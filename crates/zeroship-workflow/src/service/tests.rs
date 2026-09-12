@@ -16,6 +16,7 @@ use testcontainers::{
 use zeroship_core::{app_id::AppId, typed_id};
 
 mod payloads;
+mod output_reads;
 mod policy;
 mod runner;
 

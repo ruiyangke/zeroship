@@ -5,7 +5,8 @@ use zeroship_workflow::{
     engine::WorkflowOutputRef,
     service::{
         wire::{
-            ReadAppPayload, ReadTaskPayload, PAYLOAD_HEADER, REQUEST_ID_HEADER, TASK_TOKEN_HEADER,
+            ReadAppPayload, ReadStepOutput, ReadTaskPayload, PAYLOAD_HEADER, REQUEST_ID_HEADER,
+            TASK_TOKEN_HEADER,
         },
         PayloadRead, RequestId, TaskToken,
     },
@@ -24,7 +25,35 @@ pub(super) fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::resource("/v1/apps/{app_id}/workflow-runs/{run_id}/payloads/read")
                 .route(web::post().to(read_app)),
+        )
+        .service(
+            web::resource("/v1/apps/{app_id}/workflow-runs/{run_id}/step-output")
+                .route(web::post().to(read_step)),
         );
+}
+
+async fn read_step(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    path: Path<(String, String)>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    streaming(
+        async {
+            let (app, run) = path.into_inner();
+            let app = app_id(&app)?;
+            state
+                .auth
+                .app(authorization(&request), &app, AppOperation::ReadOutput)?;
+            let body: ReadStepOutput = read_json(&request, body).await?;
+            state
+                .service
+                .for_app(app)
+                .read_step_output(&run, &body.name, body.occurrence)
+                .await
+        }
+        .await,
+    )
 }
 
 async fn upload(

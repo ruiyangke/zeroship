@@ -1,6 +1,8 @@
 //! Shared workflow service for embedded and remote hosts.
 
 mod app;
+mod backend;
+pub use backend::AppBackend;
 pub mod capability;
 mod control;
 mod deploys;

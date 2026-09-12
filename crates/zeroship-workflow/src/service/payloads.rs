@@ -4,13 +4,16 @@ use super::{
     tasks::authorized_task,
     AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
 };
-use crate::{engine::WorkflowOutputRef, WorkflowServiceError};
+use crate::{
+    engine::{StepCheckpoint, WorkflowOutputRef},
+    validation, WorkflowServiceError,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, rc::Rc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_storage::{
-    backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource},
+    backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
     Namespace, Storage, StorageError, StorageStore,
 };
 
@@ -46,6 +49,39 @@ pub struct PayloadRead {
     pub body: BoxByteStream,
 }
 impl PayloadRead {
+    /// Collect a verified payload within the host's memory budget.
+    ///
+    /// # Errors
+    /// Rejects oversized descriptors, interrupted bodies and corrupt content.
+    pub async fn into_bytes(mut self, limit: usize) -> Result<Vec<u8>, WorkflowServiceError> {
+        let size = usize::try_from(self.reference.size)
+            .ok()
+            .filter(|size| *size <= limit)
+            .ok_or(WorkflowServiceError::PayloadTooLarge)?;
+        let mut bytes = Vec::new();
+        while let Some(chunk) = self.body.next_chunk().await {
+            let chunk = chunk.map_err(|_| {
+                WorkflowServiceError::Unavailable(
+                    "workflow payload read failed integrity verification".into(),
+                )
+            })?;
+            if bytes
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|size| size > limit)
+            {
+                return Err(WorkflowServiceError::PayloadTooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        if bytes.len() != size {
+            return Err(WorkflowServiceError::Unavailable(
+                "workflow payload size changed".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+
     pub(crate) fn checked(
         reference: WorkflowOutputRef,
         body: BoxByteStream,
@@ -303,6 +339,69 @@ impl WorkflowService {
 }
 
 impl AppWorkflows {
+    /// Read a completed step from the run's current generation. Generation
+    /// selection and reference resolution share the run lock with restart.
+    ///
+    /// # Errors
+    /// Rejects invalid names, unavailable steps and storage failures.
+    pub async fn read_step_output(
+        &self,
+        run_id: &str,
+        name: &str,
+        occurrence: u32,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        validate_run(run_id)?;
+        validation::step_name(name)?;
+        let occurrence = i32::try_from(occurrence).map_err(|_| {
+            WorkflowServiceError::InvalidRequest("invalid step name occurrence".into())
+        })?;
+        let mut tx = self.service.store.begin().await?;
+        lock_app(&mut tx, &self.app).await?;
+        let run = lock_run(&mut tx, &self.app, run_id).await?;
+        let generation = run.integer("generation")?;
+        let rows = tx.query(
+            &format!("SELECT record FROM {} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND name=$4 AND occurrence=$5", tx.table("steps")),
+            &[self.app.as_str().into(), run_id.into(), generation.into(), name.into(), i64::from(occurrence).into()],
+        ).await?;
+        let row = rows
+            .first()
+            .ok_or_else(|| not_found("workflow step output"))?;
+        let step: StepCheckpoint = super::app::decode(&row.text("record")?)?;
+        if step.state != "completed" {
+            return Err(not_found("workflow step output"));
+        }
+        let read = if let Some(reference) = step.output_ref {
+            let row = reference_at(
+                &mut tx,
+                &self.app,
+                run_id,
+                generation,
+                PayloadSlot::Step {
+                    ordinal: step.ordinal,
+                },
+            )
+            .await?;
+            if reference_from(&row)? != reference {
+                return Err(WorkflowServiceError::Unavailable(
+                    "workflow step payload reference changed".into(),
+                ));
+            }
+            open_payload(&storage(&self.service)?, &self.app, &row).await?
+        } else {
+            let bytes = serde_json::to_vec(&step.output)
+                .map_err(|_| WorkflowServiceError::Internal("invalid step output".into()))?;
+            let reference = WorkflowOutputRef {
+                hash: super::types::hash(&bytes),
+                size: i64::try_from(bytes.len())
+                    .map_err(|_| WorkflowServiceError::PayloadTooLarge)?,
+                content_type: Some("application/json".into()),
+            };
+            PayloadRead::checked(reference, Box::new(OnceChunk::new(bytes.into())))?
+        };
+        tx.commit().await?;
+        Ok(read)
+    }
+
     pub async fn read_payload(
         &self,
         run_id: &str,

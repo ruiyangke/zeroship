@@ -46,6 +46,12 @@ Replay generations, child results and continuation inputs retain explicit
 reference edges. Collection fences uploads and retries failed deletions;
 tombstones remain discoverable when an interrupted remote write arrives late.
 Payload contracts run against local storage and Testcontainers S3.
+Embedded and remote app handles expose `read_step_output` for a completed
+named occurrence in the run's current generation. The service resolves that
+generation under the restart fence and checks reference ownership before
+opening storage. `PayloadRead::into_bytes` verifies the stream within a host
+memory limit. `into_backend` adapts either app handle to `WorkflowBackend`;
+its bound identity cannot change between operations.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
 `node crates/zeroship-workflow/schema/generate.mjs` from the repository root.

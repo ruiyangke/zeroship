@@ -69,7 +69,7 @@ pub(crate) async fn append(
     for mut step in checkpoints {
         if step.ordinal < 0
             || step.name.is_empty()
-            || step.name.len() > 256
+            || step.name.len() > validation::STEP_NAME_MAX_BYTES
             || step.name_occurrence < 0
         {
             return invalid("invalid workflow checkpoint identity");
