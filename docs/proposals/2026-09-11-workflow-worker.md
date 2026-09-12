@@ -69,6 +69,13 @@ grants. These paths and grants violate the revised ownership rule and must be
 removed with production composition; the new engine's customer binding does not
 establish that boundary for the old worker binary.
 
+The native worker coordinator client now exchanges registration, assignment,
+wake and management metadata through the authenticated service API. It binds
+the enrolled worker signer, mints a fresh assertion per call and checks response
+scope and receipt identity. Request serialization, response streaming and the
+complete exchange are bounded. Redirects and malformed metadata are rejected.
+The production worker's polling and policy composition remain pending.
+
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify
 their canonical content hash. Runtime bootstrap preserves creator module paths;
@@ -155,6 +162,16 @@ credentials. Cross-boundary management and deployment-hold operations use
 authenticated service contracts; each receiving process writes only its own
 database. The existing Control journal-reading operations violate this boundary
 and must be removed during the replacement.
+
+The final deployment places creator workers and platform services in separate
+zones. Each database is private to its zone. Neither side may require a network
+route to the other database, a cross-database query or shared connection
+credentials. The worker initiates coordination requests to the authenticated
+platform endpoint and polls for assignments and management commands. Control
+queues those commands without opening a connection into the creator's database.
+HTTPS protects the remote connection; literal loopback HTTP supports local
+hosts. Sharing infrastructure in a local development environment must not become
+a dependency of the production protocol.
 
 ```text
 Platform Control and Gateway
