@@ -343,206 +343,29 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
     rows.iter().map(row_to_value).collect()
 }
 
-// ---------------------------------------------------------------------------
-// 1. The oracle
-// ---------------------------------------------------------------------------
-
-/// **THE ORACLE.** A range filter on a masked column must not narrow the
-/// plaintext.
-///
-/// Two rows whose real SSNs sit at opposite ends of the range. A sequence of
-/// `$gt` probes sweeps between them. Before the flip the probe at
-/// `500-00-0000` returned exactly the high row and nothing else, and repeating
-/// the sweep at finer granularity recovers the digits one at a time. After the
-/// flip both rows store `***`, every probe compares `'***'` against the probe
-/// value, and the two rows fall on the SAME side of every one.
-///
-/// The assertion is INVARIANCE, not emptiness: no probe may separate the two
-/// rows, and the whole sweep must return one constant answer. An implementation
-/// that returned nothing at all would satisfy an emptiness assertion perfectly,
-/// which is why the same sweep also runs against the unmasked control column,
-/// where it MUST separate them.
+/// Masked fields expose only their visible representation, so ordered predicates are invalid.
 #[test]
-fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
-    Host::test(|host| {
-        host.run(async {
-            let (_postgres, url) = require_pg().await;
-            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-            let app = "flip_oracle";
-            let schema = flip_schema();
-            fixture(host, &pool, &url, app, "people", &schema).await;
-
-            // The two rows are told apart by the ids the PLATFORM minted for them, not
-            // by ids this fixture chose - it may not choose one. `low` is the row whose
-            // real SSN sits at the bottom of the range, `high` the one at the top.
-            let low = insert_through_the_pipeline(
-                host,
-                &pool,
-                app,
-                "people",
-                &schema,
-                value!({ "ssn": "111-11-1111", "nickname": "aaa" }),
-            )
-            .await
-            .id;
-            let high = insert_through_the_pipeline(
-                host,
-                &pool,
-                app,
-                "people",
-                &schema,
-                value!({ "ssn": "999-99-9999", "nickname": "zzz" }),
-            )
-            .await
-            .id;
-
-            // Control zero: both rows are there. A fixture that inserted nothing would
-            // make every arm below vacuous. The set is compared against the two minted
-            // ids rather than counted, so this also pins that each write's identity
-            // survived the round trip - a row read back under some other id would
-            // satisfy a bare count.
-            let all = run_find(&pool, app, &value!({}), &schema).await;
-            assert_eq!(all.len(), 2, "both rows must be present: {all:?}");
-            let mut present: Vec<String> = all
-                .iter()
-                .map(|r| r["id"].as_str().unwrap().to_string())
-                .collect();
-            present.sort();
-            let mut minted = vec![low.clone(), high.clone()];
-            minted.sort();
-            assert_eq!(
-                present, minted,
-                "the rows read back must be the two the platform minted: {all:?}",
-            );
-
-            let probes = [
-                "000-00-0000",
-                "111-11-1111",
-                "222-22-2222",
-                "500-00-0000",
-                "888-88-8888",
-                "999-99-9999",
-            ];
-
-            let mut sweep: Vec<Vec<String>> = Vec::new();
-            for probe in probes {
-                let rows =
-                    run_find(&pool, app, &value!({ "ssn": { "$gt": probe } }), &schema).await;
-                let mut ids: Vec<String> = rows
-                    .iter()
-                    .map(|r| r["id"].as_str().unwrap().to_string())
-                    .collect();
-                ids.sort();
-                assert_ne!(
-                    ids.len(),
-                    1,
-                    "probe {probe:?} SEPARATED the two rows. That single bit is the oracle: \
-             repeating the sweep recovers the whole SSN, with no authorization check \
-             on the path and no audit row written. Matched: {ids:?}",
-                );
-                sweep.push(ids);
-            }
-            assert!(
-                sweep.windows(2).all(|w| w[0] == w[1]),
-                "the probe sweep over a masked column must be constant - it must carry no \
-         information about the values at all; got {sweep:?}",
-            );
-
-            // ---- the sweep above rules on NOTHING without this arm. Measured, 2026-09-01.
-            //
-            // Every one of the six probes returns ZERO rows (`sweep` is six empty vectors),
-            // so `assert_ne!(ids.len(), 1)` compares 0 against 1 six times and the
-            // constancy check compares [] to [] five times. Both pass on an
-            // implementation that returns nothing at all for any filter whatsoever.
-            //
-            // And it is empty BY CONSTRUCTION, not by accident: the stored mask begins
-            // with `*` (0x2A) while every probe above begins with a digit (0x30+), so
-            // under the bytewise collation these columns pin, no probe can ever exceed a
-            // mask. The six probes were chosen to look like SSNs, which is exactly what
-            // makes them unable to match one.
-            //
-            // The `nickname` control below does not close this. It differs from the
-            // masked probe in TWO variables - a different column AND an unmasked one -
-            // so it cannot distinguish "the mask hid the ordering" from "this filter
-            // returns nothing". This arm differs in ONE: same column, same operator,
-            // same masked path, a bound chosen to sit BELOW every mask rather than
-            // above it. A correct implementation must return both rows.
-            let below_every_mask =
-                run_find(&pool, app, &value!({ "ssn": { "$gt": "!" } }), &schema).await;
-            let mut reached: Vec<String> = below_every_mask
-                .iter()
-                .map(|r| r["id"].as_str().unwrap().to_string())
-                .collect();
-            reached.sort();
-            assert_eq!(
-                reached, minted,
-                "a `$gt` bound below every mask must still reach both rows through the \
-         masked column. If this is empty, the sweep above proved nothing: it was \
-         constant because the filter matched nothing, not because the mask hid \
-         the ordering. Got {below_every_mask:?}",
-            );
-
-            // THE CONTROL, differing in one variable: the same shape of query over the
-            // unmasked `nickname` column MUST separate the rows. Without this arm an
-            // implementation that refused every filter, or returned no rows at all,
-            // would pass every assertion above.
-            let rows = run_find(
-                &pool,
-                app,
-                &value!({ "nickname": { "$gt": "mmm" } }),
-                &schema,
-            )
-            .await;
-            assert_eq!(
-                rows.len(),
-                1,
-                "the unmasked control column must still be range-filterable: {rows:?}",
-            );
-            // And it selects the RIGHT one: the row inserted second, named by the id
-            // the platform minted for it.
-            assert_eq!(rows[0]["id"], value!(high));
-
-            // And the ordering channel is closed the same way: `orderBy` on a masked
-            // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
-            let ordered = {
-                let bq = compile_find(
-                    &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-                    "people",
-                    &value!({}),
-                    Some(1),
-                    None,
-                    Some(&value!({ "ssn": -1 })),
-                    None,
-                    &schema,
-                )
-                .unwrap();
-                assert!(
-                    !bq.sql.contains(&raw_column_name("ssn")),
-                    "orderBy must never name the raw column: {}",
-                    bq.sql,
-                );
-                let param_refs = &bq.params;
-                zeroship_data_orm::backend::postgres::params::query(
-                    &pool.acquire().await.unwrap(),
-                    &bq.sql,
-                    param_refs,
-                )
-                .await
-                .unwrap()
-            };
-            assert_eq!(ordered.len(), 1, "the ordered query still returns a row");
-
-            release_pg(host, pool).await;
-        })
-    })
+fn a_range_filter_on_a_masked_column_is_refused() {
+    let schema = crate::tests::fixtures::schema::generated_fields(flip_schema());
+    let error = compile_find(
+        &crate::sql::SchemaName::new("flip_oracle").expect("fixture schema name"),
+        "people",
+        &value!({ "ssn": { "$gt": "500-00-0000" } }),
+        Some(50),
+        None,
+        None,
+        None,
+        &schema,
+    )
+    .expect_err("masked range predicates must be refused");
+    assert!(
+        matches!(error, crate::sql::mapping::QueryError::InvalidFilter(ref message)
+            if message == "comparison operator is not supported for this field type"),
+        "unexpected error: {error}"
+    );
 }
 
-/// The feature is SECURED, not CLOSED: the plaintext is still reachable, by the
-/// one path that carries an authorization check and writes an audit row.
-///
-/// This is the granted-path control for the oracle above. Without it, an
-/// implementation that simply destroyed the value on write would satisfy every
-/// assertion in this file.
+/// The authorized unmask path still reaches the plaintext and writes its audit row.
 #[test]
 fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
     Host::test(|host| {
