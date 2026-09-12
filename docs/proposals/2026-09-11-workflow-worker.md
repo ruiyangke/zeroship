@@ -33,8 +33,13 @@ verification. Ingest preserves the manifest fields used to compute deployment
 identity; the CLI verifies that identity before loading code. Native tests load
 an earlier deployment after installing a replacement and reject corrupt,
 missing or oversized sources. The workflow-specific content hash has been
-removed. Durable deployment holds and replacement of executable snapshot
-persistence remain pending.
+removed. The platform deployment hold ledger now uses ORM models generated
+from the normal deployment migration. Acquisition, release and reclamation
+serialize on the deployment record; generations fence stale retries and released
+rows remain as tombstones. Native PostgreSQL and SQLite tests cover retries,
+reconnection, scope and reclamation, including a concurrent PostgreSQL collector.
+Worker-side durable hold intents, the production retention cutover and
+replacement of executable snapshot persistence remain pending.
 
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify
