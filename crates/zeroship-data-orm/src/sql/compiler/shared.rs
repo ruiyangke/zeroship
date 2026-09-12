@@ -619,6 +619,9 @@ fn compile_select(
         writer.sql.push_str(" OFFSET ");
         writer.write_param(Value::from(offset))?;
     }
+    if parts.lock == crate::sql::statement::RowLock::Update {
+        writer.sql.push_str(syntax.first_row_lock);
+    }
     Ok(writer.finish())
 }
 

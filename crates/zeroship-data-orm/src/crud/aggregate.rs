@@ -123,6 +123,7 @@ pub(super) fn build(
         limit,
         offset: None,
         distinct: false,
+        lock: crate::sql::statement::RowLock::None,
     })?;
     Ok((
         registration.compile(Statement::Select(statement))?,

@@ -330,6 +330,7 @@ impl PreparedRead {
             limit: Some(input.limit.get()),
             offset: Some(input.offset.get()),
             distinct: false,
+            lock: crate::sql::statement::RowLock::None,
         })
         .map_err(|error| invalid(error.to_string()))?;
         let query = registration

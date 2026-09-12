@@ -73,6 +73,7 @@ pub(crate) fn raw_column(
         limit: None,
         offset: None,
         distinct: false,
+        lock: crate::sql::statement::RowLock::None,
     })?;
     registration
         .compile(Statement::Select(statement))

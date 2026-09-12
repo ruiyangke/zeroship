@@ -220,6 +220,7 @@ fn column_comparisons_do_not_consume_the_bind_budget() {
                 limit: Some(1),
                 offset: Some(0),
                 distinct: false,
+                lock: zeroship_data_orm::sql::statement::RowLock::None,
             })
             .unwrap(),
         )
@@ -281,6 +282,7 @@ fn a_join_cannot_reference_a_source_that_has_not_been_introduced() {
         limit: None,
         offset: None,
         distinct: false,
+        lock: zeroship_data_orm::sql::statement::RowLock::None,
     });
     assert!(statement.is_err());
 }
@@ -327,6 +329,7 @@ fn an_aggregate_select_rejects_an_ungrouped_column() {
         limit: None,
         offset: None,
         distinct: false,
+        lock: zeroship_data_orm::sql::statement::RowLock::None,
     });
     assert!(statement.is_err());
 }

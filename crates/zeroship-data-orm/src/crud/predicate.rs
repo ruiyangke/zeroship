@@ -49,13 +49,6 @@ impl Input {
         }
     }
 
-    pub(crate) fn model_value(&self) -> Value {
-        match self {
-            Self::Dynamic(value) => value.clone(),
-            Self::Model(value) => model_value(value),
-        }
-    }
-
     pub(crate) fn conjunctive_value(&self, field: &str) -> Option<&Value> {
         match self {
             Self::Dynamic(value) => dynamic_equality(value, field),
@@ -91,46 +84,6 @@ fn model_equality<'a>(predicate: &'a crate::orm::ModelPredicate, field: &str) ->
             .iter()
             .find_map(|child| model_equality(child, field)),
         _ => None,
-    }
-}
-
-fn model_value(predicate: &crate::orm::ModelPredicate) -> Value {
-    match predicate {
-        crate::orm::ModelPredicate::Const(true) => Value::Object(crate::value::Record::new()),
-        crate::orm::ModelPredicate::Const(false) => {
-            Value::Object([("$or".into(), Value::Array(Vec::new()))].into())
-        }
-        crate::orm::ModelPredicate::And(children) => Value::Object(
-            [(
-                "$and".into(),
-                Value::Array(children.iter().map(model_value).collect()),
-            )]
-            .into(),
-        ),
-        crate::orm::ModelPredicate::Or(children) => Value::Object(
-            [(
-                "$or".into(),
-                Value::Array(children.iter().map(model_value).collect()),
-            )]
-            .into(),
-        ),
-        crate::orm::ModelPredicate::Compare { field, op, value } => {
-            let operator = match op {
-                CompareOp::Eq => "$eq",
-                CompareOp::Ne => "$ne",
-                CompareOp::Lt => "$lt",
-                CompareOp::Lte => "$lte",
-                CompareOp::Gt => "$gt",
-                CompareOp::Gte => "$gte",
-            };
-            Value::Object(
-                [(
-                    (*field).into(),
-                    Value::Object([(operator.into(), value.clone())].into()),
-                )]
-                .into(),
-            )
-        }
     }
 }
 

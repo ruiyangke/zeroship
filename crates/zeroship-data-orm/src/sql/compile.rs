@@ -551,105 +551,6 @@ fn push_array_value_bind(
     Ok(())
 }
 
-/// Build the bounded id probe used before a write fans out per matching row.
-///
-/// The caller supplies an explicit bound. `updateMany` asks for one row above
-/// [`MAX_QUERY_LIMIT`] so it can distinguish an exactly-full target set from
-/// an overflowing one; `updateOne` asks for one. This is deliberately separate
-/// from creator-facing `find`, whose public limit remains `MAX_QUERY_LIMIT`.
-pub fn build_write_target_probe(
-    schema_name: &SchemaName,
-    collection: &str,
-    schema_hint: &Value,
-    filter: &Value,
-    limit: i64,
-    dialect: SqlDialect,
-) -> Result<CompiledQuery, QueryError> {
-    let select = project_read_field("id", schema_hint, None);
-    let mut built =
-        build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
-            schema_name,
-            collection,
-            filter,
-            Some(limit),
-            None,
-            None,
-            &select,
-            schema_hint,
-            false,
-            dialect,
-            MAX_QUERY_LIMIT + 1,
-        )?;
-    if dialect == SqlDialect::Postgres {
-        built.sql.push_str(" FOR UPDATE");
-    }
-    Ok(built)
-}
-
-pub fn build_conflict_probe_with_dialect(
-    schema_name: &SchemaName,
-    collection: &str,
-    schema_hint: &Value,
-    filter: &Value,
-    dialect: SqlDialect,
-) -> Result<CompiledQuery, QueryError> {
-    validate_collection(collection)?;
-
-    let obj = filter.as_object().ok_or_else(|| {
-        QueryError::InvalidFilter("conflict probe filter must be an object".to_string())
-    })?;
-    if obj.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "conflict probe filter cannot be empty".to_string(),
-        ));
-    }
-
-    let schema = crate::sql::compile::quote_ident(schema_name.as_str());
-    let table = quote_ident(collection);
-    let mut params = Vec::new();
-    let mut conditions = Vec::new();
-
-    for (field, value) in obj {
-        validate_field_name(field)?;
-        validate_value_operation(field, schema_hint)?;
-        let col = quote_ident(field);
-        if value.is_null() {
-            conditions.push(format!("{col} IS NULL"));
-            continue;
-        }
-
-        let raw = value_to_param(value);
-        let binary_bind = matches!(value, Value::Bytes(_));
-        let param_value = if binary_bind {
-            dialect.encode_binary_param(raw)?
-        } else {
-            raw
-        };
-        if binary_bind {
-            params.push(param_value);
-            let n = params.len();
-            conditions.push(format!("{col} = {}", dialect.binary_bind_placeholder(n)));
-        } else {
-            conditions.push(format!(
-                "{col} = {}",
-                push_field_value_bind(&mut params, value, field, schema_hint, dialect)?
-            ));
-        }
-    }
-
-    if conditions.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "conflict probe filter cannot be empty".to_string(),
-        ));
-    }
-
-    let sql = format!(
-        "SELECT \"id\" FROM {schema}.{table} WHERE {} LIMIT 1",
-        conditions.join(" AND ")
-    );
-    Ok(CompiledQuery { sql, params })
-}
-
 /// Build a SELECT over the runtime descriptor's readable fields.
 ///
 /// Each logical field projects its `storage.valueColumn`, aliased when needed.
@@ -8714,16 +8615,6 @@ mod encrypted_query_tests {
                         .is_err()
                     );
                 }
-                assert!(
-                    build_conflict_probe_with_dialect(
-                        &namespace,
-                        "records",
-                        &schema,
-                        &value!({"secret":"x"}),
-                        dialect
-                    )
-                    .is_err()
-                );
                 assert!(
                     build_distinct_with_soft_delete_with_dialect(
                         &namespace,

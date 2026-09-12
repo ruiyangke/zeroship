@@ -164,6 +164,7 @@ fn compile_select(
         limit,
         offset,
         distinct,
+        lock: crate::sql::statement::RowLock::None,
     })?;
     registration
         .compile(Statement::Select(statement))

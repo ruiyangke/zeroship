@@ -368,6 +368,14 @@ pub struct SelectParts {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub distinct: bool,
+    pub lock: RowLock,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RowLock {
+    #[default]
+    None,
+    Update,
 }
 
 #[derive(Debug)]
@@ -754,6 +762,9 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
         for order in &parts.order_by {
             validate_grouped_operand(&order.expression, &parts.group_by)?;
         }
+    }
+    if parts.lock == RowLock::Update && (grouped || parts.distinct) {
+        return Err(invalid("row locking requires an ungrouped select"));
     }
     if parts.limit.is_some_and(|value| value < 0) || parts.offset.is_some_and(|value| value < 0) {
         return Err(invalid("select pagination cannot be negative"));
