@@ -26,8 +26,8 @@ pub enum ApplyMode<'a> {
     },
 }
 
-/// Normalize the update and enforce system assignments. Insert-fixed fields are
-/// refused; write-assigned fields are removed so the SQL builder supplies them.
+/// Normalize the update and enforce descriptor-declared assignments. Insert-fixed
+/// fields are refused; write-assigned fields are removed for the SQL builder.
 pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
     crate::sql::update::normalize(patch)?;
     super::assignment_pass::apply_assignments_on_update(patch, schema)
@@ -36,7 +36,7 @@ pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> 
 /// DB-8: validate every top-level field key of a plain write document
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
-/// any system/encryption/mask pass adds its own (legitimately reserved) keys.
+/// protection and assignment passes add reserved storage keys.
 fn validate_user_doc_keys(doc: &Value, schema: &Value) -> Result<(), DbError> {
     if let Some(obj) = doc.as_object() {
         for key in obj.keys() {
@@ -61,8 +61,11 @@ fn refuse_generated_identifier(doc: &Value, schema: &Value) -> Result<(), DbErro
         .columns()
         .iter()
         .any(|column| {
-            column.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
-                && obj.contains_key(&column.name)
+            matches!(
+                column.by,
+                zeroship_migrate_policy::AssignmentGenerator::TypedId
+                    | zeroship_migrate_policy::AssignmentGenerator::Identity
+            ) && obj.contains_key(&column.name)
         })
     {
         return Err(DbError::validation(
@@ -160,7 +163,7 @@ pub async fn apply(
         "the write route must belong to the app being written"
     );
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    // Validate creator keys before protection and system passes add reserved storage keys.
+    // Validate creator keys before protection and assignment passes add storage keys.
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
             validate_user_doc_keys(payload, &schema)?;
@@ -821,6 +824,26 @@ mod tests {
                 assert_eq!(code, "platform_assigned_field");
             }
             other => panic!("expected the supplied id to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_supplied_database_identity_is_refused_at_the_document_boundary() {
+        let doc = crate::value!({ "id": 42, "title": "hi" });
+        let schema = crate::value!({
+            "id": {
+                "type": "bigInt",
+                "primaryKey": true,
+                "required": true,
+                "assign": { "by": "identity", "on": "insert" }
+            },
+            "title": { "type": "string" }
+        });
+        match super::refuse_generated_identifier(&doc, &schema) {
+            Err(zeroship_data_orm::error::DbError::ValidationFailed { code, .. }) => {
+                assert_eq!(code, "platform_assigned_field");
+            }
+            other => panic!("expected the supplied identity to be refused, got {other:?}"),
         }
     }
 
