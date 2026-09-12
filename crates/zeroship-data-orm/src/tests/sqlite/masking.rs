@@ -1,8 +1,8 @@
 //! SQLite masking contracts.
 use super::fixtures::*;
 
-use crate::tests::fixtures::Host;
 use crate::tests::fixtures::schema::fixture_table_sql;
+use crate::tests::fixtures::Host;
 
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -64,17 +64,11 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
     })
 }
 
-/// **Atomic dual-write on SQLite**: when a row carries
-/// both the parent + sibling (mask pass already ran), the
-/// SQLite-flavoured `build_insert_with_dialect` INSERT statement
-/// includes both columns atomically. Then we execute the INSERT
-/// against a hand-rolled SQLite-shaped table to confirm the engine
-/// accepts the dual write end-to-end and persists the masked value
-/// alongside the plaintext.
+/// A masked write stores its visible mask and raw value in one statement.
 #[test]
-fn dual_write_insert_persists_parent_and_sibling_sqlite() {
+fn masked_insert_persists_visible_and_raw_columns_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
+        use crate::sql::compile::{build_insert_with_dialect, SqlDialect};
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -82,36 +76,29 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
                 .attach_app_file("app_demo")
                 .await
                 .expect("ensure_app_schema");
-            // Hand-rolled SQLite-flavoured CREATE TABLE — the SQLite
-            // CREATE TABLE dialect doesn't speak PG's SERIAL /
-            // TIMESTAMPTZ; the orchestrator emits SQLite-flavoured DDL
-            // elsewhere. The sibling-column CLAUSE emission is standard
-            // SQL; we exercise it inside a SQLite-valid table here.
+            let raw = raw_column_name("ssn");
             backend
                 .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"users\" (\
+                    &format!(
+                        "CREATE TABLE \"app_demo\".\"users\" (\
                      id    INTEGER PRIMARY KEY, \
                      ssn   TEXT, \
-                     ssn_masked TEXT NOT NULL\
-                 )",
+                     \"{raw}\" TEXT NOT NULL\
+                 )"
+                    ),
                     &[],
                 )
                 .await
                 .expect("CREATE TABLE ok");
 
-            // Simulate the dispatch_insert → apply_mask_on_write step:
-            // the mask pass has populated `ssn_masked`. The SQL builder
-            // walks the row map, so the sibling key naturally lands on
-            // the INSERT column list (no special-casing needed).
-            let doc = crate::value!({
-                "ssn": "123-45-6789",
-                "ssn_masked": "***-**-6789"
+            let mut doc = crate::value!({"ssn": "***-**-6789"});
+            doc[raw.as_str()] = crate::value::Value::from("123-45-6789");
+            let schema = crate::value!({
+                "ssn": {
+                    "type": "string",
+                    "mask": {"kind": "last4", "classification": "spi"}
+                }
             });
-            // The descriptor entry for the fixture table above. It declares `ssn`
-            // only: `ssn_masked` is a PHYSICAL column the mask pass writes, never a
-            // declared field, so it is on the INSERT column list and not on the
-            // projection - which is the shape this test is about.
-            let schema = crate::value!({ "ssn": { "type": "string" } });
             let bq = build_insert_with_dialect(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
@@ -121,8 +108,8 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
             )
             .unwrap();
             assert!(
-                bq.sql.contains("\"ssn\"") && bq.sql.contains("\"ssn_masked\""),
-                "INSERT must reference both parent + sibling: {}",
+                bq.sql.contains("\"ssn\"") && bq.sql.contains(&format!("\"{raw}\"")),
+                "INSERT must reference the visible and raw columns: {}",
                 bq.sql,
             );
 
@@ -134,16 +121,18 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
             let _ = client
                 .query_values(&bq.sql, param_refs)
                 .await
-                .expect("dual-write INSERT must succeed");
+                .expect("masked INSERT must succeed");
 
-            // Verify both columns landed atomically.
             let rows = client
-                .query("SELECT ssn, ssn_masked FROM \"app_demo\".\"users\"", &[])
+                .query(
+                    &format!("SELECT ssn, \"{raw}\" FROM \"app_demo\".\"users\""),
+                    &[],
+                )
                 .await
                 .expect("SELECT both columns");
             assert_eq!(rows.len(), 1, "exactly one row inserted");
-            assert_eq!(rows[0][0].as_deref(), Some("123-45-6789"));
-            assert_eq!(rows[0][1].as_deref(), Some("***-**-6789"));
+            assert_eq!(rows[0][0].as_deref(), Some("***-**-6789"));
+            assert_eq!(rows[0][1].as_deref(), Some("123-45-6789"));
         });
     })
 }
@@ -163,9 +152,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::{
-            SqlDialect, build_find_with_schema, build_insert_with_dialect,
-        };
+        use crate::sql::compile::{build_find_with_schema, build_insert_with_dialect, SqlDialect};
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);

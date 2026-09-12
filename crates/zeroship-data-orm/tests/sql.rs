@@ -1,5 +1,7 @@
 #[path = "sql/determinism.rs"]
 mod determinism;
+#[path = "sql/dml_compiler.rs"]
+mod dml_compiler;
 #[path = "sql/ident_refusals.rs"]
 mod ident_refusals;
 #[path = "sql/joins.rs"]
@@ -22,8 +24,6 @@ mod public_contract;
 mod search_family;
 #[path = "sql/write_family.rs"]
 mod write_family;
-#[path = "sql/upsert_compiler.rs"]
-mod upsert_compiler;
 
 trait NumberedParameters {
     fn placeholder_count(&self) -> usize;
@@ -66,4 +66,5 @@ impl NumberedParameters for zeroship_data_orm::sql::compiler::CompiledQuery {
         slots.sort_unstable();
         slots.dedup();
         slots
-    }}
+    }
+}

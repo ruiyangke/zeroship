@@ -13,7 +13,7 @@ impl SqlStorageCodecs for PostgresCodecs {
             return Ok(StorageType::Bytes);
         }
         Ok(match definition["type"].as_str() {
-            Some("string" | "text" | "id" | "calendarDate") => StorageType::Text,
+            Some("string" | "text" | "id" | "ref" | "calendarDate") => StorageType::Text,
             Some("boolean" | "bool") => StorageType::Boolean,
             Some("integer" | "int" | "bigint" | "bigInt") => StorageType::Integer,
             Some("number" | "float" | "double") => StorageType::Real,

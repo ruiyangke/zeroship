@@ -13,13 +13,15 @@ impl SqlStorageCodecs for SqliteCodecs {
             return Ok(StorageType::Bytes);
         }
         Ok(match definition["type"].as_str() {
-            Some("string" | "text" | "id" | "calendarDate") => StorageType::Text,
+            Some("string" | "text" | "id" | "ref" | "calendarDate") => StorageType::Text,
             Some("boolean" | "bool" | "integer" | "int" | "bigint" | "bigInt") => {
                 StorageType::Integer
             }
             Some("number" | "float" | "double") => StorageType::Real,
             Some("decimal") => StorageType::Decimal,
-            Some("bytes" | "vector" | "geoPoint") => StorageType::Bytes,
+            Some("bytes") => StorageType::Bytes,
+            Some("vector") => StorageType::Vector,
+            Some("geoPoint") => StorageType::GeoPoint,
             Some("date" | "timestamp" | "timestamptz") => StorageType::Timestamp,
             Some("json" | "object" | "array" | "union") => StorageType::Json,
             _ => return Err(unsupported_type()),
@@ -40,6 +42,45 @@ impl SqlStorageCodecs for SqliteCodecs {
                 )
             }
             (StorageType::Integer, Value::Bool(value)) => Value::from(i64::from(value)),
+            (StorageType::Vector, Value::Bytes(bytes)) => {
+                decode_vector_blob(&bytes)?;
+                Value::Bytes(bytes)
+            }
+            (StorageType::Vector, Value::Array(values)) => {
+                let values = values
+                    .into_iter()
+                    .map(|value| {
+                        let value = value.as_f64().ok_or_else(invalid_vector)? as f32;
+                        value
+                            .is_finite()
+                            .then_some(value)
+                            .ok_or_else(invalid_vector)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                if values.is_empty() {
+                    return Err(invalid_vector());
+                }
+                Value::Bytes(crate::sql::sqlite_values::vec_to_le_bytes(&values))
+            }
+            (StorageType::GeoPoint, Value::Bytes(bytes)) => {
+                decode_point_blob(&bytes)?;
+                Value::Bytes(bytes)
+            }
+            (StorageType::GeoPoint, Value::Object(point)) => {
+                let lat = point
+                    .get("lat")
+                    .and_then(Value::as_f64)
+                    .filter(|value| (-90.0..=90.0).contains(value))
+                    .ok_or_else(invalid_point)?;
+                let lng = point
+                    .get("lng")
+                    .and_then(Value::as_f64)
+                    .filter(|value| (-180.0..=180.0).contains(value))
+                    .ok_or_else(invalid_point)?;
+                Value::Bytes(crate::sql::sqlite_values::point_to_blob(
+                    crate::sql::descriptors::GeoPoint { lat, lng },
+                ))
+            }
             (StorageType::Json, value)
                 if !matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)) =>
             {
@@ -49,9 +90,48 @@ impl SqlStorageCodecs for SqliteCodecs {
         })
     }
 
-    fn decode(&self, _: StorageType, value: Value) -> Result<Value, CompileError> {
-        Ok(value)
+    fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+        match (storage, value) {
+            (StorageType::Vector, Value::Bytes(bytes)) => {
+                decode_vector_blob(&bytes).map(Value::Array)
+            }
+            (StorageType::GeoPoint, Value::Bytes(bytes)) => decode_point_blob(&bytes),
+            (_, value) => Ok(value),
+        }
     }
+}
+
+fn decode_vector_blob(bytes: &[u8]) -> Result<Vec<Value>, CompileError> {
+    if bytes.is_empty() || bytes.len() % size_of::<f32>() != 0 {
+        return Err(invalid_vector());
+    }
+    bytes
+        .chunks_exact(size_of::<f32>())
+        .map(|bytes| {
+            let value = f32::from_le_bytes(bytes.try_into().expect("vector chunk"));
+            Value::try_from(f64::from(value)).map_err(|_| invalid_vector())
+        })
+        .collect()
+}
+
+fn decode_point_blob(bytes: &[u8]) -> Result<Value, CompileError> {
+    if bytes.len() != size_of::<f64>() * 2 {
+        return Err(invalid_point());
+    }
+    let [lat, lng] = bytes
+        .chunks_exact(size_of::<f64>())
+        .map(|bytes| f64::from_le_bytes(bytes.try_into().expect("coordinate bytes")))
+        .collect::<Vec<_>>()
+        .try_into()
+        .map_err(|_| invalid_point())?;
+    if !lat.is_finite()
+        || !lng.is_finite()
+        || !(-90.0..=90.0).contains(&lat)
+        || !(-180.0..=180.0).contains(&lng)
+    {
+        return Err(invalid_point());
+    }
+    Ok(crate::value!({"lat":lat,"lng":lng}))
 }
 
 fn unsupported_type() -> CompileError {
@@ -60,4 +140,12 @@ fn unsupported_type() -> CompileError {
 
 fn invalid_timestamp() -> CompileError {
     CompileError::InvalidStatement("invalid SQLite timestamp storage value".into())
+}
+
+fn invalid_vector() -> CompileError {
+    CompileError::InvalidStatement("invalid SQLite vector storage value".into())
+}
+
+fn invalid_point() -> CompileError {
+    CompileError::InvalidStatement("invalid SQLite geographic storage value".into())
 }

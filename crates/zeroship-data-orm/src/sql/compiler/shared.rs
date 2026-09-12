@@ -1,7 +1,7 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
-    CompareOp,
     statement::{Column, Expression, Statement, StorageType, Table},
+    CompareOp,
 };
 use crate::value::Value;
 
@@ -28,6 +28,21 @@ pub struct Requirements {
 impl Requirements {
     pub fn for_statement(statement: &Statement) -> Self {
         match statement {
+            Statement::Insert(insert) => {
+                let parts = insert.parts();
+                let values = parts.rows.iter().flatten();
+                Self {
+                    returning: !parts.returning.is_empty(),
+                    insert_generated_identity: parts.insert_generated_identity,
+                    default_expression: values
+                        .clone()
+                        .any(|value| matches!(value, Expression::Default)),
+                    bind_parameters: values
+                        .filter(|value| matches!(value, Expression::Bind(_)))
+                        .count(),
+                    ..Self::default()
+                }
+            }
             Statement::Upsert(upsert) => {
                 let parts = upsert.parts();
                 let values = parts.insert.iter().chain(&parts.update).map(|a| &a.value);
@@ -140,6 +155,36 @@ pub(crate) fn compile(
         effective,
     )?;
     match statement {
+        Statement::Insert(insert) => {
+            insert.validate()?;
+            let parts = insert.into_parts();
+            let mut writer = SqlWriter::new(effective.max_bind_parameters);
+            writer.sql.push_str("INSERT INTO ");
+            write_table(&mut writer, &parts.table);
+            writer.sql.push_str(" (");
+            for (index, column) in parts.columns.iter().enumerate() {
+                comma(&mut writer, index);
+                writer.identifier(column.name().as_str());
+            }
+            writer.sql.push(')');
+            if parts.insert_generated_identity {
+                if let Some(clause) = syntax.generated_identity_override {
+                    writer.sql.push_str(clause);
+                }
+            }
+            writer.sql.push_str(" VALUES ");
+            for (row_index, row) in parts.rows.into_iter().enumerate() {
+                comma(&mut writer, row_index);
+                writer.sql.push('(');
+                for (column_index, (column, value)) in parts.columns.iter().zip(row).enumerate() {
+                    comma(&mut writer, column_index);
+                    write_expression(&mut writer, syntax, column.storage(), value)?;
+                }
+                writer.sql.push(')');
+            }
+            write_returning(&mut writer, &parts.returning);
+            Ok(writer.finish())
+        }
         Statement::Upsert(upsert) => {
             upsert.validate()?;
             let parts = upsert.into_parts();
@@ -202,18 +247,23 @@ pub(crate) fn compile(
                     condition.value,
                 )?;
             }
-            if !parts.returning.is_empty() {
-                writer.sql.push_str(" RETURNING ");
-                for (index, field) in parts.returning.iter().enumerate() {
-                    comma(&mut writer, index);
-                    writer.identifier(field.column.name().as_str());
-                    if let Some(alias) = &field.alias {
-                        writer.sql.push_str(" AS ");
-                        writer.identifier(alias.as_str());
-                    }
-                }
-            }
+            write_returning(&mut writer, &parts.returning);
             Ok(writer.finish())
+        }
+    }
+}
+
+fn write_returning(writer: &mut SqlWriter, returning: &[crate::sql::statement::ReturnedColumn]) {
+    if returning.is_empty() {
+        return;
+    }
+    writer.sql.push_str(" RETURNING ");
+    for (index, field) in returning.iter().enumerate() {
+        comma(writer, index);
+        writer.identifier(field.column.name().as_str());
+        if let Some(alias) = &field.alias {
+            writer.sql.push_str(" AS ");
+            writer.identifier(alias.as_str());
         }
     }
 }

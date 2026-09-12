@@ -1,6 +1,6 @@
 //! Logical values and their database storage representations.
-use crate::value::Value;
 use crate::sql::{compile, descriptors::GeoPoint};
+use crate::value::Value;
 
 mod typed;
 pub(crate) use typed::{prepare_array_operand, prepare_value};
@@ -44,25 +44,6 @@ impl std::fmt::Display for CodecError {
     }
 }
 impl std::error::Error for CodecError {}
-
-pub fn lower_document(dialect: compile::SqlDialect, schema: &Value, doc: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_doc_with_schema(schema, doc);
-}
-
-pub fn lower_documents(dialect: compile::SqlDialect, schema: &Value, docs: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    let Some(arr) = docs.as_array_mut() else {
-        return;
-    };
-    for doc in arr {
-        lower_boolean_doc_with_schema(schema, doc);
-    }
-}
 
 pub fn lower_update(dialect: compile::SqlDialect, schema: &Value, patch: &mut Value) {
     if dialect != compile::SqlDialect::Sqlite {
@@ -257,7 +238,10 @@ fn encode_sqlite_binary_scalar(
                     format!("db: geoPoint column '{field}' contains out-of-range coordinates"),
                 ));
             }
-            *value = Value::Bytes(crate::sql::sqlite_values::point_to_blob(GeoPoint { lat, lng }));
+            *value = Value::Bytes(crate::sql::sqlite_values::point_to_blob(GeoPoint {
+                lat,
+                lng,
+            }));
             Ok(())
         }
         _ => Ok(()),
@@ -398,9 +382,9 @@ fn normalize_row_on_read(
             Some("date" | "timestamp") => normalize_timestamp_value(key, value)?,
             Some("calendarDate") => {
                 if !value.is_null()
-                    && value
-                        .as_str()
-                        .is_none_or(|date| crate::sql::temporal::parse_calendar_date(date).is_none())
+                    && value.as_str().is_none_or(|date| {
+                        crate::sql::temporal::parse_calendar_date(date).is_none()
+                    })
                 {
                     return Err(CodecError::Decode {
                         column: key.clone(),
@@ -555,10 +539,11 @@ fn normalize_timestamp_value(field: &str, value: &mut Value) -> Result<(), Codec
     if value.is_null() {
         return Ok(());
     }
-    let millis = crate::sql::temporal::timestamp_millis(value).ok_or_else(|| CodecError::Decode {
-        column: field.to_string(),
-        reason: "invalid timestamp storage",
-    })?;
+    let millis =
+        crate::sql::temporal::timestamp_millis(value).ok_or_else(|| CodecError::Decode {
+            column: field.to_string(),
+            reason: "invalid timestamp storage",
+        })?;
     *value = Value::Timestamp(millis);
     Ok(())
 }
@@ -912,14 +897,12 @@ mod binary_read_tests {
         }
         let unmasked = value!({"classified":{"type":"bytes", "mask":{"kind":"none"}}});
         let mut row = value!({"classified":"***"});
-        assert!(
-            decode_rows(
-                compile::SqlDialect::Sqlite,
-                &unmasked,
-                std::slice::from_mut(&mut row)
-            )
-            .is_err()
-        );
+        assert!(decode_rows(
+            compile::SqlDialect::Sqlite,
+            &unmasked,
+            std::slice::from_mut(&mut row)
+        )
+        .is_err());
     }
 
     #[test]
@@ -961,7 +944,10 @@ mod binary_read_tests {
         for (field, bytes) in [
             ("embedding", vec![]),
             ("embedding", vec![0]),
-            ("embedding", crate::sql::sqlite_values::vec_to_le_bytes(&[1.0])),
+            (
+                "embedding",
+                crate::sql::sqlite_values::vec_to_le_bytes(&[1.0]),
+            ),
             (
                 "embedding",
                 crate::sql::sqlite_values::vec_to_le_bytes(&[1.0, f32::INFINITY]),

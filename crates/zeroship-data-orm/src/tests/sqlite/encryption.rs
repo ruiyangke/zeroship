@@ -1,8 +1,8 @@
 //! SQLite encryption contracts.
 use super::fixtures::*;
 
-use crate::tests::fixtures::Host;
 use crate::tests::fixtures::schema::fixture_table_sql_for;
+use crate::tests::fixtures::Host;
 
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -35,21 +35,21 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         host.run(async {
             use std::collections::HashMap;
 
+            use crate::sql::compile::{build_insert_many_with_dialect, SqlDialect};
             use zeroship_data_orm::backend::sqlite::session::TypedCell;
             use zeroship_data_orm::encryption;
-            use crate::sql::compile::{SqlDialect, build_insert_many_with_dialect};
 
             let _keys = host.supply_project_key(&["app_demo"], &"d".repeat(64));
             let app_id = "app_demo";
             let collection = "bulk_people";
-            let schema = crate::value!({
+            let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
                 "name": { "type": "string" },
                 "ssn": {
                     "type": "string",
                     "encrypted": true,
                     "mask": { "kind": "last4", "classification": "spi" }
                 }
-            });
+            }));
             let (backend, _dir) =
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
             let ddl = fixture_table_sql_for(
@@ -401,12 +401,12 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
     Host::test(|host| {
+        use crate::sql::compile::{build_insert_with_dialect, SqlDialect};
         use crate::tests::fixtures::DatabaseFixture;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::protection::encryption_pass::{
             decrypt_row_on_read, encrypt_row_on_write,
         };
-        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
 
         let _keys = host.supply_project_key(&["app_demo"], &"c".repeat(64));
         host.run(async {
@@ -470,11 +470,10 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 "SQLite dialect must not emit `decode(...)::bytea`: {}",
                 bq.sql,
             );
-            assert!(
-                bq.params
-                    .iter()
-                    .any(|value| value.as_bytes() == Some(ciphertext.as_slice()))
-            );
+            assert!(bq
+                .params
+                .iter()
+                .any(|value| value.as_bytes() == Some(ciphertext.as_slice())));
             assert!(!bq.sql.contains("unhex("));
 
             // Execute the compiled INSERT through the typed RETURNING surface.

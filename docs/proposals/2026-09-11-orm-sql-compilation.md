@@ -393,8 +393,12 @@ codecs, effective support, and immutable identity as one bundle. Captured routes
 retain that identity and the connection identity, and refuse a replacement
 registration or connection. Production upsert checks its required features
 before opening its atomic write frame. The dialect files are backend-wide
-compiler homes; upsert is the first statement family routed through them while
-the other families remain in the cutover below.
+compiler homes. Upsert and single- or multi-row inserts are routed through them;
+the other families remain in the cutover below. Insert resolution consumes owned
+documents, canonicalizes their shared physical column list, and uses registered
+storage codecs. Capability preflight runs before generated identity allocation.
+The replaced insert SQL bodies and the insert-side SQLite boolean lowering pass
+are removed.
 
 ## Implementation checklist
 

@@ -1,5 +1,5 @@
 use super::{CompileError, CompiledQuery, Requirements, SqlCompiler, SqlSupport};
-use crate::sql::{BindBudget, statement::Statement};
+use crate::sql::{statement::Statement, BindBudget};
 
 #[derive(Clone, Copy, Debug)]
 pub struct SqliteCompiler;
@@ -13,7 +13,7 @@ const SUPPORT: SqlSupport = SqlSupport {
     max_bind_parameters: BindBudget::SQLITE.max(),
 };
 
-const SYNTAX: super::upsert::Syntax = super::upsert::Syntax {
+const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     current_timestamp: "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
     generated_identity_override: None,
     timestamp_cast: "",
@@ -30,7 +30,7 @@ impl SqlCompiler for SqliteCompiler {
         requirements: &Requirements,
         effective: &SqlSupport,
     ) -> Result<(), CompileError> {
-        super::upsert::check(SUPPORT, requirements, effective)
+        super::shared::check(SUPPORT, requirements, effective)
     }
 
     fn compile(
@@ -38,6 +38,6 @@ impl SqlCompiler for SqliteCompiler {
         statement: Statement,
         effective: &SqlSupport,
     ) -> Result<CompiledQuery, CompileError> {
-        super::upsert::compile(SYNTAX, SUPPORT, statement, effective)
+        super::shared::compile(SYNTAX, SUPPORT, statement, effective)
     }
 }

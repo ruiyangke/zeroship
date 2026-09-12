@@ -1,12 +1,12 @@
 use zeroship_data_orm::{
     sql::{
-        CompareOp, Ident, IdentRole, SchemaName,
         compiler::{CompileError, PostgresCompiler, Requirements, SqlCompiler, SqliteCompiler},
         registration::{SqlRegistration, SqlStorageCodecs},
         statement::{
-            Assignment, Comparison, Expression, ReturnedColumn, Statement, StorageType, Table,
-            Upsert, UpsertParts,
+            Assignment, Comparison, Expression, Insert, InsertParts, ReturnedColumn, Statement,
+            StorageType, Table, Upsert, UpsertParts,
         },
+        CompareOp, Ident, IdentRole, SchemaName,
     },
     value::Value,
 };
@@ -29,6 +29,70 @@ fn table() -> Table {
         }),
     )
     .unwrap()
+}
+
+fn insert_parts(table: &Table) -> InsertParts {
+    InsertParts {
+        table: table.clone(),
+        columns: vec![
+            table.column("payload").unwrap(),
+            table.column("id").unwrap(),
+        ],
+        rows: vec![vec![
+            Expression::Bind(Value::Bytes(vec![1, 2, 3])),
+            Expression::Bind(Value::from(7)),
+        ]],
+        returning: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: None,
+        }],
+        insert_generated_identity: true,
+    }
+}
+
+#[test]
+fn insert_columns_are_canonical_and_rows_follow_their_columns() {
+    let table = table();
+    let statement = Statement::Insert(Insert::new(insert_parts(&table)).unwrap());
+    let postgres = PostgresCompiler
+        .compile(statement, &PostgresCompiler.support())
+        .unwrap();
+    assert_eq!(
+        postgres.sql(),
+        r#"INSERT INTO "app-upserts"."entries" ("id", "payload") OVERRIDING SYSTEM VALUE VALUES ($1, $2) RETURNING "id""#
+    );
+    assert_eq!(
+        postgres.params(),
+        &[Value::from(7), Value::Bytes(vec![1, 2, 3])]
+    );
+
+    let sqlite = SqliteCompiler
+        .compile(
+            Statement::Insert(Insert::new(insert_parts(&table)).unwrap()),
+            &SqliteCompiler.support(),
+        )
+        .unwrap();
+    assert_eq!(
+        sqlite.sql(),
+        r#"INSERT INTO "app-upserts"."entries" ("id", "payload") VALUES ($1, $2) RETURNING "id""#
+    );
+}
+
+#[test]
+fn insert_rejects_foreign_columns_and_invalid_row_shapes() {
+    let own = table();
+    let foreign = table();
+    let mut input = insert_parts(&own);
+    input.columns[0] = foreign.column("payload").unwrap();
+    assert!(Insert::new(input).is_err());
+
+    let mut input = insert_parts(&own);
+    input.rows[0].pop();
+    assert!(Insert::new(input).is_err());
+
+    let mut input = insert_parts(&own);
+    input.rows[0][0] = Expression::Incoming(own.column("payload").unwrap());
+    assert!(Insert::new(input).is_err());
 }
 
 fn parts(table: &Table) -> UpsertParts {
@@ -188,11 +252,9 @@ fn statement_compilation_moves_buffers_and_keeps_values_out_of_sql() {
             )
             .unwrap();
         assert_eq!(query.params()[1].as_bytes().unwrap().as_ptr(), pointer);
-        assert!(
-            query
-                .sql()
-                .starts_with("INSERT INTO \"app-upserts\".\"entries\"")
-        );
+        assert!(query
+            .sql()
+            .starts_with("INSERT INTO \"app-upserts\".\"entries\""));
         assert!(!query.sql().contains("DROP TABLE"));
         assert!(!format!("{query:?}").contains("DROP TABLE"));
     }

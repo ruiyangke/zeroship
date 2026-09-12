@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
-use crate::sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
+use crate::sql::codecs::{lower_filter, lower_update};
 use crate::sql::compile;
 use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 use crate::tx_route::TxRoute;
@@ -22,7 +22,9 @@ pub(crate) mod assignment_pass;
 
 mod bytes_pass;
 mod identity;
+pub(crate) mod insert;
 pub mod read_pipeline;
+mod resolved;
 mod update_validation;
 pub mod upsert;
 mod write_pipeline;
@@ -386,6 +388,10 @@ pub async fn run_insert(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    route
+        .sql_registration()
+        .check(&insert::requirements(&schema))
+        .map_err(compile::QueryError::from)?;
     let frame;
     let route = if identity::requires_allocation(&schema, &doc) {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
@@ -412,13 +418,12 @@ pub async fn run_insert(
             },
         )
         .await?;
-        lower_document(route.dialect(), &schema, &mut doc);
-        let bq = compile::build_insert_with_dialect(
+        let bq = insert::build_one(
             binding.schema(),
             &coll,
             &schema,
-            &doc,
-            route.dialect(),
+            doc,
+            route.sql_registration(),
         )
         .map_err(DbError::from)?;
         let rows = exec_mutation_with_emit(
@@ -458,6 +463,10 @@ pub async fn run_insert_many(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    route
+        .sql_registration()
+        .check(&insert::requirements(&schema))
+        .map_err(compile::QueryError::from)?;
     let frame;
     let route = if identity::requires_allocation(&schema, &docs) {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
@@ -478,14 +487,12 @@ pub async fn run_insert_many(
             actor_id.as_deref(),
         )
         .await?;
-        lower_documents(route.dialect(), &schema, &mut docs);
-
-        let bq = compile::build_insert_many_with_dialect(
+        let bq = insert::build_many(
             binding.schema(),
             &coll,
             &schema,
-            &docs,
-            route.dialect(),
+            docs,
+            route.sql_registration(),
         )
         .map_err(DbError::from)?;
         let rows = exec_mutation_with_emit(
@@ -1234,7 +1241,6 @@ pub async fn run_upsert(
                 &conflict_fields,
             )
             .await?;
-            lower_document(route.dialect(), &schema, &mut doc);
             let expected_id =
                 if guard_identity {
                     Some(doc.get("id").cloned().ok_or_else(|| {
