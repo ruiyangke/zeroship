@@ -416,13 +416,201 @@ must be defined before enabling it. No live-tenant compatibility layer is needed
 
 ## Rust composition and ORM
 
-`zeroship-workflow` contains reusable native contracts, customer journal operations,
-replay types and bounded job execution. `zeroship-workflow-v8` is the thin binding
-and V8 executor. `zeroship-worker` composes trusted app context with the job
-consumer and execution runtime. `zeroship-workflow-server` hosts the manager and
-metadata queue. Manager scheduling belongs to reusable native code so local
-development can embed it without a daemon or a second scheduler implementation.
-No new crate is required merely to name each responsibility.
+### Crate layout
+
+Split the reusable manager from its executable host and the service client from
+the customer engine. The worker and CLI reuse the customer execution library;
+the server and CLI reuse the manager library. Scheduling and queue persistence
+remain modules of the manager, with a shared transaction domain.
+
+```text
+crates/
+  zeroship-core/
+    workflow/                    Closed metadata and native service contracts
+
+  zeroship-workflow/              Customer-side Rust library
+    api/                         App-scoped start, signal and read operations
+    journal/                     ORM models, transitions, fencing and receipts
+    jobs/                        Bounded execution and maintenance operations
+    consumer/                    Pull, heartbeat, execute, commit, acknowledge
+    payloads/                    Customer storage, replay and upload handling
+    retention/                   Customer dependency checks and hold intents
+    schema/                      Canonical creator journal definition
+
+  zeroship-workflow-manager/      Reusable platform-side Rust library
+    queue/                       Submission, delivery leases and settlement
+    schedules/                   Cron calendar and durable timers
+    placement/                   Worker registration and scope assignments
+    management/                  Commands and lifecycle delivery barriers
+    recovery/                    Reconciliation and execution-capacity demand
+    deployments/                 Platform catalog and deployment-hold ledger
+    schema/                      Canonical platform metadata definitions
+
+  zeroship-workflow-client/       Authenticated metadata transport
+    manager/                     Worker and Control manager clients
+    deployment_holds/            Remote Control retention operations
+    transport/                   Bounded HTTP, assertions and closed errors
+
+  zeroship-workflow-v8/           env.workflows binding and V8 job executor
+
+  zeroship-workflow-server/       Deployable host
+    api/                         HTTP routing and metadata decoding
+    auth/                        Enrollment and service authentication
+    config/                      Server settings and CLI integration
+    server/                      Startup, readiness and shutdown
+```
+
+This is the target layout, not a list of directories already created.
+`zeroship-workflow-manager` replaces `zeroship-workflow-scheduler`; it has no
+standalone scheduler binary. The existing `zeroship-workflow-server` remains the
+deployable manager host. The queue does not become a separate crate or service.
+`zeroship-worker` remains the existing app worker executable; there is no new
+workflow-worker executable.
+
+| Crate | Owns | Must not own |
+| --- | --- | --- |
+| `zeroship-core` workflow module | App/job identities, closed requests, delivery and outcome metadata, shared policy values and native queue/hold operation interfaces. | Customer replay envelopes, ORM models, HTTP implementations or scheduling loops. |
+| `zeroship-workflow` | Customer acceptance, journal transactions, replay, job execution, payload handling and app-scoped Rust handles. | Platform tables, cron evaluation, manager implementation or HTTP server hosting. |
+| `zeroship-workflow-manager` | Platform scheduling, queue transitions, registration, recovery and platform deployment metadata operations. | Creator journal operations, customer storage handles, V8 or an HTTP listener. |
+| `zeroship-workflow-client` | Remote implementations of metadata operations using existing service authentication. | Journal/queue SQL, creator inputs, V8, scheduling policy or automatic mutation retries with new identities. |
+| `zeroship-workflow-v8` | JavaScript handles, argument conversion, runtime construction and the execution shutdown barrier. | Scheduler/queue persistence, deployment ledger access or service credentials exposed to app code. |
+| `zeroship-workflow-server` | HTTP/auth/configuration composition around the manager. | Business scheduling logic, creator DB handles or a second queue implementation. |
+
+Keeping the service client separate lets Control enqueue management and verify
+assignments without importing the customer journal engine. The client is a native
+metadata API, not a relocation of the old Control-backed `start(input)` endpoint.
+The app-facing Rust API remains in `zeroship-workflow`; its accepted data stays in
+creator storage. The V8 adapter uses that same bound native handle.
+
+### Dependency direction
+
+Arrows below mean normal Cargo dependencies, not network calls. Shared
+`zeroship-core` metadata is below all workflow crates.
+
+```text
+zeroship-workflow-server
+  +--> zeroship-workflow-manager --> zeroship-data-orm (platform binding)
+  +--> zeroship-workflow-client  --> authenticated service transport
+
+zeroship-worker
+  +--> zeroship-workflow         --> zeroship-data-orm (creator binding)
+  |                             --> zeroship-storage / zeroship-bundle
+  +--> zeroship-workflow-client  --> manager and Control APIs
+  +--> zeroship-workflow-v8      --> zeroship-workflow + zeroship-runtime
+
+zeroship-control
+  +--> zeroship-workflow-client  --> manager API
+  +--> zeroship-workflow-manager::deployments
+                                  platform ledger used by Control's hold API
+
+zeroship-cli
+  +--> zeroship-workflow-manager    Native manager with local metadata binding
+  +--> zeroship-workflow            Customer engine with normal app DB binding
+  +--> zeroship-workflow-v8         Same V8 executor as production
+```
+
+The manager and customer engine do not depend on each other. The remote client
+depends on neither implementation. Shared operation interfaces in core describe
+only metadata exchanges; the manager implements native calls and the client
+implements remote calls. Hosts inject the appropriate capability. The CLI can
+use the same queue protocol in process without depending on the HTTP server or
+starting a network client. Host authentication establishes the local caller's
+authority before invoking the same scope and revision checks.
+
+Do not put the customer `WorkflowInvocation`, replay history, payload types or
+arbitrary execution errors into the shared metadata module. They remain in the
+customer library and are consumed by its V8 adapter. Likewise, generated ORM
+entities remain with the database owner rather than becoming shared protocol.
+The existing `workflow_coordination` module is replaced with the job-oriented
+contract as its producers and consumers change; it is not retained as an alias.
+
+### Deployment retention placement
+
+The current `zeroship-workflow::deployment_holds` mixes platform ORM persistence
+with the worker's remote client. Split these responsibilities with the crate
+change. Ledger/catalog models and mutations move to the manager library's
+`deployments` module. Closed hold messages and the native capability contract
+move to core; HTTP calls move to the service client. Customer journal dependency
+checks and publication intents stay in `zeroship-workflow`.
+
+Control remains the production owner of its hold and reclamation APIs. It uses
+the native platform ledger library with its authorized binding. The manager's
+queue receives a scoped hold capability for its pending jobs; production server
+composition supplies the Control client and local composition supplies the native
+catalog. Sharing a platform persistence library grants no process additional DB
+permissions and does not put the ledger in the creator worker.
+
+Constructing the manager does not open catalog tables. Only Control and the local
+host explicitly construct that ledger with an authorized platform binding. The
+manager's persistence and client errors must not depend on the customer engine's
+`WorkflowServiceError`; use owner-specific errors and closed shared refusals at
+the boundary, with customer-side conversion where needed.
+
+Queue retention and creator-journal retention use distinct authenticated holder
+identities and generation sequences. Manager replicas share a stable logical
+queue holder, while replacement workers preserve the journal holder. Control
+derives the holder class from the authenticated service role and authorized app;
+a caller cannot select another holder in its request. The current worker-only
+hold API and journal `HoldScope::for_app` do not authorize manager retention.
+Extend that contract deliberately so releasing a queued job's dependency cannot
+release a journal hold, and the reverse. Active manager schedules and jobs must
+agree before releasing their shared queue dependency.
+
+The normal bundle crate continues to own artifact formats, hashing and loading.
+Manifest verification may be reused by the platform catalog, but adding ORM
+deployment persistence to the bundle crate would mix artifact and database
+responsibilities. A generic deployment service or another shared deployment
+crate is outside this workflow restructuring.
+
+### Moving the existing code
+
+| Current location | Target action |
+| --- | --- |
+| `zeroship-workflow/src/calendar.rs` | Move cron parsing and calendar evaluation into manager scheduling; keep due-time computation out of the customer engine. |
+| `zeroship-workflow-scheduler` | Replace with the native manager library. Reuse timer behavior and tests where applicable, replace the old raw-SQL store with ORM metadata operations and delete the old binary/config surface. |
+| `zeroship-workflow-server/src/coordinator` | Move placement and management persistence into the manager. Keep HTTP authentication and process lifecycle in the server. |
+| `zeroship-workflow/src/coordination` | Move authenticated clients and shared HTTP transport into `zeroship-workflow-client`; adapt them to queue contracts. |
+| `zeroship-workflow/src/service` | Retain customer ORM transitions and app handles; replace local task discovery with delivered-job acceptance. Split schedule acceptance from calendar evaluation. |
+| `zeroship-workflow/src/service/runner` | Keep bounded execution and shutdown; change its transport to the injected manager interface and remove scheduling/maintenance sweeps. |
+| `zeroship-workflow/src/deployment_holds` | Separate platform ledger, remote client, shared metadata and customer intents as described above. |
+| `zeroship-workflow/src/store` and legacy claim/apply paths | Remove with the old Control journal integration after replacement callers use delivered jobs. |
+| `WorkflowBinding::new` and the old Control HTTP backend | Remove at production cutover. Use an app-scoped native binding for customer operations. |
+| Workflow schemas and generated files | Keep creator schema with the customer library; move platform queue and hold definitions with the manager. Update canonical platform migration composition and generator callers together. |
+
+The host changes are composition work: the worker selects trusted creator context
+and supplies remote metadata capabilities; the server supplies platform context
+and starts the manager; the CLI supplies separate local bindings and embeds both.
+Configuration parsing belongs to hosts, with validated native options passed to
+libraries. Do not carry the scheduler's standalone configuration into a library
+or introduce workflow-specific CLI database/bundle flags.
+
+Update workspace declarations, config-contract registration, schema-generation
+paths, Docker inputs, xtask package selection and affected documentation in the
+same restructuring. Update the repository's crate ownership instructions when
+moving the client. Moving its existing `cyper` use changes the declared carrier
+entrypoints, so the zero-Tokio dependency checks and documented accepted carrier
+set must move with it; do not add a normal Tokio runtime or leave duplicate HTTP
+implementations to preserve the old dependency list.
+
+### Verification ownership
+
+Core tests cover closed metadata and identity contracts. Customer-library tests
+cover journal semantics on PostgreSQL and SQLite. Manager tests cover durable
+queue, timer, placement and ledger transactions, including local SQLite parity.
+Client tests cover authenticated transport, response binding and lost replies.
+V8 tests cover app isolation, replay, execution limits and shutdown. Server tests
+cover real HTTP authorization, startup privileges and manager integration.
+Cross-process tests prove the database-zone boundary; examples retain their own
+Vitest and Playwright suites.
+
+Extend the existing workflow architecture tests to inspect normal dependency
+edges: workers must not reach manager/server implementations; manager/server and
+Control must not reach the customer engine or V8 through workflow dependencies;
+the client must not reach either persistence implementation. Test-only fixtures
+may compose both sides. Crate boundaries support review and compilation isolation;
+database permissions, scoped capabilities and runtime checks still enforce access.
+
+### Native execution and database access
 
 The existing `WorkflowService` is a Rust library object. Its current scheduling
 methods do not justify scheduling in the worker: split manager scheduling from
@@ -505,6 +693,9 @@ removed, without aliases or a parallel legacy mode.
 
 ### Work sequence
 
+- Establish the crate layout and dependency checks above. Move shared contracts
+  with their callers, extract client/manager libraries and preserve owned tests
+  while retiring the standalone scheduler host.
 - Define closed submission, job, delivery, outcome and acknowledgement contracts,
   including logical identities, app scope, revisions and retention of receipts.
 - Implement manager queue persistence, replica-safe claims, timers, cron and
