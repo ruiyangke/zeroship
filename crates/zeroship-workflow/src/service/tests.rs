@@ -1170,6 +1170,20 @@ async fn review_contract(store: Rc<OrmStore>) {
 
 #[compio::test]
 async fn postgres_completion_that_outlives_its_lease_rolls_back() {
+    delayed_lease_write("steps", "INSERT", false).await;
+}
+
+#[compio::test]
+async fn postgres_receipt_write_that_outlives_its_lease_rolls_back() {
+    delayed_lease_write("tasks", "UPDATE", false).await;
+}
+
+#[compio::test]
+async fn postgres_heartbeat_write_that_outlives_its_lease_rolls_back() {
+    delayed_lease_write("tasks", "UPDATE", true).await;
+}
+
+async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     let fixture = PostgresFixture::start().await;
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _) = registered_service(store.clone()).await;
@@ -1192,10 +1206,28 @@ async fn postgres_completion_that_outlives_its_lease_rolls_back() {
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute("CREATE FUNCTION customer.delay_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_checkpoint BEFORE INSERT ON customer.__zeroship_workflow_steps FOR EACH ROW EXECUTE FUNCTION customer.delay_checkpoint();").await.unwrap();
+    admin.batch_execute(&format!("CREATE SEQUENCE customer.delayed_write_calls; GRANT USAGE ON SEQUENCE customer.delayed_write_calls TO app_customer_role; CREATE FUNCTION customer.delay_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM nextval('customer.delayed_write_calls'); PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_write BEFORE {operation} ON customer.__zeroship_workflow_{table} FOR EACH ROW EXECUTE FUNCTION customer.delay_write();")).await.unwrap();
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
-    assert!(matches!(service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"StepCompleted","ordinal":0,"name":"slow","output":"must roll back"},{"kind":"RunCompleted"}]))).await,Err(WorkflowServiceError::Conflict(_))));
+    if heartbeat {
+        let result = service.heartbeat(&worker, &task.id, &task.token).await;
+        assert!(
+            matches!(result, Err(WorkflowServiceError::Conflict(_))),
+            "{result:?}"
+        );
+    } else {
+        let result = service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"StepCompleted","ordinal":0,"name":"slow","output":"must roll back"},{"kind":"RunCompleted"}]))).await;
+        assert!(
+            matches!(result, Err(WorkflowServiceError::Conflict(_))),
+            "{result:?}"
+        );
+    }
+    // Sequences survive rollback, proving this reached the delayed database write.
+    assert!(admin
+        .query_one("SELECT is_called FROM customer.delayed_write_calls", &[])
+        .await
+        .unwrap()
+        .get::<_, bool>(0));
     let mut tx = store.begin().await.unwrap();
     let steps = tx.table("steps");
     assert!(tx
@@ -1207,8 +1239,29 @@ async fn postgres_completion_that_outlives_its_lease_rolls_back() {
         .unwrap()
         .is_empty());
     tx.commit().await.unwrap();
+    let tx = store.begin().await.unwrap();
+    let persisted = tx
+        .database()
+        .entity::<super::models::tasks::Entity>()
+        .unwrap()
+        .find::<super::models::TaskRecord>(
+            super::models::tasks::id.eq(task.id.as_str()).unwrap(),
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(persisted[0].state, "leased");
+    assert_eq!(persisted[0].deadline, task.deadline);
+    assert!(persisted[0].receipt.is_none());
+    tx.commit().await.unwrap();
+    assert_eq!(
+        scope.status(&run.id).await.unwrap().state,
+        crate::operations::RunState::Running
+    );
     admin
-        .batch_execute("DROP TRIGGER delay_checkpoint ON customer.__zeroship_workflow_steps;")
+        .batch_execute(&format!(
+            "DROP TRIGGER delay_write ON customer.__zeroship_workflow_{table};"
+        ))
         .await
         .unwrap();
     let replacement = service.poll(&worker).await.unwrap().unwrap();
