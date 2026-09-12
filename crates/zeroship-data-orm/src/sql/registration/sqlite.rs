@@ -12,13 +12,15 @@ impl SqlStorageCodecs for SqliteCodecs {
         if crate::sql::descriptors::is_encrypted(definition) {
             return Ok(StorageType::Bytes);
         }
+        if let Some(decimal) = crate::sql::decimal::storage(definition)? {
+            return Ok(StorageType::ExactDecimal(decimal));
+        }
         Ok(match definition["type"].as_str() {
             Some("string" | "text" | "id" | "ref" | "calendarDate") => StorageType::Text,
             Some("boolean" | "bool" | "integer" | "int" | "bigint" | "bigInt") => {
                 StorageType::Integer
             }
             Some("number" | "float" | "double") => StorageType::Real,
-            Some("decimal") => StorageType::Decimal,
             Some("bytes") => StorageType::Bytes,
             Some("vector") => StorageType::Vector,
             Some("geoPoint") => StorageType::GeoPoint,
@@ -102,6 +104,11 @@ impl SqlStorageCodecs for SqliteCodecs {
                 decode_vector_blob(&bytes).map(Value::Array)
             }
             (StorageType::GeoPoint, Value::Bytes(bytes)) => decode_point_blob(&bytes),
+            (StorageType::ExactDecimal(_), Value::String(encoded))
+                if crate::sql::decimal::valid(&encoded) =>
+            {
+                Ok(Value::Decimal(encoded))
+            }
             (_, value) => Ok(value),
         }
     }

@@ -67,7 +67,7 @@ fn search_table() -> Table {
         [
             ("id", StorageType::Text),
             ("label", StorageType::Text),
-            ("amount", StorageType::Decimal),
+            ("amount", StorageType::exact_decimal(38, 9).unwrap()),
             ("embedding", StorageType::Vector),
             ("location", StorageType::GeoPoint),
         ]
@@ -162,7 +162,7 @@ fn resolved_selects_reject_backend_dependent_ordering() {
     for storage in [
         StorageType::Boolean,
         StorageType::Bytes,
-        StorageType::Decimal,
+        StorageType::exact_decimal(38, 9).unwrap(),
         StorageType::Json,
         StorageType::Vector,
         StorageType::GeoPoint,
@@ -218,7 +218,7 @@ fn offset_without_limit_uses_valid_backend_syntax() {
 #[test]
 fn resolved_selects_reject_backend_dependent_grouping_and_distinctness() {
     for storage in [
-        StorageType::Decimal,
+        StorageType::exact_decimal(38, 9).unwrap(),
         StorageType::Json,
         StorageType::Vector,
         StorageType::GeoPoint,
@@ -256,7 +256,7 @@ fn resolved_selects_reject_backend_dependent_grouping_and_distinctness() {
 #[test]
 fn count_distinct_rejects_backend_dependent_equality() {
     for storage in [
-        StorageType::Decimal,
+        StorageType::exact_decimal(38, 9).unwrap(),
         StorageType::Json,
         StorageType::Vector,
         StorageType::GeoPoint,
@@ -942,7 +942,7 @@ fn numeric_storage_rejects_lossy_integer_arithmetic_and_invalid_decimals() {
             ("id", StorageType::Integer),
             ("balance", StorageType::Integer),
             ("ratio", StorageType::Real),
-            ("amount", StorageType::Decimal),
+            ("amount", StorageType::exact_decimal(38, 9).unwrap()),
         ]
         .map(|(name, storage)| {
             (
@@ -982,6 +982,102 @@ fn numeric_storage_rejects_lossy_integer_arithmetic_and_invalid_decimals() {
         })
         .is_err());
     }
+    let amount = table.column("amount").unwrap();
+    assert!(Insert::new(InsertParts {
+        table,
+        columns: vec![amount],
+        rows: vec![vec![Expression::Bind(zeroship_data_orm::value!(1.25))]],
+        returning: Vec::new(),
+        insert_generated_identity: false,
+    })
+    .is_err());
+}
+
+#[test]
+fn dialects_compile_exact_decimal_storage_without_floating_point() {
+    let table = Table::new(
+        SchemaName::new("app-ledger").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        [
+            ("id", StorageType::Text),
+            ("amount", StorageType::exact_decimal(30, 2).unwrap()),
+        ]
+        .map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap();
+    let amount = table.column("amount").unwrap();
+    let insert = || {
+        Statement::Insert(
+            Insert::new(InsertParts {
+                table: table.clone(),
+                columns: vec![amount.clone()],
+                rows: vec![vec![Expression::Bind(Value::Decimal(
+                    "9007199254740993.005".into(),
+                ))]],
+                returning: Vec::new(),
+                insert_generated_identity: false,
+            })
+            .unwrap(),
+        )
+    };
+    let update = || {
+        Statement::Update(
+            Update::new(UpdateParts {
+                table: table.clone(),
+                assignments: vec![Assignment {
+                    column: amount.clone(),
+                    value: Expression::Arithmetic {
+                        column: amount.clone(),
+                        operator: ArithmeticOperator::Add,
+                        operand: Value::Decimal("0.01".into()),
+                    },
+                }],
+                predicate: ResolvedPredicate::Compare {
+                    lhs: ResolvedOperand::Column(amount.clone()),
+                    op: CompareOp::Eq,
+                    rhs: ResolvedPredicateValue::Bind {
+                        storage: amount.storage(),
+                        value: Value::Decimal("9007199254740993.00".into()),
+                    },
+                },
+                scope: MutationScope::Matching,
+                returning: Vec::new(),
+            })
+            .unwrap(),
+        )
+    };
+
+    let postgres_insert = PostgresCompiler
+        .compile(insert(), &PostgresCompiler.support())
+        .unwrap();
+    assert!(postgres_insert.sql().contains("VALUES ($1::numeric)"));
+    let postgres_update = PostgresCompiler
+        .compile(update(), &PostgresCompiler.support())
+        .unwrap();
+    assert!(postgres_update.sql().contains("\"amount\" + $1::numeric"));
+    assert!(postgres_update.sql().contains("\"amount\" = $2::numeric"));
+    assert!(!postgres_update.sql().contains("zeroship_decimal_"));
+
+    let sqlite_insert = SqliteCompiler
+        .compile(insert(), &SqliteCompiler.support())
+        .unwrap();
+    assert!(sqlite_insert
+        .sql()
+        .contains("VALUES (zeroship_decimal_quantize($1, 30, 2))"));
+    let sqlite_update = SqliteCompiler
+        .compile(update(), &SqliteCompiler.support())
+        .unwrap();
+    assert!(sqlite_update
+        .sql()
+        .contains("zeroship_decimal_add(\"amount\", $1, 30, 2)"));
+    assert!(sqlite_update
+        .sql()
+        .contains("zeroship_decimal_equal(\"amount\", $2)"));
 }
 
 #[test]

@@ -24,6 +24,7 @@ url = { workspace = true }
 zeroship-data-cdc-wire = { workspace = true }
 compio-postgres = { workspace = true, features = ["with-uuid-1"] }
 rusqlite = { workspace = true, features = ["bundled", "preupdate_hook", "functions"] }
+num-bigint = { workspace = true }
 flume = { workspace = true }
 sqlite-vec = { workspace = true }
 tempfile = { workspace = true }

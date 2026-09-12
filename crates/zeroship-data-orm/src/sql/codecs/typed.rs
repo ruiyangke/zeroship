@@ -185,6 +185,21 @@ fn prepare_value_at(
         return Ok(());
     }
     let kind = definition["type"].as_str();
+    if crate::sql::descriptors::is_exact_decimal(definition) {
+        let input = match value {
+            Value::Decimal(value) | Value::String(value) if crate::sql::decimal::valid(value) => {
+                value.clone()
+            }
+            _ => return Err(invalid(field, "an exact decimal string")),
+        };
+        let storage = crate::sql::decimal::storage(definition)
+            .map_err(|_| invalid(field, "valid fixed precision metadata"))?
+            .ok_or_else(|| invalid(field, "valid fixed precision metadata"))?;
+        let encoded = crate::sql::decimal::quantize(&input, storage)
+            .map_err(|_| invalid(field, "an in-range exact decimal string"))?;
+        *value = Value::Decimal(encoded);
+        return Ok(());
+    }
     if matches!(kind, Some("date" | "timestamp" | "calendarDate")) {
         return scalar(kind.unwrap(), field, value);
     }
@@ -329,6 +344,11 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
                     Operator::Push | Operator::Pull | Operator::AddToSet => {
                         prepare_array_operand(field, definition, operand)?;
                     }
+                    Operator::Increment | Operator::Decrement | Operator::Multiply
+                        if crate::sql::descriptors::is_exact_decimal(definition) =>
+                    {
+                        prepare_value(field, definition, operand)?;
+                    }
                     Operator::Increment | Operator::Decrement | Operator::Multiply => {}
                 }
             }
@@ -371,6 +391,17 @@ mod tests {
         }
         let mut valid = value!({"lat":90.0,"lng":-180.0});
         prepare_value("location", &point, &mut valid).unwrap();
+    }
+
+    #[test]
+    fn exact_decimal_inputs_are_quantized_before_protection() {
+        let definition = value!({"type":"number", "precision":30, "scale":2});
+        let mut value = Value::String("9007199254740993.005".into());
+        prepare_value("amount", &definition, &mut value).unwrap();
+        assert_eq!(value, Value::Decimal("9007199254740993.01".into()));
+
+        let mut overflow = Value::String("9999999999999999999999999999.995".into());
+        assert!(prepare_value("amount", &definition, &mut overflow).is_err());
     }
 
     #[test]

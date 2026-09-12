@@ -42,6 +42,7 @@ impl ChangeSink for NullChangeSink {
 // `BackendHandle::as_change_stream_sqlite()` (mirroring the
 // `as_postgres` / `as_sqlite` accessor shape).
 pub mod cdc;
+mod decimal;
 pub mod error;
 mod json;
 pub mod lock;

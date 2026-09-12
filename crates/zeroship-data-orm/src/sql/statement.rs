@@ -19,22 +19,29 @@ pub enum StorageType {
     Text,
     Bytes,
     Timestamp,
-    Decimal,
+    ExactDecimal(DecimalStorage),
     Json,
     Vector,
     GeoPoint,
 }
 
 impl StorageType {
+    pub fn exact_decimal(precision: u64, scale: u64) -> Result<Self, CompileError> {
+        DecimalStorage::new(precision, scale).map(Self::ExactDecimal)
+    }
+
     fn accepts(self, value: &Value) -> bool {
         match self {
             Self::Boolean => matches!(value, Value::Bool(_)),
             Self::Integer => matches!(value, Value::Number(value) if value.as_i64().is_some()),
-            Self::Real | Self::Decimal => match value {
+            Self::Real => match value {
                 Value::Number(_) => true,
                 Value::Decimal(value) => valid_decimal(value),
                 _ => false,
             },
+            Self::ExactDecimal(_) => {
+                matches!(value, Value::Decimal(value) if valid_decimal(value))
+            }
             Self::Text => matches!(value, Value::String(_)),
             Self::Bytes => matches!(value, Value::Bytes(_)),
             Self::Timestamp => {
@@ -49,7 +56,7 @@ impl StorageType {
     }
 
     fn numeric(self) -> bool {
-        matches!(self, Self::Integer | Self::Real | Self::Decimal)
+        matches!(self, Self::Integer | Self::Real | Self::ExactDecimal(_))
     }
 
     fn accepts_arithmetic(self, value: &Value) -> bool {
@@ -73,14 +80,53 @@ impl StorageType {
             Self::Boolean | Self::Integer | Self::Real | Self::Text | Self::Bytes | Self::Timestamp
         )
     }
+
+    pub fn decimal(self) -> Option<DecimalStorage> {
+        match self {
+            Self::ExactDecimal(storage) => Some(storage),
+            _ => None,
+        }
+    }
+
+    fn compatible_with(self, other: Self) -> bool {
+        self == other
+            || matches!(
+                (self, other),
+                (Self::ExactDecimal(_), Self::ExactDecimal(_))
+            )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecimalStorage {
+    precision: u16,
+    scale: u16,
+}
+
+impl DecimalStorage {
+    pub fn new(precision: u64, scale: u64) -> Result<Self, CompileError> {
+        let precision = u16::try_from(precision)
+            .ok()
+            .filter(|precision| (1..=crate::sql::decimal::MAX_PRECISION).contains(precision))
+            .ok_or_else(|| invalid("decimal precision is outside the portable range"))?;
+        let scale = u16::try_from(scale)
+            .ok()
+            .filter(|scale| *scale <= precision)
+            .ok_or_else(|| invalid("decimal scale exceeds its precision"))?;
+        Ok(Self { precision, scale })
+    }
+
+    pub fn precision(self) -> u16 {
+        self.precision
+    }
+
+    pub fn scale(self) -> u16 {
+        self.scale
+    }
 }
 
 fn valid_decimal(value: &str) -> bool {
-    serde_json::from_str::<&serde_json::value::RawValue>(value).is_ok_and(|value| {
-        value
-            .get()
-            .starts_with(|ch: char| ch == '-' || ch.is_ascii_digit())
-    })
+    crate::sql::decimal::valid(value)
 }
 
 #[derive(Debug)]
@@ -1190,7 +1236,7 @@ fn validate_predicate_for_tables(
                 match rhs {
                     ResolvedPredicateValue::Operand(rhs) => {
                         validate_operand(tables, rhs, allow_aggregate)?;
-                        if rhs.storage()? != lhs_storage {
+                        if !rhs.storage()?.compatible_with(lhs_storage) {
                             return Err(invalid(
                                 "comparison operands have different storage types",
                             ));

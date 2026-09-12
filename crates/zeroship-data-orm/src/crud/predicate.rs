@@ -479,7 +479,7 @@ mod tests {
                 crate::value!({"field":{"$gt":false}}),
             ),
             (
-                crate::value!({"type":"decimal"}),
+                crate::value!({"type":"number", "precision":18, "scale":2}),
                 crate::value!({"field":{"$lt":"10.5"}}),
             ),
             (

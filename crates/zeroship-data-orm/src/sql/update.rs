@@ -39,7 +39,7 @@ impl Operator {
             Set => true,
             Increment | Decrement | Multiply => matches!(
                 kind,
-                Some("int" | "integer" | "bigInt" | "number" | "float" | "decimal" | "numeric")
+                Some("int" | "integer" | "bigInt" | "number" | "float")
             ),
             Push | Pull | AddToSet => kind == Some("array"),
         };
@@ -116,11 +116,7 @@ fn field_operator(value: &Value) -> Result<Operator, CodecError> {
 fn numeric_operand(value: &Value) -> bool {
     match value {
         Value::Number(_) => true,
-        Value::Decimal(text) => serde_json::from_str::<&serde_json::value::RawValue>(text)
-            .is_ok_and(|raw| {
-                raw.get()
-                    .starts_with(|c: char| c == '-' || c.is_ascii_digit())
-            }),
+        Value::Decimal(text) | Value::String(text) => crate::sql::decimal::valid(text),
         _ => false,
     }
 }

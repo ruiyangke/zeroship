@@ -37,6 +37,7 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     average_suffix: "",
     offset_without_limit: " LIMIT -1",
     structural_json_equality: true,
+    exact_decimal_functions: true,
     vector_distance: write_vector_distance,
     array_mutation: write_array_mutation,
 };

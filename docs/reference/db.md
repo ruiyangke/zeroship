@@ -181,6 +181,7 @@ Use the `t.*` factories. Every builder is chainable.
 |------------------------|-------------------------------|-----------------|
 | `t.string()`           | `string`                      | TEXT            |
 | `t.number()`           | `number`                      | DOUBLE PRECISION |
+| `t.numeric({ precision, scale })` | `Decimal` string      | NUMERIC         |
 | `t.bigInt()`           | `number` or `bigint`           | BIGINT          |
 | `t.boolean()`          | `boolean`                     | BOOLEAN         |
 | `t.timestamp()`        | `number` (Unix ms)            | TIMESTAMPTZ     |

@@ -1,7 +1,7 @@
 "use server";
 
 // Primary API — schema declarators and their public builder value types.
-export { t, naming, schema, SchemaBuilder, TypeBuilder } from "./types";
+export { decimal, t, naming, schema, SchemaBuilder, TypeBuilder } from "./types";
 export { Collection } from "./collection";
 export { Query } from "./query";
 export { eq, ne, gt, gte, lt, lte, and, or, not, isNull, count, sum, avg, min, max } from "./read";
@@ -27,6 +27,6 @@ export type { LiveQuery, LiveOptions } from "./live";
 // installation and normalization helpers live in @zeroship/bootstrap.
 export type { Db, Collections, DbExtensions, TxCollection, TxQuery, TransactionOptions, SchemaInput, SchemaShape, RowOf, RowInputOf } from "./db-types";
 export type { PaginationResult } from "./query";
-export type { FieldDef, FieldStorage, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpsertOptions, ColumnAssignment, UpdateExpression, Filter, SortableField, DistinctField, SortSpec, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, IdValue, RowId, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, WithRelations, WithSpec } from "./types";
+export type { Decimal, FieldDef, FieldStorage, FieldDefaultValue, PlainObject, Result, Row, RowInput, UpsertOptions, ColumnAssignment, UpdateExpression, Filter, SortableField, DistinctField, SortSpec, NamingStrategy, SchemaOptions, InferSchema, InferUnion, InferFieldDef, IsolationLevel, Id, IdValue, RowId, FkAction, RefOptions, InferRow, InferRowInput, InferId, MaskKind, Classification, MaskOpts, MaskedValueRepr, MaskedValue, Actor, NamedIndexSpec, WithRelations, WithSpec } from "./types";
 export type { NormalizedSchema } from "./schema";
 export type { JsonValue } from "./types";

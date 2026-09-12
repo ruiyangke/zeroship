@@ -174,6 +174,13 @@ storage types to backend-native values for booleans, JSON, temporal values,
 decimals, vectors, geography, arrays, and encrypted bytes. Driver adapters then
 perform the final PostgreSQL wire or SQLite binding.
 
+Fixed-precision descriptors use the canonical `type: "number"` with precision
+and scale facets. Rust uses `Decimal`; TypeScript uses the branded string made
+by `decimal()`. Logical input is quantized before masking or encryption.
+PostgreSQL binds it to `NUMERIC`, while SQLite stores text and uses registered
+exact-decimal functions for equality, membership, assignment, and arithmetic.
+Binary floating-point values are refused for fixed-precision fields.
+
 The write path is:
 
 ```text

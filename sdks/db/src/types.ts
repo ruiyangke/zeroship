@@ -16,6 +16,35 @@ export type PlainObject = Record<string, unknown>;
 /** A JSON column can hold an object, array, or scalar at its root. */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+declare const decimalBrand: unique symbol;
+export type Decimal = string & { readonly [decimalBrand]: "Decimal" };
+
+const DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const MAX_DECIMAL_INPUT_DIGITS = 4096;
+const MAX_DECIMAL_EXPONENT = 4096;
+
+export function decimal(value: string): Decimal {
+  if (value.length > MAX_DECIMAL_INPUT_DIGITS) {
+    throw new TypeError("decimal value must be a bounded JSON decimal string");
+  }
+  const exponent = /[eE]([+-]?\d+)$/.exec(value)?.[1];
+  const fraction = /\.(\d+)/.exec(value)?.[1] ?? "";
+  const digits = value.replace(/^-/, "").split(/[eE]/, 1)[0].replace(".", "");
+  const exponentValue = exponent === undefined ? 0 : Number(exponent);
+  const scale = fraction.length - exponentValue;
+  if (
+    !DECIMAL_PATTERN.test(value) ||
+    digits.length > MAX_DECIMAL_INPUT_DIGITS ||
+    !Number.isSafeInteger(exponentValue) ||
+    Math.abs(exponentValue) > MAX_DECIMAL_EXPONENT ||
+    scale > MAX_DECIMAL_INPUT_DIGITS ||
+    (scale < 0 && digits.length - scale > MAX_DECIMAL_INPUT_DIGITS)
+  ) {
+    throw new TypeError("decimal value must be a bounded JSON decimal string");
+  }
+  return value as Decimal;
+}
+
 /** PostgreSQL transaction isolation levels. */
 /**
  * Postgres transaction isolation level. Alias of the ambient
@@ -185,8 +214,10 @@ type OrderingOps<T> = {
   $lte?: T;
 };
 
-type FilterKind = "text" | "ordered" | "equality" | "json" | "search";
-type InferredFilterKind<T> = NonNullable<T> extends string
+type FilterKind = "text" | "ordered" | "equality" | "exact" | "json" | "search";
+type InferredFilterKind<T> = NonNullable<T> extends Decimal
+  ? "exact"
+  : NonNullable<T> extends string
   ? "text"
   : NonNullable<T> extends number | bigint
     ? "ordered"
@@ -270,7 +301,7 @@ type DistinctBuilder<F> = F extends {
 }
   ? true extends E
     ? false
-    : K extends "json" | "search"
+    : K extends "json" | "search" | "exact"
       ? false
       : true
   : false;
@@ -318,7 +349,7 @@ export type SortSpec<S> = Partial<Record<SortableField<S>, 1 | -1>>;
 // ---------------------------------------------------------------------------
 
 /** Numeric update operators. */
-type NumericUpdateOps<T extends number | bigint> = {
+type NumericUpdateOps<T extends number | bigint | Decimal> = {
   $inc?: T;
   $dec?: T;
   $mul?: T;
@@ -334,7 +365,7 @@ type ArrayUpdateOps<T> = {
 /** Update value for a single field — direct value or typed operator. */
 type UpdateFieldValue<T> =
   T |
-  (NonNullable<T> extends number | bigint ? NumericUpdateOps<NonNullable<T>> : never) |
+  (NonNullable<T> extends number | bigint | Decimal ? NumericUpdateOps<NonNullable<T>> : never) |
   (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
 
 type UpdateKeys<S> = Exclude<keyof InferSchema<S>, AssignedKeys<S> | "id">;
@@ -345,9 +376,9 @@ export type UpdateExpression<S> = {
 } & {
   // Document operators share the ORM's assignment grammar.
   $set?: Partial<Pick<InferSchema<S>, UpdateKeys<S>>>;
-  $inc?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $dec?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $mul?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $inc?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $dec?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $mul?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
   $push?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
   $pull?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
   $addToSet?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
@@ -836,6 +867,8 @@ export interface FieldDef {
   writable?: boolean;
   min?: number;
   max?: number;
+  precision?: number;
+  scale?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
   /**
@@ -1268,6 +1301,22 @@ export const t = {
   number(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
     return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "number" });
   },
+  /** Creates a fixed precision decimal represented as exact text. */
+  numeric(opts: { precision?: number; scale?: number } = {}): TypeBuilder<Decimal, false, undefined, undefined, false, "exact"> {
+    const precision = opts.precision ?? 38;
+    const scale = opts.scale ?? 9;
+    if (!Number.isSafeInteger(precision) || precision < 1 || precision > 1000) {
+      throw new TypeError("t.numeric precision is outside the portable range");
+    }
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > precision) {
+      throw new TypeError("t.numeric scale must be between zero and precision");
+    }
+    return new TypeBuilder<Decimal, false, undefined, undefined, false, "exact">({
+      type: "number",
+      precision,
+      scale,
+    });
+  },
   /** Creates an integer field with exact bigint input and output beyond the safe number range. */
   bigInt(): TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered"> {
     return new TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered">({ type: "bigInt" });
@@ -1495,6 +1544,8 @@ export const t = {
   ): TypeBuilder<T, false, "full", true, false> {
     const innerBuilder = opts?.of;
     let plaintextType: "string" | "number" | "bytes" = "string";
+    let precision: number | undefined;
+    let scale: number | undefined;
     if (innerBuilder !== undefined) {
       if (!(innerBuilder instanceof TypeBuilder)) {
         throw Object.assign(
@@ -1504,8 +1555,11 @@ export const t = {
       }
       const def = innerBuilder.toFieldDef();
       if (def.type === "string") plaintextType = "string";
-      else if (def.type === "number") plaintextType = "number";
-      else if (def.type === "bytes") plaintextType = "bytes";
+      else if (def.type === "number") {
+        plaintextType = "number";
+        precision = def.precision;
+        scale = def.scale;
+      } else if (def.type === "bytes") plaintextType = "bytes";
       else {
         throw Object.assign(
           new Error(
@@ -1526,6 +1580,7 @@ export const t = {
     // builder's `.mask` method (assigns `_def.mask` unconditionally).
     return new TypeBuilder<T, false, "full", true>({
       type: plaintextType,
+      ...(precision === undefined ? {} : { precision, scale }),
       encrypted: true,
       mask: { kind: "full", classification: "pii" },
     });

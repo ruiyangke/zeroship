@@ -12,12 +12,14 @@ impl SqlStorageCodecs for PostgresCodecs {
         if crate::sql::descriptors::is_encrypted(definition) {
             return Ok(StorageType::Bytes);
         }
+        if let Some(decimal) = crate::sql::decimal::storage(definition)? {
+            return Ok(StorageType::ExactDecimal(decimal));
+        }
         Ok(match definition["type"].as_str() {
             Some("string" | "text" | "id" | "ref" | "calendarDate") => StorageType::Text,
             Some("boolean" | "bool") => StorageType::Boolean,
             Some("integer" | "int" | "bigint" | "bigInt") => StorageType::Integer,
             Some("number" | "float" | "double") => StorageType::Real,
-            Some("decimal") => StorageType::Decimal,
             Some("bytes") => StorageType::Bytes,
             Some("date" | "timestamp" | "timestamptz") => StorageType::Timestamp,
             Some("json" | "object" | "array" | "union") => StorageType::Json,
@@ -51,6 +53,11 @@ impl SqlStorageCodecs for PostgresCodecs {
         match (storage, value) {
             (StorageType::Json, Value::Json(encoded)) => {
                 serde_json::from_str(&encoded).map_err(|_| invalid_json())
+            }
+            (StorageType::ExactDecimal(_), Value::String(encoded))
+                if crate::sql::decimal::valid(&encoded) =>
+            {
+                Ok(Value::Decimal(encoded))
             }
             (_, value) => Ok(value),
         }

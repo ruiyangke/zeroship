@@ -35,6 +35,7 @@ pub mod catalog;
 /// Descriptor validation and physical storage mapping.
 pub mod mapping;
 pub mod compiler;
+pub(crate) mod decimal;
 pub mod descriptors;
 pub mod lifecycle;
 pub mod mask_codec;
