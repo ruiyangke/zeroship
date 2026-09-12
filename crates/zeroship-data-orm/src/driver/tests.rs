@@ -28,7 +28,7 @@ pub(crate) async fn native_commands(driver: impl Driver) {
     session.exec("BEGIN", &[]).await.unwrap();
     let blob_type = match driver.dialect() {
         SqlDialect::Postgres => "BYTEA",
-        SqlDialect::Sqlite | SqlDialect::Mysql => "BLOB",
+        SqlDialect::Sqlite => "BLOB",
     };
     session.exec(&format!("CREATE TEMP TABLE driver_values (id BIGINT PRIMARY KEY, payload {blob_type}, label TEXT)"), &[]).await.unwrap();
     let bytes = Value::Bytes(vec![0, 255, 128, 39]);

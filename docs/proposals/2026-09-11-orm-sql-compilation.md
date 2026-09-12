@@ -1,6 +1,6 @@
 # Shared ORM SQL compilation
 
-**Status: Crate consolidation implemented and validated. The shared compiler redesign remains proposed.**
+**Status: Compiler redesign in progress. Crate consolidation is implemented and validated.**
 
 Consolidate runtime SQL construction around a shared statement representation,
 dialect compilation, and ORM-owned execution strategies. Rust and TypeScript
@@ -373,6 +373,22 @@ compiler, Rust input construction, and SDK filter decoding. Measure allocations,
 compilation work, and statement reuse across equivalent inputs. Keep results in
 benchmark output rather than prose. Do not infer a performance improvement from
 removing code or from a standalone renderer benchmark.
+
+## Implementation checklist
+
+- [x] Consolidate the SQL crate into the ORM and validate its consumers.
+- [x] Close incomplete runtime dialect admission; retain migration dialect support.
+- [ ] Consolidate compiler output and native binding through a shared writer.
+- [ ] Register compiler, storage codecs, effective support, and immutable identity together.
+- [ ] Capture registration and verify it against bound backends and scoped sessions.
+- [ ] Replace production upsert construction with a resolved statement and capability preflight.
+- [ ] Move generated-identity allocation behind the scoped ORM backend service.
+- [ ] Verify protected upsert concurrency, nullable targets, no-change updates, and effects.
+- [ ] Cut over other writes and remove their replaced renderers.
+- [ ] Cut over ordinary and relational reads, including direct Rust expressions and bound pagination.
+- [ ] Cut over search and internal protection SQL and remove remaining runtime enum dispatch.
+- [ ] Verify downstream registration and the complete database, SDK, bootstrap, and V8 contracts.
+- [ ] Update production-path benchmarks and stable architecture documentation.
 
 ## Cutover and TDD
 
