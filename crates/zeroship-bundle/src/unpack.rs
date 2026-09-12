@@ -180,7 +180,7 @@ pub async fn ingest(
     }
 
     // Step 4: parse + validate the manifest.
-    let manifest_value: Value = serde_json::from_slice(&manifest_bytes)
+    let mut manifest_value: Value = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| IngestError::bad("invalid manifest", format!("parse: {e}")))?;
     if manifest_value
         .as_object()
@@ -191,7 +191,7 @@ pub async fn ingest(
             "manifest.migrations was removed; apply migration documents through the migration service before deploy".to_string(),
         ));
     }
-    let mut manifest: Manifest = serde_json::from_slice(&manifest_bytes)
+    let manifest: Manifest = serde_json::from_slice(&manifest_bytes)
         .map_err(|e| IngestError::bad("invalid manifest", format!("parse: {e}")))?;
     if manifest.version != 1 {
         return Err(IngestError::bad(
@@ -328,11 +328,10 @@ pub async fn ingest(
         }
     }
 
-    // Step 9: re-serialize the manifest with deploy_hash inserted, write
-    // it to the blob store, and hand the canonical JSON back so the
-    // caller can persist it inline on the apps row.
-    manifest.deploy_hash = Some(deploy_hash.clone());
-    let final_json = serde_json::to_string(&manifest)
+    // Preserve the exact fields used for identity. Serializing the typed
+    // manifest would add defaults and discard fields outside its Rust model.
+    manifest_value["deploy_hash"] = Value::String(deploy_hash.clone());
+    let final_json = serde_json::to_string(&canonicalize_value(&manifest_value))
         .map_err(|e| IngestError::Internal(format!("re-serialize manifest: {e}")))?;
     if let Err(e) = blob_store
         .put_manifest(app_id, &deploy_hash, final_json.as_bytes())
