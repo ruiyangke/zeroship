@@ -33,37 +33,8 @@ impl Search for SqliteBackend {
     }
 }
 
-// ---------------------------------------------------------------------------
-// `SpatialIndex` impl (pure-Rust haversine + flat scan)
-// ---------------------------------------------------------------------------
-//
-// Pure-Rust over an R-tree (Q-P4-C, plan §4.3): same rationale as the
-// vector path's pure-Rust-over-`sqlite-vec` decision — bundling the
-// R-tree extension would require either forking the SQLite
-// amalgamation per CI platform or runtime-loading a `.so`, both of
-// which defeat the "no system libsqlite3" invariant. The haversine
-// flat scan is acceptable at dev scale; production spatial workloads
-// run on PostGIS via the PG arm.
-//
-// One method (the flat scan needs no index at all, so there was never
-// anything for an `ensure_spatial_index` to do on this arm):
-//   * `spatial_near` — SELECT all rows matching `filter` via the
-//     session actor's `query_typed`, decode each row's `column` blob
-//     via `spatial::blob_to_point`, compute `haversine_m(point, row_point)`,
-//     filter rows with `distance <= radius_m`, sort ASC, take top-
-//     `limit`, and re-emit as JSON with a synthetic `_distance_m: f64`
-//     field.
-
 impl SqliteBackend {
-    /// Haversine flat scan **on `session`**, the spatial twin of
-    /// [`Self::vector_search_on`]; see there for why the session is a
-    /// parameter.
-    ///
-    /// # Errors
-    ///
-    /// `invalid_geo_arg` when the named column is absent from the result row or
-    /// is not a BLOB, the query builder's own refusals, and any error the
-    /// statement raises.
+    /// Filter in SQL, then rank matching file-backed rows by haversine distance.
     #[allow(clippy::too_many_arguments)]
     pub async fn spatial_near_on(
         &self,
@@ -74,10 +45,6 @@ impl SqliteBackend {
         radius_m: f64,
         limit: usize,
     ) -> Result<Vec<crate::value::Value>, DbError> {
-        // Build the WHERE clause via the same machinery `dispatch_find`
-        // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
-        // positionally on rusqlite). No ORDER BY at the SQL layer —
-        // we sort in Rust by computed distance.
         let rows = session.query(query.sql(), query.params()).await?;
         let mut scored = Vec::new();
         for row in rows {
@@ -148,9 +115,3 @@ mod tests {
         assert!(compare_identity(&value!({"id":"b"}), &value!({"id":"c"})).is_lt());
     }
 }
-
-// ===========================================================================
-// Key-store accessor on SqliteBackend
-// ===========================================================================
-//
-// Both backends resolve host-supplied project keys through the same key store.

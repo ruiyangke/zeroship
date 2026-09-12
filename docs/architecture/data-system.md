@@ -334,7 +334,7 @@ A column a grant withholds is unreadable at the database, not merely absent from
 Two consequences measured on live PostgreSQL:
 
 - **The runtime role receives no blanket table grants.** A table-level grant subsumes any column
-  list, so neither production provisioning nor the plugin-db test provisioner grants DML on all
+  list, so neither production provisioning nor the ORM test fixtures grant DML on all
   tables or installs prospective table default privileges. Bindings grant their columns
   explicitly. The sole reserved-table exception is `__zeroship_audit_unmask`: the runtime role
   receives table `INSERT` plus `USAGE` on its owned serial sequence, and nothing else. That the

@@ -437,14 +437,7 @@ impl Collection {
         dispatch_aggregate(scope, self.binding.clone(), &self.name, pipeline_v, opts_v).into()
     }
 
-    /// `collection.search(args)` - vector search.
-    ///
-    /// `args` is a discriminated union:
-    /// - `{ vector: number[], k?: number, metric?, column?, filter? }`
-    ///   — pgvector nearest-neighbour search. Resolves with a row
-    ///   array; each row carries a synthetic `_distance` field.
-    /// Routes to [`dispatch_search`] which inspects the discriminator
-    /// and dispatches to the appropriate backend impl.
+    /// Run vector search through the ORM and return rows with `_distance`.
     #[v8_method]
     fn search<'s>(
         &self,
@@ -458,22 +451,7 @@ impl Collection {
         dispatch_search(scope, self.binding.clone(), &self.name, args_v).into()
     }
 
-    /// `collection.near(args)` — spatial within-radius search.
-    ///
-    /// `args` shape:
-    /// ```ts
-    /// { field: string,
-    ///   point: { lat: number, lng: number },
-    ///   radius: number,        // metres
-    ///   filter?: Filter,
-    ///   limit?: number }
-    /// ```
-    ///
-    /// Resolves with a row array; each row carries a synthetic
-    /// `_distance_m` field (the metric distance in metres). PG arm
-    /// routes to PostGIS `ST_DWithin` / `ST_Distance` against a
-    /// `geography(POINT, 4326)` column; SQLite arm returns
-    /// `spatial_unsupported` until the haversine implementation lands.
+    /// Run spatial search through the ORM and return rows with `_distance_m`.
     #[v8_method]
     fn near<'s>(
         &self,
