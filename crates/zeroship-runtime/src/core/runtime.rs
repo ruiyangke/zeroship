@@ -2020,9 +2020,9 @@ impl RuntimeInner {
     // Kernel dispatch primitive — call_fetch_handler
     // -----------------------------------------------------------------------
 
-    /// Kernel durable-workflow replay primitive. The worker passes the
-    /// control-plane StepRequest as JSON; the bootstrap returns a StepResult
-    /// object, which this method serializes back to JSON for the worker.
+    /// Kernel durable-workflow replay primitive. The trusted host passes replay
+    /// input as JSON; both the interpreter and native failures return an outcome
+    /// batch. Lease authority stays outside the isolate.
     pub fn call_workflow_dispatch(
         &mut self,
         modules: &[crate::ModuleEntry],
@@ -2040,11 +2040,7 @@ impl RuntimeInner {
                 Ok(()) => "No default.workflow handler exported".to_string(),
             };
             return crate::WorkflowOutcome::Response {
-                json: serde_json::json!({
-                    "kind": "RunFailed",
-                    "error": { "type": "Error", "message": msg },
-                })
-                .to_string(),
+                json: workflow_failure_json(&msg),
                 logs: vec![],
             };
         }
@@ -2086,11 +2082,7 @@ impl RuntimeInner {
             self.clear_executing_request();
             self.discard_request_state(request_id);
             return crate::WorkflowOutcome::Response {
-                json: serde_json::json!({
-                    "kind": "RunFailed",
-                    "error": { "type": "Error", "message": self.termination_message() },
-                })
-                .to_string(),
+                json: workflow_failure_json(self.termination_message()),
                 logs: vec![],
             };
         }
@@ -2106,11 +2098,7 @@ impl RuntimeInner {
                 self.clear_executing_request();
                 self.discard_request_state(request_id);
                 crate::WorkflowOutcome::Response {
-                    json: serde_json::json!({
-                        "kind": "RunFailed",
-                        "error": { "type": "Error", "message": e.message },
-                    })
-                    .to_string(),
+                    json: workflow_failure_json(&e.message),
                     logs: vec![],
                 }
             }
@@ -4259,6 +4247,16 @@ fn parse_rpc_body<'s>(
         Ok(v) => InputParse::Ok(v),
         Err(_) => InputParse::Reject400("invalid JSON body"),
     }
+}
+
+fn workflow_failure_json(message: &str) -> String {
+    let error = serde_json::json!({"type": "Error", "message": message});
+    serde_json::json!({
+        "kind": "RunFailed",
+        "error": error,
+        "outcomes": [{"kind": "RunFailed", "error": error}],
+    })
+    .to_string()
 }
 
 fn parse_workflow_envelope<'s>(
