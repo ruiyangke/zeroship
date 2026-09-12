@@ -40,6 +40,11 @@ export function workflowSchema(namespace) {
   }, ["app_id", "id"], [appFk("deploys")], [
     { name: "deploy_hash_identity", columns: ["app_id", "hash"] },
   ]);
+  create("deployment_holds", {
+    ...identity(), deploy_id: text(), deploy_hash: text(), holder_id: text(),
+    generation: integer(), state: text(),
+  }, ["app_id", "deploy_id"], [appFk("deployment_holds")]);
+  index("deployment_holds", "pending", ["app_id", "state", "deploy_id"]);
   create("schedules", {
     ...identity(), id: text(), name: text(), workflow_name: text(), deploy_id: text(), definition: text(),
     next_at: t.bigInt(), revision: integer(), anchor_at: integer(), last_checked_at: integer(),

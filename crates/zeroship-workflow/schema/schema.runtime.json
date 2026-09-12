@@ -180,6 +180,93 @@
       },
       "indexes": []
     },
+    "__zeroship_workflow_deployment_holds": {
+      "fields": {
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          },
+          "primaryKey": true
+        },
+        "deploy_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deploy_id"
+          },
+          "primaryKey": true
+        },
+        "deploy_hash": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deploy_hash"
+          }
+        },
+        "holder_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "holder_id"
+          }
+        },
+        "generation": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "generation"
+          }
+        },
+        "state": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "state"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_deployment_holds_pending_idx",
+          "fields": [
+            "app_id",
+            "state",
+            "deploy_id"
+          ]
+        }
+      ]
+    },
     "__zeroship_workflow_deploys": {
       "fields": {
         "app_id": {

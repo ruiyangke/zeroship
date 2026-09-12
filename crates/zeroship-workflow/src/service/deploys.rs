@@ -103,6 +103,9 @@ impl WorkflowService {
         let size = i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
+        let hold_generation =
+            super::deployment_retention::admission_generation(&tx, app, &deploy.id, &deploy.hash)
+                .await?;
         let now = tx.now().await?;
         let table = tx.table("deploys");
         let rows = tx
@@ -112,7 +115,7 @@ impl WorkflowService {
             )
             .await?;
         if let Some(existing) = rows.first() {
-            check_existing(existing, deploy, &hash, size)?;
+            check_existing(existing, deploy, &hash, size, hold_generation.is_some())?;
         } else {
             tx.execute(&format!("INSERT INTO {table} (app_id,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch) VALUES ($1,$2,$3,$4,$5,0,'staging',$6,$7,0)"),
                 &[app.as_str().into(),deploy.id.clone().into(),deploy.hash.clone().into(),encode(deploy)?.into(),now.into(),hash.clone().into(),size.into()]).await?;
@@ -122,6 +125,12 @@ impl WorkflowService {
         snapshots.put(app, &deploy.id, bytes, &hash).await?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
+        if super::deployment_retention::admission_generation(&tx, app, &deploy.id, &deploy.hash)
+            .await?
+            != hold_generation
+        {
+            return Err(conflict());
+        }
         let rows = tx
             .query(
                 &format!("SELECT * FROM {table} WHERE app_id=$1 AND id=$2"),
@@ -129,7 +138,7 @@ impl WorkflowService {
             )
             .await?;
         let existing = rows.first().ok_or_else(conflict)?;
-        check_existing(existing, deploy, &hash, size)?;
+        check_existing(existing, deploy, &hash, size, hold_generation.is_some())?;
         let epoch = existing
             .integer("snapshot_epoch")?
             .checked_add(1)
@@ -152,16 +161,17 @@ fn check_existing(
     deploy: &DeployRegistration,
     hash: &str,
     size: i64,
+    held: bool,
 ) -> Result<(), WorkflowServiceError> {
     let manifest: DeployRegistration = decode(&row.text("manifest")?)?;
     if manifest != *deploy
         || row.text("hash")? != deploy.hash
         || row.text("snapshot_hash")? != hash
         || row.integer("snapshot_size")? != size
-        || !matches!(
+        || !(matches!(
             row.text("state")?.as_str(),
             "staging" | "available" | "unavailable"
-        )
+        ) || (held && row.text("state")? == "retiring"))
     {
         return Err(conflict());
     }
