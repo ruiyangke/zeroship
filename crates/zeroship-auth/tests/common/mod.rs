@@ -118,29 +118,9 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     cfg.settings.stash_signing_key = test_secret("test-stash-key-not-for-prod-32bytes!");
     cfg.settings.totp_enc_key =
         test_secret("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
-    // The session-secret keyring, which `main.rs` REFUSES TO BOOT WITHOUT.
-    // Every fixture needs it now, because every token exchange establishes a
-    // session and a session's secret is hashed under this keyring - where
-    // before, only an exchange that issued a refresh token reached it, so a
-    // fixture could omit it and still serve tokens.
-    //
-    // That gap is what a device-grant test found: it configured no keyring
-    // (it never asked for `offline_access`), and the exchange answered 500.
-    // The fixture was simply less configured than any real deployment.
-    //
-    // The pair comes from `tests/fixtures/session_keys.rs` rather than from a local
-    // helper, because the control plane's `PlatformOp` fixture builds its own
-    // `AuthConfig` the same way and MISSED this when it was added here. One
-    // function is what stops the two drifting again, and the fixtures that
-    // used to write a second pair of their own on top of this one no longer
-    // do - a duplicate of this operation is precisely how the control plane's
-    // copy came to be missing. `tests/session_keyring_fixture_gate.sh` rules
-    // on that: a fixture that mounts the auth server and drives a token
-    // exchange must have a keyring, whatever route it takes to one.
-    //
-    // `cli_device_refresh_test.rs` is the one fixture that still writes its
-    // own pair after calling this. It is correct - it configures both fields
-    // - so the gate passes it; it is simply not consolidated.
+    // Token exchange reads the key files through the resolved AuthConfig.
+    // These paths still come from the shared fixture; owning their lifetime
+    // alongside each server is part of the remaining fixture conversion.
     let (hash_file, idem_file) = session_keys::session_key_files();
     cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
     cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
