@@ -1055,14 +1055,11 @@ pub async fn dispatch_unmask_for_query(
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
-        let Some(row_pk) = row
-            .get(zeroship_data_sql::lifecycle::primary_key(&schema)?)
-            .map(|v| match v {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                _ => String::new(),
-            })
-        else {
+        let Some(row_pk) = row.get("id").map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        }) else {
             continue;
         };
         if row_pk.is_empty() {

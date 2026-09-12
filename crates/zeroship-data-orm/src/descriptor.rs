@@ -24,6 +24,11 @@ pub fn install_collections(
         let fields = schema
             .as_object()
             .ok_or_else(|| DbError::internal("collection descriptor must be an object"))?;
+        zeroship_data_sql::descriptors::validate_collection_identity(schema).map_err(
+            |message| {
+                DbError::validation("invalid_collection_identity", format!("{name}: {message}"))
+            },
+        )?;
         let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
         zeroship_data_sql::lifecycle::soft_delete_column(schema)?;
         zeroship_data_sql::lifecycle::concurrency_column(schema)?;
@@ -105,6 +110,65 @@ pub fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
 mod tests {
     use super::*;
     use zeroship_data_sql::value;
+
+    #[test]
+    fn invalid_identity_cannot_replace_installed_collections() {
+        crate::tests::fixtures::reset_engine();
+        let binding = DbBinding::cold_start("app_identity_contract");
+        let valid = value!({"id":{"type":"string", "required":true, "primaryKey":true}});
+        install_collections(&binding, vec![("entries".into(), valid.clone())]).unwrap();
+        for invalid in [
+            value!({}),
+            value!({"key":{"type":"string", "required":true, "primaryKey":true}}),
+            value!({"id":{"type":"string", "required":true}}),
+            value!({"id":{"type":"string", "primaryKey":true}}),
+            value!({"id":{"type":"string", "required":false, "primaryKey":true}}),
+            value!({
+                "id":{"type":"string", "required":true, "primaryKey":true},
+                "tenant":{"type":"string", "required":true, "primaryKey":true}
+            }),
+        ] {
+            let err = install_collections(
+                &binding,
+                vec![
+                    ("replacement".into(), valid.clone()),
+                    ("invalid".into(), invalid),
+                ],
+            )
+            .unwrap_err();
+            assert!(matches!(
+                err,
+                DbError::ValidationFailed {
+                    code: "invalid_collection_identity",
+                    ..
+                }
+            ));
+            assert_eq!(
+                collection_schema(&binding, "entries").unwrap().as_ref(),
+                &valid
+            );
+            assert!(collection_schema(&binding, "replacement").is_err());
+            assert!(collection_schema(&binding, "invalid").is_err());
+        }
+    }
+
+    #[test]
+    fn declared_id_does_not_require_or_invent_a_generator() {
+        crate::tests::fixtures::reset_engine();
+        let binding = DbBinding::cold_start("app_explicit_identity");
+        for id in [
+            value!({"type":"string", "required":true, "primaryKey":true}),
+            value!({"type":"string", "required":true, "primaryKey":true,
+                "assign":{"by":"typedId", "on":"insert"}}),
+        ] {
+            let fields = value!({"id":id, "slug":{"type":"string", "unique":true}});
+            install_collections(&binding, vec![("entries".into(), fields.clone())]).unwrap();
+            assert_eq!(
+                collection_schema(&binding, "entries").unwrap().as_ref(),
+                &fields
+            );
+        }
+    }
 
     #[test]
     fn an_undeclared_collection_is_a_typed_error_not_a_missing_schema() {

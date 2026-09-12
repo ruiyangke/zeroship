@@ -11,7 +11,6 @@ fn row(output: Output) -> Value {
 
 async fn lifecycle(mut fixture: CollectionFixture) {
     let names = [
-        ("id", "row_key"),
         ("created_at", "born"),
         ("updated_at", "touched"),
         ("created_by", "author"),
@@ -26,7 +25,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
         .with_actor(Some("usr_author".into()));
     let entries = db.collection("entries").unwrap();
     let inserted = row(entries.insert(value!({"title":"first"})).await.unwrap());
-    assert!(inserted["row_key"].as_str().unwrap().starts_with("entr_"));
+    assert!(inserted["id"].as_str().unwrap().starts_with("entr_"));
     assert_eq!(inserted["revision"], value!(1));
     assert_eq!(inserted["author"], value!("usr_author"));
     assert_eq!(inserted["editor"], value!("usr_author"));
@@ -35,10 +34,10 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     for (old, _) in names {
         assert!(inserted.get(old).is_none(), "{old}: {inserted}");
     }
-    let key = inserted["row_key"].clone();
+    let key = inserted["id"].clone();
     let updated = row(entries
         .update(
-            value!({"row_key":key.clone(), "revision":1}),
+            value!({"id":key.clone(), "revision":1}),
             value!({"title":"changed"}),
         )
         .await
@@ -48,7 +47,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     assert!(
         entries
             .update(
-                value!({"row_key":key.clone(), "revision":1}),
+                value!({"id":key.clone(), "revision":1}),
                 value!({"title":"stale"})
             )
             .await
@@ -56,20 +55,20 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     );
     assert!(
         entries
-            .update(value!({"row_key":key.clone()}), value!({"born":0}))
+            .update(value!({"id":key.clone()}), value!({"born":0}))
             .await
             .is_err()
     );
     assert!(
         entries
-            .update(value!({"row_key":key.clone()}), value!({"removed":0}))
+            .update(value!({"id":key.clone()}), value!({"removed":0}))
             .await
             .is_err()
     );
 
     let anonymous = fixture.database.collection("entries").unwrap();
     let updated = row(anonymous
-        .update(value!({"row_key":key.clone()}), value!({"title":"changed"}))
+        .update(value!({"id":key.clone()}), value!({"title":"changed"}))
         .await
         .unwrap());
     assert_eq!(updated["revision"], value!(3));
@@ -82,31 +81,25 @@ async fn lifecycle(mut fixture: CollectionFixture) {
         })
         .await
         .unwrap());
-    assert_eq!(upserted["row_key"], key);
+    assert_eq!(upserted["id"], key);
     assert_eq!(upserted["born"], inserted["born"]);
     assert_eq!(upserted["revision"], value!(4));
 
-    let deleted = row(entries
-        .delete(value!({"row_key":key.clone()}))
-        .await
-        .unwrap());
+    let deleted = row(entries.delete(value!({"id":key.clone()})).await.unwrap());
     assert!(deleted["removed"].as_i64().unwrap() > 0);
     assert_eq!(deleted["revision"], value!(5));
     let Output::Rows { rows, .. } = entries.find(value!({}), value!({})).await.unwrap() else {
         panic!("rows")
     };
     assert!(rows.is_empty());
-    let Output::Rows { rows, .. } = entries
-        .delete(value!({"row_key":key.clone()}))
-        .await
-        .unwrap()
+    let Output::Rows { rows, .. } = entries.delete(value!({"id":key.clone()})).await.unwrap()
     else {
         panic!("rows")
     };
     assert!(rows.is_empty());
     let restored = row(entries
         .execute(Operation::Restore {
-            filter: value!({"row_key":key.clone()}),
+            filter: value!({"id":key.clone()}),
             many: false,
         })
         .await
@@ -114,12 +107,12 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     assert_eq!(restored["removed"], Value::Null);
     assert_eq!(restored["revision"], value!(6));
     assert_eq!(
-        row(entries.find(value!({}), value!({})).await.unwrap())["row_key"],
+        row(entries.find(value!({}), value!({})).await.unwrap())["id"],
         key
     );
     let Output::Rows { rows, .. } = entries
         .execute(Operation::Restore {
-            filter: value!({"row_key":key.clone()}),
+            filter: value!({"id":key.clone()}),
             many: false,
         })
         .await
@@ -130,7 +123,7 @@ async fn lifecycle(mut fixture: CollectionFixture) {
     assert!(rows.is_empty());
     entries
         .execute(Operation::Purge {
-            filter: value!({"row_key":key}),
+            filter: value!({"id":key}),
             many: false,
         })
         .await

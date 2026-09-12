@@ -176,7 +176,7 @@ pub async fn read_raw_column_value(
     schema: &Value,
 ) -> Result<ScalarRead<Value>, DbError> {
     let namespace = route.backend().namespace(route.app_id(), route.schema());
-    let key_column = zeroship_data_sql::lifecycle::primary_key(schema)?;
+    let key_column = "id";
     let key_value = match schema[key_column]["type"].as_str() {
         Some("int" | "integer" | "bigInt" | "bigint") => {
             Value::from(row_pk.parse::<i64>().map_err(|_| {

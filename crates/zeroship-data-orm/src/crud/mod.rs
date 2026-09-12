@@ -14,7 +14,7 @@ use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_sql::codecs::{lower_document, lower_documents, lower_filter, lower_update};
-use zeroship_data_sql::lifecycle::{concurrency_column, primary_key, soft_delete_column};
+use zeroship_data_sql::lifecycle::{concurrency_column, soft_delete_column};
 
 use crate::protection::{mask_pass, protection_floor, unmask};
 
@@ -197,7 +197,6 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
 fn validate_unmask_projection(
     select: Option<&Value>,
     unmask_columns: &[String],
-    schema: &Value,
 ) -> Result<(), DbError> {
     if unmask_columns.is_empty() {
         return Ok(());
@@ -208,7 +207,7 @@ fn validate_unmask_projection(
     if arr.is_empty() {
         return Ok(());
     }
-    if arr.iter().any(|v| v.as_str() == primary_key(schema).ok()) {
+    if arr.iter().any(|v| v.as_str() == Some("id")) {
         return Ok(());
     }
     Err(DbError::ValidationFailed {
@@ -303,11 +302,7 @@ pub async fn run_find(
     filter: Value,
     plan: FindPlan,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    validate_unmask_projection(
-        plan.select.as_ref(),
-        &plan.unmask_columns,
-        crate::descriptor::collection_schema(&binding, &coll)?.as_ref(),
-    )?;
+    validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
 
     // Unmask reads follow this operation's transaction route. Authorization and
     // audit writes use the backend separately so creator rollback cannot erase
@@ -520,9 +515,7 @@ pub async fn run_update_one(
     // Detect creator-supplied CAS version + reject
     // the unsupported "version filter without id" shape eagerly.
     let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some()
-        && !assignment_pass::filter_has_primary_key_predicate(&filter, &schema)?
-    {
+    if cas_version.is_some() && !assignment_pass::filter_has_id_predicate(&filter) {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
@@ -544,7 +537,7 @@ pub async fn run_update_one(
             if let Some(expected_version) = cas_version {
                 let row_id = filter
                     .as_object()
-                    .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
+                    .and_then(|o| o.get("id"))
                     .and_then(|v| v.as_str());
                 return Err(DbError::version_mismatch(&coll, row_id, expected_version));
             }
@@ -571,8 +564,7 @@ pub async fn run_update_one(
     .await?;
     lower_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
-        let mut sql_filter =
-            zeroship_data_sql::value!({ (primary_key(&schema)?): target_row.id_value });
+        let mut sql_filter = zeroship_data_sql::value!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
             sql_filter[concurrency_column(&schema)?.expect("CAS column")] =
                 Value::from(expected_version);
@@ -630,7 +622,7 @@ pub async fn run_update_one(
         if result.rows.is_empty() {
             let row_id = filter
                 .as_object()
-                .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
+                .and_then(|o| o.get("id"))
                 .and_then(|v| v.as_str());
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
@@ -667,9 +659,7 @@ pub async fn run_update_many(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
     let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some()
-        && !assignment_pass::filter_has_primary_key_predicate(&filter, &schema)?
-    {
+    if cas_version.is_some() && !assignment_pass::filter_has_id_predicate(&filter) {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
@@ -718,7 +708,7 @@ pub async fn run_update_many(
                 if let Some(expected_version) = cas_version {
                     let row_id = filter
                         .as_object()
-                        .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
+                        .and_then(|o| o.get("id"))
                         .and_then(|v| v.as_str());
                     return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                 }
@@ -745,7 +735,7 @@ pub async fn run_update_many(
                 )
                 .await?;
                 lower_update(dialect, &schema, &mut row_update);
-                let mut row_filter = zeroship_data_sql::value!({ (primary_key(&schema)?): row_id });
+                let mut row_filter = zeroship_data_sql::value!({ "id": row_id });
                 if let Some(expected_version) = cas_version {
                     row_filter[concurrency_column(&schema)?.expect("CAS column")] =
                         Value::from(expected_version);
@@ -784,7 +774,7 @@ pub async fn run_update_many(
                 if affected != target_count as u64 {
                     let row_id = filter
                         .as_object()
-                        .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
+                        .and_then(|o| o.get("id"))
                         .and_then(|v| v.as_str());
                     return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                 }
@@ -822,19 +812,15 @@ pub async fn run_update_many(
         &autobump,
     )
     .map_err(DbError::from)?;
-    let affected = exec_mutation_count_with_emit(
-        bq,
-        &route,
-        &coll,
-        zeroship_data_orm::cdc::ChangeOp::Update,
-    )
-    .await?;
+    let affected =
+        exec_mutation_count_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
+            .await?;
     // A primary-key CAS miss has the same error contract as updateOne.
     if let Some(expected_version) = cas_version {
         if affected == 0 {
             let row_id = filter
                 .as_object()
-                .and_then(|o| primary_key(&schema).ok().and_then(|key| o.get(key)))
+                .and_then(|o| o.get("id"))
                 .and_then(|v| v.as_str());
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
@@ -1672,7 +1658,6 @@ mod tests {
         let err = validate_unmask_projection(
             Some(&zeroship_data_sql::value!(["ssn", "email"])),
             &["ssn".to_string()],
-            &zeroship_data_sql::value!({"id":{"primaryKey":true}}),
         )
         .expect_err("explicit unmask projection without id must be refused");
 
@@ -1690,16 +1675,10 @@ mod tests {
 
     #[test]
     fn validate_unmask_projection_accepts_implicit_or_id_inclusive_select() {
-        validate_unmask_projection(
-            None,
-            &["ssn".to_string()],
-            &zeroship_data_sql::value!({"id":{"primaryKey":true}}),
-        )
-        .expect("implicit select ok");
+        validate_unmask_projection(None, &["ssn".to_string()]).expect("implicit select ok");
         validate_unmask_projection(
             Some(&zeroship_data_sql::value!(["id", "ssn"])),
             &["ssn".to_string()],
-            &zeroship_data_sql::value!({"id":{"primaryKey":true}}),
         )
         .expect("id-inclusive projection ok");
     }

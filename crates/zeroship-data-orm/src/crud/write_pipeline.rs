@@ -202,7 +202,7 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
-            let row_pk = row_pk_from_doc(payload, &schema);
+            let row_pk = row_pk_from_doc(payload);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
@@ -216,7 +216,7 @@ pub async fn apply(
                 return Ok(());
             };
             for doc in docs.iter_mut() {
-                let row_pk = row_pk_from_doc(doc, &schema);
+                let row_pk = row_pk_from_doc(doc);
                 stages
                     .apply_to_doc(keys, dialect, app_id, collection, &row_pk, doc)
                     .await?;
@@ -245,7 +245,7 @@ pub async fn apply(
                 &schema,
             )
             .await?;
-            let row_pk = row_pk_from_doc(payload, &schema);
+            let row_pk = row_pk_from_doc(payload);
             stages
                 .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
@@ -383,12 +383,8 @@ impl<'a> WriteStages<'a> {
     }
 }
 
-fn row_pk_from_doc(doc: &Value, schema: &Value) -> String {
-    row_pk_from_value(
-        zeroship_data_sql::lifecycle::primary_key(schema)
-            .ok()
-            .and_then(|key| doc.get(key)),
-    )
+fn row_pk_from_doc(doc: &Value) -> String {
+    row_pk_from_value(doc.get("id"))
 }
 
 fn row_pk_from_value(value: Option<&Value>) -> String {
@@ -447,9 +443,7 @@ pub async fn resolve_target_row_ids(
     Ok(rows
         .into_iter()
         .filter_map(|row| {
-            let id_value = row
-                .get(zeroship_data_sql::lifecycle::primary_key(schema).ok()?)?
-                .clone();
+            let id_value = row.get("id")?.clone();
             Some(TargetRowId {
                 row_pk: row_pk_from_value(Some(&id_value)),
                 id_value,
@@ -584,7 +578,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     )
     .map_err(DbError::from)?;
     let rows = exec_query(route, built).await?;
-    let key = zeroship_data_sql::lifecycle::primary_key(schema)?;
+    let key = "id";
     if let Some(existing_id) = rows
         .first()
         .and_then(|row| row.get(key))

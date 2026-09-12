@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "collections": {
+    "entries": {
+      "fields": {
+        "key": { "type": "string", "required": true, "primaryKey": true }
+      }
+    }
+  }
+}

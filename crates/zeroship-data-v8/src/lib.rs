@@ -202,7 +202,7 @@ mod runtime_descriptor_binding_tests {
             "collections": {
                 "users": {
                     "fields": {
-                        "id": { "type": "id", "idPrefix": "usr" },
+                        "id": { "type": "id", "idPrefix": "usr", "required": true, "primaryKey": true },
                         "email": { "type": "string", "required": true }
                     },
                     "options": {
@@ -234,6 +234,18 @@ mod runtime_descriptor_binding_tests {
             &runtime_descriptor["collections"]["users"]["fields"],
             "native boot must publish the descriptor's field map verbatim"
         );
+        let mut invalid = runtime_descriptor.clone();
+        invalid["collections"]["users"]["fields"] = value!({
+            "key": { "type": "string", "required": true, "primaryKey": true }
+        });
+        let error = plugin()
+            .bind_runtime_descriptor(scope, APP, Some(&serde_json::to_value(&invalid).unwrap()))
+            .expect_err("renamed identity must fail at native installation");
+        assert!(error.contains("id"), "{error}");
+        assert_eq!(
+            descriptor::collection_schema(&binding, "users").unwrap(),
+            schema
+        );
     }
 
     #[test]
@@ -250,7 +262,7 @@ mod runtime_descriptor_binding_tests {
             "version": 2,
             "collections": {
                 "stale": {
-                    "fields": { "id": { "type": "id" } },
+                    "fields": { "id": { "type": "id", "required": true, "primaryKey": true } },
                     "options": { "softDelete": false, "versioning": false },
                     "indexes": []
                 }

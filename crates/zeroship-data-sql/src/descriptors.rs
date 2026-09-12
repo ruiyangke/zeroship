@@ -1,5 +1,28 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+/// ORM collections declare a non-null `id` as their sole primary key.
+pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), &'static str> {
+    use crate::value::Value;
+    let fields = schema
+        .as_object()
+        .ok_or("collection fields must be an object")?;
+    let id = fields
+        .get("id")
+        .ok_or("collection requires an 'id' primary key")?;
+    if id.get("primaryKey").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be declared as its primary key");
+    }
+    if id.get("required").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be required and non-null");
+    }
+    if fields.iter().any(|(name, def)| {
+        name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
+    }) {
+        return Err("collection 'id' must be its sole primary key");
+    }
+    Ok(())
+}
+
 /// Projectable fields explicitly declared by the generated schema.
 pub fn readable_fields(schema: &crate::value::Value) -> std::collections::BTreeSet<String> {
     schema

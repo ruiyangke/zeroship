@@ -119,9 +119,7 @@ pub async fn decrypt_row_on_read(
         return Ok(());
     };
 
-    let row_pk = match zeroship_data_sql::lifecycle::primary_key_column(schema)?
-        .and_then(|key| obj.get(key))
-    {
+    let row_pk = match obj.get("id") {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
         _ => String::new(),
@@ -198,11 +196,12 @@ mod tests {
         let keys = test_key_store();
 
         let schema = zeroship_data_sql::value!({
-            "record_key": { "type": "string", "primaryKey": true },
+            "id": { "type": "string", "primaryKey": true },
             "ssn": { "type": "string", "encrypted": true },
             "name": { "type": "string" },
         });
-        let mut row = zeroship_data_sql::value!({ "record_key": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
+        let mut row =
+            zeroship_data_sql::value!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
@@ -219,7 +218,7 @@ mod tests {
         assert_ne!(raw, b"123-45-6789");
         assert_eq!(obj["name"], "alice");
         assert!(!obj.contains_key("__zsbin__ssn"));
-        let mut read_row = zeroship_data_sql::value!({ "record_key": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
+        let mut read_row = zeroship_data_sql::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
 
         rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
@@ -233,7 +232,7 @@ mod tests {
         // Same ciphertext under a DIFFERENT row_pk must fail tag check
         // (Camp A defence — the row-swap attack surfaces as
         // `encryption_aead_failed`).
-        let mut wrong_pk_row = zeroship_data_sql::value!({ "record_key": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
+        let mut wrong_pk_row = zeroship_data_sql::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
         let err = rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut wrong_pk_row).await
         });

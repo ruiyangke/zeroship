@@ -455,11 +455,7 @@ fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_s
 
     let update = PlanUpdate::builder(
         collection.clone(),
-        PlanIdent::parse_as(
-            zeroship_data_sql::lifecycle::primary_key(&people_schema()).unwrap(),
-            PlanIdentRole::Column,
-        )
-        .unwrap(),
+        PlanIdent::parse_as("id", PlanIdentRole::Column).unwrap(),
         limit,
         returning(),
     )
@@ -473,11 +469,7 @@ fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_s
     .expect("bounded update plan");
     let delete = PlanDelete::builder(
         collection,
-        PlanIdent::parse_as(
-            zeroship_data_sql::lifecycle::primary_key(&people_schema()).unwrap(),
-            PlanIdentRole::Column,
-        )
-        .unwrap(),
+        PlanIdent::parse_as("id", PlanIdentRole::Column).unwrap(),
         limit,
         returning(),
     )

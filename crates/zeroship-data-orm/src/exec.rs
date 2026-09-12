@@ -208,8 +208,7 @@ pub async fn exec_mutation_with_emit(
     // iterate the live `Value`s directly. The CRUD resolver in
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
-    let schema = crate::descriptor::collection_schema(binding, collection)?;
-    let key = zeroship_data_sql::lifecycle::primary_key_column(&schema)?;
+    crate::descriptor::collection_schema(binding, collection)?;
     let rows = exec_mutation(route, bq).await?;
     emit_for_rows(
         &rows,
@@ -218,7 +217,6 @@ pub async fn exec_mutation_with_emit(
         backend_publishes_committed_changes(route.backend()),
         collection,
         op,
-        key,
     );
     Ok(rows)
 }
@@ -312,7 +310,6 @@ fn emit_for_rows(
     backend_publishes: bool,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
-    key: Option<&str>,
 ) {
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
@@ -333,9 +330,7 @@ fn emit_for_rows(
         return;
     }
     for row in rows {
-        let pk = key
-            .and_then(|key| row.get(key))
-            .and_then(value_to_logical_id);
+        let pk = row.get("id").and_then(value_to_logical_id);
         // The returned post-image conservatively reports every projected field.
         let (columns, tuple): (Vec<String>, std::collections::HashMap<String, String>) = match row {
             Value::Object(m) => {
@@ -671,7 +666,6 @@ mod tests {
             /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
-            Some("id"),
         );
 
         assert_eq!(
@@ -699,7 +693,6 @@ mod tests {
             /* backend_publishes */ false,
             "ghosts",
             ChangeOp::Insert,
-            Some("id"),
         );
 
         assert_eq!(
@@ -890,7 +883,6 @@ mod tests {
             /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
-            Some("id"),
         );
 
         assert_eq!(
@@ -955,7 +947,6 @@ mod tests {
                 backend_publishes_committed_changes(&handle),
                 "messages",
                 ChangeOp::Insert,
-                Some("id"),
             );
 
             assert_eq!(
@@ -989,7 +980,6 @@ mod tests {
             /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
-            Some("id"),
         );
 
         match sub.pop() {
@@ -1212,7 +1202,9 @@ mod tests {
             for (filter, expected) in [("id = 1", 1), ("id = 2", 0)] {
                 let affected = exec_mutation_count_with_emit(
                     BuiltQuery {
-                        sql: format!(r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#),
+                        sql: format!(
+                            r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#
+                        ),
                         params: vec![],
                     },
                     &ambient_route_for_tests(app_id, handle.clone()),

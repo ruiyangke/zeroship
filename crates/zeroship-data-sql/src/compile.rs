@@ -17,7 +17,7 @@ mod read;
 pub use read::{ReadSource, build_select};
 
 pub use crate::lifecycle::WriteAssignments;
-use crate::lifecycle::{primary_key, soft_delete_column};
+use crate::lifecycle::soft_delete_column;
 use crate::value::Value;
 
 use crate::schema_name::SchemaName;
@@ -614,7 +614,7 @@ pub fn build_write_target_probe(
     limit: i64,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
-    let select = crate::value!([primary_key(schema_hint)?]);
+    let select = crate::value!(["id"]);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
             schema_name,
@@ -1450,7 +1450,7 @@ pub fn build_update_one_with_assignments(
     } else {
         format!(" WHERE {where_clause}")
     };
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
@@ -1740,7 +1740,7 @@ pub fn build_delete_one_with_dialect(
     let mut params: Vec<Value> = Vec::new();
     let where_clause = build_where_with_dialect(filter, &mut params, schema_hint, dialect)?;
 
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
     let sql = format!(
         "DELETE FROM {schema}.{table} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{} LIMIT 1{lock_clause}) RETURNING {returning}",
         if where_clause.is_empty() {
@@ -1755,20 +1755,16 @@ pub fn build_delete_one_with_dialect(
 
 // Lifecycle mutations use assignments prepared by the ORM.
 
-/// Use the declared key to select and lock a row for mutation.
-fn single_row_write_target(
-    dialect: SqlDialect,
-    schema: &Value,
-) -> Result<(String, &'static str), QueryError> {
-    let key = primary_key(schema)?;
-    Ok((
-        quote_ident(&value_column_for_field(key, schema)),
+/// Select and lock an entity by its id.
+fn single_row_write_target(dialect: SqlDialect, schema: &Value) -> (String, &'static str) {
+    (
+        quote_ident(&value_column_for_field("id", schema)),
         if dialect == SqlDialect::Postgres {
             " FOR UPDATE"
         } else {
             ""
         },
-    ))
+    )
 }
 
 fn deleted_predicate(schema: &Value, deleted: bool) -> Result<String, QueryError> {
@@ -1832,7 +1828,7 @@ pub fn build_soft_delete_one_with_assignments(
         )
     };
 
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),
@@ -1909,7 +1905,7 @@ pub fn build_restore_one_with_assignments(
         )
     };
 
-    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint)?;
+    let (target_col, lock_clause) = single_row_write_target(dialect, schema_hint);
     let sql = format!(
         "UPDATE {schema}.{table} SET {} WHERE {target_col} = (SELECT {target_col} FROM {schema}.{table}{inner_where} LIMIT 1{lock_clause}) RETURNING {returning}",
         set_clauses.join(", "),

@@ -112,6 +112,12 @@ Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.
 
+Every ORM collection declares a required `id` as its sole primary key. Artifact
+packing, runtime installation and Rust schema generation validate this contract.
+ID values come from the declared generator or explicit input; the ORM injects neither columns
+nor generators. Other column names and lifecycle assignments remain
+schema-driven. Projections and aggregate results may omit `id`.
+
 Worker hosts supply the ORM factory to the V8 service:
 
 ```rust,ignore
