@@ -207,28 +207,7 @@ async fn decrypt_rows_on_read(
     Ok(())
 }
 
-/// Remove every key that is not on the row's declared surface.
-///
-/// The LAST stage. It used to be described here as "the one that closes the
-/// `RETURNING *` leak", because twelve SQL sites in `zeroship-data-sql` emitted
-/// `RETURNING *` - every physical column, including a masked field's raw
-/// column - and none of them passed through the projection allowlist, which was
-/// SELECT-side only. Without this stage `await db.users.insert({ ssn })` handed
-/// the real value back under a key the generated `Row<S>` type does not
-/// declare, invisible to any review written against the generated types.
-///
-/// **Those twelve sites now project explicitly**
-/// (`zeroship_data_sql::compile::build_returning_expr`), so no statement this
-/// runtime issues produces an off-surface key any more. **This stage is still
-/// required**, and the reason has not changed: a statement is not the only
-/// producer of a row. The WAL consumer decodes pgoutput with no schema in reach
-/// and no projection to apply, and its rows arrive here with every physical
-/// column on them. A projection binds one statement; this predicate binds every
-/// row.
-///
-/// It runs last because the stages before it need the physical columns: the
-/// decrypt stage reads ciphertext, and the mask pass strips the raw column
-/// itself. A strip placed earlier would delete their input.
+/// Restrict the public result after protection consumes internal identity and storage.
 fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
     let allowed = match surface {
         RowSurface::Declared => crate::compile::read_surface_columns(schema),
