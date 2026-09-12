@@ -197,6 +197,25 @@ fn resolved_selects_reject_backend_dependent_ordering() {
 }
 
 #[test]
+fn offset_without_limit_uses_valid_backend_syntax() {
+    let postgres = scalar_select(StorageType::Integer, |parts| parts.offset = Some(5)).unwrap();
+    let postgres = PostgresCompiler
+        .compile(Statement::Select(postgres), &PostgresCompiler.support())
+        .unwrap();
+    assert!(postgres.sql().ends_with(" OFFSET $1"), "{}", postgres.sql());
+
+    let sqlite = scalar_select(StorageType::Integer, |parts| parts.offset = Some(5)).unwrap();
+    let sqlite = SqliteCompiler
+        .compile(Statement::Select(sqlite), &SqliteCompiler.support())
+        .unwrap();
+    assert!(
+        sqlite.sql().ends_with(" LIMIT -1 OFFSET $1"),
+        "{}",
+        sqlite.sql()
+    );
+}
+
+#[test]
 fn resolved_selects_reject_backend_dependent_grouping_and_distinctness() {
     for storage in [
         StorageType::Decimal,

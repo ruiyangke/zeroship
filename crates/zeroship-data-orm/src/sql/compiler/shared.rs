@@ -249,6 +249,7 @@ pub(crate) struct Syntax {
     pub(crate) insensitive_like: &'static str,
     pub(crate) insensitive_like_suffix: &'static str,
     pub(crate) average_suffix: &'static str,
+    pub(crate) offset_without_limit: &'static str,
     pub(crate) structural_json_equality: bool,
     pub(crate) vector_distance: fn(
         &mut SqlWriter,
@@ -626,6 +627,8 @@ pub(crate) fn compile_select(
     if let Some(limit) = parts.limit {
         writer.sql.push_str(" LIMIT ");
         writer.write_param(Value::from(limit))?;
+    } else if parts.offset.is_some() {
+        writer.sql.push_str(syntax.offset_without_limit);
     }
     if let Some(offset) = parts.offset {
         writer.sql.push_str(" OFFSET ");

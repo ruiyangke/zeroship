@@ -35,6 +35,7 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     insensitive_like: "ILIKE",
     insensitive_like_suffix: "",
     average_suffix: "::double precision",
+    offset_without_limit: "",
     structural_json_equality: false,
     vector_distance: write_vector_distance,
     array_mutation: write_array_mutation,
