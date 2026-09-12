@@ -212,8 +212,8 @@ existing `with` relation loader remains a separate operation.
 
 ## Driver contract
 
-`driver::Driver` exposes a configured physical connection source: SQL dialect,
-acquisition, and pool diagnostics. It accepts no application binding or keys and
+`driver::Driver` exposes a configured physical connection source: acquisition
+and pool diagnostics. It accepts no application binding or keys and
 requires no search, catalog, masking, or change-publication implementation.
 `DriverSession` executes SQL with native parameters, returns rows or affected-row
 counts, and handles settlement, cancellation, cleanup, and discard.
@@ -388,9 +388,11 @@ quarantine unfinished work before physical resources can be reused.
 ## SQL portability and extension points
 
 The driver standardizes execution. The SQL compiler owns syntax differences.
-A backend pairs its execution implementation with a supported `SqlDialect`.
-Adding another SQL language extends the SQL compiler; it does not require
-rewriting application models or shared transaction policy.
+A backend pairs execution with an immutable `SqlRegistration` containing its
+compiler, storage codecs, effective support, SQL family, and opaque identity.
+Adding another SQL language registers another implementation of the shared
+statement contract; it does not require a central vendor enum or changes to
+application models and transaction policy.
 
 Portable behavior is established by tests, including native types, null/default
 handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship_data_orm::sql` with a native byte
@@ -446,8 +448,8 @@ CRUD pipeline invokes these conversions at the appropriate points around
 protection transforms without choosing a concrete backend. Namespace selection
 belongs to the host executor.
 
-The runtime has one catalog contract (`Catalog`) and one search contract
-(`Search`). `Driver` and `DriverSession` own physical execution. Conformance
+The runtime uses `Catalog` for protection evidence and `Search` for ORM search
+strategies. `Driver` and `DriverSession` own physical execution. Conformance
 fixtures use a separate test-only `DatabaseFixture` helper with native values.
 There is no production text-parameter execution trait or backend DDL type mapper;
 the migration engine remains the authority for schema creation.
