@@ -65,7 +65,7 @@ async fn journal_rows(
         let Output::Rows { rows: page, .. } = collection
             .find(
                 filter.clone().into(),
-                value!({"offset":rows.len(), "limit":1000, "orderBy":{"id":"asc"}}),
+                value!({"offset":rows.len(), "limit":zeroship_data_orm::sql::MAX_ROW_LIMIT, "orderBy":{"id":1}}),
             )
             .await
             .unwrap()
