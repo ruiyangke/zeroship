@@ -1,8 +1,9 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
     statement::{
-        ArithmeticOperator, ArrayOperator, Column, Expression, MutationScope, ResolvedOperand,
-        ResolvedPredicate, ResolvedPredicateValue, Statement, StorageType, Table,
+        ArithmeticOperator, ArrayOperator, Column, Delete, Expression, Insert, MutationScope,
+        ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement, Statement,
+        StorageType, Table, Update, Upsert, VectorSearchStatement,
     },
     CompareOp, MembershipOp, PatternOp,
 };
@@ -242,10 +243,6 @@ pub(crate) struct Syntax {
         crate::sql::descriptors::VectorMetric,
         super::ParameterSlot,
     ) -> Result<(), CompileError>,
-    pub(crate) spatial_near: fn(
-        crate::sql::statement::SpatialNearStatement,
-        &SqlSupport,
-    ) -> Result<CompiledQuery, CompileError>,
     pub(crate) array_mutation: fn(
         &mut SqlWriter,
         &Column,
@@ -349,162 +346,164 @@ pub(crate) fn check(
     Ok(())
 }
 
-pub(crate) fn compile(
+pub(crate) fn compile_insert(
     syntax: Syntax,
-    implemented: SqlSupport,
-    statement: Statement,
     effective: &SqlSupport,
+    insert: Insert,
 ) -> Result<CompiledQuery, CompileError> {
-    check(
-        implemented,
-        &Requirements::for_statement(&statement),
-        effective,
-    )?;
-    match statement {
-        Statement::Select(select) => compile_select(syntax, effective, select),
-        Statement::VectorSearch(search) => compile_vector_search(syntax, effective, search),
-        Statement::SpatialNear(search) => (syntax.spatial_near)(search, effective),
-        Statement::Insert(insert) => {
-            insert.validate()?;
-            let parts = insert.into_parts();
-            let mut writer = SqlWriter::new(effective.max_bind_parameters);
-            writer.sql.push_str("INSERT INTO ");
-            write_table(&mut writer, &parts.table);
-            writer.sql.push_str(" (");
-            for (index, column) in parts.columns.iter().enumerate() {
-                comma(&mut writer, index);
-                writer.identifier(column.name().as_str());
-            }
-            writer.sql.push(')');
-            if parts.insert_generated_identity {
-                if let Some(clause) = syntax.generated_identity_override {
-                    writer.sql.push_str(clause);
-                }
-            }
-            writer.sql.push_str(" VALUES ");
-            for (row_index, row) in parts.rows.into_iter().enumerate() {
-                comma(&mut writer, row_index);
-                writer.sql.push('(');
-                for (column_index, (column, value)) in parts.columns.iter().zip(row).enumerate() {
-                    comma(&mut writer, column_index);
-                    write_expression(&mut writer, syntax, column.storage(), value)?;
-                }
-                writer.sql.push(')');
-            }
-            write_returning(&mut writer, &parts.returning);
-            Ok(writer.finish())
-        }
-        Statement::Upsert(upsert) => {
-            upsert.validate()?;
-            let parts = upsert.into_parts();
-            let mut writer = SqlWriter::new(effective.max_bind_parameters);
-            writer.sql.push_str("INSERT INTO ");
-            write_table(&mut writer, &parts.table);
-            writer.sql.push_str(" (");
-            for (index, assignment) in parts.insert.iter().enumerate() {
-                comma(&mut writer, index);
-                writer.identifier(assignment.column.name().as_str());
-            }
-            writer.sql.push(')');
-            if parts.insert_generated_identity {
-                if let Some(clause) = syntax.generated_identity_override {
-                    writer.sql.push_str(clause);
-                }
-            }
-            writer.sql.push_str(" VALUES (");
-            for (index, assignment) in parts.insert.into_iter().enumerate() {
-                comma(&mut writer, index);
-                write_expression(
-                    &mut writer,
-                    syntax,
-                    assignment.column.storage(),
-                    assignment.value,
-                )?;
-            }
-            writer.sql.push_str(") ON CONFLICT (");
-            for (index, column) in parts.conflict.iter().enumerate() {
-                comma(&mut writer, index);
-                writer.identifier(column.name().as_str());
-            }
-            writer.sql.push_str(") DO UPDATE SET ");
-            for (index, assignment) in parts.update.into_iter().enumerate() {
-                comma(&mut writer, index);
-                writer.identifier(assignment.column.name().as_str());
-                writer.sql.push_str(" = ");
-                write_expression(
-                    &mut writer,
-                    syntax,
-                    assignment.column.storage(),
-                    assignment.value,
-                )?;
-            }
-            if let Some(condition) = parts.condition {
-                writer.sql.push_str(" WHERE ");
-                write_current(&mut writer, &condition.column);
-                writer.sql.push_str(match condition.op {
-                    CompareOp::Eq => " = ",
-                    CompareOp::Ne => " <> ",
-                    CompareOp::Lt => " < ",
-                    CompareOp::Lte => " <= ",
-                    CompareOp::Gt => " > ",
-                    CompareOp::Gte => " >= ",
-                });
-                write_bind(
-                    &mut writer,
-                    syntax,
-                    condition.column.storage(),
-                    condition.value,
-                )?;
-            }
-            write_returning(&mut writer, &parts.returning);
-            Ok(writer.finish())
-        }
-        Statement::Update(update) => {
-            update.validate()?;
-            let parts = update.into_parts();
-            let mut writer = SqlWriter::new(effective.max_bind_parameters);
-            writer.sql.push_str("UPDATE ");
-            write_table(&mut writer, &parts.table);
-            writer.sql.push_str(" SET ");
-            for (index, assignment) in parts.assignments.into_iter().enumerate() {
-                comma(&mut writer, index);
-                writer.identifier(assignment.column.name().as_str());
-                writer.sql.push_str(" = ");
-                write_update_expression(&mut writer, syntax, assignment.column, assignment.value)?;
-            }
-            write_mutation_predicate(
-                &mut writer,
-                syntax,
-                &parts.table,
-                parts.scope,
-                parts.predicate,
-            )?;
-            write_returning(&mut writer, &parts.returning);
-            Ok(writer.finish())
-        }
-        Statement::Delete(delete) => {
-            delete.validate()?;
-            let parts = delete.into_parts();
-            let mut writer = SqlWriter::new(effective.max_bind_parameters);
-            writer.sql.push_str("DELETE FROM ");
-            write_table(&mut writer, &parts.table);
-            write_mutation_predicate(
-                &mut writer,
-                syntax,
-                &parts.table,
-                parts.scope,
-                parts.predicate,
-            )?;
-            write_returning(&mut writer, &parts.returning);
-            Ok(writer.finish())
+    insert.validate()?;
+    let parts = insert.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("INSERT INTO ");
+    write_table(&mut writer, &parts.table);
+    writer.sql.push_str(" (");
+    for (index, column) in parts.columns.iter().enumerate() {
+        comma(&mut writer, index);
+        writer.identifier(column.name().as_str());
+    }
+    writer.sql.push(')');
+    if parts.insert_generated_identity {
+        if let Some(clause) = syntax.generated_identity_override {
+            writer.sql.push_str(clause);
         }
     }
+    writer.sql.push_str(" VALUES ");
+    for (row_index, row) in parts.rows.into_iter().enumerate() {
+        comma(&mut writer, row_index);
+        writer.sql.push('(');
+        for (column_index, (column, value)) in parts.columns.iter().zip(row).enumerate() {
+            comma(&mut writer, column_index);
+            write_expression(&mut writer, syntax, column.storage(), value)?;
+        }
+        writer.sql.push(')');
+    }
+    write_returning(&mut writer, &parts.returning);
+    Ok(writer.finish())
 }
 
-fn compile_vector_search(
+pub(crate) fn compile_upsert(
     syntax: Syntax,
     effective: &SqlSupport,
-    search: crate::sql::statement::VectorSearchStatement,
+    upsert: Upsert,
+) -> Result<CompiledQuery, CompileError> {
+    upsert.validate()?;
+    let parts = upsert.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("INSERT INTO ");
+    write_table(&mut writer, &parts.table);
+    writer.sql.push_str(" (");
+    for (index, assignment) in parts.insert.iter().enumerate() {
+        comma(&mut writer, index);
+        writer.identifier(assignment.column.name().as_str());
+    }
+    writer.sql.push(')');
+    if parts.insert_generated_identity {
+        if let Some(clause) = syntax.generated_identity_override {
+            writer.sql.push_str(clause);
+        }
+    }
+    writer.sql.push_str(" VALUES (");
+    for (index, assignment) in parts.insert.into_iter().enumerate() {
+        comma(&mut writer, index);
+        write_expression(
+            &mut writer,
+            syntax,
+            assignment.column.storage(),
+            assignment.value,
+        )?;
+    }
+    writer.sql.push_str(") ON CONFLICT (");
+    for (index, column) in parts.conflict.iter().enumerate() {
+        comma(&mut writer, index);
+        writer.identifier(column.name().as_str());
+    }
+    writer.sql.push_str(") DO UPDATE SET ");
+    for (index, assignment) in parts.update.into_iter().enumerate() {
+        comma(&mut writer, index);
+        writer.identifier(assignment.column.name().as_str());
+        writer.sql.push_str(" = ");
+        write_expression(
+            &mut writer,
+            syntax,
+            assignment.column.storage(),
+            assignment.value,
+        )?;
+    }
+    if let Some(condition) = parts.condition {
+        writer.sql.push_str(" WHERE ");
+        write_current(&mut writer, &condition.column);
+        writer.sql.push_str(match condition.op {
+            CompareOp::Eq => " = ",
+            CompareOp::Ne => " <> ",
+            CompareOp::Lt => " < ",
+            CompareOp::Lte => " <= ",
+            CompareOp::Gt => " > ",
+            CompareOp::Gte => " >= ",
+        });
+        write_bind(
+            &mut writer,
+            syntax,
+            condition.column.storage(),
+            condition.value,
+        )?;
+    }
+    write_returning(&mut writer, &parts.returning);
+    Ok(writer.finish())
+}
+
+pub(crate) fn compile_update(
+    syntax: Syntax,
+    effective: &SqlSupport,
+    update: Update,
+) -> Result<CompiledQuery, CompileError> {
+    update.validate()?;
+    let parts = update.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("UPDATE ");
+    write_table(&mut writer, &parts.table);
+    writer.sql.push_str(" SET ");
+    for (index, assignment) in parts.assignments.into_iter().enumerate() {
+        comma(&mut writer, index);
+        writer.identifier(assignment.column.name().as_str());
+        writer.sql.push_str(" = ");
+        write_update_expression(&mut writer, syntax, assignment.column, assignment.value)?;
+    }
+    write_mutation_predicate(
+        &mut writer,
+        syntax,
+        &parts.table,
+        parts.scope,
+        parts.predicate,
+    )?;
+    write_returning(&mut writer, &parts.returning);
+    Ok(writer.finish())
+}
+
+pub(crate) fn compile_delete(
+    syntax: Syntax,
+    effective: &SqlSupport,
+    delete: Delete,
+) -> Result<CompiledQuery, CompileError> {
+    delete.validate()?;
+    let parts = delete.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("DELETE FROM ");
+    write_table(&mut writer, &parts.table);
+    write_mutation_predicate(
+        &mut writer,
+        syntax,
+        &parts.table,
+        parts.scope,
+        parts.predicate,
+    )?;
+    write_returning(&mut writer, &parts.returning);
+    Ok(writer.finish())
+}
+
+pub(crate) fn compile_vector_search(
+    syntax: Syntax,
+    effective: &SqlSupport,
+    search: VectorSearchStatement,
 ) -> Result<CompiledQuery, CompileError> {
     search.validate()?;
     let parts = search.into_parts();
@@ -552,10 +551,10 @@ pub(crate) fn write_search_projection(
     }
 }
 
-fn compile_select(
+pub(crate) fn compile_select(
     syntax: Syntax,
     effective: &SqlSupport,
-    select: crate::sql::statement::SelectStatement,
+    select: SelectStatement,
 ) -> Result<CompiledQuery, CompileError> {
     select.validate()?;
     let parts = select.into_parts();

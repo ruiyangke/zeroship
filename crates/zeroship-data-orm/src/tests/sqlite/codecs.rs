@@ -49,7 +49,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             // catches a regression in the emitter without needing a row at all.
             assert!(
                 ddl.contains("strftime('%Y-%m-%dT%H:%M:%fZ','now')"),
-                "the emitted system-field default must be the ISO-T spelling, got: {ddl}"
+                "the emitted timestamp default must use the ISO-T spelling, got: {ddl}"
             );
 
             // Row A: id only, so `created_at` is written BY THE EMITTED DEFAULT.

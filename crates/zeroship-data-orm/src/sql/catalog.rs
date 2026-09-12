@@ -183,15 +183,9 @@ impl MaskKind {
 /// Taxonomy of sensitivity classes used to drive
 /// unmask authorization and audit-row tagging.
 ///
-/// Mirrors the SDK's `Classification` union. The taxonomy is
-/// deliberately small — six classes covering the standard regulatory
-/// boundaries (PII / SPI / PHI / PCI) plus `Public` (nothing to
-/// protect) and `Internal` (platform metadata).
-///
-/// The six default-classification names (`public`, `pii`, `spi`,
-/// `phi`, `pci`, `internal`) are RESERVED as column names by
-/// `query::validate_field_name` so creators cannot accidentally
-/// collide with the classification taxonomy in their schemas.
+/// Mirrors the SDK's `Classification` union. It covers the regulatory
+/// categories plus public and application-internal data. The canonical names
+/// are reserved as columns so schemas cannot collide with the taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Classification {
     /// Usernames, display names, public profile data — visible to all.

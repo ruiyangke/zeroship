@@ -263,9 +263,9 @@ implementation still allocates records and futures and copies some inputs.
 The ORM refuses caller-supplied typed-ID assignments before insert, batch insert, or
 upsert can mutate rows. Upsert conflict keys must be declared, supplied,
 application-owned fields. The SQL compiler rejects malformed or repeated
-conflict columns. A conflicting row keeps its identity; a new row gets a
-platform-generated identity. The assignment pass remains idempotent because
-input validation runs before it.
+conflict columns. A conflicting row keeps its identity; a new row gets the
+descriptor-declared generated identity. The assignment pass remains idempotent
+because input validation runs before it.
 
 Collection descriptors carry assignment generators and explicit primary-key,
 concurrency and soft-delete roles. The ORM resolves assignments per collection;
@@ -312,7 +312,7 @@ JSON null is an element when used as an operand; null columns remain null.
 The dialect renderer lives in `zeroship_data_orm::sql`.
 
 The SQL module also owns the shared update grammar. It validates assignments
-before system-field and protection transforms, rejecting conflicting writes and
+before declared generators and protection transforms, rejecting conflicting writes and
 nonnumeric arithmetic operands. Normalization moves literal values under `$set`
 so every assigned field passes through the same encryption and masking path.
 Explicit `$set` values remain literal JSON even when they contain operator keys.

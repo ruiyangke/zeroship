@@ -158,6 +158,29 @@ fn contracts_codecs_and_context_have_authoritative_owners() {
 }
 
 #[test]
+fn backend_compilers_dispatch_every_statement_family() {
+    for backend in ["postgres", "sqlite"] {
+        let source = source::parse(&repo::read(&format!(
+            "crates/zeroship-data-orm/src/sql/compiler/{backend}.rs"
+        )));
+        for statement in [
+            "Select",
+            "VectorSearch",
+            "SpatialNear",
+            "Insert",
+            "Upsert",
+            "Update",
+            "Delete",
+        ] {
+            assert!(
+                source.contains(&format!("Statement :: {statement}")),
+                "{backend} compiler does not dispatch Statement::{statement}"
+            );
+        }
+    }
+}
+
+#[test]
 fn dependency_closures_preserve_library_and_service_boundaries() {
     let members: BTreeSet<_> = repo::workspace()
         .into_iter()
