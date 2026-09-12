@@ -4,6 +4,7 @@ use crate::common;
 
 use crate::common::database::Database;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
 use jsonwebtoken::{
     decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
 };
@@ -374,7 +375,6 @@ fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
         "client_id": CLIENT_ID,
         "scope": "openid",
     });
-    use ed25519_dalek::pkcs8::EncodePrivateKey;
     let signing = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
     let key = signing.to_pkcs8_der().expect("fixture signing key");
     let mut header = Header::new(Algorithm::EdDSA);
