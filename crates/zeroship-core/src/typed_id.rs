@@ -221,6 +221,10 @@ pub const USER_PREFIX: &str = "usr";
 /// app-secret AAD, and a `String` returned from here would reach all of them
 /// with no type to say which rendering each one wanted.
 pub const APP_PREFIX: &str = "app";
+
+/// Immutable normal app deployment identity.
+pub const DEPLOYMENT_PREFIX: &str = "dep";
+
 pub const SESSION_PREFIX: &str = "ses";
 
 /// Grant typed-id prefix: one row per (person, audience) in `zeroship.grants`,
@@ -536,6 +540,9 @@ pub fn new_reconcile_finding_id() -> String {
 /// Workflow-run typed-id prefix. `zeroship.workflow_runs.id` stores the full
 /// `run_<base62>` string because workflow runs are creator-visible handles.
 pub const WORKFLOW_RUN_PREFIX: &str = "run";
+
+/// Logical workflow queue job identity, independent of its delivery attempt.
+pub const WORKFLOW_JOB_PREFIX: &str = "wjb";
 
 /// Workflow-signal typed-id prefix. `zeroship.workflow_signals.id` stores the
 /// full `sig_<base62>` string.
