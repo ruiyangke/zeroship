@@ -9,8 +9,15 @@ routes and platform journal are not part of the target coordinator contract.
 The closed metadata messages live in `zeroship_core::workflow_coordination`.
 They separate registration, placement, wake-up hints and lifecycle management
 from execution data. Native wire tests reject customer payload and credential
-fields, including inside nested command acknowledgements. Handler and store
-composition are still being replaced.
+fields, including inside nested command acknowledgements.
+
+`src/coordinator.rs` implements the metadata store on a bounded compio PostgreSQL
+pool. `schema/schema.ts` defines its tables through the canonical migration DSL.
+Native tests in `tests/coordinator.rs` exercise concurrent replicas, retained
+placement revisions, wake acknowledgements, management retries, lost-worker
+recovery discovery and database privileges. The store rejects the last worker's
+voluntary release until host-driven wake-up delivery is available. The HTTP host
+and platform migration still use the prototype below and need conversion.
 
 The V8-free HTTP host for `zeroship-workflow::service`. App routes require a
 Control-issued capability. Task routes verify an active enrolled worker's

@@ -4,13 +4,14 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AcknowledgeManagement, AssignScope, Assignment, ManageRun, ManagementOperation,
-        ManagementOutcome, PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope,
-        RequestId, Revision, RunId, UnixMillis, WakeHintReceipt, WorkerId,
+        AcknowledgeManagement, AssignScope, AssignedScope, Assignment, ManageRun,
+        ManagementOperation, ManagementOutcome, ManagementReceipt, PublishWakeHint, RegisterWorker,
+        RegisteredWorker, ReleaseScope, RequestId, Revision, RunId, UnixMillis, WakeHintReceipt,
+        WorkerId,
     },
 };
 
-fn rejects_customer_fields<T: DeserializeOwned + Serialize + PartialEq + Debug>(value: Value) {
+fn rejects_customer_fields<T: DeserializeOwned + Serialize + PartialEq + Debug>(value: &Value) {
     let decoded: T = serde_json::from_value(value.clone()).expect("valid metadata control");
     let encoded = serde_json::to_value(&decoded).unwrap();
     assert_eq!(serde_json::from_value::<T>(encoded).unwrap(), decoded);
@@ -42,17 +43,20 @@ fn registry_and_placement_contracts_reject_customer_data() {
     let app = AppId::mint();
     let worker = WorkerId::mint();
     let request = RequestId::mint();
-    rejects_customer_fields::<RegisterWorker>(json!({"capacity":4,"state":"ready"}));
-    rejects_customer_fields::<RegisteredWorker>(json!({
+    rejects_customer_fields::<RegisterWorker>(&json!({"capacity":4,"state":"ready"}));
+    rejects_customer_fields::<RegisteredWorker>(&json!({
         "workerId":worker,"capacity":4,"state":"ready","expiresAt":1000
     }));
-    rejects_customer_fields::<AssignScope>(json!({
+    rejects_customer_fields::<AssignScope>(&json!({
         "requestId":request,"appId":app,"workerId":worker,"expectedRevision":null
     }));
-    rejects_customer_fields::<Assignment>(json!({
+    rejects_customer_fields::<Assignment>(&json!({
         "appId":app,"workerId":worker,"revision":1,"expiresAt":1000
     }));
-    rejects_customer_fields::<ReleaseScope>(json!({
+    rejects_customer_fields::<AssignedScope>(&json!({
+        "appId":app,"assignmentRevision":1
+    }));
+    rejects_customer_fields::<ReleaseScope>(&json!({
         "requestId":request,"appId":app,"assignmentRevision":1,"wakeRevision":2
     }));
     assert!(
@@ -62,10 +66,10 @@ fn registry_and_placement_contracts_reject_customer_data() {
         .is_err(),
         "release must identify the acknowledged wake hint"
     );
-    rejects_customer_fields::<PublishWakeHint>(json!({
+    rejects_customer_fields::<PublishWakeHint>(&json!({
         "appId":app,"assignmentRevision":1,"revision":2,"nextDueAt":1000
     }));
-    rejects_customer_fields::<WakeHintReceipt>(json!({
+    rejects_customer_fields::<WakeHintReceipt>(&json!({
         "appId":app,"assignmentRevision":1,"revision":2
     }));
     for field in ["workerId", "appId"] {
@@ -79,14 +83,17 @@ fn registry_and_placement_contracts_reject_customer_data() {
 fn management_and_nested_receipts_cannot_carry_execution_data() {
     let app = AppId::mint();
     let request = RequestId::mint();
+    rejects_customer_fields::<ManagementReceipt>(&json!({
+        "appId":app,"requestId":request,"outcome":null
+    }));
     for command in [
         json!({"kind":"transition","operation":"pause"}),
         json!({"kind":"restart","options":{"from":{"name":"checkpoint","occurrence":0},"deploy":"started"}}),
     ] {
-        rejects_customer_fields::<ManagementOperation>(command.clone());
+        rejects_customer_fields::<ManagementOperation>(&command);
         let envelope =
             json!({"requestId":request,"appId":app,"runId":RunId::mint(),"command":command});
-        rejects_customer_fields::<ManageRun>(envelope.clone());
+        rejects_customer_fields::<ManageRun>(&envelope);
         let mut attempted = envelope;
         attempted["command"]["input"] = json!("private");
         assert!(serde_json::from_value::<ManageRun>(attempted).is_err());
@@ -97,8 +104,8 @@ fn management_and_nested_receipts_cannot_carry_execution_data() {
         json!({"kind":"conflict"}),
         json!({"kind":"denied"}),
     ] {
-        rejects_customer_fields::<ManagementOutcome>(outcome.clone());
-        rejects_customer_fields::<AcknowledgeManagement>(json!({
+        rejects_customer_fields::<ManagementOutcome>(&outcome);
+        rejects_customer_fields::<AcknowledgeManagement>(&json!({
             "requestId":request,"appId":app,"assignmentRevision":1,"outcome":outcome
         }));
     }

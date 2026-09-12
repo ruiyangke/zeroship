@@ -3,6 +3,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod coordinator;
 pub mod server;
 
 use std::sync::Arc;

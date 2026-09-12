@@ -1,0 +1,23 @@
+{
+  "workers": [
+    "worker_id"
+  ],
+  "scopes": [
+    "app_id"
+  ],
+  "assignments": [
+    "app_id",
+    "worker_id"
+  ],
+  "placement_receipts": [
+    "app_id",
+    "request_id",
+    "worker_id"
+  ],
+  "management": [
+    "app_id",
+    "request_id",
+    "run_id",
+    "ack_worker_id"
+  ]
+}

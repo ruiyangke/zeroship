@@ -17,7 +17,9 @@ Closed coordination messages now live in `zeroship_core::workflow_coordination`,
 alongside shared lifecycle metadata and validated identifiers/counters. Native
 wire tests reject execution data and credentials at the message boundary,
 including nested management operations and acknowledgements. The coordinator
-handlers and persistence have not yet replaced the data-owning prototype.
+metadata store and canonical schema are implemented with native PostgreSQL
+contracts. The HTTP host and platform migration still need conversion from the
+data-owning prototype; the new store is not yet the server's startup composition.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
@@ -109,6 +111,19 @@ connection. `zeroship-workflow-server` is the coordinator host; its data-owning
 HTTP task poll/complete/upload protocol is replaced rather than exposed as an
 alternate mode.
 
+`zeroship-workflow-server/src/coordinator.rs` owns the metadata store. Placements
+are keyed by app and worker, with retained revisions and mutation receipts across
+release and reassignment. Registration reports liveness and app-placement
+capacity; renewing it cannot revive an expired assignment. Worker mutations
+check app, instance, assignment revision and database time after acquiring locks.
+The compio pool bounds both acquisition and the complete metadata transaction.
+
+Lifecycle commands use explicit database columns, with closed acknowledgement
+codes and lifecycle states. Retried requests retain their original command and
+authenticated Control issuer. Delivery can repeat after a lost response or reach
+another assigned worker; applying it still requires the customer's engine to
+deduplicate by request identity in its own database.
+
 The worker publishes wake-up metadata from a durable intent committed beside
 its own scheduling changes. Publication is retryable and revisioned. A wake-up
 only asks the worker to inspect its customer journal; duplicated or stale hints
@@ -120,6 +135,11 @@ A worker cannot relinquish responsibility on the assumption that an
 unacknowledged hint was persisted. Scaling a scope to zero requires a durable
 coordinator acknowledgement and a recovery path for lost assignments; until
 that contract is implemented, keep a responsible worker host available.
+The metadata store therefore refuses the last worker's voluntary release, even
+after acknowledging its wake hint. Concurrent releases serialize by app, and
+an expired registration or placement exposes the scope for recovery without
+requiring a previously published hint. Host-driven reassignment and wake-up
+delivery remain part of the production composition work.
 
 Pause, resume, cancellation and restart commands carry identities and typed
 options to the worker, where their effects commit in the customer database.
