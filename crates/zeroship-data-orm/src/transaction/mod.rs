@@ -20,8 +20,7 @@ pub mod reducer;
 pub mod scope;
 
 /// The driver: the only place a reducer action becomes I/O.
-pub mod driver;
-
+pub(crate) mod driver;
 
 #[cfg(test)]
 pub mod probe;
@@ -33,8 +32,6 @@ use zeroship_data_orm::error::DbError;
 /// Maximum savepoint nesting beneath the top-level transaction.
 /// Deeper callback nesting is refused with `savepoint_depth_exceeded`.
 pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
-
-
 
 /// Future that resolves once this app owns the top-level-transaction
 /// claim (see [`crate::context::ThreadDbContext::try_claim_tx`]).
@@ -368,7 +365,7 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
     reason = "the tests below are its only callers until exec.rs's in-transaction \
               arms move onto the reducer's operation guard"
 )]
-pub async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
+pub(crate) async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
     driver::run_operation(app_id, sql, &[]).await
 }
 

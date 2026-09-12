@@ -1,0 +1,39 @@
+error[E0603]: module `exec` is private
+ --> tests/sql/ui/raw_execution_is_private.rs:2:32
+  |
+2 |     let _ = zeroship_data_orm::exec::run_sql;
+  |                                ^^^^  ------- function `run_sql` is not publicly re-exported
+  |                                |
+  |                                private module
+  |
+note: the module `exec` is defined here
+ --> src/lib.rs
+  |
+  | pub(crate) mod exec;
+  | ^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: module `driver` is private
+ --> tests/sql/ui/raw_execution_is_private.rs:3:45
+  |
+3 |     let _ = zeroship_data_orm::transaction::driver::run_operation;
+  |                                             ^^^^^^  ------------- function `run_operation` is not publicly re-exported
+  |                                             |
+  |                                             private module
+  |
+note: the module `driver` is defined here
+ --> src/transaction/mod.rs
+  |
+  | pub(crate) mod driver;
+  | ^^^^^^^^^^^^^^^^^^^^^
+
+error[E0603]: function `run_on_tx_conn` is private
+ --> tests/sql/ui/raw_execution_is_private.rs:4:45
+  |
+4 |     let _ = zeroship_data_orm::transaction::run_on_tx_conn;
+  |                                             ^^^^^^^^^^^^^^ private function
+  |
+note: the function `run_on_tx_conn` is defined here
+ --> src/transaction/mod.rs
+  |
+  | pub(crate) async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

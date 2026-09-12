@@ -41,7 +41,7 @@ pub mod descriptor;
 pub mod driver;
 pub mod encryption;
 pub mod error;
-pub mod exec;
+pub(crate) mod exec;
 pub mod executor;
 pub mod lock_policy;
 pub mod masking;
