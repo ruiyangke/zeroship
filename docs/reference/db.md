@@ -119,12 +119,11 @@ project's `tsconfig.json`:
 `@zeroship/types` declares the base `zeroship` runtime module. The
 generated `env.db.ts` imports `@zeroship/db`'s `t`/`Db` types, reconstructs
 the folded schema, and declares the single `Env.db` augmentation for the
-app. Do not add `@zeroship/db/env` or a `zeroship-schema` path alias; that
-declared-schema typing path is retired.
+app. This generated module is the only source of application database typing.
 
-The root `@zeroship/db` package remains the plain TypeScript SDK surface
-(`t`, `schema`, `RowOf`, `Db`, etc.) for shared packages and tests; only the
-app-level `Env.db` augmentation moved to generated code.
+The root `@zeroship/db` package is the plain TypeScript SDK surface (`t`,
+`schema`, `RowOf`, `Db`, etc.) for shared packages and tests. The generated
+module is the sole app-level `Env.db` augmentation.
 
 ### Collection names
 
