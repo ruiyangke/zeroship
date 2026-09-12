@@ -143,17 +143,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   });
 
   test("a batch of more than 100 distinct ids is chunked, never over the cap", async () => {
-    // The IdLoader is the SECOND `$in` emitter in this SDK. The first fix for
-    // this defect chunked only the relation loader
-    // (`src/collection/relations.ts`), and this path kept sending an unbounded
-    // list: `dispatch()` dedupes the whole microtask batch and calls `flush`
-    // once. The native builder REJECTS a membership list over
-    // MAX_MEMBERSHIP_LIST_LEN rather than clamping it, so an over-cap batch
-    // fails EVERY queued get(), not merely the ids past the boundary.
-    //
-    // A microtask batch is as large as the caller's concurrency, so a plain
-    // `Promise.all` over a few hundred ids reaches it with nothing unusual
-    // happening.
+    // The loader must split a microtask batch before it reaches the ORM budget.
     const N = 250;
     const rows: Record<string, { id: string; email: string; name: string }> = {};
     for (let i = 0; i < N; i++) {

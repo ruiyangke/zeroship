@@ -184,28 +184,31 @@ async fn recovery_contract(store: Rc<OrmStore>, dir: &Path) {
     lose_acquisition(&service, &b, &expired, &second).await;
 
     // Corrupt identities and values must not prevent discovery of later intents.
-    let mut tx = service.begin().await.unwrap();
+    let tx = service.begin().await.unwrap();
     tx.database()
         .collection("__zeroship_workflow_deployment_holds")
         .unwrap()
         .insert(value!({
-            "app_id":a.as_str(), "deploy_id":"!invalid", "deploy_hash":"invalid",
+            "id":crate::service::types::storage_id(), "app_id":a.as_str(), "deploy_id":"!invalid", "deploy_hash":"invalid",
             "holder_id":first.scope().holder(), "generation":-1, "state":"acquiring"
         }))
         .await
         .unwrap();
-    if tx.dialect() == "sqlite" {
-        tx.execute(
-            &format!(
-                "UPDATE {} SET generation='corrupt' WHERE app_id=$1 AND deploy_id='!invalid'",
-                tx.table("deployment_holds")
-            ),
-            &[a.as_str().into()],
-        )
-        .await
-        .unwrap();
-    }
+    let sqlite = tx.dialect() == "sqlite";
     tx.commit().await.unwrap();
+    if sqlite {
+        // Deliberately bypass the ORM's type validation to exercise recovery
+        // from corrupt on-disk metadata after the valid fixture is committed.
+        let store = &service.store;
+        let namespace = zeroship_data_orm::sql::mapping::quote_ident(
+            store
+                .backend
+                .namespace(store.binding.app_id(), store.binding.schema()),
+        );
+        store.backend.exec(store.binding.app_id(), store.binding.schema(),
+            &format!("UPDATE {namespace}.__zeroship_workflow_deployment_holds SET generation='corrupt' WHERE app_id=?1 AND deploy_id='!invalid'"),
+            &[a.as_str().into()]).await.unwrap();
+    }
 
     let foreign = AppId::mint();
     let foreign_client = Rc::new(Client::new(&deployments, &foreign));
@@ -264,11 +267,22 @@ async fn recovery_contract(store: Rc<OrmStore>, dir: &Path) {
         .await;
     deployments.assert_held(&a, &acquire.id).await;
     deployments.assert_held(&b, &expired.id).await;
-    let tx = deployments.database.begin_transaction().await.unwrap();
-    crate::deployment_holds::fence_reclamation(&tx, &a, &release.id)
-        .await
-        .unwrap();
-    tx.rollback().await.unwrap();
+    let app = &a;
+    let deployment = &release.id;
+    let result = deployments
+        .database
+        .transaction(|tx| async move {
+            crate::deployment_holds::fence_reclamation(&tx, app, deployment)
+                .await
+                .unwrap();
+            Err::<(), _>(zeroship_data_orm::error::DbError::internal(
+                "rollback collector probe",
+            ))
+        })
+        .await;
+    assert!(
+        matches!(result, Err(zeroship_data_orm::error::DbError::Internal { message }) if message == "rollback collector probe")
+    );
     assert_eq!(
         state(&foreign_owner, &foreign, &foreign_deploy.id).await,
         "acquiring"

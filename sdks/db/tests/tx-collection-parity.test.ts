@@ -12,7 +12,7 @@ type ExampleSchema = {
   title: string;
   secret: string;
   embedding: number[];
-  location: string;
+  location: { lat: number; lng: number };
 };
 
 type ExpectNever<T extends never> = T;

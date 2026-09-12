@@ -724,18 +724,9 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
     Ok(rows.first().map(|row| row.get::<_, bool>("active")))
 }
 
-/// Refuse to run the exercise unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`]
-/// describe the same eight columns.
-///
-/// This is not belt-and-braces. The data plane BELIEVES the descriptor: it
-/// projects `SELECT` lists straight out of the declared field map
-/// (`crates/zeroship-data-orm/src/sql/compile.rs`) and reads no catalog at
-/// all, so a field the table lacks is a Postgres `42703` in the middle of the
-/// stream and a column the descriptor lacks is data silently never read. Either
-/// way the failure lands as a stalled or empty SSE frame, which is exactly what
-/// a real cross-isolate delivery bug looks like. Checking set equality up front
-/// makes the two indistinguishable cases distinguishable, and names which side
-/// is wrong.
+/// Refuse to run unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`] describe the
+/// same columns. The ORM compiles projections from the descriptor without
+/// consulting the catalog, so this fixture checks its two inputs directly.
 async fn assert_descriptor_matches_table(pool: &Pool, app_id: &str) -> Result<(), String> {
     let descriptor: serde_json::Value = serde_json::from_str(RUNTIME_DESCRIPTOR)
         .map_err(|error| format!("RUNTIME_DESCRIPTOR is not valid JSON: {error}"))?;

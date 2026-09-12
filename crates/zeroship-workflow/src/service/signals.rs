@@ -14,10 +14,29 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Output},
-    sql::Predicate,
+    orm::{Entity, FindOptions, FromRow, Output},
+    sql::{CompareOp, Literal, Operand, Predicate},
     value,
 };
+
+#[derive(FromRow)]
+#[orm(entity = models::broadcasts)]
+struct PendingBroadcast {
+    app_id: String,
+    id: String,
+}
+
+#[derive(FromRow)]
+#[orm(entity = models::broadcasts)]
+struct BroadcastRecord {
+    topic: String,
+    signal_type: String,
+    payload: String,
+    created_at: i64,
+    cursor: i64,
+    cutoff_sequence: i64,
+    origin: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AcceptedBroadcast {
@@ -160,27 +179,55 @@ impl WorkflowService {
     /// Resume durable fanout from its recipient cursor. A publication includes
     /// subscriptions accepted before it, even when the host restarts mid-fanout.
     pub async fn tick_broadcasts(&self) -> Result<usize, WorkflowServiceError> {
-        let mut tx = self.begin().await?;
-        let broadcasts = tx.table("broadcasts");
-        let (scope, app_ids) = tx.host_app_scope()?;
-        let pending=tx.query(&format!("SELECT app_id,id FROM {broadcasts} WHERE app_id IN ({scope}) AND finished=0 ORDER BY created_at,app_id,id LIMIT 128"), &[app_ids]).await?;
+        let tx = self.begin().await?;
+        let db = tx.database();
+        let broadcast = db.entity::<models::broadcasts::Entity>()?.alias("b")?;
+        let pending = db
+            .from(&broadcast)
+            .filter(Predicate::And(vec![
+                Predicate::Or(
+                    tx.host_app_ids()?
+                        .into_iter()
+                        .map(|app| {
+                            broadcast
+                                .column(models::broadcasts::app_id)
+                                .eq(app.as_str())
+                        })
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                broadcast.column(models::broadcasts::finished).eq(0_i64)?,
+            ]))
+            .order_by(broadcast.column(models::broadcasts::created_at).asc())
+            .order_by(broadcast.column(models::broadcasts::app_id).asc())
+            .order_by(broadcast.column(models::broadcasts::id).asc())
+            .select(broadcast.row::<PendingBroadcast>())?
+            .limit(128)?
+            .all()
+            .await?;
         tx.commit().await?;
         let mut delivered = 0;
         for candidate in pending {
-            let app = AppId::parse(&candidate.text("app_id")?).map_err(|_| {
+            let app = AppId::parse(&candidate.app_id).map_err(|_| {
                 WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
             })?;
-            let id = candidate.text("id")?;
+            let id = candidate.id;
             let mut tx = self.begin().await?;
             lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
+            // Every fanout mutation holds the app lock, including publication.
+            // Read the receipt after acquiring it so concurrent ticks serialize.
             let rows = tx
-                .query(
-                    &format!(
-                        "SELECT * FROM {broadcasts} WHERE app_id=$1 AND id=$2 AND finished=0{}",
-                        tx.lock_clause()
-                    ),
-                    &[app.as_str().into(), id.clone().into()],
+                .database()
+                .entity::<models::broadcasts::Entity>()?
+                .find::<BroadcastRecord>(
+                    models::broadcasts::app_id
+                        .eq(app.as_str())?
+                        .and(models::broadcasts::id.eq(id.as_str())?)
+                        .and(models::broadcasts::finished.eq(0_i64)?),
+                    FindOptions {
+                        limit: Some(1),
+                        ..Default::default()
+                    },
                 )
                 .await?;
             let Some(broadcast) = rows.first() else {
@@ -230,15 +277,29 @@ impl WorkflowService {
                         .eq(app.as_str())?,
                     subscription
                         .column(models::subscriptions::topic)
-                        .eq(broadcast.text("topic")?)?,
-                    subscription
-                        .column(models::subscriptions::sequence)
-                        .gt(broadcast.integer("cursor")?)?,
-                    subscription
-                        .column(models::subscriptions::sequence)
-                        .lte(broadcast.integer("cutoff_sequence")?)?,
+                        .eq(broadcast.topic.as_str())?,
+                    Predicate::compare(
+                        Operand::Path(
+                            subscription
+                                .column(models::subscriptions::sequence)
+                                .asc()
+                                .path,
+                        ),
+                        CompareOp::Gt,
+                        Operand::Lit(Literal::Int(broadcast.cursor)),
+                    ),
+                    Predicate::compare(
+                        Operand::Path(
+                            subscription
+                                .column(models::subscriptions::sequence)
+                                .asc()
+                                .path,
+                        ),
+                        CompareOp::Lte,
+                        Operand::Lit(Literal::Int(broadcast.cutoff_sequence)),
+                    ),
                     wait.column(models::waits::signal_type)
-                        .eq(Some(broadcast.text("signal_type")?))?,
+                        .eq(Some(broadcast.signal_type.as_str()))?,
                     Predicate::Not(Box::new(Predicate::Or(vec![
                         run.column(models::runs::state).eq("completed")?,
                         run.column(models::runs::state).eq("failed")?,
@@ -250,16 +311,32 @@ impl WorkflowService {
                 .limit(128)?
                 .all()
                 .await?;
-            let signals = tx.table("signals");
-            let mut cursor = broadcast.integer("cursor")?;
+            let signals = db.collection(models::signals::Entity::COLLECTION)?;
+            let mut cursor = broadcast.cursor;
             for recipient in &recipients {
                 cursor = recipient.sequence;
-                let signal_id = typed_id::new_workflow_signal_id();
-                let inserted=tx.execute(&format!("INSERT INTO {signals} (app_id,id,run_id,signal_type,payload,created_at,broadcast_id,origin,delivery,topic,target_generation,target_ordinal) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'topic',$9,$10,$11) ON CONFLICT (app_id,broadcast_id,run_id) DO NOTHING"),
-                    &[app.as_str().into(),signal_id.clone().into(),recipient.run_id.clone().into(),broadcast.text("signal_type")?.into(),broadcast.text("payload")?.into(),broadcast.integer("created_at")?.into(),id.clone().into(),broadcast.text("origin")?.into(),broadcast.text("topic")?.into(),recipient.generation.into(),recipient.ordinal.into()]).await?;
-                if inserted == 0 {
+                let Output::Count(existing) = signals
+                    .count(
+                        value!({"app_id":app.as_str(), "broadcast_id":id.clone(), "run_id":recipient.run_id.clone()}),
+                        value!({}),
+                    )
+                    .await?
+                else {
+                    return Err(WorkflowServiceError::Internal(
+                        "workflow signal count returned rows".into(),
+                    ));
+                };
+                if existing != 0 {
                     continue;
                 }
+                let signal_id = typed_id::new_workflow_signal_id();
+                signals.insert(value!({
+                    "app_id":app.as_str(), "id":signal_id.clone(), "run_id":recipient.run_id.clone(),
+                    "signal_type":broadcast.signal_type.clone(), "payload":broadcast.payload.clone(),
+                    "created_at":broadcast.created_at, "broadcast_id":id.clone(), "origin":broadcast.origin.clone(),
+                    "delivery":"topic", "topic":broadcast.topic.clone(), "target_generation":recipient.generation,
+                    "target_ordinal":recipient.ordinal,
+                })).await?;
                 delivered += 1;
                 tx.database().collection(models::runs::Entity::COLLECTION)?.update(
                     value!({"app_id":app.as_str(), "id":recipient.run_id.clone(), "generation":recipient.generation,

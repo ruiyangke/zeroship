@@ -2,6 +2,7 @@ use super::{deadline, get, now, revision, scope, timestamp, Coordinator, Error};
 use compio_postgres::{Row, Transaction};
 use zeroship_core::{
     app_id::AppId,
+    typed_id,
     workflow_coordination::{
         AssignScope, AssignedScope, Assignment, PublishWakeHint, ReleaseScope, RequestId, Revision,
         UnixMillis, WakeHintReceipt, WorkerId,
@@ -55,15 +56,15 @@ impl Coordinator {
             let rev = previous.unwrap_or(0).checked_add(1).ok_or(Error::Conflict)?;
             let expires = deadline(now,self.options.assignment_ttl)?;
             tx.execute(
-                "INSERT INTO workflow_coordination.assignments(app_id,worker_id,revision,expires_at,released)
-                 VALUES($1,$2,$3,$4,false) ON CONFLICT(app_id,worker_id) DO UPDATE SET
+                "INSERT INTO workflow_coordination.assignments(app_id,worker_id,revision,expires_at,released,id)
+                 VALUES($1,$2,$3,$4,false,$5) ON CONFLICT(app_id,worker_id) DO UPDATE SET
                  revision=$3,expires_at=$4,released=false,wake_revision=NULL,next_due_at=NULL",
-                &[&request.app_id.as_str(), &request.worker_id.as_str(), &rev, &expires],
+                &[&request.app_id.as_str(), &request.worker_id.as_str(), &rev, &expires, &typed_id::generate("wca")],
             ).await?;
             tx.execute(
-                "INSERT INTO workflow_coordination.placement_receipts(app_id,request_id,operation,worker_id,expected_revision,result_revision,result_expires_at)
-                 VALUES($1,$2,'assign',$3,$4,$5,$6)",
-                &[&request.app_id.as_str(), &request.request_id.as_str(), &request.worker_id.as_str(), &expected, &rev, &expires],
+                "INSERT INTO workflow_coordination.placement_receipts(app_id,request_id,operation,worker_id,expected_revision,result_revision,result_expires_at,id)
+                 VALUES($1,$2,'assign',$3,$4,$5,$6,$7)",
+                &[&request.app_id.as_str(), &request.request_id.as_str(), &request.worker_id.as_str(), &expected, &rev, &expires, &typed_id::generate("wcp")],
             ).await?;
             Ok(Assignment { app_id: request.app_id.clone(), worker_id: request.worker_id.clone(), revision: revision(rev)?, expires_at: timestamp(expires)? })
         }).await
@@ -170,9 +171,9 @@ impl Coordinator {
                 &[&request.app_id.as_str(), &worker.as_str()],
             ).await?;
             tx.execute(
-                "INSERT INTO workflow_coordination.placement_receipts(app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at)
-                 VALUES($1,$2,'release',$3,$4,$5,$4,$6)",
-                &[&request.app_id.as_str(), &request.request_id.as_str(), &worker.as_str(), &expected, &wake, &now],
+                "INSERT INTO workflow_coordination.placement_receipts(app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at,id)
+                 VALUES($1,$2,'release',$3,$4,$5,$4,$6,$7)",
+                &[&request.app_id.as_str(), &request.request_id.as_str(), &worker.as_str(), &expected, &wake, &now, &typed_id::generate("wcp")],
             ).await?;
             Ok(())
         }).await

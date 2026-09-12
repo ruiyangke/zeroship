@@ -3,6 +3,18 @@
   "collections": {
     "__zeroship_workflow_app_state": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -12,12 +24,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "signal_epoch": {
           "type": "bigInt",
           "required": true,
+          "default": 0,
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -56,22 +68,18 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_app_state_scope_key",
+          "fields": [
+            "app_id"
+          ],
+          "unique": true
+        }
+      ]
     },
     "__zeroship_workflow_broadcasts": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -83,6 +91,17 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
         },
         "topic": {
           "type": "string",
@@ -178,10 +197,31 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_broadcasts_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        }
+      ]
     },
     "__zeroship_workflow_deployment_holds": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -191,8 +231,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "deploy_id": {
           "type": "string",
@@ -203,8 +242,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "deploy_id"
-          },
-          "primaryKey": true
+          }
         },
         "deploy_hash": {
           "type": "string",
@@ -258,6 +296,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_deployment_holds_scope_key",
+          "fields": [
+            "app_id",
+            "deploy_id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_deployment_holds_pending_idx",
           "fields": [
             "app_id",
@@ -269,18 +315,6 @@
     },
     "__zeroship_workflow_deploys": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -292,6 +326,17 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
         },
         "hash": {
           "type": "string",
@@ -367,6 +412,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_deploys_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_deploy_hash_identity",
           "fields": [
             "app_id",
@@ -378,6 +431,18 @@
     },
     "__zeroship_workflow_generations": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -387,8 +452,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -399,8 +463,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "run_id"
-          },
-          "primaryKey": true
+          }
         },
         "generation": {
           "type": "bigInt",
@@ -411,8 +474,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "generation"
-          },
-          "primaryKey": true
+          }
         },
         "deploy_id": {
           "type": "string",
@@ -514,10 +576,32 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_generations_scope_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation"
+          ],
+          "unique": true
+        }
+      ]
     },
     "__zeroship_workflow_occurrences": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -527,8 +611,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "schedule_id": {
           "type": "string",
@@ -539,8 +622,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "schedule_id"
-          },
-          "primaryKey": true
+          }
         },
         "at": {
           "type": "bigInt",
@@ -551,8 +633,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "at"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -570,22 +651,20 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_occurrences_scope_key",
+          "fields": [
+            "app_id",
+            "schedule_id",
+            "at"
+          ],
+          "unique": true
+        }
+      ]
     },
     "__zeroship_workflow_outbox": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -597,6 +676,17 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
         },
         "kind": {
           "type": "string",
@@ -649,6 +739,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_outbox_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_outbox_delivery_idx",
           "fields": [
             "delivered_at",
@@ -659,6 +757,18 @@
     },
     "__zeroship_workflow_payload_refs": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -668,8 +778,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -680,8 +789,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "run_id"
-          },
-          "primaryKey": true
+          }
         },
         "generation": {
           "type": "bigInt",
@@ -692,8 +800,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "generation"
-          },
-          "primaryKey": true
+          }
         },
         "slot": {
           "type": "string",
@@ -704,8 +811,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "slot"
-          },
-          "primaryKey": true
+          }
         },
         "ordinal": {
           "type": "bigInt",
@@ -716,8 +822,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "ordinal"
-          },
-          "primaryKey": true
+          }
         },
         "payload_id": {
           "type": "string",
@@ -736,10 +841,34 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_payload_refs_scope_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation",
+            "slot",
+            "ordinal"
+          ],
+          "unique": true
+        }
+      ]
     },
     "__zeroship_workflow_payloads": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -749,8 +878,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -773,18 +901,6 @@
           "storage": {
             "valueColumn": "generation"
           }
-        },
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
         },
         "task_id": {
           "type": "string",
@@ -881,6 +997,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_payloads_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_payload_upload_request",
           "fields": [
             "app_id",
@@ -900,18 +1024,6 @@
     },
     "__zeroship_workflow_requests": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -923,6 +1035,28 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "request_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "request_id"
+          }
         },
         "operation": {
           "type": "string",
@@ -976,6 +1110,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_requests_scope_key",
+          "fields": [
+            "app_id",
+            "request_id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_requests_expiry_idx",
           "fields": [
             "expires_at"
@@ -985,18 +1127,6 @@
     },
     "__zeroship_workflow_runs": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -1008,6 +1138,17 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
         },
         "workflow_name": {
           "type": "string",
@@ -1237,6 +1378,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_runs_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_live_workflow_key",
           "fields": [
             "app_id",
@@ -1265,18 +1414,6 @@
     },
     "__zeroship_workflow_schedules": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -1288,6 +1425,17 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
         },
         "name": {
           "type": "string",
@@ -1384,6 +1532,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_schedules_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_schedule_name",
           "fields": [
             "app_id",
@@ -1436,29 +1592,6 @@
     },
     "__zeroship_workflow_signals": {
       "fields": {
-        "app_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "app_id"
-          },
-          "primaryKey": true
-        },
-        "run_id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "run_id"
-          }
-        },
         "id": {
           "type": "string",
           "required": true,
@@ -1470,6 +1603,28 @@
             "valueColumn": "id"
           },
           "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "run_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_id"
+          }
         },
         "signal_type": {
           "type": "string",
@@ -1596,6 +1751,14 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_signals_scope_key",
+          "fields": [
+            "app_id",
+            "id"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_broadcast_delivery",
           "fields": [
             "app_id",
@@ -1618,6 +1781,18 @@
     },
     "__zeroship_workflow_steps": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -1627,8 +1802,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -1639,8 +1813,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "run_id"
-          },
-          "primaryKey": true
+          }
         },
         "generation": {
           "type": "bigInt",
@@ -1651,8 +1824,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "generation"
-          },
-          "primaryKey": true
+          }
         },
         "ordinal": {
           "type": "bigInt",
@@ -1663,8 +1835,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "ordinal"
-          },
-          "primaryKey": true
+          }
         },
         "name": {
           "type": "string",
@@ -1784,6 +1955,16 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_steps_scope_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation",
+            "ordinal"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_step_name_occurrence",
           "fields": [
             "app_id",
@@ -1798,6 +1979,18 @@
     },
     "__zeroship_workflow_subscriptions": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -1807,8 +2000,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -1819,8 +2011,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "run_id"
-          },
-          "primaryKey": true
+          }
         },
         "generation": {
           "type": "bigInt",
@@ -1831,8 +2022,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "generation"
-          },
-          "primaryKey": true
+          }
         },
         "ordinal": {
           "type": "bigInt",
@@ -1843,18 +2033,6 @@
           "projectable": true,
           "storage": {
             "valueColumn": "ordinal"
-          },
-          "primaryKey": true
-        },
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
           }
         },
         "topic": {
@@ -1898,6 +2076,16 @@
       },
       "indexes": [
         {
+          "name": "__zeroship_workflow_subscriptions_scope_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation",
+            "ordinal"
+          ],
+          "unique": true
+        },
+        {
           "name": "__zeroship_workflow_subscription_identity",
           "fields": [
             "app_id",
@@ -1925,6 +2113,18 @@
     },
     "__zeroship_workflow_tasks": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -1957,18 +2157,6 @@
           "storage": {
             "valueColumn": "generation"
           }
-        },
-        "id": {
-          "type": "string",
-          "required": true,
-          "readable": true,
-          "filterable": true,
-          "sortable": true,
-          "projectable": true,
-          "storage": {
-            "valueColumn": "id"
-          },
-          "primaryKey": true
         },
         "worker": {
           "type": "string",
@@ -2105,6 +2293,18 @@
     },
     "__zeroship_workflow_topics": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -2114,8 +2314,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "topic": {
           "type": "string",
@@ -2126,8 +2325,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "topic"
-          },
-          "primaryKey": true
+          }
         },
         "signal_epoch": {
           "type": "bigInt",
@@ -2146,10 +2344,31 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_topics_scope_key",
+          "fields": [
+            "app_id",
+            "topic"
+          ],
+          "unique": true
+        }
+      ]
     },
     "__zeroship_workflow_waits": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -2159,8 +2378,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "run_id": {
           "type": "string",
@@ -2171,8 +2389,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "run_id"
-          },
-          "primaryKey": true
+          }
         },
         "generation": {
           "type": "bigInt",
@@ -2183,8 +2400,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "generation"
-          },
-          "primaryKey": true
+          }
         },
         "ordinal": {
           "type": "bigInt",
@@ -2195,8 +2411,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "ordinal"
-          },
-          "primaryKey": true
+          }
         },
         "kind": {
           "type": "string",
@@ -2265,7 +2480,18 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "__zeroship_workflow_waits_scope_key",
+          "fields": [
+            "app_id",
+            "run_id",
+            "generation",
+            "ordinal"
+          ],
+          "unique": true
+        }
+      ]
     }
   }
 }

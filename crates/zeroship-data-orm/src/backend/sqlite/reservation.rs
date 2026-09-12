@@ -284,13 +284,8 @@ impl Reservation {
     /// already claimed - by a completion, or by an earlier cancellation - and
     /// this caller must not act on its own.
     ///
-    /// **The second-claim arm is load-bearing, not tidiness.** It returned
-    /// `true` until 2026-08-27, so a reservation whose terminal already read
-    /// `CLAIMED_CANCELLED` handed a *second* caller the right to run cleanup.
-    /// The actor's cleanup is a `ROLLBACK` on the reservation's lane, and by
-    /// the time a duplicate arrives that lane can belong to somebody else, so
-    /// "claim an already-claimed terminal" is a licence to destroy a stranger's
-    /// open transaction. Exactly one claim wins; every later one is told so.
+    /// Exactly one caller may claim cleanup. A later cleanup could otherwise
+    /// roll back a lane that has already been assigned to another transaction.
     pub(crate) fn claim_cancelled(&self) -> bool {
         loop {
             let current = self.terminal.load(Ordering::SeqCst);
@@ -539,14 +534,9 @@ impl TerminalOutcome {
 /// What a cancellation reports when it finds the terminal already claimed.
 ///
 /// The stored outcome is the answer whenever the winner left one. When it did
-/// not, **nothing here knows what happened**, and the default must say so: the
+/// not, nothing here knows what happened, and the default must say so: the
 /// terminal word alone proves only that some other path claimed the right to
 /// decide, never what it decided.
-///
-/// This defaulted to [`TerminalOutcome::Committed`] until 2026-08-27 - a
-/// confirmed commit that nothing proved, which `into_result` then reported as
-/// `Ok(())`. That is the collapse this whole module exists to refuse: an
-/// uncertainty resolved by assumption, in the direction that publishes success.
 pub(crate) fn outcome_for_a_claimed_terminal(reservation: &Reservation) -> TerminalOutcome {
     let stored =
         reservation

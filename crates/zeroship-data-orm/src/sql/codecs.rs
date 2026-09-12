@@ -1,10 +1,12 @@
 //! Logical values and their database storage representations.
+use crate::sql::mapping;
 use crate::value::Value;
-use crate::sql::{compile, descriptors::GeoPoint};
 
 mod typed;
-pub(crate) use typed::{prepare_array_operand, prepare_value};
+pub(crate) use typed::prepare_value;
 pub use typed::{prepare_document, prepare_update};
+
+pub(crate) const MAX_JSON_DEPTH: usize = 128;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CodecError {
@@ -45,265 +47,30 @@ impl std::fmt::Display for CodecError {
 }
 impl std::error::Error for CodecError {}
 
-pub fn lower_document(dialect: compile::SqlDialect, schema: &Value, doc: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_doc_with_schema(schema, doc);
-}
-
-pub fn lower_documents(dialect: compile::SqlDialect, schema: &Value, docs: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    let Some(arr) = docs.as_array_mut() else {
-        return;
-    };
-    for doc in arr {
-        lower_boolean_doc_with_schema(schema, doc);
-    }
-}
-
-pub fn lower_update(dialect: compile::SqlDialect, schema: &Value, patch: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_update_with_schema(schema, patch);
-}
-
-pub fn lower_filter(dialect: compile::SqlDialect, schema: &Value, filter: &mut Value) {
-    if dialect != compile::SqlDialect::Sqlite {
-        return;
-    }
-    lower_boolean_filter_with_schema(schema, filter);
-}
-
-fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
-    let Some(obj) = doc.as_object_mut() else {
-        return;
-    };
-    for (field, value) in obj.iter_mut() {
-        if schema_field_type(schema, field) == Some("boolean") {
-            lower_boolean_scalar(value);
-        }
-    }
-}
-
-fn lower_boolean_update_with_schema(schema: &Value, patch: &mut Value) {
-    let Some(obj) = patch.as_object_mut() else {
-        return;
-    };
-    if let Some(set_doc) = obj.get_mut("$set") {
-        lower_boolean_doc_with_schema(schema, set_doc);
-    }
-    for (field, value) in obj {
-        if field.starts_with('$') {
-            continue;
-        }
-        if schema_field_type(schema, field) != Some("boolean") {
-            continue;
+pub(crate) fn validate_json_value(field: &str, value: &Value) -> Result<(), CodecError> {
+    let mut pending = vec![(value, 0usize)];
+    while let Some((value, depth)) = pending.pop() {
+        if depth > MAX_JSON_DEPTH {
+            return Err(CodecError::validation(
+                "invalid_json_value",
+                format!("column '{field}' requires bounded JSON nesting"),
+            ));
         }
         match value {
-            Value::Bool(_) => lower_boolean_scalar(value),
-            Value::Object(ops) => {
-                if let Some(set_val) = ops.get_mut("$set") {
-                    lower_boolean_scalar(set_val);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-fn lower_boolean_filter_with_schema(schema: &Value, filter: &mut Value) {
-    let Some(obj) = filter.as_object_mut() else {
-        return;
-    };
-    for (key, value) in obj {
-        if key.starts_with('$') {
-            match key.as_str() {
-                "$and" | "$or" => {
-                    if let Some(arr) = value.as_array_mut() {
-                        for clause in arr {
-                            lower_boolean_filter_with_schema(schema, clause);
-                        }
-                    }
-                }
-                "$not" => lower_boolean_filter_with_schema(schema, value),
-                _ => {}
-            }
-            continue;
-        }
-        if schema_field_type(schema, key) == Some("boolean") {
-            lower_boolean_filter_value(value);
-        }
-    }
-}
-
-fn lower_boolean_filter_value(value: &mut Value) {
-    match value {
-        Value::Bool(_) => lower_boolean_scalar(value),
-        Value::Object(ops) => {
-            for (op, operand) in ops {
-                match op.as_str() {
-                    "$eq" | "$ne" | "$gt" | "$gte" | "$lt" | "$lte" => {
-                        lower_boolean_scalar(operand);
-                    }
-                    "$in" | "$nin" => {
-                        if let Some(arr) = operand.as_array_mut() {
-                            for item in arr {
-                                lower_boolean_scalar(item);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-fn lower_boolean_scalar(value: &mut Value) {
-    if let Value::Bool(b) = value {
-        *value = Value::Number(crate::value::Number::from(i64::from(u8::from(*b))));
-    }
-}
-
-fn schema_field_type<'a>(schema: &'a Value, field: &str) -> Option<&'a str> {
-    schema.as_object()?.get(field)?.get("type")?.as_str()
-}
-
-fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
-    schema.as_object()?.get(field)
-}
-
-fn encode_sqlite_binary_scalar(
-    field: &str,
-    field_def: &Value,
-    value: &mut Value,
-) -> Result<(), CodecError> {
-    if value.is_null() {
-        return Ok(());
-    }
-
-    match field_def.get("type").and_then(Value::as_str) {
-        Some("vector") => {
-            let dims = field_def
-                .get("vectorDims")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| {
-                    CodecError::internal(format!(
-                        "sqlite vector write encoding: schema for '{field}' is missing vectorDims"
-                    ))
-                })? as usize;
-            let arr = value.as_array().ok_or_else(|| {
-                CodecError::validation(
-                    "invalid_vector_arg",
-                    format!("db: vector column '{field}' must be a number[]"),
-                )
-            })?;
-            if arr.len() != dims {
-                return Err(CodecError::validation(
-                    "vector_dimension_mismatch",
-                    format!(
-                        "db: vector column '{field}' expected {dims} dimensions, got {}",
-                        arr.len()
-                    ),
-                ));
-            }
-            let mut vector = Vec::with_capacity(dims);
-            for item in arr {
-                let n = item.as_f64().ok_or_else(|| {
+            Value::Json(encoded) => {
+                validate_encoded_json_depth(field, encoded)?;
+                serde_json::from_str::<&serde_json::value::RawValue>(encoded).map_err(|_| {
                     CodecError::validation(
-                        "invalid_vector_arg",
-                        format!("db: vector column '{field}' must contain only numbers"),
+                        "invalid_json_value",
+                        format!("column '{field}' requires valid JSON"),
                     )
                 })?;
-                let component = n as f32;
-                if !component.is_finite() {
-                    return Err(CodecError::validation(
-                        "invalid_vector_arg",
-                        format!("db: vector column '{field}' contains an out-of-range component"),
-                    ));
-                }
-                vector.push(component);
             }
-            *value = Value::Bytes(crate::sql::sqlite_values::vec_to_le_bytes(&vector));
-            Ok(())
-        }
-        Some("geoPoint") => {
-            let obj = value.as_object().ok_or_else(|| {
-                CodecError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' must be an object with lat/lng"),
-                )
-            })?;
-            let lat = obj.get("lat").and_then(Value::as_f64).ok_or_else(|| {
-                CodecError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' is missing numeric lat"),
-                )
-            })?;
-            let lng = obj.get("lng").and_then(Value::as_f64).ok_or_else(|| {
-                CodecError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' is missing numeric lng"),
-                )
-            })?;
-            if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
-                return Err(CodecError::validation(
-                    "invalid_geo_arg",
-                    format!("db: geoPoint column '{field}' contains out-of-range coordinates"),
-                ));
+            Value::Array(values) => {
+                pending.extend(values.iter().map(|value| (value, depth + 1)));
             }
-            *value = Value::Bytes(crate::sql::sqlite_values::point_to_blob(GeoPoint { lat, lng }));
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-fn encode_sqlite_binary_doc_with_schema(schema: &Value, doc: &mut Value) -> Result<(), CodecError> {
-    let Some(obj) = doc.as_object_mut() else {
-        return Ok(());
-    };
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(());
-    };
-    for (field, field_def) in schema_obj {
-        let Some(value) = obj.get_mut(field) else {
-            continue;
-        };
-        encode_sqlite_binary_scalar(field, field_def, value)?;
-    }
-    Ok(())
-}
-
-fn encode_sqlite_binary_update_with_schema(
-    schema: &Value,
-    patch: &mut Value,
-) -> Result<(), CodecError> {
-    let Some(obj) = patch.as_object_mut() else {
-        return Ok(());
-    };
-    if let Some(set_doc) = obj.get_mut("$set") {
-        encode_sqlite_binary_doc_with_schema(schema, set_doc)?;
-    }
-    for (field, value) in obj.iter_mut() {
-        if field.starts_with('$') {
-            continue;
-        }
-        let Some(field_def) = schema_field(schema, field) else {
-            continue;
-        };
-        match value {
-            Value::Array(_) | Value::String(_) | Value::Object(_) | Value::Null => {
-                if let Some(set_val) = value.as_object_mut().and_then(|ops| ops.get_mut("$set")) {
-                    encode_sqlite_binary_scalar(field, field_def, set_val)?;
-                } else {
-                    encode_sqlite_binary_scalar(field, field_def, value)?;
-                }
+            Value::Object(values) => {
+                pending.extend(values.values().map(|value| (value, depth + 1)));
             }
             _ => {}
         }
@@ -311,57 +78,53 @@ fn encode_sqlite_binary_update_with_schema(
     Ok(())
 }
 
-pub fn has_storage_encoding(schema: &Value) -> bool {
-    schema_has_sqlite_binary_columns(schema)
-}
-pub fn encode_document(
-    dialect: compile::SqlDialect,
-    schema: &Value,
-    value: &mut Value,
-) -> Result<(), CodecError> {
-    if dialect == compile::SqlDialect::Sqlite {
-        encode_sqlite_binary_doc_with_schema(schema, value)?;
+fn validate_encoded_json_depth(field: &str, encoded: &str) -> Result<(), CodecError> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for byte in encoded.bytes() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_JSON_DEPTH {
+                    return Err(CodecError::validation(
+                        "invalid_json_value",
+                        format!("column '{field}' requires bounded JSON nesting"),
+                    ));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
     }
     Ok(())
 }
-pub fn encode_update(
-    dialect: compile::SqlDialect,
-    schema: &Value,
-    value: &mut Value,
-) -> Result<(), CodecError> {
-    if dialect == compile::SqlDialect::Sqlite {
-        encode_sqlite_binary_update_with_schema(schema, value)?;
-    }
-    Ok(())
-}
-fn schema_has_sqlite_binary_columns(schema: &Value) -> bool {
-    schema
-        .as_object()
-        .map(|o| {
-            o.values().any(|def| {
-                matches!(
-                    def.get("type").and_then(Value::as_str),
-                    Some("vector") | Some("geoPoint")
-                )
-            })
-        })
-        .unwrap_or(false)
-}
-/// Convert driver results to logical values. SQLite JSON text is still encoded;
-/// PostgreSQL JSON values have already been decoded by the wire protocol codec.
-pub fn decode_rows(
-    dialect: compile::SqlDialect,
+
+/// Convert driver results to logical values through the selected storage codecs.
+pub(crate) fn decode_rows(
+    registration: &crate::sql::registration::SqlRegistration,
     schema: &Value,
     rows: &mut [Value],
 ) -> Result<(), CodecError> {
     for row in rows.iter_mut() {
-        normalize_row_on_read(dialect, schema, row)?;
+        normalize_row_on_read(registration, schema, row)?;
     }
     Ok(())
 }
 
 fn normalize_row_on_read(
-    dialect: compile::SqlDialect,
+    registration: &crate::sql::registration::SqlRegistration,
     schema: &Value,
     row: &mut Value,
 ) -> Result<(), CodecError> {
@@ -380,15 +143,28 @@ fn normalize_row_on_read(
         // Protected storage is decoded by the protection pipeline. A mask is
         // stored as text even when its logical field is numeric or binary.
         if def.get("encrypted").and_then(Value::as_bool) == Some(true)
-            || compile::column_is_masked(key, schema)
+            || mapping::column_is_masked(key, schema)
         {
             continue;
         }
 
+        let storage = registration
+            .storage_type(&schema[key])
+            .map_err(|_| CodecError::Decode {
+                column: key.clone(),
+                reason: "unsupported storage type",
+            })?;
+        let stored = std::mem::replace(value, Value::Null);
+        *value = registration
+            .decode(storage, stored)
+            .map_err(|_| CodecError::Decode {
+                column: key.clone(),
+                reason: "invalid storage value",
+            })?;
+
         match def.get("type").and_then(Value::as_str) {
             Some("boolean") => normalize_boolean_value(value)?,
             Some("json") | Some("object") | Some("array") | Some("union") => {
-                normalize_json_value(dialect, key, value)?;
                 prepare_value(key, &schema[key], value).map_err(|_| CodecError::Decode {
                     column: key.clone(),
                     reason: "invalid typed JSON storage",
@@ -398,9 +174,9 @@ fn normalize_row_on_read(
             Some("date" | "timestamp") => normalize_timestamp_value(key, value)?,
             Some("calendarDate") => {
                 if !value.is_null()
-                    && value
-                        .as_str()
-                        .is_none_or(|date| crate::sql::temporal::parse_calendar_date(date).is_none())
+                    && value.as_str().is_none_or(|date| {
+                        crate::sql::temporal::parse_calendar_date(date).is_none()
+                    })
                 {
                     return Err(CodecError::Decode {
                         column: key.clone(),
@@ -525,23 +301,6 @@ fn normalize_boolean_value(value: &mut Value) -> Result<(), CodecError> {
     }
 }
 
-fn normalize_json_value(
-    dialect: compile::SqlDialect,
-    field: &str,
-    value: &mut Value,
-) -> Result<(), CodecError> {
-    let encoded = match value {
-        Value::Json(encoded) => encoded,
-        Value::String(encoded) if dialect == compile::SqlDialect::Sqlite => encoded,
-        _ => return Ok(()),
-    };
-    *value = serde_json::from_str(encoded).map_err(|_| CodecError::Decode {
-        column: field.to_owned(),
-        reason: "invalid JSON storage",
-    })?;
-    Ok(())
-}
-
 fn normalize_bytes_value(value: &mut Value) -> Result<(), CodecError> {
     match value {
         Value::Null | Value::Bytes(_) => Ok(()),
@@ -555,10 +314,11 @@ fn normalize_timestamp_value(field: &str, value: &mut Value) -> Result<(), Codec
     if value.is_null() {
         return Ok(());
     }
-    let millis = crate::sql::temporal::timestamp_millis(value).ok_or_else(|| CodecError::Decode {
-        column: field.to_string(),
-        reason: "invalid timestamp storage",
-    })?;
+    let millis =
+        crate::sql::temporal::timestamp_millis(value).ok_or_else(|| CodecError::Decode {
+            column: field.to_string(),
+            reason: "invalid timestamp storage",
+        })?;
     *value = Value::Timestamp(millis);
     Ok(())
 }
@@ -567,42 +327,26 @@ fn normalize_timestamp_value(field: &str, value: &mut Value) -> Result<(), Codec
 mod tests {
     use super::*;
     #[test]
-    fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {
-        let schema = crate::value!({
-            "active": { "type": "boolean" },
-            "payload": { "type": "json" }
-        });
-        let mut filter = crate::value!({
-            "$and": [
-                { "active": { "$in": [true, false] } },
-                { "payload": true }
-            ]
-        });
-
-        lower_boolean_filter_with_schema(&schema, &mut filter);
-
-        assert_eq!(filter["$and"][0]["active"]["$in"], crate::value!([1, 0]));
-        assert_eq!(filter["$and"][1]["payload"], Value::Bool(true));
-    }
-    #[test]
-    fn encode_sqlite_binary_doc_with_schema_packs_vector_and_geopoint() {
+    fn sqlite_registration_packs_vector_and_geopoint_values() {
         let schema = crate::value!({
             "embedding": { "type": "vector", "vectorDims": 4 },
             "loc": { "type": "geoPoint" },
             "name": { "type": "string" }
         });
-        let mut doc = crate::value!({
-            "embedding": [1.0, 0.0, 0.5, -1.25],
-            "loc": { "lat": 37.7749, "lng": -122.4194 },
-            "name": "Alpha HQ"
-        });
+        let registration = crate::sql::registration::SqlRegistration::sqlite();
+        let embedding = registration
+            .storage_type(&schema["embedding"])
+            .and_then(|storage| registration.encode(storage, crate::value!([1.0, 0.0, 0.5, -1.25])))
+            .expect("encode vector");
+        let location = registration
+            .storage_type(&schema["loc"])
+            .and_then(|storage| {
+                registration.encode(storage, crate::value!({"lat":37.7749,"lng":-122.4194}))
+            })
+            .expect("encode geographic point");
 
-        encode_sqlite_binary_doc_with_schema(&schema, &mut doc).expect("encode sqlite blobs");
-
-        let embedding_bytes = doc["embedding"].as_bytes().expect("native vector buffer");
-        let loc_bytes = doc["loc"].as_bytes().expect("native geography buffer");
-        assert!(doc.get("__zsbin__embedding").is_none());
-        assert!(doc.get("__zsbin__loc").is_none());
+        let embedding_bytes = embedding.as_bytes().expect("native vector buffer");
+        let loc_bytes = location.as_bytes().expect("native geography buffer");
 
         assert_eq!(
             embedding_bytes,
@@ -610,7 +354,7 @@ mod tests {
         );
         assert_eq!(
             loc_bytes,
-            crate::sql::sqlite_values::point_to_blob(GeoPoint {
+            crate::sql::sqlite_values::point_to_blob(crate::sql::descriptors::GeoPoint {
                 lat: 37.7749,
                 lng: -122.4194,
             }),
@@ -631,7 +375,12 @@ mod tests {
             "published_at": "2026-05-07T01:02:03.004Z"
         });
 
-        normalize_row_on_read(compile::SqlDialect::Sqlite, &schema, &mut row).expect("normalize");
+        normalize_row_on_read(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &schema,
+            &mut row,
+        )
+        .expect("normalize");
 
         assert_eq!(row["active"], Value::Bool(true));
         assert_eq!(row["prefs"], crate::value!({"theme":"dark"}));
@@ -650,7 +399,12 @@ mod tests {
             "secret": "AQID"
         });
 
-        normalize_row_on_read(compile::SqlDialect::Sqlite, &schema, &mut row).expect("normalize");
+        normalize_row_on_read(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &schema,
+            &mut row,
+        )
+        .expect("normalize");
 
         assert_eq!(row["secret"], Value::String("AQID".to_string()));
     }
@@ -664,8 +418,8 @@ mod tests {
         });
 
         normalize_row_on_read(
-            compile::SqlDialect::Sqlite,
-            &crate::sql::compile::empty_read_schema(),
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &crate::sql::mapping::empty_read_schema(),
             &mut row,
         )
         .expect("normalize");
@@ -694,20 +448,24 @@ mod tests {
         let mut rows = vec![
             crate::value!({"created_at":"ordinary text", "updated_at":9, "occurred_at":"2026-05-07T01:02:03.004Z"}),
         ];
-        decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap();
+        decode_rows(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &schema,
+            &mut rows,
+        )
+        .unwrap();
         assert_eq!(rows[0]["created_at"], crate::value!("ordinary text"));
         assert_eq!(rows[0]["updated_at"], crate::value!(9));
         assert_eq!(rows[0]["occurred_at"], Value::Timestamp(1_778_115_723_004));
-        let mut parameters = Vec::new();
-        let sql = compile::build_where_with_dialect(
-            &crate::value!({"created_at":"ordinary text"}),
-            &mut parameters,
-            &schema,
-            compile::SqlDialect::Postgres,
-        )
-        .unwrap();
-        assert!(!sql.contains("timestamptz"));
-        assert_eq!(parameters, vec![crate::value!("ordinary text")]);
+        let registration = crate::sql::registration::SqlRegistration::postgres();
+        let storage = registration.storage_type(&schema["created_at"]).unwrap();
+        assert_eq!(storage, crate::sql::statement::StorageType::Text);
+        assert_eq!(
+            registration
+                .encode(storage, crate::value!("ordinary text"))
+                .unwrap(),
+            crate::value!("ordinary text")
+        );
     }
     #[test]
     fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {
@@ -734,8 +492,12 @@ mod tests {
             "active": 2
         });
 
-        let err = normalize_row_on_read(compile::SqlDialect::Sqlite, &schema, &mut row)
-            .expect_err("declared boolean field must reject out-of-domain values");
+        let err = normalize_row_on_read(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &schema,
+            &mut row,
+        )
+        .expect_err("declared boolean field must reject out-of-domain values");
         match err {
             CodecError::Internal { message } => {
                 assert!(
@@ -757,7 +519,10 @@ mod timestamp_tests {
     fn timestamp_aliases_validate_storage_without_echoing_values() {
         for kind in ["date", "timestamp"] {
             let schema = value!({"instant":{"type":kind}});
-            for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
+            for registration in [
+                crate::sql::registration::SqlRegistration::postgres(),
+                crate::sql::registration::SqlRegistration::sqlite(),
+            ] {
                 for value in [
                     value!(-1),
                     value!(-1.0),
@@ -765,7 +530,7 @@ mod timestamp_tests {
                     value!("1969-12-31T23:59:59.999999Z"),
                 ] {
                     let mut rows = [value!({"instant":value})];
-                    decode_rows(dialect, &schema, &mut rows).unwrap();
+                    decode_rows(&registration, &schema, &mut rows).unwrap();
                     assert_eq!(rows[0]["instant"], Value::Timestamp(-1));
                 }
                 for value in [
@@ -777,7 +542,7 @@ mod timestamp_tests {
                     Value::Timestamp(i64::MAX),
                 ] {
                     let mut rows = [value!({"instant":value})];
-                    let error = decode_rows(dialect, &schema, &mut rows).unwrap_err();
+                    let error = decode_rows(&registration, &schema, &mut rows).unwrap_err();
                     assert_eq!(
                         error,
                         CodecError::Decode {
@@ -799,7 +564,12 @@ mod timestamp_tests {
         });
         let original = value!({"masked":"***", "encrypted":Value::Bytes(vec![1, 2, 3])});
         let mut rows = [original.clone()];
-        decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap();
+        decode_rows(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &schema,
+            &mut rows,
+        )
+        .unwrap();
         assert_eq!(rows[0], original);
     }
 }
@@ -821,7 +591,12 @@ mod calendar_date_tests {
             value!(0),
         ] {
             let mut rows = [value!({"birthday":stored})];
-            let error = decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap_err();
+            let error = decode_rows(
+                &crate::sql::registration::SqlRegistration::sqlite(),
+                &schema,
+                &mut rows,
+            )
+            .unwrap_err();
             assert!(error.to_string().contains("birthday"));
             assert!(!error.to_string().contains("private_not_a_date"));
         }
@@ -838,7 +613,12 @@ mod json_read_tests {
         let schema = value!({"payload":{"type":"json"}});
         for text in ["true", "null", "42", "[1]", "{\"key\":1}", "\"nested\""] {
             let mut rows = [value!({"payload":text})];
-            decode_rows(compile::SqlDialect::Postgres, &schema, &mut rows).unwrap();
+            decode_rows(
+                &crate::sql::registration::SqlRegistration::postgres(),
+                &schema,
+                &mut rows,
+            )
+            .unwrap();
             assert_eq!(rows[0]["payload"], Value::String(text.into()));
         }
     }
@@ -847,7 +627,12 @@ mod json_read_tests {
     fn sqlite_json_text_requires_valid_json() {
         let schema = value!({"payload":{"type":"json"}});
         let mut rows = [value!({"payload":"secret_invalid_json"})];
-        let error = decode_rows(compile::SqlDialect::Sqlite, &schema, &mut rows).unwrap_err();
+        let error = decode_rows(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &schema,
+            &mut rows,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("payload"));
         assert!(!error.to_string().contains("secret_invalid_json"));
     }
@@ -860,19 +645,22 @@ mod json_read_tests {
             true, false, 42, 1.5, null, {"key":"true"}, [false,"null"],
         ]);
         for value in values.as_array().unwrap() {
-            for dialect in [compile::SqlDialect::Postgres, compile::SqlDialect::Sqlite] {
-                let stored = if dialect == compile::SqlDialect::Sqlite {
+            for (registration, sqlite) in [
+                (crate::sql::registration::SqlRegistration::postgres(), false),
+                (crate::sql::registration::SqlRegistration::sqlite(), true),
+            ] {
+                let stored = if sqlite {
                     Value::String(serde_json::to_string(value).unwrap())
                 } else {
                     value.clone()
                 };
                 let mut rows = [value!({"payload":stored, "label":"true"})];
-                decode_rows(dialect, &schema, &mut rows).unwrap();
+                decode_rows(&registration, &schema, &mut rows).unwrap();
                 assert_eq!(&rows[0]["payload"], value);
                 assert_eq!(rows[0]["label"], Value::String("true".into()));
 
                 rows[0]["payload"] = Value::Json(serde_json::to_string(value).unwrap());
-                decode_rows(dialect, &schema, &mut rows).unwrap();
+                decode_rows(&registration, &schema, &mut rows).unwrap();
                 assert_eq!(&rows[0]["payload"], value);
             }
         }
@@ -903,7 +691,7 @@ mod binary_read_tests {
             let schema = value!({"classified":{"type":logical_type, "mask":{"kind":"full"}}});
             let mut row = value!({"classified":"***"});
             decode_rows(
-                compile::SqlDialect::Sqlite,
+                &crate::sql::registration::SqlRegistration::sqlite(),
                 &schema,
                 std::slice::from_mut(&mut row),
             )
@@ -912,33 +700,37 @@ mod binary_read_tests {
         }
         let unmasked = value!({"classified":{"type":"bytes", "mask":{"kind":"none"}}});
         let mut row = value!({"classified":"***"});
-        assert!(
-            decode_rows(
-                compile::SqlDialect::Sqlite,
-                &unmasked,
-                std::slice::from_mut(&mut row)
-            )
-            .is_err()
-        );
+        assert!(decode_rows(
+            &crate::sql::registration::SqlRegistration::sqlite(),
+            &unmasked,
+            std::slice::from_mut(&mut row)
+        )
+        .is_err());
     }
 
     #[test]
     fn binary_search_values_round_trip_as_logical_values() {
         let expected = value!({"embedding":[1.0, -0.5], "location":{"lat":37.0, "lng":-122.0}});
+        let registration = crate::sql::registration::SqlRegistration::sqlite();
+        let descriptor = schema();
         let mut stored = expected.clone();
-        encode_document(compile::SqlDialect::Sqlite, &schema(), &mut stored).unwrap();
+        for field in ["embedding", "location"] {
+            let storage = registration.storage_type(&descriptor[field]).unwrap();
+            let value = std::mem::replace(&mut stored[field], Value::Null);
+            stored[field] = registration.encode(storage, value).unwrap();
+        }
         assert!(stored["embedding"].as_bytes().is_some());
         assert!(stored["location"].as_bytes().is_some());
         decode_rows(
-            compile::SqlDialect::Sqlite,
-            &schema(),
+            &registration,
+            &descriptor,
             std::slice::from_mut(&mut stored),
         )
         .unwrap();
         assert_eq!(stored, expected);
         decode_rows(
-            compile::SqlDialect::Sqlite,
-            &schema(),
+            &registration,
+            &descriptor,
             std::slice::from_mut(&mut stored),
         )
         .unwrap();
@@ -948,8 +740,8 @@ mod binary_read_tests {
         );
         let mut absent = value!({"embedding":null, "location":null});
         decode_rows(
-            compile::SqlDialect::Sqlite,
-            &schema(),
+            &registration,
+            &descriptor,
             std::slice::from_mut(&mut absent),
         )
         .unwrap();
@@ -961,7 +753,10 @@ mod binary_read_tests {
         for (field, bytes) in [
             ("embedding", vec![]),
             ("embedding", vec![0]),
-            ("embedding", crate::sql::sqlite_values::vec_to_le_bytes(&[1.0])),
+            (
+                "embedding",
+                crate::sql::sqlite_values::vec_to_le_bytes(&[1.0]),
+            ),
             (
                 "embedding",
                 crate::sql::sqlite_values::vec_to_le_bytes(&[1.0, f32::INFINITY]),
@@ -969,14 +764,14 @@ mod binary_read_tests {
             ("location", vec![0]),
             (
                 "location",
-                crate::sql::sqlite_values::point_to_blob(GeoPoint {
+                crate::sql::sqlite_values::point_to_blob(crate::sql::descriptors::GeoPoint {
                     lat: f64::NAN,
                     lng: 0.0,
                 }),
             ),
             (
                 "location",
-                crate::sql::sqlite_values::point_to_blob(GeoPoint {
+                crate::sql::sqlite_values::point_to_blob(crate::sql::descriptors::GeoPoint {
                     lat: 91.0,
                     lng: 0.0,
                 }),
@@ -984,14 +779,19 @@ mod binary_read_tests {
         ] {
             let mut row = Value::Object([(field.to_owned(), Value::Bytes(bytes))].into());
             let error = decode_rows(
-                compile::SqlDialect::Sqlite,
+                &crate::sql::registration::SqlRegistration::sqlite(),
                 &schema(),
                 std::slice::from_mut(&mut row),
             )
             .unwrap_err();
             assert!(error.to_string().contains(field));
         }
-        let mut row = value!({"embedding":[f64::MAX, 0.0]});
-        assert!(encode_document(compile::SqlDialect::Sqlite, &schema(), &mut row).is_err());
+        let registration = crate::sql::registration::SqlRegistration::sqlite();
+        assert!(registration
+            .encode(
+                crate::sql::statement::StorageType::Vector,
+                value!([f64::MAX, 0.0]),
+            )
+            .is_err());
     }
 }

@@ -1,7 +1,7 @@
 //! Database fixtures use the migration engine that creates creator tables.
 
+use zeroship_data_orm::sql::SchemaName;
 use zeroship_data_orm::value::Value;
-use zeroship_data_orm::sql::{SchemaName, compile::SqlDialect};
 use zeroship_migrate::schema::query::{FkEmission, IndexSpec, QueryError};
 
 #[allow(dead_code)]
@@ -11,15 +11,37 @@ pub fn fixture_table_sql(
     fields: &Value,
     fks: &FkEmission<'_>,
 ) -> Result<String, QueryError> {
-    fixture_table_sql_for(schema, collection, fields, fks, SqlDialect::Postgres)
+    fixture_table_sql_for(
+        schema,
+        collection,
+        fields,
+        fks,
+        &zeroship_migrate_postgres::DIALECT,
+    )
 }
 
-pub fn fixture_table_sql_for(
+#[allow(dead_code)]
+pub fn fixture_table_sql_sqlite(
     schema: &SchemaName,
     collection: &str,
     fields: &Value,
     fks: &FkEmission<'_>,
-    dialect: SqlDialect,
+) -> Result<String, QueryError> {
+    fixture_table_sql_for(
+        schema,
+        collection,
+        fields,
+        fks,
+        &zeroship_migrate_sqlite::DIALECT,
+    )
+}
+
+fn fixture_table_sql_for(
+    schema: &SchemaName,
+    collection: &str,
+    fields: &Value,
+    fks: &FkEmission<'_>,
+    dialect: &zeroship_migrate::DialectId,
 ) -> Result<String, QueryError> {
     let policy =
         zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
@@ -27,10 +49,6 @@ pub fn fixture_table_sql_for(
             .current_ceiling_for_app(&uuid::Uuid::nil(), None)
             .expect("compose the creator charter")
             .policy;
-    let dialect = match dialect {
-        SqlDialect::Postgres => &zeroship_migrate_postgres::DIALECT,
-        SqlDialect::Sqlite => &zeroship_migrate_sqlite::DIALECT,
-    };
     // The confined policy supplies assigned fields when compiling authored DDL.
     let authored = Value::Object(
         fields
@@ -69,7 +87,10 @@ pub fn fixture_indexes(
 
 #[allow(dead_code)]
 pub fn fixture_schema_sql(schema: &SchemaName) -> String {
-    format!("CREATE SCHEMA IF NOT EXISTS {}", zeroship_data_orm::sql::compile::quote_ident(schema.as_str()))
+    format!(
+        "CREATE SCHEMA IF NOT EXISTS {}",
+        zeroship_data_orm::sql::mapping::quote_ident(schema.as_str())
+    )
 }
 
 /// Add the fields emitted by the fixture's confined migration policy.

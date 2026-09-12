@@ -336,7 +336,7 @@ async fn target_epoch(
             // race another issuer or overwrite a persisted revocation epoch.
             tx.database()
                 .collection(models::topics::Entity::COLLECTION)?
-                .insert(value!({"app_id":app.as_str(), "topic":topic, "signal_epoch":0}))
+                .insert(value!({"id":super::types::storage_id(), "app_id":app.as_str(), "topic":topic, "signal_epoch":0}))
                 .await?;
             Ok(0)
         }

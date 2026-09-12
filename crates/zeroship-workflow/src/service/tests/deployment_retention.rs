@@ -130,34 +130,27 @@ async fn recovery_contract(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .is_empty());
-    // Customer-owned rows can forge a foreign app's deployment reference; they
-    // must not participate in this app's release decision.
     let foreign_run = reopened
         .for_app(other.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
-    let mut tx = reopened.begin().await.unwrap();
-    let deploys = tx.table("deploys");
-    tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,availability_epoch) VALUES ($1,$2,$3,$4,0,0,'available',1)"),
-        &[other.as_str().into(), deploy.id.clone().into(), deploy.hash.clone().into(), super::super::app::encode(&deploy).unwrap().into()]).await.unwrap();
+    // Scoped foreign keys reject assigning another app's deployment even when
+    // a caller knows its globally unique ID.
     for table in ["runs", "generations"] {
+        let tx = reopened.begin().await.unwrap();
         let key = if table == "runs" { "id" } else { "run_id" };
-        tx.execute(
-            &format!(
-                "UPDATE {} SET deploy_id=$3 WHERE app_id=$1 AND {key}=$2",
-                tx.table(table)
-            ),
-            &[
-                other.as_str().into(),
-                foreign_run.id.clone().into(),
-                deploy.id.clone().into(),
-            ],
-        )
-        .await
-        .unwrap();
+        assert!(tx
+            .database()
+            .collection(&format!("__zeroship_workflow_{table}"))
+            .unwrap()
+            .update(
+                json!({"app_id":other.as_str(), key:foreign_run.id}).into(),
+                json!({"deploy_id":deploy.id}).into()
+            )
+            .await
+            .is_err());
     }
-    tx.commit().await.unwrap();
     assert!(matches!(
         reopened
             .release_deployment_hold(&app, &deploy.id, &client)

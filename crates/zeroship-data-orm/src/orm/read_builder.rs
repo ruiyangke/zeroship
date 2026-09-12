@@ -69,49 +69,19 @@ impl<C: Column> SourceColumn<C> {
 }
 impl<C: FilterableColumn> SourceColumn<C> {
     pub fn eq<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        self.comparison("$eq", value)
-    }
-    pub fn gt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        self.comparison("$gt", value)
-    }
-    pub fn lt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        self.comparison("$lt", value)
-    }
-    pub fn gte<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        self.comparison("$gte", value)
-    }
-    pub fn lte<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        self.comparison("$lte", value)
-    }
-    fn comparison<T: EncodeValue<C::SqlType>>(
-        &self,
-        operator: &str,
-        value: T,
-    ) -> Result<Predicate, DbError> {
-        let filter = crate::sql::filter::decode(&Value::Object(
-            [(
-                C::NAME.into(),
-                Value::Object([(operator.into(), value.encode_value()?)].into()),
-            )]
-            .into(),
-        ))?;
-        let Predicate::And(mut children) = filter else {
-            return Err(read::invalid("invalid comparison"));
-        };
-        let predicate = children
-            .pop()
-            .ok_or_else(|| read::invalid("missing comparison"))?;
-        Ok(match predicate {
-            Predicate::Compare { op, rhs, .. } => Predicate::Compare {
+        let value = value.encode_value()?;
+        let literal = crate::sql::Literal::try_from_value(value)
+            .map_err(|error| read::invalid(error.to_string()))?;
+        Ok(match literal {
+            Some(literal) => Predicate::Compare {
                 lhs: Operand::Path(self.path()),
-                op,
-                rhs,
+                op: CompareOp::Eq,
+                rhs: Operand::Lit(literal),
             },
-            Predicate::IsNull { negated, .. } => Predicate::IsNull {
+            None => Predicate::IsNull {
                 operand: Operand::Path(self.path()),
-                negated,
+                negated: false,
             },
-            _ => return Err(read::invalid("invalid comparison")),
         })
     }
     pub fn eq_column<D: FilterableColumn>(

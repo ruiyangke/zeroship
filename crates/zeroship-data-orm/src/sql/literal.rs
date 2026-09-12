@@ -3,26 +3,14 @@
 //!
 //! # There is no null
 //!
-//! [`Literal`] has no `Null` variant, and that absence is the single most
-//! load-bearing decision in this module. SC-3 traces a shipped defect to
-//! exactly this shape: `value_to_param_inner` maps a JSON null to
-//! `String::new()` - the empty string - with its own comment conceding the case
-//! "should not be used as param (use IS NULL)", and the membership arms pushed
-//! every array element through it. `{ f: { $in: [null] } }` compiled to
-//! `f IN ($1)` with `$1 = ''`, which on a text column silently matched rows
-//! holding the empty string and missed every row that was actually NULL. Wrong
-//! results, no error, no diagnostic.
-//!
-//! That was repaired in `query.rs` (the `$in` arm now partitions nulls out,
-//! `query.rs:5386-5409`), and a repair is not a guarantee: nothing stops the
-//! next author adding a third membership operator that reaches for
-//! `value_to_param` again. Here the repair is structural. A null is not a
+//! [`Literal`] has no `Null` variant. A null is not a
 //! [`Literal`], so it cannot be an [`crate::sql::Operand`], so it cannot be a
 //! comparison's right-hand side. Nullness is expressible only as
 //! `Predicate::IsNull`, and the conversion boundary
 //! ([`Literal::from_optional`]) forces the caller to say which of the two they
 //! meant.
 
+use crate::value::Value;
 use core::fmt;
 
 /// The largest membership list accepted by the query grammar.
@@ -30,8 +18,8 @@ pub const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
 
 /// A finite `f64`.
 ///
-/// Wrapping the float is what lets [`Literal`] carry a total order, which the
-/// canonical rendering in [`crate::sql::render`] needs and which `f64` cannot
+/// Wrapping the float is what lets [`Literal`] carry a total order, which
+/// canonical predicate construction needs and which `f64` cannot
 /// provide. Non-finite values are refused at construction rather than ordered
 /// arbitrarily: a NaN parameter compares equal to nothing, including itself, so
 /// a filter carrying one returns no rows for a reason no test would explain.
@@ -94,13 +82,7 @@ impl core::hash::Hash for Finite {
 
 /// A finite `f32`, for the elements of a [`QueryVector`].
 ///
-/// The same argument as [`Finite`] and the same hand-written impls, at the
-/// width the value actually has. An embedding is `f32` at every layer that
-/// carries it - `VectorIndex::vector_search` takes `&[f32]`
-/// (`crates/zeroship-data-orm/src/backend/mod.rs`) and `vec0` reads a
-/// buffer of `f32` (`backend/sqlite/vector.rs:127`) - so widening to `f64` here
-/// and narrowing again at the driver would make the plan's value and the bound
-/// value different numbers for no gain.
+/// Embeddings remain `f32` through query construction and backend binding.
 #[derive(Debug, Clone, Copy)]
 pub struct Finite32(f32);
 
@@ -154,16 +136,6 @@ impl core::hash::Hash for Finite32 {
 }
 
 /// The most dimensions a query vector may carry.
-///
-/// **Measured, not recalled.** `pgvector` 0.8.6 accepts `vector(16000)` and
-/// refuses `vector(16001)` - probed 2026-08-28 against the container this
-/// family's live tests run on (`server_version_num = 170011`). A vector wider
-/// than the column type can hold is an error the server raises after the whole
-/// buffer has crossed the wire, so the bound belongs at construction.
-///
-/// It is deliberately **not** the tighter index limit (`2000` for `hnsw` and
-/// `ivfflat`): an unindexed `vector` column is legal and searchable by exact
-/// scan, and refusing it here would refuse a query `PostgreSQL` serves.
 pub const MAX_VECTOR_DIMS: usize = 16_000;
 
 /// A query vector: non-empty, finite in every element, and bounded in width.
@@ -238,6 +210,35 @@ pub enum Literal {
 }
 
 impl Literal {
+    /// Convert an owned native value into a query literal.
+    ///
+    /// A null remains structural and JSON containers are encoded only because
+    /// SQL JSON parameters require an explicit storage representation.
+    pub fn try_from_value(value: Value) -> Result<Option<Self>, LiteralError> {
+        Ok(Some(match value {
+            Value::Null => return Ok(None),
+            Value::Bool(value) => Self::Bool(value),
+            Value::Number(value) if value.as_i64().is_some() => {
+                Self::Int(value.as_i64().expect("checked integer"))
+            }
+            Value::Number(value) if value.as_u64().is_some() => Self::text(value.to_string())?,
+            Value::Number(value) => Self::Float(Finite::new(
+                value.as_f64().ok_or(LiteralError::NonFiniteFloat)?,
+            )?),
+            Value::String(value) | Value::Decimal(value) => Self::text(value)?,
+            Value::Bytes(value) => Self::Bytes(value),
+            Value::Timestamp(value) => Self::Int(value),
+            Value::Json(value) => {
+                serde_json::from_str::<serde_json::Value>(&value)
+                    .map_err(|_| LiteralError::InvalidJson)?;
+                Self::Json(value)
+            }
+            value @ (Value::Array(_) | Value::Object(_)) => {
+                Self::Json(serde_json::to_string(&value).map_err(|_| LiteralError::InvalidJson)?)
+            }
+        }))
+    }
+
     /// A text value.
     ///
     /// # Errors
@@ -293,16 +294,10 @@ impl Literal {
 
 /// A non-empty, homogeneous, bounded set of values for a membership test.
 ///
-/// Three bounds travel with the type rather than being re-checked at each call
-/// site:
+/// Its invariants travel with the type rather than being rechecked by each caller:
 ///
-/// * **Non-empty.** SC-3 is explicit that this is the half an earlier draft
-///   omitted: with only an upper bound, an empty set was constructible and
-///   `Membership` over it rendered `IN ()`, which is a `PostgreSQL` *syntax
-///   error* - so the whole query failed rather than returning nothing, and an
-///   empty list is the natural result of narrowing a filter. Empty membership
-///   is not representable here at all; [`crate::sql::Predicate::membership`]
-///   simplifies it to a constant before a set is ever built.
+/// * **Non-empty.** [`crate::sql::Predicate::membership`] simplifies an empty
+///   input to a constant before a set is built.
 /// * **Homogeneous.** A set mixing `Int` and `Text` binds parameters of two
 ///   types into one `IN` list, where `PostgreSQL` resolves a single type for the
 ///   whole list and the mismatch surfaces as a cast error at execution.
@@ -310,9 +305,7 @@ impl Literal {
 ///
 /// The values are stored sorted and deduplicated. Membership is a set test, so
 /// neither transformation changes the result, and both are needed for the
-/// canonical-rendering property: `IN (2, 1)` and `IN (1, 2)` are the same
-/// logical plan and must produce one SQL string, or the prepared-statement
-/// cache sees two.
+/// stable statement property: equivalent sets produce one SQL shape.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LiteralSet(Vec<Literal>);
 
@@ -374,6 +367,8 @@ pub enum LiteralError {
     NonFiniteFloat,
     /// A text value carried a NUL byte.
     NulByteInText,
+    /// An encoded JSON value was invalid.
+    InvalidJson,
     /// A membership set had no members. Not representable: see
     /// [`crate::sql::Predicate::membership`], which simplifies that case away
     /// before a set is built.
@@ -399,6 +394,7 @@ impl fmt::Display for LiteralError {
                  including itself",
             ),
             Self::NulByteInText => f.write_str("a text parameter must not contain a NUL byte"),
+            Self::InvalidJson => f.write_str("a JSON parameter must contain valid JSON"),
             Self::EmptyLiteralSet => f.write_str(
                 "a membership set must not be empty; empty membership is a constant, \
                  not an IN list",
@@ -432,8 +428,8 @@ impl std::error::Error for LiteralError {}
 mod tests {
     use super::*;
 
-    /// The total order must be total, or the canonical sort in
-    /// [`crate::sql::render`] is not deterministic. `-0.0` and `0.0` are the pair
+    /// The total order keeps canonical predicate construction deterministic.
+    /// `-0.0` and `0.0` are the pair
     /// that separates `total_cmp` from `PartialOrd`.
     #[test]
     fn the_float_order_is_total_and_consistent_with_eq() {

@@ -1,11 +1,10 @@
 /**
- * Database primitives (zeroship.db.*) — v2 surface.
+ * Database primitives exposed through `env.db`.
  *
- * The runtime exposes `env.db` as a Db v8_class instance with a small set
+ * The runtime exposes `env.db` as a Db instance with a small set
  * of entry-point methods. Per-collection CRUD lives on the Collection
- * wrapper returned by `env.db.collection(name)`. Transactions, migration
- * runs, and reactive subscriptions are also separate wrappers. The
- * flat-method surface from v1 was removed in 2026-05.
+ * wrapper returned by `env.db.collection(name)`. Transactions and reactive
+ * subscriptions use separate wrappers.
  */
 
 // ---------------------------------------------------------------------------
@@ -44,16 +43,23 @@ interface ZeroshipDbUpdate {
   [field: string]: ZeroshipDbUpdateValue;
 }
 
+/** Values carried by the native database boundary. */
+type ZeroshipDbValue =
+  | ZeroshipScalar
+  | Uint8Array
+  | ZeroshipDbValue[]
+  | { [key: string]: ZeroshipDbValue };
+
 /** A single update field value — direct scalar or operator object. */
 type ZeroshipDbUpdateValue =
-  | ZeroshipScalar
-  | { $set?: ZeroshipScalar }
+  | ZeroshipDbValue
+  | { $set?: ZeroshipDbValue }
   | { $inc?: number }
   | { $dec?: number }
   | { $mul?: number }
-  | { $push?: ZeroshipScalar }
-  | { $pull?: ZeroshipScalar }
-  | { $addToSet?: ZeroshipScalar };
+  | { $push?: ZeroshipDbValue }
+  | { $pull?: ZeroshipDbValue }
+  | { $addToSet?: ZeroshipDbValue };
 
 // ---------------------------------------------------------------------------
 // Query options
@@ -82,11 +88,8 @@ interface ZeroshipDbFindOpts {
   actor?: Record<string, unknown>;
   unmaskReason?: string;
   /**
-   * opt out of the default `AND deleted_at IS NULL`
-   * auto-filter. When `true`, soft-deleted rows participate in the
-   * result set. Default omitted means "filter soft-deleted out" on
-   * post-migration tables (no-op on pre-migration tables where the
-   * column doesn't exist).
+   * Include soft-deleted rows when the descriptor declares a soft-delete
+   * assignment. Otherwise this option has no effect.
    */
   include_deleted?: boolean;
 }
@@ -115,8 +118,7 @@ type ZeroshipDbAccumulator =
   | { $sum: string }
   | { $avg: string }
   | { $min: string }
-  | { $max: string }
-  | { $first: string };
+  | { $max: string };
 
 // ---------------------------------------------------------------------------
 // Wrapper v8_classes — the v2 native surface.
@@ -138,83 +140,56 @@ interface ZeroshipCollection {
   find(filter: ZeroshipDbFilter, opts?: ZeroshipDbFindOpts): Promise<Record<string, unknown>[]>;
 
   /** Insert one document. Returns the inserted row. */
-  insert(doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>): Promise<Record<string, unknown>>;
+  insert(doc: Record<string, ZeroshipDbValue>): Promise<Record<string, unknown>>;
 
   /** Insert multiple documents. Returns the inserted rows. */
-  insertMany(docs: Record<string, ZeroshipScalar | ZeroshipScalar[]>[]): Promise<Record<string, unknown>[]>;
+  insertMany(docs: Record<string, ZeroshipDbValue>[]): Promise<Record<string, unknown>[]>;
 
-  /** Update one document. Returns the updated row or `null` when nothing matched.
-   *
-   *  renamed from `updateOne` to `update` to align with
-   *  the SDK and Prisma/Convex singular-default convention. */
+  /** Update one document. Returns the updated row or `null` when nothing matched. */
   update(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<Record<string, unknown> | null>;
 
   /** Update multiple documents. Returns the count of affected rows. */
   updateMany(filter: ZeroshipDbFilter, update: ZeroshipDbUpdate): Promise<number>;
 
-  /** Delete one document. Returns the deleted row or `null` when nothing matched.
-   *
-   *  renamed from `deleteOne` to `delete`.
-   *
-   *  on post-migration tables (those carrying the
-   *  platform `deleted_at` column) this performs a SOFT delete:
-   *  `UPDATE ... SET deleted_at = NOW()` and the returned row carries
-   *  the populated `deleted_at`. On pre-migration tables it still
-   *  performs a hard DELETE with an operator-side warning. Use
-   *  `purge` for explicit hard-delete regardless of table state. */
+  /** Delete one document. Descriptor delete assignments determine whether the
+   *  row is updated or physically deleted. */
   delete(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
-  /** Delete multiple documents. Returns the count of affected rows.
-   *
-   *  same Path C semantics as `delete`. */
+  /** Delete multiple documents. Returns the count of affected rows. */
   deleteMany(filter: ZeroshipDbFilter): Promise<number>;
 
-  /** explicit hard-delete. Always emits `DELETE FROM ...`,
-   *  regardless of the system-fields marker. */
+  /** Physically delete one row regardless of descriptor delete assignments. */
   purge(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
   /** bulk hard-delete. Returns the count of affected rows. */
   purgeMany(filter: ZeroshipDbFilter): Promise<number>;
 
-  /** restore a soft-deleted row by clearing `deleted_at`.
-   *  Refuses with `restore_unsupported_legacy_table` on pre-migration
-   *  tables. */
+  /** Restore one row through the descriptor's restore assignment. */
   restore(filter: ZeroshipDbFilter): Promise<Record<string, unknown> | null>;
 
   /** bulk-restore. Returns the count of restored rows. */
   restoreMany(filter: ZeroshipDbFilter): Promise<number>;
 
   /** Upsert a document (insert or update on conflict). Returns the row.
-   *  `opts.conflictFields` names the ON CONFLICT target columns — must
-   *  be a non-empty array of column names; missing / empty rejects
-   *  with `TypeError`.
-   *
-   *  `findOrCreate` was removed; callers use `upsert`
-   *  directly. If the SDK consumer needs the legacy `{row, created}`
-   *  envelope, do an explicit `find(filter).first()` first, branch on
-   *  `null`, and decide. */
+   *  `opts.conflictFields` names a non-empty application-owned unique key. */
   upsert(
-    doc: Record<string, ZeroshipScalar | ZeroshipScalar[]>,
+    doc: Record<string, ZeroshipDbValue>,
     opts: { conflictFields: string[] },
   ): Promise<Record<string, unknown> | null>;
 
-  /** Count documents matching `filter`. `opts.include_deleted: true`
-   *  (P7 PR 5) opts out of the auto soft-delete filter. */
+  /** Count documents matching `filter`. */
   count(
     filter: ZeroshipDbFilter,
     opts?: { include_deleted?: boolean },
   ): Promise<number>;
 
-  /** Get distinct values for `opts.field` across rows matching
-   *  `filter`. `opts.include_deleted: true` (P7 PR 5) opts out of the
-   *  soft-delete auto-filter. */
+  /** Get distinct values for `opts.field` across rows matching `filter`. */
   distinct(
     filter: ZeroshipDbFilter,
     opts: { field: string; include_deleted?: boolean },
-  ): Promise<(string | number | boolean | null)[]>;
+  ): Promise<(string | number | bigint | boolean | Uint8Array | null)[]>;
 
-  /** Run an aggregation pipeline. `opts.include_deleted: true` (P7
-   *  PR 5) opts out of the soft-delete auto-`$match`. */
+  /** Run an aggregation pipeline. */
   aggregate(
     pipeline: ZeroshipDbAggregateStage[],
     opts?: { include_deleted?: boolean },
@@ -242,7 +217,7 @@ interface ZeroshipCollection {
     rowPk: string,
     column: string,
     opts?: { actor?: Record<string, unknown> | null; reason?: string },
-  ): Promise<string>;
+  ): Promise<ZeroshipDbValue>;
 
   /**
    * bulk unmask round-trip (collection inherited from
@@ -254,12 +229,11 @@ interface ZeroshipCollection {
   bulkUnmask(
     items: ReadonlyArray<{ rowPk: string; columns: readonly string[] }>,
     opts?: { actor?: Record<string, unknown> | null; reason?: string },
-  ): Promise<{ results: Record<string, Record<string, string>> }>;
+  ): Promise<{ results: Record<string, Record<string, ZeroshipDbValue>> }>;
 }
 
 /**
- * The collections-only view handed to a `env.db.transaction(fn)`
- * callback (P9 PR 3).
+ * The collections-only view handed to an `env.db.transaction(fn)` callback.
  *
  * Each property is a tx-bound {@link ZeroshipCollection} — every CRUD op
  * routes through the open transaction connection automatically. There is
@@ -287,8 +261,7 @@ type ZeroshipSubscriptionEvent =
 
 /**
  * A live subscription wrapper minted by
- * `env.db.<collection>.openSubscription()` (P9 PR 1: the duplicate
- * `env.db.openSubscription(name)` entry point was removed).
+ * `env.db.<collection>.openSubscription()`.
  * Synchronous to mint — calling it does not allocate any Postgres state;
  * the wrapper merely registers a slot in the per-isolate broker routing
  * table. The wrapper's GC finalizer is the safety-net release.
@@ -329,21 +302,6 @@ interface ZeroshipSubscription {
  * not on this surface.
  */
 interface ZeroshipDb {
-  // the platform-internal entry points moved off `env.db`
-  // to the `__platform` capability handle (reached only via a V8
-  // private symbol; §8). Removed from this published surface:
-  //   - `setMaskPolicy`         → `__platform.setMaskPolicy`
-  // Their type declarations live in `@zeroship/bootstrap`'s
-  // framework-internal `internal.d.ts` (the `ZeroshipDbPlatform`
-  // interface). Creator IDE hover on `env.db` no longer surfaces them.
-  // `env.db.__platform` (string access) is actively refused at runtime
-  // with `platform_internal_only`.
-  //
-  // `unmaskField` / `bulkUnmaskFields` moved off `Db` to
-  // `Collection` (collection name inherited from the receiver). See
-  // `ZeroshipCollection.unmaskField` / `.bulkUnmask`. `MaskedValue`
-  // instances dispatch unmask natively from their own bound `_meta`.
-
   /**
    * Mint (or return the cached) Collection wrapper for `name`. Identity
    * is cached on the Db wrapper so repeated calls with the same name
@@ -353,28 +311,16 @@ interface ZeroshipDb {
   collection(name: string): ZeroshipCollection;
 
   /**
-   * Run `callback` inside a transaction (P9 PR 3 — native orchestrator).
+   * Run `callback` inside a native transaction.
    *
    * `callback` receives a collections-only {@link ZeroshipTxView}; the
    * returned promise resolves with the callback's result on **commit**
    * (callback resolved) and rejects with the callback's error on
    * **rollback** (callback threw / rejected). A `transaction(...)` call
-   * made while a transaction is already active opens a `SAVEPOINT`
-   * instead of a fresh `BEGIN` (nested-tx via implicit savepoint; depth
-   * cap 8 → `savepoint_depth_exceeded`).
+   * made while a transaction is already active opens a `SAVEPOINT`.
    *
-   * `opts.isolationLevel` is a {@link ZeroshipIsolationLevel} (the SQL-spaced
-   * lowercase form - `"read uncommitted"` | `"read committed"` |
-   * `"repeatable read"` | `"serializable"`); honoured on the outermost
-   * `BEGIN` only. This type used to declare its own three-value camelCase
-   * literal (`"readCommitted" | "repeatableRead" | "serializable"`), which
-   * disagreed with `ZeroshipIsolationLevel` on both spelling and count - it
-   * dropped `readUncommitted` entirely even though the runtime accepts it
-   * (measured 2026-08-10, task #245). The runtime's `normalize_isolation_level`
-   * (`crates/zeroship-data-v8/src/v8_classes/db.rs`) also accepts the camelCase and
-   * uppercase SQL forms, but `ZeroshipIsolationLevel` is the one published
-   * type - see its doc comment in `shared.d.ts` - so this signature matches
-   * that rather than inventing a second accepted-but-undocumented union.
+   * `opts.isolationLevel` is a {@link ZeroshipIsolationLevel} and applies to
+   * the outermost `BEGIN`.
    *
    * This is the low-level native primitive. The `@zeroship/db` SDK wraps
    * it as `env.db.transaction(fn): Promise<Result<R>>` (the

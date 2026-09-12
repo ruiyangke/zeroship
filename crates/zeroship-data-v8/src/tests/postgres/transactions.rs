@@ -15,7 +15,7 @@ use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 thread_local! {
     /// Keep the I/O runtime alive across dispatches so pooled sockets remain valid.
@@ -398,16 +398,14 @@ fn dispatch_zs_for_app_with_descriptor(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
-        DbService::new(DbServiceConfig {
-            project_keys: crate::tests::fixtures::project_keys(),
-            connection: crate::tests::fixtures::recording::connection(url),
-            cdc_relay: None,
-            meter: None,
-        })
-        .expect("db service")
-        .plugin(),
-    ];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        project_keys: crate::tests::fixtures::project_keys(),
+        connection: crate::tests::fixtures::recording::connection(url),
+        cdc_relay: None,
+        meter: None,
+    })
+    .expect("db service")
+    .plugin()];
     let mut env_vars = std::collections::HashMap::new();
     if let Some(app_id) = app_id {
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
@@ -1991,14 +1989,14 @@ const _procedures = { seed, failBulk };
         1,
         "the PG fan-out must execute one non-empty target probe: {counters:?}"
     );
-    let expected_probe_suffix = format!(
-        " LIMIT {} FOR UPDATE",
-        zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1
-    );
     assert!(
-        counters[0].ends_with(&expected_probe_suffix),
+        counters[0].sql.ends_with(" LIMIT $2 FOR UPDATE"),
         "the PG target probe must cap and lock the rows it will update: {counters:?}"
     );
+    let expected_limit = zeroship_data_orm::value::Value::from(
+        zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1,
+    );
+    assert_eq!(counters[0].params.last(), Some(&expected_limit));
     let mut caller_visible: Vec<(String, i64)> = after
         .iter()
         .map(|row| {

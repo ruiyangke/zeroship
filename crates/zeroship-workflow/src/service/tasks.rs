@@ -11,9 +11,23 @@ use super::{
 use crate::{WorkflowExecution, WorkflowServiceError};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation, Output},
+    orm::{Entity, FindOptions, FromRow, Operation, Output},
+    sql::{CompareOp, Literal, Operand, Predicate},
     value, Value,
 };
+
+#[derive(FromRow)]
+#[orm(entity = models::runs)]
+struct DueRun {
+    id: String,
+    due_at: Option<i64>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = models::app_state)]
+struct PollOrder {
+    last_polled_at: i64,
+}
 
 impl WorkflowService {
     /// Claim service-selected work for an authenticated worker with free capacity.
@@ -25,22 +39,73 @@ impl WorkflowService {
         while remaining > 0 {
             let mut tx = self.begin().await?;
             let now = tx.now().await?;
-            let runs = tx.table("runs");
-            let apps = tx.table("app_state");
-            let deploys = tx.table("deploys");
-            let (scope, app_ids) = tx.host_app_scope()?;
-            let candidates = tx.query(&format!("WITH candidates AS (SELECT app_id,id,due_at,ROW_NUMBER() OVER (PARTITION BY app_id ORDER BY due_at,id) AS position FROM {runs} r WHERE r.app_id IN ({scope}) AND due_at <= $2 AND (r.task_id IS NOT NULL OR r.control <> 'none' OR EXISTS (SELECT 1 FROM {deploys} d WHERE d.app_id=r.app_id AND d.id=r.deploy_id AND d.state='available'))) SELECT c.app_id,c.id FROM candidates c JOIN {apps} a ON a.app_id=c.app_id WHERE c.position=1 ORDER BY a.last_polled_at,c.due_at,c.app_id LIMIT $3"), &[app_ids,now.into(),remaining.into()]).await?;
+            let db = tx.database();
+            let run = db.entity::<models::runs::Entity>()?.alias("r")?;
+            let app_state = db.entity::<models::app_state::Entity>()?.alias("a")?;
+            let deploy = db.entity::<models::deploys::Entity>()?.alias("d")?;
+            let mut candidates = Vec::new();
+            // Select each assigned app's first eligible run before applying the
+            // global fairness order. Unavailable code never fills the frontier.
+            for app in tx.host_app_ids()? {
+                let candidate = db
+                    .from(&run)
+                    .inner_join(
+                        &app_state,
+                        run.column(models::runs::app_id)
+                            .eq_column(app_state.column(models::app_state::app_id))?,
+                    )?
+                    .left_join(
+                        &deploy,
+                        Predicate::And(vec![
+                            run.column(models::runs::app_id)
+                                .eq_column(deploy.column(models::deploys::app_id))?,
+                            run.column(models::runs::deploy_id)
+                                .eq_column(deploy.column(models::deploys::id))?,
+                            deploy.column(models::deploys::state).eq("available")?,
+                        ]),
+                    )?
+                    .filter(Predicate::And(vec![
+                        run.column(models::runs::app_id).eq(app.as_str())?,
+                        Predicate::compare(
+                            Operand::Path(run.column(models::runs::due_at).asc().path),
+                            CompareOp::Lte,
+                            Operand::Lit(Literal::Int(now)),
+                        ),
+                        Predicate::Or(vec![
+                            Predicate::is_not_null(Operand::Path(
+                                run.column(models::runs::task_id).asc().path,
+                            )),
+                            Predicate::Not(Box::new(run.column(models::runs::control).eq("none")?)),
+                            Predicate::is_not_null(Operand::Path(
+                                deploy.column(models::deploys::id).asc().path,
+                            )),
+                        ]),
+                    ]))
+                    .order_by(run.column(models::runs::due_at).asc())
+                    .order_by(run.column(models::runs::id).asc())
+                    .select((run.row::<DueRun>(), app_state.row::<PollOrder>()))?
+                    .limit(1)?
+                    .all()
+                    .await?;
+                if let Some((run, order)) = candidate.into_iter().next() {
+                    candidates.push((order.last_polled_at, run.due_at, app, run.id));
+                    candidates.sort_by(|left, right| {
+                        (&left.0, &left.1, left.2.as_str()).cmp(&(
+                            &right.0,
+                            &right.1,
+                            right.2.as_str(),
+                        ))
+                    });
+                    candidates.truncate(remaining as usize);
+                }
+            }
             tx.commit().await?;
             if candidates.is_empty() {
                 return Ok(None);
             }
             let mut advanced = false;
-            for candidate in candidates {
+            for (_, _, app, id) in candidates {
                 remaining -= 1;
-                let app = AppId::parse(&candidate.text("app_id")?).map_err(|_| {
-                    WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
-                })?;
-                let id = candidate.text("id")?;
                 let mut tx = self.begin().await?;
                 let policy = lock_app(&mut tx, &app).await?;
                 let mut run = lock_run(&mut tx, &app, &id).await?;
@@ -365,8 +430,24 @@ pub(crate) async fn authorized_task(
         limit: Some(1),
         ..Default::default()
     };
-    let initial = tasks
-        .find::<models::TaskRecord>(lookup()?, options())
+    let source = tasks.alias("t")?;
+    let initial = tx
+        .database()
+        .from(&source)
+        .filter(Predicate::And(vec![
+            Predicate::Or(
+                tx.host_app_ids()?
+                    .into_iter()
+                    .map(|app| source.column(models::tasks::app_id).eq(app.as_str()))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
+            source.column(models::tasks::id).eq(task_id)?,
+            source.column(models::tasks::worker).eq(worker.as_str())?,
+            source.column(models::tasks::token_hash).eq(token.hash())?,
+        ]))
+        .select(source.row::<models::TaskRecord>())?
+        .limit(1)?
+        .all()
         .await?
         .into_iter()
         .next()

@@ -340,18 +340,11 @@ pub fn zs_platform_private<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s
 ///
 /// ## Security (P9 §8)
 ///
-/// The `DbPlatform` handle lives in a `v8::Private` slot — invisible to
-/// `Object.keys` / `getOwnPropertyNames` / `getOwnPropertySymbols` /
-/// `for..in` / JSON, and unreadable from JS (a `v8::Private` is NOT a
-/// `v8::Symbol` and cannot be used as a property key). The ONLY JS path
-/// to the handle is this resolver. `runtime-entry` invokes it once
-/// during module evaluation, threads the handle into `installSchema`,
-/// and then **deletes `globalThis.__zsDbPlatform`** — so by the time any
-/// creator `fetch` / `rpc` handler runs, the resolver is gone. Creator
-/// code cannot import `@zeroship/bootstrap` (an existing invariant), so
-/// it has no other carrier. `env.db.__platform` (string access) is
-/// actively refused by a getter trap on the `Db` class
-/// (`platform_internal_only`).
+/// The `DbPlatform` handle lives in a `v8::Private` slot and is unreadable from
+/// creator JavaScript. The internal bridge captures this resolver and deletes
+/// the global before the creator module evaluates. It exposes only the mask
+/// policy installation operation to the bootstrap module. Dev uses the same
+/// ordering before its module runner loads creator code.
 fn zs_db_platform_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
@@ -406,10 +399,27 @@ const ZS_WORKFLOW_BODY_TIMER_ERROR =
 const enterKind = globalThis.__zsEnterKind;
 const exitKind = globalThis.__zsExitKind;
 const zsWorkflowRealFetch = globalThis.fetch;
+const zsDbPlatformResolver = globalThis.__zsDbPlatform;
+const zsEnvDb = typeof globalThis.__zs_env === "function"
+    ? globalThis.__zs_env()?.db
+    : undefined;
+const zsDbPlatform = typeof zsDbPlatformResolver === "function" && zsEnvDb != null
+    ? zsDbPlatformResolver(zsEnvDb)
+    : undefined;
 
 try { delete globalThis.__zsEnterKind; } catch (_e) {}
 try { delete globalThis.__zsExitKind; } catch (_e) {}
 try { delete globalThis.__zsClearKind; } catch (_e) {}
+if (__zsHideDbPlatform) {
+    try { delete globalThis.__zsDbPlatform; } catch (_e) {}
+}
+
+export async function __zsInstallDbMaskPolicy(policy) {
+    const setter = zsDbPlatform?.setMaskPolicy;
+    if (typeof setter === "function") {
+        await setter.call(zsDbPlatform, policy);
+    }
+}
 
 class ZsNondeterministicError extends Error {
     constructor(message = "workflow replay is nondeterministic") {
@@ -1592,7 +1602,7 @@ fn bootstrap_js(entry: &str) -> Result<String, String> {
     let entry = serde_json::to_string(entry)
         .map_err(|error| format!("Invalid entry specifier: {error}"))?;
     let prefix = format!(
-        "import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from \"./{}\";\nimport * as user from {entry};\n",
+        "import {{ __zsDispatchRpc, __zsInstallDbMaskPolicy, __zsWorkflowDispatch }} from \"./{}\";\nimport * as user from {entry};\n",
         &*BOOTSTRAP_KIND_BRIDGE_SPEC,
     );
     let mut source =
@@ -2367,7 +2377,11 @@ fn wrap_with_bootstrap(
         },
         ModuleEntry {
             specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
-            source: KIND_BRIDGE_JS.into(),
+            source: format!(
+                "const __zsHideDbPlatform = {};\n{}",
+                !crate::transport::ssrf::dev_mode_enabled(),
+                KIND_BRIDGE_JS
+            ),
         },
         ModuleEntry {
             specifier: "zeroship".into(),

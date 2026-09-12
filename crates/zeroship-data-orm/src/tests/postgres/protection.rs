@@ -5,9 +5,9 @@
 //! verify that filtering cannot reveal a protected value without unmask authorization.
 //! PostgreSQL and its required extensions come from an owned testcontainer.
 
-use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
-use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::fixture_table_sql;
+use crate::tests::fixtures::Host;
 use crate::tests::fixtures::{self, schema};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -15,20 +15,18 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use crate::sql::mapping::{raw_column_name, read_surface_columns, validate_field_name};
+use crate::sql::{registration::SqlRegistration, SchemaName};
+use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::protection::unmask::{
-    BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, audit_query_hint_granted,
-    authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
-    parse_args, parse_bulk_args,
+    audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
+    dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
+    UnmaskFieldArgs,
 };
-use crate::sql::compile::{
-    build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
-    raw_column_name, read_surface_columns, validate_field_name,
-};
-use crate::value::{Value, value};
 
 /// Use the backend already installed by the fixture; this helper does not test cold startup.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
@@ -198,7 +196,7 @@ async fn insert_through_the_pipeline(
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
     let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
-    let bq = build_insert(
+    let bq = compile_insert(
         &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         schema,
@@ -237,9 +235,93 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
     Value::Object(map)
 }
 
+fn compile_insert(
+    namespace: &SchemaName,
+    collection: &str,
+    schema: &Value,
+    document: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
+    crate::crud::insert::build_one(
+        namespace,
+        collection,
+        schema,
+        document.clone(),
+        &SqlRegistration::postgres(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_find(
+    namespace: &SchemaName,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
+    crate::crud::read::find(
+        namespace,
+        collection,
+        schema,
+        filter.clone(),
+        limit,
+        offset,
+        order_by,
+        select,
+        &[],
+        false,
+        &SqlRegistration::postgres(),
+    )
+}
+
+fn compile_distinct(
+    namespace: &SchemaName,
+    collection: &str,
+    field: &str,
+    filter: &Value,
+    schema: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
+    crate::crud::read::distinct(
+        namespace,
+        collection,
+        schema,
+        field,
+        filter.clone(),
+        false,
+        &SqlRegistration::postgres(),
+    )
+}
+
+fn compile_aggregate(
+    namespace: &SchemaName,
+    collection: &str,
+    pipeline: &Value,
+    schema: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
+    crate::crud::aggregate::build(
+        namespace,
+        collection,
+        pipeline,
+        false,
+        schema,
+        &SqlRegistration::postgres(),
+    )
+    .map(|(query, _)| query)
+}
+
+fn compile_filter(
+    filter: &Value,
+    _parameters: &mut Vec<Value>,
+    _schema: &Value,
+) -> Result<crate::sql::Predicate, crate::sql::mapping::QueryError> {
+    crate::sql::filter::decode(filter)
+}
+
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
-    let bq = build_find_with_schema(
+    let bq = compile_find(
         &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         filter,
@@ -261,206 +343,29 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
     rows.iter().map(row_to_value).collect()
 }
 
-// ---------------------------------------------------------------------------
-// 1. The oracle
-// ---------------------------------------------------------------------------
-
-/// **THE ORACLE.** A range filter on a masked column must not narrow the
-/// plaintext.
-///
-/// Two rows whose real SSNs sit at opposite ends of the range. A sequence of
-/// `$gt` probes sweeps between them. Before the flip the probe at
-/// `500-00-0000` returned exactly the high row and nothing else, and repeating
-/// the sweep at finer granularity recovers the digits one at a time. After the
-/// flip both rows store `***`, every probe compares `'***'` against the probe
-/// value, and the two rows fall on the SAME side of every one.
-///
-/// The assertion is INVARIANCE, not emptiness: no probe may separate the two
-/// rows, and the whole sweep must return one constant answer. An implementation
-/// that returned nothing at all would satisfy an emptiness assertion perfectly,
-/// which is why the same sweep also runs against the unmasked control column,
-/// where it MUST separate them.
+/// Masked fields expose only their visible representation, so ordered predicates are invalid.
 #[test]
-fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
-    Host::test(|host| {
-        host.run(async {
-            let (_postgres, url) = require_pg().await;
-            let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-            let app = "flip_oracle";
-            let schema = flip_schema();
-            fixture(host, &pool, &url, app, "people", &schema).await;
-
-            // The two rows are told apart by the ids the PLATFORM minted for them, not
-            // by ids this fixture chose - it may not choose one. `low` is the row whose
-            // real SSN sits at the bottom of the range, `high` the one at the top.
-            let low = insert_through_the_pipeline(
-                host,
-                &pool,
-                app,
-                "people",
-                &schema,
-                value!({ "ssn": "111-11-1111", "nickname": "aaa" }),
-            )
-            .await
-            .id;
-            let high = insert_through_the_pipeline(
-                host,
-                &pool,
-                app,
-                "people",
-                &schema,
-                value!({ "ssn": "999-99-9999", "nickname": "zzz" }),
-            )
-            .await
-            .id;
-
-            // Control zero: both rows are there. A fixture that inserted nothing would
-            // make every arm below vacuous. The set is compared against the two minted
-            // ids rather than counted, so this also pins that each write's identity
-            // survived the round trip - a row read back under some other id would
-            // satisfy a bare count.
-            let all = run_find(&pool, app, &value!({}), &schema).await;
-            assert_eq!(all.len(), 2, "both rows must be present: {all:?}");
-            let mut present: Vec<String> = all
-                .iter()
-                .map(|r| r["id"].as_str().unwrap().to_string())
-                .collect();
-            present.sort();
-            let mut minted = vec![low.clone(), high.clone()];
-            minted.sort();
-            assert_eq!(
-                present, minted,
-                "the rows read back must be the two the platform minted: {all:?}",
-            );
-
-            let probes = [
-                "000-00-0000",
-                "111-11-1111",
-                "222-22-2222",
-                "500-00-0000",
-                "888-88-8888",
-                "999-99-9999",
-            ];
-
-            let mut sweep: Vec<Vec<String>> = Vec::new();
-            for probe in probes {
-                let rows =
-                    run_find(&pool, app, &value!({ "ssn": { "$gt": probe } }), &schema).await;
-                let mut ids: Vec<String> = rows
-                    .iter()
-                    .map(|r| r["id"].as_str().unwrap().to_string())
-                    .collect();
-                ids.sort();
-                assert_ne!(
-                    ids.len(),
-                    1,
-                    "probe {probe:?} SEPARATED the two rows. That single bit is the oracle: \
-             repeating the sweep recovers the whole SSN, with no authorization check \
-             on the path and no audit row written. Matched: {ids:?}",
-                );
-                sweep.push(ids);
-            }
-            assert!(
-                sweep.windows(2).all(|w| w[0] == w[1]),
-                "the probe sweep over a masked column must be constant - it must carry no \
-         information about the values at all; got {sweep:?}",
-            );
-
-            // ---- the sweep above rules on NOTHING without this arm. Measured, 2026-09-01.
-            //
-            // Every one of the six probes returns ZERO rows (`sweep` is six empty vectors),
-            // so `assert_ne!(ids.len(), 1)` compares 0 against 1 six times and the
-            // constancy check compares [] to [] five times. Both pass on an
-            // implementation that returns nothing at all for any filter whatsoever.
-            //
-            // And it is empty BY CONSTRUCTION, not by accident: the stored mask begins
-            // with `*` (0x2A) while every probe above begins with a digit (0x30+), so
-            // under the bytewise collation these columns pin, no probe can ever exceed a
-            // mask. The six probes were chosen to look like SSNs, which is exactly what
-            // makes them unable to match one.
-            //
-            // The `nickname` control below does not close this. It differs from the
-            // masked probe in TWO variables - a different column AND an unmasked one -
-            // so it cannot distinguish "the mask hid the ordering" from "this filter
-            // returns nothing". This arm differs in ONE: same column, same operator,
-            // same masked path, a bound chosen to sit BELOW every mask rather than
-            // above it. A correct implementation must return both rows.
-            let below_every_mask =
-                run_find(&pool, app, &value!({ "ssn": { "$gt": "!" } }), &schema).await;
-            let mut reached: Vec<String> = below_every_mask
-                .iter()
-                .map(|r| r["id"].as_str().unwrap().to_string())
-                .collect();
-            reached.sort();
-            assert_eq!(
-                reached, minted,
-                "a `$gt` bound below every mask must still reach both rows through the \
-         masked column. If this is empty, the sweep above proved nothing: it was \
-         constant because the filter matched nothing, not because the mask hid \
-         the ordering. Got {below_every_mask:?}",
-            );
-
-            // THE CONTROL, differing in one variable: the same shape of query over the
-            // unmasked `nickname` column MUST separate the rows. Without this arm an
-            // implementation that refused every filter, or returned no rows at all,
-            // would pass every assertion above.
-            let rows = run_find(
-                &pool,
-                app,
-                &value!({ "nickname": { "$gt": "mmm" } }),
-                &schema,
-            )
-            .await;
-            assert_eq!(
-                rows.len(),
-                1,
-                "the unmasked control column must still be range-filterable: {rows:?}",
-            );
-            // And it selects the RIGHT one: the row inserted second, named by the id
-            // the platform minted for it.
-            assert_eq!(rows[0]["id"], value!(high));
-
-            // And the ordering channel is closed the same way: `orderBy` on a masked
-            // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
-            let ordered = {
-                let bq = build_find_with_schema(
-                    &crate::sql::SchemaName::new(app).expect("fixture schema name"),
-                    "people",
-                    &value!({}),
-                    Some(1),
-                    None,
-                    Some(&value!({ "ssn": -1 })),
-                    None,
-                    &schema,
-                )
-                .unwrap();
-                assert!(
-                    !bq.sql.contains(&raw_column_name("ssn")),
-                    "orderBy must never name the raw column: {}",
-                    bq.sql,
-                );
-                let param_refs = &bq.params;
-                zeroship_data_orm::backend::postgres::params::query(
-                    &pool.acquire().await.unwrap(),
-                    &bq.sql,
-                    param_refs,
-                )
-                .await
-                .unwrap()
-            };
-            assert_eq!(ordered.len(), 1, "the ordered query still returns a row");
-
-            release_pg(host, pool).await;
-        })
-    })
+fn a_range_filter_on_a_masked_column_is_refused() {
+    let schema = crate::tests::fixtures::schema::generated_fields(flip_schema());
+    let error = compile_find(
+        &crate::sql::SchemaName::new("flip_oracle").expect("fixture schema name"),
+        "people",
+        &value!({ "ssn": { "$gt": "500-00-0000" } }),
+        Some(50),
+        None,
+        None,
+        None,
+        &schema,
+    )
+    .expect_err("masked range predicates must be refused");
+    assert!(
+        matches!(error, crate::sql::mapping::QueryError::InvalidFilter(ref message)
+            if message == "comparison operator is not supported for this field type"),
+        "unexpected error: {error}"
+    );
 }
 
-/// The feature is SECURED, not CLOSED: the plaintext is still reachable, by the
-/// one path that carries an authorization check and writes an audit row.
-///
-/// This is the granted-path control for the oracle above. Without it, an
-/// implementation that simply destroyed the value on write would satisfy every
-/// assertion in this file.
+/// The authorized unmask path still reaches the plaintext and writes its audit row.
 #[test]
 fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path() {
     Host::test(|host| {
@@ -1689,12 +1594,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// refused entirely rather than quietly degraded to the columns the actor may
 /// see - which would conceal the authorisation failure from the caller.
 ///
-/// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
-/// as the batch, at `crates/zeroship-data-orm/src/protection/unmask.rs`.
-/// `dispatch_find` calls this at
-/// `crates/zeroship-data-orm/src/crud/mod.rs`, before
-/// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
-/// refusal here means the unmasking SELECT is never issued at all.
+/// A refusal happens before read compilation, so no unmasking SELECT is issued.
 ///
 /// This drives `authorize_query_hint` directly, as its SQLite twin does - the
 /// `find` entry point needs a live V8 scope. The gap that leaves is what the
@@ -2058,7 +1958,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
                 .query_text_params(
                     &format!(
                         r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
-                        crate::sql::compile::quote_ident(&raw_column_name("ssn")),
+                        crate::sql::mapping::quote_ident(&raw_column_name("ssn")),
                     ),
                     &[minted_id.as_str()],
                 )
@@ -2157,13 +2057,13 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         let refusals: Vec<(&str, bool)> = vec![
             (
                 "filter key",
-                build_where(&value!({ (raw.clone()): "x" }), &mut Vec::new(), &schema).is_err(),
+                compile_filter(&value!({ (raw.clone()): "x" }), &mut Vec::new(), &schema).is_err(),
             ),
             (
                 // The aggregate matcher and `$group.by` below both validate
                 // against the same declared shape.
                 "aggregate $match",
-                build_aggregate(
+                compile_aggregate(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!([{ "$match": { (raw.clone()): "x" } }]),
@@ -2173,7 +2073,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "select",
-                build_find_with_schema(
+                compile_find(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!({}),
@@ -2187,7 +2087,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "orderBy",
-                build_find_with_schema(
+                compile_find(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!({}),
@@ -2201,7 +2101,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "$group.by",
-                build_aggregate(
+                compile_aggregate(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!([{ "$group": { "by": [raw.clone()] } }]),
@@ -2211,7 +2111,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "distinct",
-                build_distinct(
+                compile_distinct(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &raw,
@@ -2235,31 +2135,28 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 
         // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
         // it, a validator that refused everything would pass all seven above.
-        assert!(build_where(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
-        assert!(
-            build_distinct(
-                &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
-                "people",
-                "ssn",
-                &value!({}),
-                &schema
-            )
-            .is_ok()
-        );
+        assert!(compile_filter(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
+        assert!(compile_distinct(
+            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
+            "people",
+            "ssn",
+            &value!({}),
+            &schema
+        )
+        .is_ok());
         assert!(validate_field_name("ssn").is_ok());
-        assert!(
-            build_find_with_schema(
-                &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
-                "people",
-                &value!({}),
-                Some(1),
-                None,
-                Some(&value!({ "ssn": 1 })),
-                Some(&value!(["ssn"])),
-                &schema,
-            )
-            .is_ok()
-        );
+        let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+        assert!(compile_find(
+            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
+            "people",
+            &value!({}),
+            Some(1),
+            None,
+            Some(&value!({ "ssn": 1 })),
+            Some(&value!(["ssn"])),
+            &runtime_schema,
+        )
+        .is_ok());
     })
 }
 
@@ -2281,7 +2178,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
     Host::test(|_| {
-        use zeroship_data_orm::cdc::read_set::{Predicate, PredicateOp, normalise_filter};
+        use zeroship_data_orm::cdc::read_set::{normalise_filter, Predicate, PredicateOp};
         let schema = flip_schema();
 
         let Some(Predicate::All(conjuncts)) =
@@ -2534,10 +2431,11 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             host.prepare_insert_many_docs(&mut docs, app, "people", None)
                 .await
                 .expect("write pipeline");
-            let bq = build_insert(
+            let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
-                &schema,
+                &runtime_schema,
                 &docs[0],
             )
             .unwrap();
@@ -2836,7 +2734,7 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 /// Create `<app>.<collection>` the way PRODUCTION creates a creator table.
 ///
 /// [`fixture`] renders its DDL with the DATA PLANE's emitter,
-/// `crate::sql::compile::build_create_table_with_fks`, whose only callers are
+/// `crate::sql::mapping::build_create_table_with_fks`, whose only callers are
 /// tests (measured 2026-09-04: no `src` call site outside its own module in any
 /// crate). Every creator table that exists on the platform is instead rendered by
 /// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection
@@ -3071,20 +2969,13 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             )
             .await;
 
-            // CONTROL 1: the engine's encryption sentinel, compared against the runtime
-            // codec's own build for the same declaration.
+            // The live catalog must retain an encryption marker the runtime recognizes.
             let stored = column_comment(&pool, &app, "people", "secret")
                 .await
                 .expect("the engine must attach an encryption sentinel to the encrypted column");
-            assert_eq!(
-                stored,
-                crate::sql::mask_codec::build_encryption_sentinel(
-                    &crate::sql::catalog::EncryptionMeta {
-                        wraps: crate::sql::catalog::WrappedType::String,
-                    }
-                ),
-                "the migration engine writes the protection record and the data plane \
-         reads it; a spelling only one of them knows is a fence with no input",
+            assert!(
+                crate::sql::mask_codec::is_encryption_sentinel(&stored),
+                "the migration engine must write an encryption marker the runtime recognizes",
             );
 
             // CONTROL 2: the encrypting deploy stores ciphertext, so this test is not

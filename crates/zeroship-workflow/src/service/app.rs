@@ -98,10 +98,14 @@ impl WorkflowService {
         policy: super::PolicySnapshot,
     ) -> Result<(), WorkflowServiceError> {
         self.policies.install(app, policy)?;
-        let mut tx = self.begin().await?;
-        let table = tx.table("app_state");
-        tx.execute(&format!("INSERT INTO {table} (app_id,signal_epoch) VALUES ($1,0) ON CONFLICT (app_id) DO NOTHING"),
-            &[app.as_str().into()]).await?;
+        let tx = self.begin().await?;
+        tx.database()
+            .collection(models::app_state::Entity::COLLECTION)?
+            .execute(Operation::Upsert {
+                document: value!({"id":app.as_str(), "app_id":app.as_str()}),
+                conflict_fields: value!(["app_id"]),
+            })
+            .await?;
         tx.commit().await
     }
 }
@@ -137,7 +141,6 @@ impl AppWorkflows {
         if !deploy.workflows.contains(name) {
             return Err(not_found("workflow"));
         }
-        let runs = tx.table("runs");
         let mut joined = None;
         if let Some(key) = &options.key {
             if let Some(existing) = keyed_run(&tx, &self.app, name, key).await? {
@@ -157,8 +160,16 @@ impl AppWorkflows {
                     ConflictPolicy::Replace => {
                         // Release the business key while cancellation is durable. The
                         // incumbent's accepted frontier still belongs to its task.
-                        tx.execute(&format!("UPDATE {runs} SET key=NULL,control='cancel',due_at=CASE WHEN task_id IS NULL THEN $3 ELSE due_at END WHERE app_id=$1 AND id=$2"),
-                            &[self.app.as_str().into(),existing.id.into(),now.into()]).await?;
+                        let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
+                        runs.update(
+                            value!({"app_id":self.app.as_str(), "id":existing.id.clone()}),
+                            value!({"$set":{"key":null, "control":"cancel"}}),
+                        )
+                        .await?;
+                        runs.execute(Operation::Update {
+                            filter: value!({"app_id":self.app.as_str(), "id":existing.id, "task_id":null}),
+                            patch: value!({"$set":{"due_at":now}}), many: true,
+                        }).await?;
                     }
                 }
             }
@@ -333,13 +344,21 @@ pub(crate) async fn lock_app(
     tx: &mut Transaction,
     app: &AppId,
 ) -> Result<AppPolicy, WorkflowServiceError> {
-    let sql = format!(
-        "SELECT app_id FROM {} WHERE app_id=$1{}",
-        tx.table("app_state"),
-        tx.lock_clause()
-    );
-    let rows = tx.query(&sql, &[app.as_str().into()]).await?;
-    if rows.is_empty() {
+    let Output::Count(locked) = tx
+        .database()
+        .collection(models::app_state::Entity::COLLECTION)?
+        .execute(Operation::Update {
+            filter: value!({"app_id":app.as_str()}),
+            patch: value!({"$inc":{"signal_epoch":0}}),
+            many: true,
+        })
+        .await?
+    else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow lock returned rows".into(),
+        ));
+    };
+    if locked != 1 {
         return Err(not_found("workflow app"));
     }
     tx.policies
@@ -353,17 +372,41 @@ pub(crate) async fn lock_run(
     app: &AppId,
     run_id: &str,
 ) -> Result<Row, WorkflowServiceError> {
-    let sql = format!(
-        "SELECT * FROM {} WHERE app_id=$1 AND id=$2{}",
-        tx.table("runs"),
-        tx.lock_clause()
-    );
-    tx.query(&sql, &[app.as_str().into(), run_id.into()])
+    let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
+    // All journal mutations first lock the app. Retain a row lock as well so
+    // maintenance and task fencing share the same serialization point.
+    let Output::Count(locked) = runs
+        .execute(Operation::Update {
+            filter: value!({"app_id":app.as_str(), "id":run_id}),
+            patch: value!({"$inc":{"lease_epoch":0}}),
+            many: true,
+        })
         .await?
-        .into_iter()
+    else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow lock returned rows".into(),
+        ));
+    };
+    if locked != 1 {
+        return Err(not_found("workflow run"));
+    }
+    let Output::Rows { rows, .. } = runs
+        .find(
+            value!({"app_id":app.as_str(), "id":run_id}),
+            value!({"limit":1}),
+        )
+        .await?
+    else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow read returned count".into(),
+        ));
+    };
+    rows.into_iter()
         .next()
+        .map(Row)
         .ok_or_else(|| not_found("workflow run"))
 }
+
 pub(crate) async fn active_deploy(
     tx: &mut Transaction,
     app: &AppId,
@@ -410,7 +453,7 @@ pub(crate) async fn insert_root_run(
     tx.database()
         .collection(models::generations::Entity::COLLECTION)?
         .insert(value!({
-            "app_id":app.as_str(), "run_id":id, "generation":0, "deploy_id":deploy,
+            "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id, "generation":0, "deploy_id":deploy,
             "input":encode(&options.input)?, "state":"queued", "started_at":now,
         }))
         .await?;
@@ -435,7 +478,7 @@ pub(crate) async fn request_result<T: DeserializeOwned>(
     tx.database()
         .collection(models::requests::Entity::COLLECTION)?
         .execute(Operation::Purge {
-            filter: value!({"app_id":app.as_str(), "id":id.as_str(), "expires_at":{"$lte":now}}),
+            filter: value!({"app_id":app.as_str(), "request_id":id.as_str(), "expires_at":{"$lte":now}}),
             many: false,
         })
         .await?;
@@ -445,7 +488,7 @@ pub(crate) async fn request_result<T: DeserializeOwned>(
         .find::<models::RequestResult>(
             models::requests::app_id
                 .eq(app.as_str())?
-                .and(models::requests::id.eq(id.as_str())?),
+                .and(models::requests::request_id.eq(id.as_str())?),
             FindOptions {
                 limit: Some(1),
                 ..Default::default()
@@ -474,7 +517,7 @@ pub(crate) async fn store_request<T: Serialize>(
     tx.database()
         .collection(models::requests::Entity::COLLECTION)?
         .insert(value!({
-            "app_id":app.as_str(), "id":id.as_str(), "operation":operation, "digest":digest,
+            "id":super::types::storage_id(), "app_id":app.as_str(), "request_id":id.as_str(), "operation":operation, "digest":digest,
             "result":encode(result)?, "expires_at":expires_at,
         }))
         .await?;
@@ -488,9 +531,20 @@ pub(crate) async fn emit(
     payload: serde_json::Value,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
-    let table = tx.table("outbox");
-    tx.execute(&format!("INSERT INTO {table} (app_id,id,kind,payload,created_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (app_id,id) DO NOTHING"),
-        &[app.as_str().into(),id.into(),kind.into(),encode(&payload)?.into(),now.into()]).await?;
+    let outbox = tx
+        .database()
+        .collection(models::outbox::Entity::COLLECTION)?;
+    let Output::Count(count) = outbox
+        .count(value!({"app_id":app.as_str(), "id":id}), value!({}))
+        .await?
+    else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow count returned rows".into(),
+        ));
+    };
+    if count == 0 {
+        outbox.insert(value!({"app_id":app.as_str(), "id":id, "kind":kind, "payload":encode(&payload)?, "created_at":now})).await?;
+    }
     Ok(())
 }
 pub(crate) fn validate_run(id: &str) -> Result<(), WorkflowServiceError> {

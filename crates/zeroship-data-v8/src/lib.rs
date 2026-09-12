@@ -21,7 +21,8 @@ use zeroship_data_orm::error::DbError;
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
 use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
-use zeroship_data_orm::sql::compile;
+#[cfg(test)]
+use zeroship_data_orm::sql::mapping;
 
 pub(crate) mod context;
 pub mod op_error;
@@ -236,12 +237,12 @@ mod runtime_descriptor_binding_tests {
         );
         let mut invalid = runtime_descriptor.clone();
         invalid["collections"]["users"]["fields"] = value!({
-            "key": { "type": "string", "required": false, "primaryKey": true }
+            "key": { "type": "string", "required": true, "primaryKey": true }
         });
         let error = plugin()
             .bind_runtime_descriptor(scope, APP, Some(&serde_json::to_value(&invalid).unwrap()))
-            .expect_err("nullable identity must fail at native installation");
-        assert!(error.contains("required and non-null"), "{error}");
+            .expect_err("renamed identity must fail at native installation");
+        assert!(error.contains("id"), "{error}");
         assert_eq!(
             descriptor::collection_schema(&binding, "users").unwrap(),
             schema

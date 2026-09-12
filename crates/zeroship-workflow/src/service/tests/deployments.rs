@@ -251,35 +251,24 @@ async fn deployment_contract(store: Rc<OrmStore>, deployments: Deployments) {
     ));
     let mut tx = reopened.begin().await.unwrap();
     let expired = tx.now().await.unwrap() - 1;
-    tx.execute(
-        &format!("UPDATE {} SET deadline=$2 WHERE id=$1", tx.table("tasks")),
-        &[recovered.id.clone().into(), expired.into()],
+    journal_update(
+        &tx,
+        "tasks",
+        json!({"id":recovered.id}),
+        json!({"deadline":expired}),
     )
-    .await
-    .unwrap();
-    tx.execute(
-        &format!(
-            "UPDATE {} SET due_at=$3 WHERE app_id=$1 AND id=$2",
-            tx.table("runs")
-        ),
-        &[
-            app.as_str().into(),
-            new_run.id.clone().into(),
-            expired.into(),
-        ],
+    .await;
+    journal_update(
+        &tx,
+        "runs",
+        json!({"app_id":app.as_str(), "id":new_run.id}),
+        json!({"due_at":expired}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     assert!(tasks.poll().await.unwrap().is_none());
-    let mut tx = reopened.begin().await.unwrap();
-    let rows = tx
-        .query(
-            &format!("SELECT state FROM {} WHERE id=$1", tx.table("tasks")),
-            &[recovered.id.clone().into()],
-        )
-        .await
-        .unwrap();
+    let tx = reopened.begin().await.unwrap();
+    let rows = journal_rows(&tx, "tasks", json!({"id":recovered.id})).await;
     assert_eq!(rows[0].text("state").unwrap(), "expired");
     tx.commit().await.unwrap();
     // Corruption or deletion in A's scope must leave B's bytes intact.

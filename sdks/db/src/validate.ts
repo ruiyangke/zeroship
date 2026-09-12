@@ -4,7 +4,7 @@
  * collecting all field errors before throwing a single ValidationError.
  */
 import { NormalizedSchema } from "./schema";
-import { FieldDef, PlainObject, TypeName, PrimitiveTypeName } from "./types";
+import { decimal, FieldDef, PlainObject, TypeName, PrimitiveTypeName } from "./types";
 import { ValidationError, FieldError } from "./errors";
 
 type Doc = PlainObject;
@@ -244,6 +244,17 @@ function checkField(
       errors[key] = { path: key, message: key + " is below its minimum" };
     } else if (max !== undefined && value > max) {
       errors[key] = { path: key, message: key + " exceeds its maximum" };
+    }
+  } else if (type === "number" && def.precision !== undefined) {
+    if (typeof value !== "string") {
+      errors[key] = { path: key, message: `${key} must be an exact decimal string` };
+      return;
+    }
+    try {
+      decimal(value);
+    } catch {
+      errors[key] = { path: key, message: `${key} must be a valid exact decimal string` };
+      return;
     }
   } else if (
     type === "number" ||

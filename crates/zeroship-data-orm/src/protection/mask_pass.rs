@@ -11,8 +11,8 @@
 
 use std::collections::HashMap;
 
-use zeroize::Zeroizing;
 use crate::value::Value;
+use zeroize::Zeroizing;
 
 use crate::sql::catalog::MaskKind;
 use zeroship_data_orm::error::DbError;
@@ -28,7 +28,7 @@ pub type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 ///
 /// The raw column's name travels with the mask rather than being re-derived at
 /// placement time, because it is the DESCRIPTOR that names it
-/// (`crate::sql::compile::declared_raw_column`) and
+/// (`crate::sql::mapping::declared_raw_column`) and
 /// [`relocate_masked_columns`] does not hold the descriptor - it holds this.
 /// [`apply_mask_on_write`], which does hold it, is where the resolution and its
 /// fence belong.
@@ -100,7 +100,7 @@ pub fn apply_mask_on_write(
         // happens to omit `ssn` is harmless in itself, but letting it through
         // means the broken deploy appears to work until the first write that
         // does mention it.
-        let Some(raw_column) = crate::sql::compile::declared_raw_column(col, def)? else {
+        let Some(raw_column) = crate::sql::mapping::declared_raw_column(col, def)? else {
             // Unreachable: `declared_raw_column` returns `None` only for a
             // field with no effective mask. Both callers use the shared
             // descriptor predicate; keep this branch fallible at the boundary.
@@ -113,6 +113,8 @@ pub fn apply_mask_on_write(
             if value.is_null() {
                 // null → no sibling write (Q-MASK-L)
                 None
+            } else if let Value::Decimal(decimal) = value {
+                Some(Zeroizing::new(decimal.clone()))
             } else if let Some(s) = value.as_str() {
                 Some(Zeroizing::new(s.to_string()))
             } else if let Some(n) = value.as_i64() {
@@ -239,7 +241,14 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
     };
 
     // Unmasking requires the originating row's identity.
-    let row_pk = crate::row_identity::token(schema, obj).unwrap_or_default();
+    let row_pk = obj
+        .get("id")
+        .map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
 
     // Collect replacements first so we don't hold a mutable borrow on
     // `obj` while iterating the schema.
@@ -268,12 +277,12 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
         // and the sentinel it writes must not sit beside the value it hides.
         //
         // The name comes from the descriptor, not from a `format!` here: see
-        // `crate::sql::compile::declared_raw_column`, which also refuses a
+        // `crate::sql::mapping::declared_raw_column`, which also refuses a
         // descriptor naming a column creator code could reach. Propagated
         // rather than swallowed - falling back to the derivation on a refusal
         // would leave the pass reading a column the write pass refused to
         // write, and report success.
-        if let Some(raw_key) = crate::sql::compile::declared_raw_column(col, def)? {
+        if let Some(raw_key) = crate::sql::mapping::declared_raw_column(col, def)? {
             if obj.contains_key(&raw_key) {
                 to_strip.push(raw_key);
             }
@@ -324,7 +333,7 @@ pub fn mask_sentinel_signature() -> &'static str {
     use std::sync::OnceLock;
     static SIG: OnceLock<String> = OnceLock::new();
     SIG.get_or_init(|| {
-        use aes_gcm::{AeadCore, Aes256Gcm, aead::OsRng};
+        use aes_gcm::{aead::OsRng, AeadCore, Aes256Gcm};
         // Two 12-byte GCM nonces → 24 bytes of OS entropy, hex-encoded.
         let a = Aes256Gcm::generate_nonce(&mut OsRng);
         let b = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -378,7 +387,7 @@ mod tests {
 
         derive_and_relocate(&schema, &plaintexts, &mut row);
 
-        let raw = crate::sql::compile::raw_column_name("ssn");
+        let raw = crate::sql::mapping::raw_column_name("ssn");
         let obj = row.as_object().unwrap();
         assert_eq!(obj.get("ssn").and_then(|v| v.as_str()), Some("***-**-6789"));
         assert_eq!(
@@ -417,7 +426,7 @@ mod tests {
         derive_and_relocate(&schema, &plaintexts, &mut row);
 
         assert_eq!(
-            row[crate::sql::compile::raw_column_name("ssn")].as_str(),
+            row[crate::sql::mapping::raw_column_name("ssn")].as_str(),
             Some("BASE64CIPHERTEXT"),
             "the ciphertext must survive a write that returns success: {row}",
         );
@@ -445,7 +454,7 @@ mod tests {
             "the field's own column holds the mask",
         );
         assert_eq!(
-            obj.get(&crate::sql::compile::raw_column_name("email"))
+            obj.get(&crate::sql::mapping::raw_column_name("email"))
                 .and_then(|v| v.as_str()),
             Some("alice@example.com"),
         );
@@ -453,7 +462,7 @@ mod tests {
 
     #[test]
     fn apply_mask_on_write_skips_kind_none() {
-        // Explicit opt-out: no sibling written.
+        // Explicit opt-out leaves the stored value unchanged.
         let schema = value!({
             "ssn": {
                 "type": "string",
@@ -468,15 +477,12 @@ mod tests {
         derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
-        assert!(
-            obj.get("ssn_masked").is_none(),
-            "kind=none must NOT emit a sibling: {row}"
-        );
+        assert_eq!(obj.get("ssn"), Some(&value!("BASE64CT")));
     }
 
     #[test]
     fn apply_mask_on_write_skips_null_value() {
-        // null passes through as null (Q-MASK-L); no sibling write.
+        // Null passes through as null.
         let schema = value!({
             "email": {
                 "type": "string",
@@ -489,17 +495,12 @@ mod tests {
         derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
-        assert!(
-            obj.get("email_masked").is_none(),
-            "null parent must not emit a sibling"
-        );
+        assert_eq!(obj.get("email"), Some(&Value::Null));
     }
 
     #[test]
     fn apply_mask_on_write_skips_absent_column() {
-        // Partial UPDATE: parent column not on the row at all → no
-        // sibling write (the existing row's masked value stays in sync
-        // because the plaintext didn't change).
+        // A partial update that omits the field does not add it.
         let schema = value!({
             "ssn": {
                 "type": "string",
@@ -513,7 +514,7 @@ mod tests {
         derive_and_relocate(&schema, &plaintexts, &mut row);
 
         let obj = row.as_object().unwrap();
-        assert!(obj.get("ssn_masked").is_none());
+        assert!(obj.get("ssn").is_none());
     }
 
     #[test]
@@ -550,11 +551,34 @@ mod tests {
         ] {
             assert_eq!(obj.get(field).and_then(|v| v.as_str()), Some(mask));
             assert_eq!(
-                obj.get(&crate::sql::compile::raw_column_name(field))
+                obj.get(&crate::sql::mapping::raw_column_name(field))
                     .and_then(|v| v.as_str()),
                 Some(plaintext),
             );
         }
+    }
+
+    #[test]
+    fn apply_mask_on_write_accepts_exact_decimal_plaintext() {
+        let schema = value!({
+            "amount": {
+                "type": "number",
+                "precision": 30,
+                "scale": 2,
+                "mask": { "kind": "full", "classification": "spi" }
+            }
+        });
+        let mut row = Value::Object(
+            [("amount".into(), Value::Decimal("9007199254740993.01".into()))].into(),
+        );
+
+        derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
+
+        assert_eq!(row["amount"], value!("***"));
+        assert_eq!(
+            row[&crate::sql::mapping::raw_column_name("amount")],
+            Value::Decimal("9007199254740993.01".into())
+        );
     }
 
     #[test]
@@ -657,7 +681,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let raw = crate::sql::compile::raw_column_name("ssn");
+        let raw = crate::sql::mapping::raw_column_name("ssn");
         let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
@@ -734,8 +758,8 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_handles_numeric_id() {
-        // typed_id collections use string `id`, but legacy collections
-        // can carry numeric PK — `row_pk` must stringify either.
+        // Mask metadata uses a textual row identity for every descriptor
+        // supported by the ORM.
         let schema = value!({
             "id": { "type": "integer", "primaryKey": true },
             "ssn": {
@@ -780,27 +804,18 @@ mod tests {
     }
 
     #[test]
-    fn sec4_wrap_row_on_read_never_returns_parent_plaintext_when_no_sibling() {
-        // SEC-4: an aggregate that grouped on a masked column WITHOUT
-        // substituting the sibling lands here with the parent slot
-        // holding PLAINTEXT and no `<col>_masked` sibling present. The
-        // old code wrapped the parent value verbatim — i.e. it surfaced
-        // plaintext to JS as if it were the masked display string. The
-        // wrap must NOT trust the parent slot as already-masked: it must
-        // either re-mask or refuse, never emit the raw value.
+    fn wrap_row_on_read_never_returns_plaintext() {
+        // Treat an unexpected plaintext display value as untrusted input.
         let schema = value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        // Parent holds plaintext; no sibling — the dangerous shape.
         let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
 
-        // Whatever shape the parent slot now carries, it must not be the
-        // raw plaintext string.
         let surfaced = row.get("ssn").cloned().unwrap_or(Value::Null);
         if let Some(s) = surfaced.as_str() {
             assert_ne!(
@@ -899,7 +914,7 @@ mod tests {
     /// A masked field def as the migration fold emits it, with the raw column
     /// spelled by the emitter that wrote the DDL.
     ///
-    /// The fixtures below declare a name `crate::sql::compile::raw_column_name`
+    /// The fixtures below declare a name `crate::sql::mapping::raw_column_name`
     /// does NOT produce. That is deliberate: a fixture spelling the derived name
     /// passes against a body that ignores the descriptor entirely, which is the
     /// state this pair of tests exists to move off.
@@ -925,7 +940,8 @@ mod tests {
             "the real value belongs in the column the descriptor names: {row}",
         );
         assert!(
-            obj.get(&crate::sql::compile::raw_column_name("ssn")).is_none(),
+            obj.get(&crate::sql::mapping::raw_column_name("ssn"))
+                .is_none(),
             "nothing may be written to a column the descriptor did not name: {row}",
         );
         assert_eq!(obj.get("ssn").and_then(|v| v.as_str()), Some("***-**-6789"));
@@ -954,7 +970,7 @@ mod tests {
 
     /// The fence, at both pass boundaries.
     ///
-    /// `crate::sql::compile::declared_raw_column` owns the verdict; these two
+    /// `crate::sql::mapping::declared_raw_column` owns the verdict; these two
     /// arms prove each pass PROPAGATES it rather than falling back to the
     /// derivation, which would place plaintext in a filterable column while
     /// reporting success. `protection::protection_floor` does not catch this shape -
@@ -986,7 +1002,7 @@ mod tests {
         let schema = value!({
             "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } }
         });
-        let raw = crate::sql::compile::raw_column_name("ssn");
+        let raw = crate::sql::mapping::raw_column_name("ssn");
         let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);

@@ -3,7 +3,7 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but

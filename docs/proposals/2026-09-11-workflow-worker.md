@@ -97,11 +97,22 @@ live leases and waiting children through the ORM, then atomically expires tasks,
 cleans up waits and signals, and advances the generation. Retained checkpoints
 and payload references are copied through ordered ORM pages and batch inserts
 inside that transaction. The copy preserves effect origins and compensation
-metadata, and retains only the selected prefix and input references. Its recursive
-graph check remains explicit SQL while conversion proceeds.
-The remaining journal operations use the ORM's explicit SQL interface. ORM table
-references permit every table prefix for Rust and creator code within the bound
-customer schema. The existing Control store's removal remains pending.
+metadata, and retains only the selected prefix and input references. Graph
+checks traverse app-scoped ORM pages with cycle detection and a bounded work
+budget. Every journal and coordinator table has a sole `id` primary key;
+composite domain identities use unique indexes. Restart copies allocate fresh
+row IDs while retaining the recorded effect origin.
+Journal reads and writes use ORM collections. The engine uses main's callback
+transaction API; dropping its local journal handle requests rollback, and
+success waits for confirmed commit. Database-clock SQL runs through a separate
+connection to the same customer database so it cannot contend for the journal's
+held pool lease. Clock reads observe no journal rows.
+Integration with main exposes a remaining ORM blocker: descriptor installation
+and collection handles still reject the reserved workflow table prefix.
+The journal compiles against the public API, but cannot open on either backend
+until that native access is supported. This failure is recorded for the ORM
+owner; workflow retains its table names and leaves main's ORM unchanged.
+The existing Control store's removal remains pending.
 
 Task authorization re-reads the generated task model after acquiring the app
 and run locks, retaining the original scope and generation identity. Lease
@@ -126,13 +137,14 @@ Completion, compensation and continuation writes also use ORM collections.
 Compensation errors are read in descending ordinal pages, and continuation
 retargets parent checkpoints using the complete run, generation and ordinal
 cursor. Native tests cover histories and parent waits that span query pages
-without crossing app or generation boundaries. The atomic relational update
-that wakes waiting parents remains explicit SQL.
+without crossing app or generation boundaries. Waiting parents are discovered
+through app-scoped ORM pages and woken by generation-checked updates under the
+app lock.
 Schedule reconciliation scans historical entries in ordered ORM pages, preserving
 schedule identity and unchanged due times across activation retries. Occurrences,
 overlap checks and run creation use the shared ORM transaction. Revision overflow
-refuses activation and rolls back schedule changes on either backend. Scoped due
-schedule discovery retains its relational SQL query.
+refuses activation and rolls back schedule changes on either backend. Due
+schedule discovery uses typed joins with host scope applied before limits.
 Signal-token authorization reads app and topic epochs through generated models;
 revocation writes the scoped app, run or topic collection under the existing
 locks. Native tests preserve foreign-app and unaffected-target authority,
@@ -144,7 +156,7 @@ Payload admission, lookup, promotion and collection state changes now use ORM
 collections and generated models. Replay and slot reads join payload ownership
 with the complete app and generation scope. Quota aggregation uses native integer
 or exact decimal results without floating-point conversion. Collection discovery
-keeps its host-scoped SQL query; object deletion remains outside the journal
+uses host-scoped ORM reads; object deletion remains outside the journal
 transaction and retains the durable deleting state and tombstones.
 
 This design supersedes the older

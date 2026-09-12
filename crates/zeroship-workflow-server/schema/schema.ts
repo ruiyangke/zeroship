@@ -4,11 +4,12 @@ import { raw, table, t } from "../../../packages/zero-migrate/dist/index.js";
 // db/migrations-ts/20260831000001_sortable_entity_id_collations.ts. This map
 // belongs beside creation because the earlier platform migration cannot see it.
 export const coordinatorIdentityColumns = {
-  workers: ["worker_id"],
-  scopes: ["app_id"],
-  assignments: ["app_id", "worker_id"],
-  placement_receipts: ["app_id", "request_id", "worker_id"],
-  management: ["app_id", "request_id", "run_id", "ack_worker_id"],
+  schema_version: ["id"],
+  workers: ["id", "worker_id"],
+  scopes: ["id", "app_id"],
+  assignments: ["id", "app_id", "worker_id"],
+  placement_receipts: ["id", "app_id", "request_id", "worker_id"],
+  management: ["id", "app_id", "request_id", "run_id", "ack_worker_id"],
 };
 
 // This schema holds coordination metadata only. Customer journals and payload
@@ -21,9 +22,14 @@ export function workflowCoordinatorSchema() {
   const fk = (name, columns, target, targetColumns) => ({
     name, columns, references: { table: target, schema: namespace, columns: targetColumns }, onDelete: "restrict",
   });
-  const create = (name, columns, primaryKey, foreignKeys = []) => {
+  const create = (name, columns, domainKey, foreignKeys = []) => {
     tables.push(name);
-    table(name, { schema: namespace }).create({ columns, primaryKey, foreignKeys });
+    table(name, { schema: namespace }).create({
+      columns: { id: text(), ...columns }, primaryKey: ["id"], foreignKeys,
+    });
+    if (domainKey.length !== 1 || domainKey[0] !== "id") {
+      table(name, { schema: namespace }).index(`${name}_scope_key`).add({ on: domainKey, unique: true });
+    }
   };
   const index = (name, purpose, on) => table(name, { schema: namespace }).index(`${name}_${purpose}_idx`).add({ on });
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);

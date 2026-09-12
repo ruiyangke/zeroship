@@ -7,4 +7,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "app_deploys_app_id_id_key" ON "zeroship"."app
 
 CREATE INDEX IF NOT EXISTS "app_deploys_app_created_idx" ON "zeroship"."app_deploys" ("app_id", "created_at" DESC);
 
-CREATE TABLE "zeroship"."app_deploy_holds" ("app_id" uuid NOT NULL, "deploy_id" text NOT NULL, "holder_id" text NOT NULL, "generation" bigint NOT NULL, "state" text NOT NULL, CONSTRAINT "app_deploy_holds_deployment_fkey" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "zeroship"."app_deploys" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "app_deploy_holds_pkey" PRIMARY KEY (app_id, deploy_id, holder_id));
+CREATE TABLE "zeroship"."app_deploy_holds" ("id" text PRIMARY KEY NOT NULL, "app_id" uuid NOT NULL, "deploy_id" text NOT NULL, "holder_id" text NOT NULL, "generation" bigint NOT NULL, "state" text NOT NULL, CONSTRAINT "app_deploy_holds_deployment_fkey" FOREIGN KEY ("app_id", "deploy_id") REFERENCES "zeroship"."app_deploys" ("app_id", id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "app_deploy_holds_deployment_fkey_idx" ON "zeroship"."app_deploy_holds" ("app_id", "deploy_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "app_deploy_holds_scope_key" ON "zeroship"."app_deploy_holds" ("app_id", "deploy_id", "holder_id");

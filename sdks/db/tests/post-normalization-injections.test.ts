@@ -22,14 +22,10 @@ function recordingNative(): { native: NativeDb; seen: unknown[] } {
 describe("normalization preserves declared columns", () => {
   test("an insert does not carry the version seed to the native op", async () => {
     const { native, seen } = recordingNative();
-    // Positional: (name, schema, native, naming, softDelete, versioning, indexes)
     const Posts = model(
       "posts",
       { id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }), title: t.string().required() },
       native,
-      undefined,
-      false,
-      true,
     );
 
     await Posts.insert({ title: "hello" } as never);
@@ -48,9 +44,6 @@ describe("normalization preserves declared columns", () => {
       "posts",
       { id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }), title: t.string().required() },
       native,
-      undefined,
-      true,
-      false,
     );
 
     await Posts.insert({ title: "hello" } as never);
@@ -70,9 +63,6 @@ describe("normalization preserves declared columns", () => {
       "posts",
       { id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }), title: t.string().required() },
       native,
-      undefined,
-      false,
-      true,
     );
 
     await Posts.insert({ title: "hello" } as never);

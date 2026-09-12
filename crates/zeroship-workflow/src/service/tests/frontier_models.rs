@@ -4,8 +4,9 @@ use crate::{
     service::{app, journal, models, WorkerIdentity},
 };
 use zeroship_data_orm::{
+    budgets::MAX_INSERT_MANY_BATCH,
     orm::{Entity, Operation, Output},
-    sql::{compile::MAX_INSERT_MANY_BATCH, RowLimit},
+    sql::RowLimit,
     value,
 };
 
@@ -38,10 +39,11 @@ async fn postgres_continuation_retargets_every_parent_wait_across_pages() {
 async fn compensation_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, _deployments) = registered_service(store).await;
     let run_id = typed_id::new_workflow_run_id();
+    let foreign_run = typed_id::new_workflow_run_id();
     let count = i32::try_from(RowLimit::default().get()).unwrap() + 1;
     let mut tx = service.begin().await.unwrap();
-    for app_id in [&local, &foreign] {
-        seed_run(&mut tx, app_id, &run_id, "Example").await;
+    for (app_id, run_id) in [(&local, &run_id), (&foreign, &foreign_run)] {
+        seed_run(&mut tx, app_id, run_id, "Example").await;
         for generation in [0, 1] {
             let active = app_id == &local && generation == 0;
             let entries = (0..if active {count} else {1}).map(|ordinal| {
@@ -50,7 +52,7 @@ async fn compensation_contract(store: Rc<OrmStore>) {
                 step.compensation_state = Some(if pending {"pending"} else {"failed"}.into());
                 (step, if pending {None} else {Some(json!({"scope":app_id.as_str(), "generation":generation, "ordinal":ordinal}))})
             }).collect();
-            seed_history(&tx, app_id, &run_id, generation, entries).await;
+            seed_history(&tx, app_id, run_id, generation, entries).await;
         }
     }
     let now = tx.now().await.unwrap();
@@ -95,6 +97,10 @@ async fn compensation_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(status.state, crate::operations::RunState::Failed);
+    assert!(matches!(
+        service.for_app(local.clone()).status(&foreign_run).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
     let error = status.error.unwrap();
     assert_eq!(error["cause"], json!({"message":"original failure"}));
     let failures = error["failures"].as_array().unwrap();
@@ -108,7 +114,7 @@ async fn compensation_contract(store: Rc<OrmStore>) {
     assert_eq!(
         service
             .for_app(foreign)
-            .status(&run_id)
+            .status(&foreign_run)
             .await
             .unwrap()
             .state,
@@ -121,11 +127,22 @@ async fn continuation_contract(store: Rc<OrmStore>) {
     let child = typed_id::new_workflow_run_id();
     let parent = typed_id::new_workflow_run_id();
     let other_parent = typed_id::new_workflow_run_id();
+    let foreign_child = typed_id::new_workflow_run_id();
+    let foreign_parent = typed_id::new_workflow_run_id();
+    let foreign_other_parent = typed_id::new_workflow_run_id();
+    let scopes = [
+        (&local, &child, [&parent, &other_parent]),
+        (
+            &foreign,
+            &foreign_child,
+            [&foreign_parent, &foreign_other_parent],
+        ),
+    ];
     let count = i32::try_from(RowLimit::default().get()).unwrap() + 1;
     let mut tx = service.begin().await.unwrap();
-    for app_id in [&local, &foreign] {
-        seed_run(&mut tx, app_id, &child, "Child").await;
-        for parent_id in [&parent, &other_parent] {
+    for (app_id, child_id, parents) in scopes {
+        seed_run(&mut tx, app_id, child_id, "Child").await;
+        for parent_id in parents {
             seed_run(&mut tx, app_id, parent_id, "Example").await;
             for generation in [0, 1] {
                 let entries = (0..if app_id == &local && parent_id == &parent && generation == 0 {
@@ -142,7 +159,7 @@ async fn continuation_contract(store: Rc<OrmStore>) {
                         step.kind = "child".into();
                         step.state = "running".into();
                         step.output = None;
-                        step.child_run_id = Some(child.clone());
+                        step.child_run_id = Some(child_id.clone());
                         step.child_workflow_name = Some("Child".into());
                         (step, None)
                     })
@@ -175,17 +192,25 @@ async fn continuation_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let status = service.for_app(local.clone()).status(&child).await.unwrap();
+    assert!(matches!(
+        service.for_app(local.clone()).status(&foreign_child).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
     let successor = status.output.unwrap()["continuedAsNew"]
         .as_str()
         .unwrap()
         .to_owned();
     assert_ne!(successor, child);
     let mut tx = service.begin().await.unwrap();
-    for app_id in [&local, &foreign] {
+    for (app_id, child_id, parents) in scopes {
         app::lock_app(&mut tx, app_id).await.unwrap();
-        for parent_id in [&parent, &other_parent] {
+        for parent_id in parents {
             for generation in [0, 1] {
-                let expected = if app_id == &local { &successor } else { &child };
+                let expected = if app_id == &local {
+                    &successor
+                } else {
+                    child_id
+                };
                 let expected_count = if app_id == &local && parent_id == &parent && generation == 0
                 {
                     count
@@ -228,7 +253,7 @@ async fn seed_run(tx: &mut Transaction, app_id: &AppId, id: &str, name: &str) {
         .collection(models::generations::Entity::COLLECTION)
         .unwrap()
         .insert(value!({
-            "app_id":app_id.as_str(), "run_id":id, "generation":1, "deploy_id":deploy.id,
+            "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":1, "deploy_id":deploy.id,
             "input":"null", "state":"queued", "started_at":now,
         }))
         .await
@@ -252,7 +277,7 @@ async fn seed_history(
     entries: Vec<(StepCheckpoint, Option<serde_json::Value>)>,
 ) {
     let documents: Vec<_> = entries.iter().map(|(step, error)| value!({
-        "app_id":app_id.as_str(), "run_id":id, "generation":generation,
+        "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
         "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,
         "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
         "record":serde_json::to_string(step).unwrap(), "compensation_attempts":i64::from(error.is_some()),
@@ -269,7 +294,7 @@ async fn seed_history(
             .unwrap();
     }
     let waits: Vec<_> = entries.iter().filter(|(step, _)| step.kind == "child").map(|(step, _)| value!({
-        "app_id":app_id.as_str(), "run_id":id, "generation":generation,
+        "id":storage_id(), "app_id":app_id.as_str(), "run_id":id, "generation":generation,
         "ordinal":i64::from(step.ordinal), "kind":"child", "child_id":step.child_run_id.clone(),
     })).collect();
     for chunk in waits.chunks(MAX_INSERT_MANY_BATCH) {

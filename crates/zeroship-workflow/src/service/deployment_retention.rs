@@ -99,7 +99,7 @@ impl WorkflowService {
             None => {
                 collection
                     .insert(value!({
-                        "app_id":app.as_str(), "deploy_id":deployment, "deploy_hash":hash,
+                        "id":super::types::storage_id(), "app_id":app.as_str(), "deploy_id":deployment, "deploy_hash":hash,
                         "holder_id":client.scope().holder(), "generation":1, "state":"acquiring"
                     }))
                     .await?;
@@ -261,7 +261,13 @@ impl WorkflowService {
             ]),
         ];
         if let Some(after) = after {
-            predicates.push(source.column(holds::deploy_id).gt(after)?);
+            predicates.push(Predicate::compare(
+                zeroship_data_orm::sql::Operand::Path(source.column(holds::deploy_id).asc().path),
+                zeroship_data_orm::sql::CompareOp::Gt,
+                zeroship_data_orm::sql::Operand::Lit(zeroship_data_orm::sql::Literal::Text(
+                    after.into(),
+                )),
+            ));
         }
         let rows = db
             .from(&source)

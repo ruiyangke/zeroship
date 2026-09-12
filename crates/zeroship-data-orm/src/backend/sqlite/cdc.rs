@@ -9,16 +9,15 @@
 //! before calling the change sink. Hooks cannot query the connection they run on,
 //! and borrowed SQLite values must be copied before returning.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
-use rusqlite::Connection;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
+use rusqlite::Connection;
 use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
 use crate::backend::sqlite::session::SqliteSession;
@@ -74,20 +73,7 @@ pub(crate) struct PendingEvent {
 
 /// Cross-thread payload shipped over the flume channel at COMMIT time.
 ///
-/// `commit_id` counts commits **within one dispatcher**, and a session has
-/// TWO - one per connection, since SC-2 gave the actor a `tx_conn` and an
-/// `op_conn` and both are write paths. Each starts its own counter at 0 and
-/// both publish into the same channel, so two packets from one session can
-/// carry the same `commit_id` and it identifies nothing on its own. Read it as
-/// "the Nth commit on whichever connection sent this", never as a session-wide
-/// commit sequence. (It said "the monotonic per-dispatcher sequence number"
-/// while the actor had one connection; the second one made that reading wrong.)
-///
-/// The `ChangeEvent` shape (`zeroship_data_orm::cdc::ChangeEvent`) does NOT carry
-/// `commit_id` today — surfacing it requires a broker-schema change
-/// (plan §10 Q-P2-E) deferred until a subscriber consumes it. Any such change
-/// has to pair it with the connection identity first, or subscribers inherit
-/// the collision above.
+/// The commit identifier is local to one dispatcher and is used only for logs.
 #[derive(Debug)]
 pub(crate) struct CommitPacket {
     pub(crate) events: Vec<DispositionedEvent>,
@@ -160,14 +146,8 @@ pub(crate) struct SqliteCdcDispatcher {
 /// automatically (rusqlite stores the boxed closures in
 /// `InnerConnection` and frees them in `Drop`).
 ///
-/// `app_id` is currently unused — the per-event app_id is derived
-/// from the `db_name` argument the preupdate hook reports (the ATTACH
-/// alias, which by convention equals the app id). The parameter is
-/// retained so future PRs can override the dispatcher's "default"
-/// label (e.g. for tests opening a connection without an ATTACH).
 pub(crate) fn install(
     conn: &Connection,
-    _app_id: Option<String>,
     packet_tx: CommitSender,
 ) -> Result<SqliteCdcDispatcher, DbError> {
     let buffer = Arc::new(Mutex::new(CdcTxBuffer::new()));
@@ -219,13 +199,7 @@ fn preupdate_callback(
     case: &PreUpdateCase,
     buffer: &Arc<Mutex<CdcTxBuffer>>,
 ) {
-    // Filter system / bookkeeping relations (per plan §6: MV shadow,
-    // audit, migrations, `__zs_*`, `sqlite_*`). The SDK boundary
-    // separately refuses subscribers opening on `__zeroship_mv_*`
-    // names. This early-return is FIRST after the
-    // action discriminant on purpose: filtered relations must never
-    // build a `PendingEvent`, never touch the buffer mutex, never
-    // increment any per-tx counters.
+    // Bookkeeping relations do not enter the change stream.
     if is_filtered_relation(table) {
         return;
     }
@@ -271,10 +245,7 @@ fn preupdate_callback(
             old_values: Some(materialise_old(old_value_accessor)),
         },
         PreUpdateCase::Unknown => {
-            // Plan §10 Q-P2-C — drop silently + tracing::warn once per
-            // session. The "once" gate would require a session-level
-            // flag; a per-fire warn is acceptable noise (the variant
-            // only appears with engine/binding version skew).
+            // The binding cannot describe this change safely, so drop it.
             tracing::warn!(
                 action = ?action,
                 db_name = %db_name,
@@ -455,15 +426,7 @@ fn value_to_string(v: ValueRef<'_>) -> Option<String> {
     }
 }
 
-/// Drop CDC for system / bookkeeping relations. Per plan §6 the
-/// filter is:
-///
-/// - `__zeroship_mv_*`  — materialised-view shadow tables (§13.5)
-/// - `__zeroship_audit_*` — audit trail (§10.7)
-/// - `__zeroship_migrations` — migration audit table
-/// - `__zs_*` - SQLite bookkeeping (e.g. `__zs_migrations`)
-/// - `sqlite_*` — engine-internal (`sqlite_master`, `sqlite_sequence`,
-///   `sqlite_autoindex_*`)
+/// Exclude platform and SQLite bookkeeping relations from CDC.
 fn is_filtered_relation(table: &str) -> bool {
     table.starts_with("__zeroship_mv_")
         || table.starts_with("__zeroship_audit_")
@@ -492,41 +455,22 @@ fn is_filtered_relation(table: &str) -> bool {
 /// thread-safe by construction.
 pub(crate) fn spawn_publisher(
     session: Rc<SqliteSession>,
-    invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
     sink: Arc<dyn ChangeSink>,
 ) -> compio::runtime::JoinHandle<()> {
-    compio::runtime::spawn(publisher_loop(session, invalidations, rx, sink))
+    compio::runtime::spawn(publisher_loop(session, rx, sink))
 }
 
 async fn publisher_loop(
     session: Rc<SqliteSession>,
-    invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
     sink: Arc<dyn ChangeSink>,
 ) {
-    // Cache column order and the declared scalar key until schema invalidation.
     let mut name_cache: HashMap<(String, String), (Vec<String>, Option<String>)> = HashMap::new();
+    let mut schema_versions: HashMap<String, String> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
-        // Backfill pause + schema-pending decoder fence (plan §5 + §7). The
-        // decision itself was taken in the commit hook and rides the packet;
-        // this loop only ACTS on it. Re-sampling `sink.disposition` here is the
-        // bug this shape replaced — see the module rustdoc.
-        //
-        // Suppression is keyed by `app_id` and the dispatcher derives the
-        // per-event `app_id` from the preupdate hook's `db_name` parameter (the
-        // ATTACH alias by convention equals the app id; see `cdc::install` +
-        // `preupdate_callback` for the contract). A single packet carries one
-        // app_id in practice — the writer is single-threaded and the buffer
-        // flushes per-commit — but the stamp is per-event so a future multi-app
-        // commit still carries the right answer for each.
-        //
-        // The counting is debug-only (NOT warn): both the backfill window and
-        // the schema-pending window are normal lifecycle events
-        // (`migrations.run` is the dominant caller of the former;
-        // `bundle_invalidated` of the latter), and a stream of warns during a
-        // deploy would spam operators.
+        // Delivery state is stamped at commit so later scheduling cannot change it.
         let mut suppressed_count: usize = 0;
         let mut schema_pending_count: usize = 0;
         let mut delivered: Vec<PendingEvent> = Vec::with_capacity(packet.events.len());
@@ -557,15 +501,29 @@ async fn publisher_loop(
             continue;
         }
 
+        let mut checked_databases = HashSet::new();
         for pending in delivered {
-            // Look up column names for this (db, table). Cache miss
-            // routes through the session actor's `Query` command —
-            // safe to await here because we're on the compio thread
-            // post-COMMIT, NOT inside a hook.
-            let key = (pending.db_name.clone(), pending.table.clone());
-            if invalidations.borrow_mut().remove(&key) {
-                name_cache.remove(&key);
+            if checked_databases.insert(pending.db_name.clone()) {
+                match fetch_schema_version(&session, &pending.db_name).await {
+                    Ok(version) => {
+                        if schema_versions
+                            .insert(pending.db_name.clone(), version.clone())
+                            .is_some_and(|previous| previous != version)
+                        {
+                            name_cache.retain(|(db_name, _), _| db_name != &pending.db_name);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            app_id = %pending.db_name,
+                            err = %error,
+                            "SQLite CDC schema version lookup failed"
+                        );
+                    }
+                }
             }
+
+            let key = (pending.db_name.clone(), pending.table.clone());
             if !name_cache.contains_key(&key) {
                 match fetch_column_names(&session, &pending.db_name, &pending.table).await {
                     Ok(names) => {
@@ -628,14 +586,21 @@ async fn publisher_loop(
                 old_tuple,
             };
 
-            // Suppression / schema-pending filtering already ran over the
-            // packet's events above, on the stamp the commit hook wrote
-            // (plan §9). The engine-provided sink owns the thread-affine
-            // broker call.
             sink.publish(&event);
         }
     }
     // rx error = sender dropped (backend torn down). Exit cleanly.
+}
+
+async fn fetch_schema_version(session: &SqliteSession, db_name: &str) -> Result<String, DbError> {
+    let sql = format!("PRAGMA {}.schema_version", quote_ident(db_name));
+    session
+        .query(&sql, &[])
+        .await?
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Clone::clone)
+        .ok_or_else(|| DbError::internal("SQLite did not return a schema version"))
 }
 
 async fn fetch_column_names(
@@ -765,7 +730,6 @@ mod tests {
         // Writer session: the real hook triplet, the real `commit_callback`.
         let writer = SqliteSession::open(
             &db_path,
-            None,
             Some(CommitSender::new(tx, sink.clone() as Arc<dyn ChangeSink>)),
         )
         .expect("open writer session");
@@ -805,7 +769,7 @@ mod tests {
         // so dropping the writer can disconnect the channel and let
         // `publisher_loop` return. One session cannot do both: the publisher
         // borrows it for the lifetime of the loop.
-        let reader = SqliteSession::open(&db_path, None, None).expect("open reader");
+        let reader = SqliteSession::open(&db_path, None).expect("open reader");
         reader
             .attach("app_window", &app_path)
             .await
@@ -813,22 +777,15 @@ mod tests {
         let reader = Rc::new(reader);
         drop(writer);
 
-        publisher_loop(
-            reader,
-            Rc::new(RefCell::new(HashSet::new())),
-            rx,
-            sink.clone() as Arc<dyn ChangeSink>,
-        )
-        .await;
+        publisher_loop(reader, rx, sink.clone() as Arc<dyn ChangeSink>).await;
 
         sink.published()
     }
 
     #[compio::test]
     async fn a_backfill_guard_dropped_before_drainage_still_suppresses_its_commit() {
-        // The fence for the whole "Delivery-window semantics" section. Sampling
-        // at dequeue time -- what shipped until 2026-09-03 -- publishes this
-        // event, because by the time the publisher looks the guard is gone.
+        // The delivery disposition is captured when the commit is queued, so a
+        // later guard drop cannot publish a suppressed event.
         assert_eq!(
             drive_window(
                 DeliveryDisposition::Suppressed,

@@ -3,8 +3,8 @@ use quote::quote;
 use serde_json::Value;
 use std::collections::HashSet;
 use syn::{
-    Ident, LitStr, Token, Visibility,
     parse::{Parse, ParseStream},
+    Ident, LitStr, Token, Visibility,
 };
 
 pub struct Input {
@@ -83,31 +83,39 @@ fn flag(def: &Value, name: &str, fallback: bool, span: proc_macro2::Span) -> syn
 }
 
 fn validate_identity(fields: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
-    let keys: Vec<_> = fields
-        .iter()
-        .filter(|(_, definition)| {
-            definition.get("primaryKey").and_then(Value::as_bool) == Some(true)
-        })
-        .collect();
-    if keys.is_empty() {
-        return Err("collection requires a declared primary key");
+    let id = fields
+        .get("id")
+        .ok_or("collection requires an 'id' primary key")?;
+    if id.get("primaryKey").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be declared as its primary key");
     }
-    for (_, key) in keys {
-        if key.get("required").and_then(Value::as_bool) != Some(true) {
-            return Err("primary key columns must be required and non-null");
-        }
-        if key.get("assign").is_some_and(|assignment| {
-            assignment.get("on").and_then(Value::as_str) != Some("insert")
-        }) {
-            return Err("primary key columns can only be assigned on insertion");
-        }
-        if key.get("encrypted").and_then(Value::as_bool) == Some(true)
-            || key
-                .get("mask")
-                .is_some_and(|mask| mask.get("kind").and_then(Value::as_str) != Some("none"))
-        {
-            return Err("primary key columns cannot be masked or encrypted");
-        }
+    if id.get("required").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be required and non-null");
+    }
+    if !matches!(
+        id.get("type").and_then(Value::as_str),
+        Some("string" | "text" | "id" | "integer" | "int" | "bigint" | "bigInt")
+    ) {
+        return Err("collection 'id' must use text or integer storage");
+    }
+    if id.get("encrypted").and_then(Value::as_bool) == Some(true)
+        || id
+            .get("mask")
+            .and_then(Value::as_object)
+            .is_some_and(|mask| mask.get("kind").and_then(Value::as_str) != Some("none"))
+    {
+        return Err("collection 'id' cannot be encrypted or masked");
+    }
+    if id
+        .get("assign")
+        .is_some_and(|assignment| assignment.get("on").and_then(Value::as_str) != Some("insert"))
+    {
+        return Err("collection 'id' can only be assigned on insertion");
+    }
+    if fields.iter().any(|(name, def)| {
+        name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
+    }) {
+        return Err("collection 'id' must be its sole primary key");
     }
     Ok(())
 }
@@ -171,7 +179,7 @@ fn generate(
             let read = readable.then(|| quote!(impl #orm::ReadableColumn for #column {}));
             let filter = filterable.then(|| quote!(impl #orm::FilterableColumn for #column {}));
             let write = writable.then(|| quote!(impl #orm::WritableColumn for #column {}));
-            let update = (writable && def.get("primaryKey").and_then(Value::as_bool) != Some(true))
+            let update = (writable && field != "id")
                 .then(|| quote!(impl #orm::UpdatableColumn for #column {}));
             let default = defaultable.then(|| quote!(impl #orm::DefaultableColumn for #column {}));
             if writable && !defaultable {
@@ -231,7 +239,7 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
         "string" | "text" | "id" | "ref" | "actor" => "Text",
         "int" | "integer" => "Integer",
         "bigInt" => "BigInt",
-        "number" | "float" | "decimal" | "numeric" => "Number",
+        "number" | "float" => "Number",
         "boolean" => "Boolean",
         "bytes" => "Bytes",
         "date" | "timestamp" => "Timestamp",
@@ -277,11 +285,9 @@ mod tests {
                 });
                 let result = generate(&descriptor, &orm, proc_macro2::Span::call_site());
                 if group == "valid" {
-                    assert!(
-                        !result
-                            .unwrap_or_else(|error| panic!("{name}: {error}"))
-                            .is_empty()
-                    );
+                    assert!(!result
+                        .unwrap_or_else(|error| panic!("{name}: {error}"))
+                        .is_empty());
                 } else {
                     assert_eq!(
                         result.expect_err(name).to_string(),

@@ -1,7 +1,7 @@
 use crate::value::Value;
 
-use crate::sql::compile;
 use crate::exec::exec_query;
+use crate::sql::mapping;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -26,8 +26,8 @@ pub enum ApplyMode<'a> {
     },
 }
 
-/// Normalize the update and enforce system assignments. Insert-fixed fields are
-/// refused; write-assigned fields are removed so the SQL builder supplies them.
+/// Normalize the update and enforce descriptor-declared assignments. Insert-fixed
+/// fields are refused; write-assigned fields are removed for the SQL builder.
 pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
     crate::sql::update::normalize(patch)?;
     super::assignment_pass::apply_assignments_on_update(patch, schema)
@@ -36,11 +36,11 @@ pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> 
 /// DB-8: validate every top-level field key of a plain write document
 /// (insert / insertMany element / upsert) with the same `validate_field_name`
 /// fence the read/filter path enforces. Runs on the raw user document before
-/// any system/encryption/mask pass adds its own (legitimately reserved) keys.
+/// protection and assignment passes add reserved storage keys.
 fn validate_user_doc_keys(doc: &Value, schema: &Value) -> Result<(), DbError> {
     if let Some(obj) = doc.as_object() {
         for key in obj.keys() {
-            compile::validate_field_name(key)?;
+            mapping::validate_field_name(key)?;
             if schema.get(key).is_none() {
                 return Err(DbError::validation(
                     "unknown_field",
@@ -61,8 +61,11 @@ fn refuse_generated_identifier(doc: &Value, schema: &Value) -> Result<(), DbErro
         .columns()
         .iter()
         .any(|column| {
-            column.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
-                && obj.contains_key(&column.name)
+            matches!(
+                column.by,
+                zeroship_migrate_policy::AssignmentGenerator::TypedId
+                    | zeroship_migrate_policy::AssignmentGenerator::Identity
+            ) && obj.contains_key(&column.name)
         })
     {
         return Err(DbError::validation(
@@ -78,8 +81,9 @@ fn validate_upsert_conflict_fields(
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
-    let fields = compile::parse_conflict_fields(conflict_fields)?;
+    let fields = mapping::parse_conflict_fields(conflict_fields)?;
     let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
+    let protected = upsert_requires_conflict_probe(schema, doc);
     for field in fields {
         if assignments
             .columns()
@@ -107,6 +111,12 @@ fn validate_upsert_conflict_fields(
                 ),
             ));
         }
+        if protected && doc.get(field).is_some_and(Value::is_null) {
+            return Err(DbError::validation(
+                "protected_upsert_nullable_conflict",
+                "a protected upsert cannot use a null conflict value",
+            ));
+        }
     }
     Ok(())
 }
@@ -124,11 +134,11 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
             // Document-level operator (e.g. $set): its nested keys are fields.
             if let Some(nested) = value.as_object() {
                 for nested_key in nested.keys() {
-                    compile::validate_field_name(nested_key)?;
+                    mapping::validate_field_name(nested_key)?;
                 }
             }
         } else {
-            compile::validate_field_name(key)?;
+            mapping::validate_field_name(key)?;
         }
     }
     Ok(())
@@ -136,11 +146,10 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 
 /// Validate and protect a write using its runtime descriptor. Catalog markers
 /// prevent protection downgrades; row identity is established before encryption.
-/// Mask inputs survive encryption in a sidechannel, and physical storage is
-/// assigned after value encoding. Keys and dialect come from the caller’s setup.
+/// Mask inputs survive encryption in a sidechannel, and the statement builder
+/// performs storage encoding after physical columns are resolved.
 pub async fn apply(
     keys: &crate::encryption::KeyStore,
-    dialect: compile::SqlDialect,
     route: &TxRoute,
     binding: &DbBinding,
     collection: &str,
@@ -154,7 +163,7 @@ pub async fn apply(
         "the write route must belong to the app being written"
     );
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    // Validate creator keys before protection and system passes add reserved storage keys.
+    // Validate creator keys before protection and assignment passes add storage keys.
     match &mode {
         ApplyMode::Insert { .. } | ApplyMode::Upsert { .. } => {
             validate_user_doc_keys(payload, &schema)?;
@@ -202,10 +211,23 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
-            super::identity::assign(route, collection, &schema, payload).await?;
-            let row_pk = row_pk_from_doc(&schema, payload);
+            if super::identity::requires_allocation(&schema, payload) {
+                let request = super::identity::request(
+                    route.schema(),
+                    collection,
+                    &schema,
+                    1,
+                    route.sql_registration(),
+                )?;
+                payload["id"] = crate::backend::identity::reserve(route, request)
+                    .await?
+                    .allocate()
+                    .await?
+                    .remove(0);
+            }
+            let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -213,21 +235,42 @@ pub async fn apply(
             super::assignment_pass::apply_assignments_on_insert_many(
                 payload, &schema, collection, actor_id,
             )?;
-            super::identity::assign(route, collection, &schema, payload).await?;
+            let identities = if super::identity::requires_allocation(&schema, payload) {
+                let request = super::identity::request(
+                    route.schema(),
+                    collection,
+                    &schema,
+                    payload.as_array().expect("batch").len(),
+                    route.sql_registration(),
+                )?;
+                Some(
+                    crate::backend::identity::reserve(route, request)
+                        .await?
+                        .allocate()
+                        .await?,
+                )
+            } else {
+                None
+            };
             let Some(docs) = payload.as_array_mut() else {
                 return Ok(());
             };
+            if let Some(identities) = identities {
+                for (doc, id) in docs.iter_mut().zip(identities) {
+                    doc["id"] = id;
+                }
+            }
             for doc in docs.iter_mut() {
-                let row_pk = row_pk_from_doc(&schema, doc);
+                let row_pk = row_pk_from_doc(doc);
                 stages
-                    .apply_to_doc(keys, dialect, app_id, collection, &row_pk, doc)
+                    .apply_to_doc(keys, app_id, collection, &row_pk, doc)
                     .await?;
             }
             Ok(())
         }
         ApplyMode::Update { row_pk } => {
             stages
-                .apply_to_update(keys, dialect, app_id, collection, row_pk, payload)
+                .apply_to_update(keys, app_id, collection, row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -239,11 +282,19 @@ pub async fn apply(
                 payload, &schema, collection, actor_id,
             )?;
             let allocate_identity = super::identity::requires_allocation(&schema, payload);
-            if allocate_identity {
-                super::identity::reserve_writer(route, collection, &schema).await?;
-            }
-            rewrite_upsert_key_to_existing_row(
-                dialect,
+            let allocation = if allocate_identity {
+                let request = super::identity::request(
+                    route.schema(),
+                    collection,
+                    &schema,
+                    1,
+                    route.sql_registration(),
+                )?;
+                Some(crate::backend::identity::reserve(route, request).await?)
+            } else {
+                None
+            };
+            rewrite_upsert_doc_id_to_existing_row_id(
                 payload,
                 route,
                 collection,
@@ -251,10 +302,16 @@ pub async fn apply(
                 &schema,
             )
             .await?;
-            super::identity::assign(route, collection, &schema, payload).await?;
-            let row_pk = row_pk_from_doc(&schema, payload);
+            if allocate_identity && payload.get("id").is_none_or(Value::is_null) {
+                payload["id"] = allocation
+                    .expect("generated identity reservation")
+                    .allocate()
+                    .await?
+                    .remove(0);
+            }
+            let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -265,7 +322,6 @@ struct WriteStages<'a> {
     schema: &'a Value,
     has_encrypted: bool,
     has_masked: bool,
-    has_storage_encoding: bool,
     has_plain_bytes: bool,
 }
 
@@ -274,7 +330,6 @@ impl<'a> WriteStages<'a> {
         Self {
             has_encrypted: super::schema_has_encrypted_columns(schema),
             has_masked: super::schema_has_masked_columns(schema),
-            has_storage_encoding: crate::sql::codecs::has_storage_encoding(schema),
             has_plain_bytes: super::bytes_pass::schema_has_plain_bytes_columns(schema),
             schema,
         }
@@ -283,17 +338,12 @@ impl<'a> WriteStages<'a> {
     /// Does any stage below have work to do for this collection? A schema with
     /// none of these facets skips the whole pipeline.
     fn any(&self) -> bool {
-        self.has_encrypted || self.has_masked || self.has_storage_encoding || self.has_plain_bytes
+        self.has_encrypted || self.has_masked || self.has_plain_bytes
     }
 
-    /// `keys` and `dialect` ride down from [`apply`] rather than being resolved
-    /// here: the encryption stage wants a key store, not a backend, the binary
-    /// stages want a dialect, not a connection, and this struct makes no
-    /// routing decision it could take either from.
     async fn apply_to_doc(
         &self,
         keys: &crate::encryption::KeyStore,
-        dialect: compile::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -324,9 +374,6 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_storage_encoding {
-            crate::sql::codecs::encode_document(dialect, schema, row)?;
-        }
         // Validate plain bytes after encryption; encrypted fields already hold ciphertext.
         if self.has_plain_bytes {
             super::bytes_pass::validate_bytes_on_write(schema, row)?;
@@ -340,12 +387,9 @@ impl<'a> WriteStages<'a> {
         Ok(())
     }
 
-    /// `keys` and `dialect` ride down from [`apply`], for the reason on
-    /// [`Self::apply_to_doc`].
     async fn apply_to_update(
         &self,
         keys: &crate::encryption::KeyStore,
-        dialect: compile::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -375,9 +419,6 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_storage_encoding {
-            crate::sql::codecs::encode_update(dialect, schema, patch)?;
-        }
         if self.has_plain_bytes {
             super::bytes_pass::validate_bytes_on_update(schema, patch)?;
         }
@@ -390,75 +431,113 @@ impl<'a> WriteStages<'a> {
     }
 }
 
-fn row_pk_from_doc(schema: &Value, doc: &Value) -> String {
-    doc.as_object()
-        .and_then(|fields| crate::row_identity::token(schema, fields))
-        .unwrap_or_default()
+fn row_pk_from_doc(doc: &Value) -> String {
+    row_pk_from_value(doc.get("id"))
+}
+
+fn row_pk_from_value(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => String::new(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TargetRowIdentity {
-    pub key: crate::value::Record,
+pub struct TargetRowId {
+    pub id_value: Value,
     pub row_pk: String,
 }
 
-/// Resolve the complete keys the pending write will touch.
-///
-/// Takes the dispatch's [`TxRoute`] rather than an `app_id`: this read
-/// MUST see the rows the same transaction is about to update, so it has
-/// to run on the same connection the update will. Reading it off the pool
-/// while the update ran in a transaction would resolve pre-transaction
-/// ids.
-///
-/// `schema` is the caller's already-resolved descriptor entry. The probe still
-/// selects every declared key column and decodes its logical value.
-///
-/// `dialect` is the caller's too, and passed in even though this function holds
-/// a [`TxRoute`] it could read one off - the same shape, and the same reason, as
-/// `keys` on [`rewrite_upsert_key_to_existing_row`]. The probe and the
-/// UPDATE it precedes must be written in ONE dialect, and that is the one the
-/// caller resolved for the whole operation, not a second derivation here.
-pub async fn resolve_target_rows(
-    route: &TxRoute,
-    dialect: compile::SqlDialect,
+fn compile_target_probe(
+    namespace: &crate::sql::SchemaName,
     collection: &str,
-    filter: &Value,
+    schema: &Value,
+    filter: super::predicate::Input,
+    limit: i64,
+    registration: &crate::sql::registration::SqlRegistration,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
+    use crate::sql::statement::{
+        ResolvedOperand, ResolvedPredicate, RowLock, SelectParts, SelectStatement,
+        SelectedExpression, Statement,
+    };
+
+    if limit <= 0 {
+        return Err(crate::sql::mapping::QueryError::InvalidFilter(
+            "target probe limit must be positive".into(),
+        ));
+    }
+    let resolved = super::resolved::ResolvedTable::aliased(
+        namespace,
+        collection,
+        "target",
+        schema,
+        registration,
+    )?;
+    let identity = resolved.inputs.get("id").ok_or_else(|| {
+        crate::sql::mapping::QueryError::InvalidFilter("descriptor requires an id field".into())
+    })?;
+    let identity = resolved.table.column(&identity.column)?;
+    let predicate = filter.resolve(schema, &resolved, registration)?;
+    let statement = SelectStatement::new(SelectParts {
+        table: resolved.table,
+        joins: Vec::new(),
+        projection: vec![SelectedExpression {
+            expression: ResolvedOperand::Column(identity),
+            alias: crate::sql::Ident::parse_as("id", crate::sql::IdentRole::Alias)
+                .map_err(crate::sql::compiler::CompileError::from)?,
+        }],
+        predicate,
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: Some(limit),
+        offset: None,
+        distinct: false,
+        lock: RowLock::Update,
+    })?;
+    registration
+        .compile(Statement::Select(statement))
+        .map_err(Into::into)
+}
+
+/// Resolve and lock the identities a protected write will touch. The captured
+/// route keeps this read on the same transaction connection as the write.
+pub async fn resolve_target_row_ids(
+    route: &TxRoute,
+    collection: &str,
+    filter: super::predicate::Input,
     limit: i64,
     schema: &Value,
-) -> Result<Vec<TargetRowIdentity>, DbError> {
+) -> Result<Vec<TargetRowId>, DbError> {
     note_target_row_resolution_for_tests();
-    let mut sql_filter = filter.clone();
-    crate::sql::codecs::lower_filter(dialect, schema, &mut sql_filter);
-    let built = compile::build_write_target_probe(
+    let built = compile_target_probe(
         route.schema(),
         collection,
         schema,
-        &sql_filter,
+        filter,
         limit,
-        dialect,
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
     note_target_row_resolution_sql_for_tests(&built.sql);
-    let mut rows = exec_query(route, built).await?;
-    crate::sql::codecs::decode_rows(dialect, schema, &mut rows)?;
-    rows.into_iter()
-        .map(|row| {
-            let fields = row
-                .as_object()
-                .ok_or_else(|| DbError::internal("write probe returned a non-record"))?;
-            Ok(TargetRowIdentity {
-                key: crate::row_identity::key(schema, fields)?,
-                row_pk: crate::row_identity::token(schema, fields)
-                    .ok_or_else(|| DbError::internal("write probe returned an incomplete identity"))?,
+    let rows = exec_query(route, built).await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let id_value = row.get("id")?.clone();
+            Some(TargetRowId {
+                row_pk: row_pk_from_value(Some(&id_value)),
+                id_value,
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Does this UPDATE touch a randomised-encrypted column?
 ///
 /// The answer decides whether the dispatcher fans the update out per row (each
-/// row's ciphertext is bound to its complete key through the AAD) or issues one
+/// row's ciphertext is bound to its own id through the AAD) or issues one
 /// multi-row statement. It reads THE DESCRIPTOR, which the caller resolved for
 /// the whole operation: a collection with no entry never reaches here, because
 /// `collection_schema` already refused it. Returning `false` on a missing
@@ -537,8 +616,7 @@ fn update_target(patch: &mut Value) -> &mut Value {
 
 /// Resolve a candidate identity before encryption. The upsert's SQL guard
 /// handles conflicts that become visible after this probe.
-async fn rewrite_upsert_key_to_existing_row(
-    dialect: compile::SqlDialect,
+async fn rewrite_upsert_doc_id_to_existing_row_id(
     doc: &mut Value,
     route: &TxRoute,
     collection: &str,
@@ -569,26 +647,25 @@ async fn rewrite_upsert_key_to_existing_row(
         return Ok(());
     }
 
-    let mut filter = Value::Object(filter_obj);
+    let filter = Value::Object(filter_obj);
     note_upsert_conflict_probe_for_tests();
-    crate::sql::codecs::lower_filter(dialect, schema, &mut filter);
-    let built = compile::build_conflict_probe_with_dialect(
+    let built = compile_target_probe(
         route.schema(),
         collection,
         schema,
-        &filter,
-        dialect,
+        super::predicate::Input::Dynamic(filter),
+        1,
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
-    let mut rows = exec_query(route, built).await?;
-    crate::sql::codecs::decode_rows(dialect, schema, &mut rows)?;
-    if let Some(existing) = rows.first() {
-        let fields = existing
-            .as_object()
-            .ok_or_else(|| DbError::internal("conflict probe returned a non-record"))?;
-        for (name, value) in crate::row_identity::key(schema, fields)? {
-            obj.insert(name, value);
-        }
+    let rows = exec_query(route, built).await?;
+    let key = "id";
+    if let Some(existing_id) = rows
+        .first()
+        .and_then(|row| row.get(key))
+        .filter(|value| !value.is_null())
+    {
+        obj.insert(key.to_owned(), existing_id.clone());
     }
     Ok(())
 }
@@ -656,6 +733,83 @@ fn note_upsert_conflict_probe_for_tests() {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn target_probes_compile_dynamic_and_model_predicates_with_backend_locking() {
+        use crate::{
+            crud::predicate::Input,
+            orm::ModelPredicate,
+            sql::{predicate::CompareOp, registration::SqlRegistration, SchemaName},
+        };
+
+        let namespace = SchemaName::new("app").unwrap();
+        let schema = crate::value!({
+            "id": { "type": "string", "primaryKey": true },
+            "name": { "type": "string" }
+        });
+        let dynamic = Input::Dynamic(crate::value!({ "name": "Ada" }));
+        let model = Input::Model(ModelPredicate::Compare {
+            field: "name",
+            op: CompareOp::Eq,
+            value: Value::from("Ada"),
+        });
+
+        for (registration, expects_lock) in [
+            (SqlRegistration::postgres(), true),
+            (SqlRegistration::sqlite(), false),
+        ] {
+            let dynamic = super::compile_target_probe(
+                &namespace,
+                "people",
+                &schema,
+                dynamic.clone(),
+                1,
+                &registration,
+            )
+            .unwrap();
+            let model = super::compile_target_probe(
+                &namespace,
+                "people",
+                &schema,
+                model.clone(),
+                1,
+                &registration,
+            )
+            .unwrap();
+            assert_eq!(dynamic, model);
+            assert!(dynamic
+                .sql
+                .starts_with("SELECT \"target\".\"id\" AS \"id\" FROM "));
+            assert_eq!(dynamic.sql.contains("FOR UPDATE"), expects_lock);
+            assert_eq!(dynamic.params, vec![Value::from("Ada"), Value::from(1_i64)]);
+        }
+    }
+
+    #[test]
+    fn target_probes_reject_storage_shaped_boolean_filters_on_every_backend() {
+        use crate::{
+            crud::predicate::Input,
+            sql::{registration::SqlRegistration, SchemaName},
+        };
+
+        let namespace = SchemaName::new("app").unwrap();
+        let schema = crate::value!({
+            "id": { "type": "string", "primaryKey": true },
+            "active": { "type": "boolean" }
+        });
+
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            let result = super::compile_target_probe(
+                &namespace,
+                "people",
+                &schema,
+                Input::Dynamic(crate::value!({ "active": 1 })),
+                1,
+                &registration,
+            );
+            assert!(result.is_err(), "boolean filters require logical booleans");
+        }
+    }
+
     /// The direct half of the id fence. The prefix validator closed the
     /// DESCRIPTOR vector; this closes the one an attacker reaches without
     /// touching a generated file, by sending `id` on an ordinary insert.
@@ -670,6 +824,26 @@ mod tests {
                 assert_eq!(code, "platform_assigned_field");
             }
             other => panic!("expected the supplied id to be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_supplied_database_identity_is_refused_at_the_document_boundary() {
+        let doc = crate::value!({ "id": 42, "title": "hi" });
+        let schema = crate::value!({
+            "id": {
+                "type": "bigInt",
+                "primaryKey": true,
+                "required": true,
+                "assign": { "by": "identity", "on": "insert" }
+            },
+            "title": { "type": "string" }
+        });
+        match super::refuse_generated_identifier(&doc, &schema) {
+            Err(zeroship_data_orm::error::DbError::ValidationFailed { code, .. }) => {
+                assert_eq!(code, "platform_assigned_field");
+            }
+            other => panic!("expected the supplied identity to be refused, got {other:?}"),
         }
     }
 
@@ -706,7 +880,7 @@ mod tests {
     use zeroship_data_orm::binding::DbBinding;
 
     use super::{
-        ApplyMode, apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys,
+        apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode,
     };
     use crate::backend::sqlite::SqliteBackend;
 
@@ -714,30 +888,18 @@ mod tests {
     fn db8_rejects_reserved_and_malformed_user_doc_keys() {
         use crate::value;
         // A normal document passes.
-        assert!(
-            validate_user_doc_keys(
-                &value!({ "name": "a", "ssn": "x" }),
-                &value!({"name":{}, "ssn":{}})
-            )
-            .is_ok()
-        );
-        // The user must not forge the masked sibling suffix the platform emits.
-        assert!(
-            validate_user_doc_keys(
-                &value!({ "ssn_masked": "x" }),
-                &value!({"name":{}, "ssn":{}})
-            )
-            .is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "name": "a", "ssn": "x" }),
+            &value!({"name":{}, "ssn":{}})
+        )
+        .is_ok());
         // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
-        assert!(
-            validate_user_doc_keys(
-                &value!({ "__zsbin__ssn": true }),
-                &value!({"name":{}, "ssn":{}})
-            )
-            .is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "__zsbin__ssn": true }),
+            &value!({"name":{}, "ssn":{}})
+        )
+        .is_err());
         assert!(
             validate_user_doc_keys(&value!({ "_rank": 1 }), &value!({"name":{}, "ssn":{}}))
                 .is_err()
@@ -762,9 +924,8 @@ mod tests {
         );
         // $set's nested field keys are validated; the operator key itself is skipped.
         assert!(validate_update_patch_keys(&value!({ "$set": { "name": "a" } })).is_ok());
-        assert!(validate_update_patch_keys(&value!({ "$set": { "ssn_masked": "x" } })).is_err());
         // A top-level reserved field key is rejected.
-        assert!(validate_update_patch_keys(&value!({ "ssn_masked": "x" })).is_err());
+        assert!(validate_update_patch_keys(&value!({ "_rank": 1 })).is_err());
     }
 
     #[test]
@@ -772,10 +933,10 @@ mod tests {
         run(async {
             let collection = "people";
             assert!(
-                !crate::sql::compile::RESERVED_ID_PREFIXES.is_empty(),
+                !crate::sql::mapping::RESERVED_ID_PREFIXES.is_empty(),
                 "the reserved-prefix fence must rule on at least one platform prefix"
             );
-            for (index, &prefix) in crate::sql::compile::RESERVED_ID_PREFIXES.iter().enumerate() {
+            for (index, &prefix) in crate::sql::mapping::RESERVED_ID_PREFIXES.iter().enumerate() {
                 let app_id = format!("app_reserved_descriptor_id_prefix_{index}");
                 let binding = DbBinding::cold_start(&app_id);
                 crate::tests::fixtures::cache_schema(
@@ -788,14 +949,9 @@ mod tests {
                 );
                 let mut doc = crate::value!({ "name": "Alice" });
 
-                // The dialect is unobservable in this case and stated rather
-                // than defaulted: the fixture schema declares no encrypted,
-                // masked or binary column, so `WriteStages::any()` is false and
-                // no dialect-sensitive stage runs before the refusal.
                 let (_dir, route) = empty_backend_route(&app_id);
                 let result = apply(
                     &test_key_store(),
-                    SqlDialect::Postgres,
                     &route,
                     &binding,
                     collection,
@@ -839,8 +995,6 @@ mod tests {
             let (_dir, route) = empty_backend_route(app_id);
             apply(
                 &test_key_store(),
-                // Unobservable here for the reason given in the sibling case.
-                SqlDialect::Postgres,
                 &route,
                 &binding,
                 collection,
@@ -858,19 +1012,17 @@ mod tests {
         });
     }
 
-    use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
     use crate::encryption;
-    use crate::tests::fixtures::DatabaseFixture;
+    use crate::sql::registration::SqlRegistration;
     use crate::tests::fixtures::cache_schema;
+    use crate::tests::fixtures::DatabaseFixture;
     use zeroship_migrate::schema::query::FkEmission;
     fn sqlite_fixture_sql(
         schema: &crate::sql::SchemaName,
         table: &str,
         fields: &Value,
         fks: &FkEmission<'_>,
-        dialect: SqlDialect,
     ) -> Result<String, zeroship_migrate::schema::query::QueryError> {
-        assert_eq!(dialect, SqlDialect::Sqlite);
         let policy =
             zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
                 .unwrap()
@@ -961,12 +1113,12 @@ mod tests {
             assert_eq!(
                 row.get("created_by").and_then(Value::as_str),
                 Some(actor),
-                "created_by should be populated by the system-field stage",
+                "the declared insert actor field should be populated",
             );
             assert_eq!(
                 row.get("updated_by").and_then(Value::as_str),
                 Some(actor),
-                "updated_by should be populated by the system-field stage",
+                "the declared update actor field should be populated",
             );
         }
         assert_eq!(
@@ -975,7 +1127,7 @@ mod tests {
             "the field's own column must carry the mask after the relocation stage",
         );
 
-        let raw_col = crate::sql::compile::raw_column_name("ssn");
+        let raw_col = crate::sql::mapping::raw_column_name("ssn");
         let ciphertext = row
             .get(&raw_col)
             .and_then(Value::as_bytes)
@@ -1012,16 +1164,15 @@ mod tests {
             let key_source = encryption::ProjectKeySource::supplied(supplied);
             let binding = DbBinding::cold_start(app_id);
             let collection = "users";
-            let schema =
-                crate::tests::fixtures::schema::generated_fields(crate::value!({
-                    "email": { "type": "string", "required": true, "unique": true },
-                    "name": { "type": "string", "required": true },
-                    "ssn": {
-                        "type": "string",
-                        "encrypted": true,
-                        "mask": { "kind": "last4", "classification": "spi" }
-                    }
-                }));
+            let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
+                "email": { "type": "string", "required": true, "unique": true },
+                "name": { "type": "string", "required": true },
+                "ssn": {
+                    "type": "string",
+                    "encrypted": true,
+                    "mask": { "kind": "last4", "classification": "spi" }
+                }
+            }));
             let ddl_schema = crate::value!({
                 "email": { "type": "string", "required": true, "unique": true },
                 "name": { "type": "string", "required": true },
@@ -1055,7 +1206,6 @@ mod tests {
                 collection,
                 &ddl_schema,
                 &FkEmission::Inline,
-                SqlDialect::Sqlite,
             )
             .expect("build DDL");
             for stmt in ddl.split(";\n") {
@@ -1074,13 +1224,8 @@ mod tests {
                 "name": "Seed",
                 "ssn": "123-45-6789"
             });
-            // SQLite, stated explicitly: the fixture stands up a real
-            // `SqliteBackend`, and this is the dialect a captured route would
-            // have stamped for it. Passing it in is what lets the case run with
-            // no isolate to capture from.
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1101,14 +1246,12 @@ mod tests {
             )
             .await;
 
-            // Query builders consume the complete generated descriptor.
-            let ddl_schema = schema.clone();
-            let insert_built = build_insert_with_dialect(
+            let insert_built = crate::crud::insert::build_one(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
-                &ddl_schema,
-                &insert_doc,
-                SqlDialect::Sqlite,
+                &schema,
+                insert_doc.clone(),
+                &SqlRegistration::sqlite(),
             )
             .expect("build insert");
             let insert_params = &insert_built.params;
@@ -1140,7 +1283,6 @@ mod tests {
             ]);
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1191,7 +1333,6 @@ mod tests {
             );
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1212,7 +1353,7 @@ mod tests {
                  encryption pass wrote to",
             );
             let update_ciphertext = update_target
-                .get(crate::sql::compile::raw_column_name("ssn").as_str())
+                .get(crate::sql::mapping::raw_column_name("ssn").as_str())
                 .and_then(Value::as_bytes)
                 .expect("update ssn ciphertext in the raw column");
             let update_key = backend
@@ -1239,15 +1380,6 @@ mod tests {
             });
             apply(
                 backend.key_store(),
-                // The conflict probe below is the ONE pre-pass that issues SQL
-                // of its own, so this is the arm where the dialect is load
-                // bearing. `apply` takes it as its own parameter rather than
-                // reading the route's, which is why this line exists at all;
-                // the two now agree either way, because
-                // `ambient_route_for_tests` derives the route's dialect from
-                // the SQLite handle below instead of stamping `Postgres` on it
-                // (it did until 2026-09-03, and this comment called that inert).
-                SqlDialect::Sqlite,
                 // No isolate in a unit test: this path is exercised outside any
                 // transaction, which is what the pool route means.
                 &route,
@@ -1278,18 +1410,7 @@ mod tests {
         });
     }
 
-    /// **The protection floor holds on SQLite too, and this is not implied by
-    /// the PostgreSQL gate.**
-    ///
-    /// The two backends recover the mask sentinel by different code: PostgreSQL
-    /// reads `pg_description` in `pg_introspect`, SQLite regexes
-    /// `sqlite_master.sql` in `parse_mask_sentinels`. Either could stop
-    /// populating `ColumnInfo::mask` on its own, and the fence would then wave
-    /// the downgrade through on that backend while `plugin-db/tests/mask_flip.rs`
-    /// stayed green on the other. This is the SQLite half.
-    ///
-    /// It also binds the DEV TIER specifically: `pnpm dev` runs SQLite, so a
-    /// creator's first encounter with a dropped `mask` key happens here.
+    /// SQLite introspection must retain the protection floor recorded in the file.
     #[test]
     fn a_sqlite_write_is_refused_when_the_descriptor_drops_a_mask_the_file_still_records() {
         run(async {
@@ -1315,25 +1436,13 @@ mod tests {
             let handle = crate::backend::BackendHandle::new(Rc::clone(&backend));
             let route = crate::exec::ambient_route_for_tests(app_id, handle);
 
-            // `zeroship-data-orm::sql`'s DDL emitter, so the `zero-migrate:mask:`
-            // sentinel and the `__zs_raw__ssn` sibling are built rather than
-            // spelled out here.
-            //
-            // It is NOT the emitter production runs - that is the migration
-            // engine's, and this one has no `src` call site anywhere. The two
-            // agreed about the raw column's name and disagreed about the
-            // sentinel's spelling until 2026-09-04, and this test was green
-            // throughout, which is exactly what a fixture sharing an emitter
-            // with its reader can be. The oracle that rules on the pair is
-            // `zeroship-data-v8`'s `mask_flip.rs`, which builds with the
-            // ENGINE's emitter; this case still earns its place as the SQLITE
-            // arm of the fence, which that live-PostgreSQL suite cannot reach.
+            // Build the file-backed fixture from its schema so the raw storage
+            // column and masking sentinel match the reader contract.
             let ddl = sqlite_fixture_sql(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &masked,
                 &FkEmission::Inline,
-                SqlDialect::Sqlite,
             )
             .expect("build DDL");
             for stmt in ddl.split(";\n") {
@@ -1350,11 +1459,9 @@ mod tests {
             // Control: under the mask-declaring descriptor the write prepares,
             // and the mask lands in the field's own column.
             cache_schema(app_id, collection, masked);
-            let mut ok_doc =
-                crate::value!({ "ssn": "123-45-6789", "nickname": "alice" });
+            let mut ok_doc = crate::value!({ "ssn": "123-45-6789", "nickname": "alice" });
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1381,7 +1488,6 @@ mod tests {
             let mut doc = crate::value!({ "ssn": "987-65-4321", "nickname": "bob" });
             let err = apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,

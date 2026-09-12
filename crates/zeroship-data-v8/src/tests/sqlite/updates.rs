@@ -3,14 +3,14 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 #[test]
 fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let total = zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 17;
+        let total = zeroship_data_orm::sql::MAX_ROW_LIMIT + 17;
         let body = r#"
 async function bulk() {
     const users = env.db.collection(COLLECTION);
@@ -243,12 +243,15 @@ const _procedures = { seed, updateManyByName };
             !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(" LIMIT {}", zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1);
-        for sql in &counters {
+        let expected_limit = zeroship_data_orm::value::Value::from(
+            zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1,
+        );
+        for query in &counters {
             assert!(
-                sql.ends_with(&expected_limit),
-                "updateMany target resolution must carry the row ceiling; sql={sql}"
+                query.sql.ends_with(" LIMIT $2"),
+                "updateMany target resolution must bind the row ceiling; query={query:?}"
             );
+            assert_eq!(query.params.last(), Some(&expected_limit));
         }
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
@@ -316,8 +319,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target_cap = usize::try_from(zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT)
-            .expect("MAX_QUERY_LIMIT must fit usize");
+        let target_cap = zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS;
         let seeded = target_cap + 1;
         let values = (0..seeded)
             .map(|index| format!("('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"))
@@ -373,11 +375,12 @@ const _procedures = { overflow };
             1,
             "the overflow SQL witness set must contain exactly the exercised probe"
         );
-        let expected_limit = format!(" LIMIT {}", target_cap + 1);
+        let expected_limit = zeroship_data_orm::value::Value::from(target_cap + 1);
         assert!(
-            counters[0].ends_with(&expected_limit),
+            counters[0].sql.ends_with(" LIMIT $2"),
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
+        assert_eq!(counters[0].params.last(), Some(&expected_limit));
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let state = client
@@ -781,7 +784,7 @@ const _procedures = { seed, nestedCasUpdate };
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
-            Some("version_filter_must_be_top_level"),
+            Some("concurrency_filter_must_be_top_level"),
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
@@ -864,7 +867,7 @@ const _procedures = { seed, nestedCasUpdateMany };
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
-            Some("version_filter_must_be_top_level"),
+            Some("concurrency_filter_must_be_top_level"),
             "nested CAS rejection must carry the canonical code: {body}"
         );
 

@@ -234,8 +234,8 @@ impl Coordinator {
             };
             let row = tx
                 .query_one(
-                    "INSERT INTO workflow_coordination.workers(worker_id,capacity,state,expires_at)
-                 VALUES ($1,$2,$3,(floor(extract(epoch FROM clock_timestamp())*1000)::bigint)+$4)
+                    "INSERT INTO workflow_coordination.workers(id,worker_id,capacity,state,expires_at)
+                 VALUES ($1,$1,$2,$3,(floor(extract(epoch FROM clock_timestamp())*1000)::bigint)+$4)
                  ON CONFLICT (worker_id) DO UPDATE SET capacity=$2,state=$3,
                  expires_at=(floor(extract(epoch FROM clock_timestamp())*1000)::bigint)+$4
                  RETURNING worker_id,capacity,state,expires_at",
@@ -313,7 +313,7 @@ fn deadline(now: i64, duration: Duration) -> Result<i64, Error> {
 async fn scope(tx: &Transaction<'_>, app: &AppId, create: bool) -> Result<(), Error> {
     if create {
         tx.execute(
-            "INSERT INTO workflow_coordination.scopes(app_id) VALUES($1) ON CONFLICT DO NOTHING",
+            "INSERT INTO workflow_coordination.scopes(id,app_id) VALUES($1,$1) ON CONFLICT DO NOTHING",
             &[&app.as_str()],
         )
         .await?;

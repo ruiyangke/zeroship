@@ -4,6 +4,7 @@ use super::{
         store_request, validate_run,
     },
     frontier, journal, models,
+    store::Transaction,
     types::digest,
     AppWorkflows, RequestId,
 };
@@ -15,13 +16,17 @@ use crate::{
     WorkflowServiceError,
 };
 use serde_json::json;
+use std::collections::BTreeSet;
+use zeroship_core::app_id::AppId;
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, Operation, Output},
-    sql::Predicate,
+    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
     value,
 };
 
 mod replay;
+
+const MAX_DESCENDANT_INSPECTIONS: usize = 16_384;
 
 impl AppWorkflows {
     pub async fn transition(
@@ -148,7 +153,6 @@ impl AppWorkflows {
         let tasks = tx
             .database()
             .collection(models::tasks::Entity::COLLECTION)?;
-        let runs = tx.table("runs");
         if parse_state(&run.text("state")?)?.is_terminal()
             && live_runs(&tx, &self.app).await? >= policy.max_live_runs
         {
@@ -168,7 +172,7 @@ impl AppWorkflows {
                 "workflow count returned rows".into(),
             ));
         };
-        let descendants=tx.query(&format!("WITH RECURSIVE descendants AS (SELECT id,state FROM {runs} WHERE app_id=$1 AND parent_id=$2 UNION ALL SELECT r.id,r.state FROM {runs} r JOIN descendants d ON r.parent_id=d.id WHERE r.app_id=$1) SELECT id FROM descendants WHERE state NOT IN ('completed','failed','cancelled')"), &[self.app.as_str().into(),run_id.into()]).await?;
+        let active_descendants = has_active_descendants(&tx, &self.app, run_id).await?;
         let db = tx.database();
         let child = db.entity::<models::runs::Entity>()?.alias("r")?;
         let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
@@ -199,7 +203,7 @@ impl AppWorkflows {
             .await?;
         RestartSafety {
             live_lease: live != 0,
-            active_descendants: !descendants.is_empty() || !waiting_children.is_empty(),
+            active_descendants: active_descendants || !waiting_children.is_empty(),
             active_compensation: run.optional_text("compensation_target")?.is_some()
                 && steps.iter().any(|step| {
                     step.compensation_state
@@ -294,7 +298,7 @@ impl AppWorkflows {
         tx.database()
             .collection(models::generations::Entity::COLLECTION)?
             .insert(value!({
-                "app_id":self.app.as_str(), "run_id":run_id, "generation":generation,
+                "id":super::types::storage_id(), "app_id":self.app.as_str(), "run_id":run_id, "generation":generation,
                 "deploy_id":deploy.clone(), "input":previous.input, "input_ref":previous.input_ref,
                 "state":"queued", "started_at":now,
             }))
@@ -333,4 +337,65 @@ impl AppWorkflows {
         tx.commit().await?;
         Ok(result)
     }
+}
+
+/// Restart holds the app lock while inspecting descendants and changing the
+/// generation. Exhaustion or corrupted ancestry cannot authorize a restart.
+async fn has_active_descendants(
+    tx: &Transaction,
+    app: &AppId,
+    root: &str,
+) -> Result<bool, WorkflowServiceError> {
+    let db = tx.database();
+    let run = db.entity::<models::runs::Entity>()?.alias("r")?;
+    let page_limit = RowLimit::default().get();
+    let mut pending = vec![root.to_owned()];
+    let mut inspected = BTreeSet::from([root.to_owned()]);
+    while let Some(parent) = pending.pop() {
+        let mut after: Option<String> = None;
+        loop {
+            let mut filter = vec![
+                run.column(models::runs::app_id).eq(app.as_str())?,
+                run.column(models::runs::parent_id)
+                    .eq(Some(parent.as_str()))?,
+            ];
+            if let Some(after) = &after {
+                filter.push(Predicate::compare(
+                    Operand::Path(run.column(models::runs::id).asc().path),
+                    CompareOp::Gt,
+                    Operand::Lit(Literal::Text(after.clone())),
+                ));
+            }
+            let page = db
+                .from(&run)
+                .filter(Predicate::And(filter))
+                .order_by(run.column(models::runs::id).asc())
+                .select(run.row::<models::KeyedRun>())?
+                .limit(page_limit)?
+                .all()
+                .await?;
+            let count = page.len();
+            for descendant in page {
+                if !inspected.insert(descendant.id.clone()) {
+                    return Err(WorkflowServiceError::Internal(
+                        "workflow descendants contain a cycle".into(),
+                    ));
+                }
+                if inspected.len() > MAX_DESCENDANT_INSPECTIONS {
+                    return Err(WorkflowServiceError::ResourceExhausted(
+                        "workflow descendant inspection limit reached".into(),
+                    ));
+                }
+                if !parse_state(&descendant.state)?.is_terminal() {
+                    return Ok(true);
+                }
+                after = Some(descendant.id.clone());
+                pending.push(descendant.id);
+            }
+            if count < page_limit as usize {
+                break;
+            }
+        }
+    }
+    Ok(false)
 }

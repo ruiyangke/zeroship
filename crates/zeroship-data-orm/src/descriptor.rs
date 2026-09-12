@@ -15,7 +15,7 @@ pub fn install_collections(
 ) -> Result<(), DbError> {
     let mut names = std::collections::HashSet::new();
     for (name, schema) in &collections {
-        crate::sql::compile::validate_collection(name)?;
+        crate::sql::mapping::validate_collection(name)?;
         if !names.insert(name) {
             return Err(DbError::internal(
                 "duplicate collection in the runtime descriptor",
@@ -24,11 +24,9 @@ pub fn install_collections(
         let fields = schema
             .as_object()
             .ok_or_else(|| DbError::internal("collection descriptor must be an object"))?;
-        crate::sql::descriptors::validate_collection_identity(schema).map_err(
-            |message| {
-                DbError::validation("invalid_collection_identity", format!("{name}: {message}"))
-            },
-        )?;
+        crate::sql::descriptors::validate_collection_identity(schema).map_err(|message| {
+            DbError::validation("invalid_collection_identity", format!("{name}: {message}"))
+        })?;
         let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
         crate::sql::lifecycle::soft_delete_column(schema)?;
         crate::sql::lifecycle::concurrency_column(schema)?;
@@ -66,10 +64,10 @@ pub fn install_collections(
                     ));
                 }
             }
-            if crate::sql::compile::is_schema_metadata_key(name) {
+            if crate::sql::mapping::is_schema_metadata_key(name) {
                 continue;
             }
-            crate::sql::compile::validate_field_name(name)?;
+            crate::sql::mapping::validate_field_name(name)?;
             if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some()
                 && definition.get("unique").and_then(Value::as_bool) == Some(true)
             {
@@ -89,14 +87,7 @@ pub fn install_collections(
     Ok(())
 }
 
-/// The descriptor entry for one collection, or a typed error.
-///
-/// **There is no `Option` here on purpose.** The read path used to treat an
-/// absent schema as "carry on", which is how L24 happened: the projection
-/// allowlist stopped applying and the read-identifier check silently passed, so
-/// a read served before the schema arrived returned every physical column and
-/// accepted any field name. A collection the descriptor does not declare is not
-/// a collection this isolate can serve, and saying so is the whole fix.
+/// Require the descriptor entry for a collection served by this isolate.
 pub fn collection_schema(binding: &DbBinding, collection: &str) -> Result<Arc<Value>, DbError> {
     zeroship_data_orm::schema_cache::with(|c| c.require(binding, collection))
 }

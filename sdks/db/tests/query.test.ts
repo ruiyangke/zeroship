@@ -251,20 +251,20 @@ describe("Query select exclusion", () => {
 describe("Query cursor pagination (after)", () => {
   test("after() returns this for chaining", () => {
     const { fn } = makeMockNative([]);
-    const q = new Query("users", {}, fn, undefined, undefined, undefined, undefined, { id: { type:"string", required:true, primaryKey:true } });
+    const q = new Query("users", {}, fn);
     assert.equal(q.after("42"), q);
   });
 
   test("after() merges id $gt condition into empty filter", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", {}, fn, undefined, undefined, undefined, undefined, { id: { type:"string", required:true, primaryKey:true } }).after("100");
+    const q = new Query("users", {}, fn).after("100");
     await q._exec();
     assert.deepEqual(calls[0].filter, { id: { $gt: "100" } });
   });
 
   test("after() wraps existing filter with $and", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", { active: true }, fn, undefined, undefined, undefined, undefined, { id: { type:"string", required:true, primaryKey:true } }).after("50");
+    const q = new Query("users", { active: true }, fn).after("50");
     await q._exec();
     assert.deepEqual(calls[0].filter, {
       $and: [{ active: true }, { id: { $gt: "50" } }],
@@ -274,7 +274,7 @@ describe("Query cursor pagination (after)", () => {
   test("after() does not modify original filter reference", async () => {
     const { fn, calls } = makeMockNative([]);
     const originalFilter = { active: true };
-    const q = new Query("users", originalFilter, fn, undefined, undefined, undefined, undefined, { id: { type:"string", required:true, primaryKey:true } }).after("10");
+    const q = new Query("users", originalFilter, fn).after("10");
     await q._exec();
     // Original filter should be unchanged
     assert.deepEqual(originalFilter, { active: true });
@@ -284,7 +284,7 @@ describe("Query cursor pagination (after)", () => {
 
   test("after() works with sort and limit", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", {}, fn, undefined, undefined, undefined, undefined, { id: { type:"string", required:true, primaryKey:true } }).after("5").sort({ id: 1 }).limit(10);
+    const q = new Query("users", {}, fn).after("5").sort({ id: 1 }).limit(10);
     await q._exec();
     assert.deepEqual(calls[0].filter, { id: { $gt: "5" } });
     assert.deepEqual(calls[0].opts.orderBy, { id: 1 });
@@ -293,7 +293,7 @@ describe("Query cursor pagination (after)", () => {
 
   test("query without after() does not modify filter", async () => {
     const { fn, calls } = makeMockNative([]);
-    const q = new Query("users", { name: "Alice" }, fn, undefined, undefined, undefined, undefined, { id: { type:"string", required:true, primaryKey:true } });
+    const q = new Query("users", { name: "Alice" }, fn);
     await q._exec();
     assert.deepEqual(calls[0].filter, { name: "Alice" });
   });

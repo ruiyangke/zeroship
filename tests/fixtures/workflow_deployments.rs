@@ -85,7 +85,8 @@ impl Deployments {
             ConnectOptions::new(
                 format!("sqlite:{}", path.display()),
                 ProjectKeySource::unavailable(),
-            ),
+            )
+            .connection_authority(),
             deployment_holds::collections().unwrap(),
         )
         .await
@@ -217,12 +218,26 @@ impl Deployments {
         .unwrap()
     }
     pub async fn assert_held(&self, app: &AppId, deployment: &str) {
-        let tx = self.database.begin_transaction().await.unwrap();
+        let rolled_back = self
+            .database
+            .transaction(async |tx| {
+                assert!(matches!(
+                    deployment_holds::fence_reclamation(&tx, app, deployment).await,
+                    Err(WorkflowServiceError::Conflict(_))
+                ));
+                Err::<(), _>(zeroship_data_orm::error::DbError::validation(
+                    "fixture_rollback",
+                    "rollback deployment probe",
+                ))
+            })
+            .await;
         assert!(matches!(
-            deployment_holds::fence_reclamation(&tx, app, deployment).await,
-            Err(WorkflowServiceError::Conflict(_))
+            rolled_back,
+            Err(zeroship_data_orm::error::DbError::ValidationFailed {
+                code: "fixture_rollback",
+                ..
+            })
         ));
-        tx.rollback().await.unwrap();
     }
 }
 

@@ -87,14 +87,8 @@ fn step(value: Value) -> Value {
     json!({"kind":"StepCompleted","ordinal":0,"name":"saved","output":value})
 }
 async fn stored_rows(store: &OrmStore, task: &TaskAssignment) -> usize {
-    let mut tx = store.begin().await.unwrap();
-    let rows = tx
-        .query(
-            &format!("SELECT id FROM {} WHERE task_id=$1", tx.table("payloads")),
-            &[task.id.clone().into()],
-        )
-        .await
-        .unwrap();
+    let tx = store.begin().await.unwrap();
+    let rows = journal_rows(&tx, "payloads", json!({"task_id":task.id})).await;
     tx.commit().await.unwrap();
     rows.len()
 }

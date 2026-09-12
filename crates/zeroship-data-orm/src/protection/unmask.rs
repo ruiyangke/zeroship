@@ -134,7 +134,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 /// The two fetch helpers below are the only readers of that column in the tree.
 /// They formatted the name themselves until this existed, which was coherent
 /// only while the write side did too: `protection::mask_pass` now places the value
-/// under the name `crate::sql::compile::declared_raw_column` resolves, so a
+/// under the name `crate::sql::mapping::declared_raw_column` resolves, so a
 /// SELECT that kept its own `format!` would miss every row a renamed column
 /// stored - and on SQLite it would MISS QUIETLY, because a double-quoted
 /// identifier that matches no column is taken as a string literal and the
@@ -155,7 +155,7 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
     let def = schema.get(canonical_column).ok_or_else(|| {
         DbError::internal(format!("unmask: column '{canonical_column}' vanished"))
     })?;
-    crate::sql::compile::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
+    crate::sql::mapping::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
         DbError::internal(format!(
             "unmask: column '{canonical_column}' has no raw column but passed the mask lookup"
         ))
@@ -399,7 +399,7 @@ async fn fetch_and_decrypt(
         app_id,
         &args.collection,
         &args.column,
-        &crate::row_identity::aad(schema, &args.row_pk)?,
+        args.row_pk.as_bytes(),
     );
 
     {
@@ -889,8 +889,7 @@ async fn write_audit_bulk_row(
 /// entirely — we do NOT silently fall back to masked-only because
 /// that would conceal the authorisation failure from the caller.
 ///
-/// Called from `crud::dispatch_find` BEFORE
-/// `build_find_with_schema` fires the SQL.
+/// Called before read compilation and execution.
 ///
 /// Returns `Ok(())` on full authorisation; on denial returns
 /// `Err(DbError::Coded { code: "unmask_not_permitted", ... })`. The
@@ -1055,7 +1054,11 @@ pub async fn dispatch_unmask_for_query(
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
-        let Some(row_pk) = row.as_object().and_then(|fields| crate::row_identity::token(&schema, fields)) else {
+        let Some(row_pk) = row.get("id").map(|v| match v {
+            Value::String(s) => s.clone(),
+            Value::Number(n) => n.to_string(),
+            _ => String::new(),
+        }) else {
             continue;
         };
         if row_pk.is_empty() {
@@ -1238,10 +1241,7 @@ pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
     })
 }
 
-fn require_string(
-    obj: &crate::value::Map<String, Value>,
-    key: &str,
-) -> Result<String, DbError> {
+fn require_string(obj: &crate::value::Map<String, Value>, key: &str) -> Result<String, DbError> {
     obj.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| DbError::ValidationFailed {
@@ -1431,45 +1431,37 @@ mod tests {
     #[test]
     fn authz_stub_grants_auto_actor() {
         let actor = Some(value!({ "kind": "auto", "id": null }));
-        assert!(
-            check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_grants_auto_1"),
-                &actor,
-                "spi"
-            )
-            .unwrap()
-        );
+        assert!(check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_grants_auto_1"),
+            &actor,
+            "spi"
+        )
+        .unwrap());
         let actor = Some(value!({ "kind": "auto", "id": "system" }));
-        assert!(
-            check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_grants_auto_2"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_grants_auto_2"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
     }
 
     #[test]
     fn authz_stub_denies_user_actor() {
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_denies_user_1"),
-                &actor,
-                "spi"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_denies_user_1"),
+            &actor,
+            "spi"
+        )
+        .unwrap());
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_denies_user_2"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_denies_user_2"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
     }
 
     #[test]
@@ -1480,41 +1472,35 @@ mod tests {
             assert!(
                 !check_unmask_authorization(&DbBinding::cold_start(&app_id), &actor, "pii")
                     .unwrap(),
-                "kind={kind} must be denied by the PR 4 stub"
+                "kind={kind} must be denied by the declared policy"
             );
         }
     }
 
     #[test]
     fn authz_stub_denies_unauthenticated() {
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_unauth_1"),
-                &None,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_unauth_1"),
+            &None,
+            "pii"
+        )
+        .unwrap());
         // Empty object — no `kind` field — also denied.
         let actor = Some(value!({}));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_unauth_2"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_unauth_2"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
         // Actor that isn't an object (e.g. JS passed a string) — denied.
         let actor = Some(value!("auto"));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_unauth_3"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_unauth_3"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
     }
 
     // ---------------------------------------------------------------

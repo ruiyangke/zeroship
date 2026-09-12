@@ -1,4 +1,3 @@
-import { scalarPrimaryKey } from "./schema";
 import type { FieldDef } from "./types";
 /**
  * Lazy query builder for @zeroship/db.
@@ -17,8 +16,13 @@ import {
   Result,
   Row,
   type Actor,
+  type ExactWithSpec,
   type IdValue,
   type RowId,
+  type SelectableField,
+  type SelectInput,
+  type SelectSpec,
+  type SortInput,
   type WithRelations,
   type WithSpec,
   ok,
@@ -172,7 +176,7 @@ export class Query<
   private _skip: number | undefined;
   private _select: string[] | undefined;
   private _afterId: RowId<S> | undefined;
-  private _with: WithSpec | undefined;
+  private _with: WithSpec<S> | undefined;
   private _unmask: string[] | undefined;
   private _actor: Actor | undefined;
   private _unmaskReason: string | undefined;
@@ -205,10 +209,10 @@ export class Query<
 
   /**
    * Sets the sort order.
-   * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
-   * String: `"field"` for ASC, `"-field"` for DESC. Multiple: `"-created_at name"`.
+   * Objects can order by several fields: `{ score: -1, title: 1 }`.
+   * Strings order by one field: `"title"` or `"-score"`.
    */
-  sort(s: Record<string, number> | string): this {
+  sort(s: SortInput<S>): this {
     if (typeof s === "string") {
       const obj: Record<string, number> = {};
       for (const part of s.split(/\s+/).filter(Boolean)) {
@@ -220,7 +224,7 @@ export class Query<
       }
       this._sort = obj;
     } else {
-      this._sort = s;
+      this._sort = s as Record<string, number>;
     }
     return this;
   }
@@ -238,8 +242,8 @@ export class Query<
   }
 
   /**
-   * Cursor pagination compares the collection's sole declared key.
-   * Composite keys require an explicit filter.
+   * Cursor-based pagination: returns documents with `id > afterId`.
+   * Merges an `{ id: { $gt: afterId } }` condition into the filter at execution time.
    */
   after(id: RowId<S>): this {
     this._afterId = id;
@@ -256,9 +260,10 @@ export class Query<
    * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
    * `data[i].user` typechecks without a cast.
    */
-  with<W extends WithSpec>(spec: W): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  with(spec: WithSpec): Query<S, any, AllSchemas>;
-  with(spec: WithSpec): Query<S, any, AllSchemas> {
+  with<const W extends WithSpec<S>>(
+    spec: ExactWithSpec<S, W>,
+  ): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with(spec: WithSpec<S>): Query<S, any, AllSchemas> {
     // Reject early when the Query was constructed without a relation
     // loader (e.g. someone called `new Query(...)` directly outside
     // `Collection.find`). The old behaviour was a silent no-op — the
@@ -273,24 +278,28 @@ export class Query<
         { code: "QUERY_WITH_NO_LOADER" as const },
       );
     }
-    this._with = { ...(this._with ?? {}), ...spec };
+    this._with = { ...(this._with ?? {}), ...spec } as WithSpec<S>;
     return this as unknown as Query<S, any, AllSchemas>;
   }
 
   /**
    * Restricts the returned fields.
-   * String: `"name email"` (space-separated).
+   * String: `"name"`.
    * Array: `["name", "email"]`.
    * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
+   * Untyped direct queries also accept a space-separated string.
    *
    * When called with a typed array of literal field names, the return type narrows
    * to `Query<S, Pick<Row<S>, K>>` so that awaited results only contain those fields.
    */
-  select<K extends keyof Row<S> & string>(fields: K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, P, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, any, AllSchemas> {
+  select<K extends SelectableField<S>>(field: K): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<const Selection extends SelectSpec<S>>(
+    fields: Selection,
+  ): Query<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
+  select(s: SelectInput<S>): Query<S, any, AllSchemas> {
     if (Array.isArray(s)) {
-      this._select = s;
+      this._select = [...s];
     } else if (typeof s === "string") {
       this._select = s.split(" ").filter((f) => f.length > 0);
     } else {
@@ -318,8 +327,8 @@ export class Query<
    * `numItems + 1` rows — the page can be rendered as the final page.
    *
    * The seek predicate is built from the Query's current `.sort(...)`
-   * and the collection's sole declared key. Composite keys require an
-   * explicit seek filter. Cursors are opaque base64-JSON and bound to the
+   * (defaulting to `{ id: 1 }`) so paginate gracefully degenerates to
+   * id-only ordering. Cursors are opaque base64-JSON and bound to the
    * orderBy they were produced under — passing a cursor from a query
    * with a different sort rejects with `paginate: cursor orderBy mismatch`.
    */
@@ -337,12 +346,7 @@ export class Query<
       );
     }
 
-    let key: string;
-    try {
-      key = scalarPrimaryKey(this._schema);
-    } catch (error) {
-      return err(error instanceof Error ? error : new Error(String(error)));
-    }
+    const key = "id";
 
     const orderBy: Record<string, 1 | -1> =
       this._sort !== undefined && Object.keys(this._sort).length > 0
@@ -368,8 +372,12 @@ export class Query<
     // Build the page-window query: apply orderBy + limit(numItems+1) so
     // we can detect isDone by whether the +1 row materialised. The cursor
     // predicate is OR-merged into the existing filter at the column layer.
-    // The emitted order and seek predicate use the same complete tuple,
-    // ending with the declared primary key to break ties deterministically.
+    // The emitted order must be the SAME tuple the seek compares, including
+    // the id tiebreak. Without it the sort is only a partial order: ties in
+    // the caller's keys are broken by whatever the store happens to return,
+    // which the seek then assumes was id order. Appending id here is what
+    // makes `_buildSeekFilter`'s final disjunct meaningful rather than
+    // aspirational.
     const seekOrder: Record<string, 1 | -1> = { ...orderBy };
     if (!(key in seekOrder)) seekOrder[key] = 1;
 
@@ -392,7 +400,7 @@ export class Query<
 
     let filter: ZeroshipDbFilter = this._filter;
     if (cursorState !== null) {
-      const seek = this._buildSeekFilter(orderBy, cursorState, key);
+      const seek = this._buildSeekFilter(orderBy, cursorState);
       const hasKeys = Object.keys(filter).length > 0;
       filter = hasKeys
         ? ({ $and: [filter, seek] } as ZeroshipDbFilter)
@@ -422,7 +430,7 @@ export class Query<
         if (!isIdValue(lastId) || lastId === "") {
           return err(
             Object.assign(
-              new TypeError("paginate: row key must be text or a finite numeric value"),
+              new TypeError("paginate: row id must be text or a finite numeric value"),
               { code: "PAGINATE_INVALID_ID" as const },
             ),
           );
@@ -451,14 +459,16 @@ export class Query<
     return out;
   }
 
-  /** @internal — lexicographic seek over the sort fields and declared key. */
+  /** @internal — build the seek-after predicate for `paginate`. For an
+   *  ascending sort on `F` the predicate is `F > lastValue OR (F = lastValue
+   *  AND id > lastId)`; descending flips the comparators. When the orderBy
+   *  is id-only the compound clause collapses to a single inequality. */
   private _buildSeekFilter(
     orderBy: Record<string, 1 | -1>,
     state: CursorState,
-    primaryKey: string,
   ): ZeroshipDbFilter {
     const keys = Object.keys(orderBy);
-    const lastIdCol = this._toColumn(primaryKey);
+    const lastIdCol = this._toColumn("id");
 
     // Lexicographic seek over (k1, .., kn, id) - the SAME tuple the emitted
     // ORDER BY uses, which is what makes it sound. For each key i, one
@@ -486,8 +496,10 @@ export class Query<
       eqPrefix.push({ [col]: v as ZeroshipDbFilterValue } as ZeroshipDbFilter);
     }
 
-    // The loop already compared the primary key when it was explicitly sorted.
-    if (!keys.includes(primaryKey)) {
+    // The id tiebreak, unless `id` is already one of the ordering keys - in
+    // which case the loop above has already compared it and appending another
+    // term would add an unsatisfiable disjunct (id = X AND id > X).
+    if (!keys.includes("id")) {
       const idCmp = { $gt: state.lastId } as ZeroshipDbFilterValue;
       terms.push({ $and: [...eqPrefix, { [lastIdCol]: idCmp } as ZeroshipDbFilter] } as ZeroshipDbFilter);
     }
@@ -495,17 +507,7 @@ export class Query<
     return (terms.length === 1 ? terms[0] : { $or: terms }) as ZeroshipDbFilter;
   }
 
-  /**
-   * **P9 PR 1** — terminal returning the first matching row, or `null`
-   * when the query has no result. Loose semantics: a missing row is a
-   * normal outcome, not an error. Mirrors what `Collection.findOne`
-   * used to do — drop the old method's behaviour onto the Query
-   * builder.
-   *
-   * Implementation: applies `LIMIT 1` over the current query state and
-   * unwraps the single-row array. The orderBy / select / with / cursor
-   * settings carry through unchanged.
-   */
+  /** Return the first matching row, or `null`. */
   async first(): Promise<Result<P | null>> {
     const prevLimit = this._limit;
     this._limit = 1;
@@ -519,17 +521,7 @@ export class Query<
     }
   }
 
-  /**
-   * **P9 PR 1** — strict terminal: exactly one matching row required.
-   * Returns `err(NotFoundError)` on 0 matches and `err(NotUniqueError)`
-   * on >1 matches. Use this for unique-constraint enforced lookups
-   * (e.g. `find({ email }).unique()` against a `.unique()` column)
-   * where ambiguity is a contract violation, not a normal outcome.
-   *
-   * Implementation: `LIMIT 2` so we can detect "more than one" without
-   * dragging the whole table; if exactly one row materialises, resolve
-   * with it.
-   */
+  /** Return one row, failing when none or multiple rows match. */
   async unique(): Promise<Result<P>> {
     const prevLimit = this._limit;
     this._limit = 2;
@@ -549,16 +541,7 @@ export class Query<
     }
   }
 
-  /**
-   * **P9 PR 1** — terminal returning the last matching row in the
-   * current sort, or `null` when there are no matches. Implemented by
-   * reversing the configured `.sort(...)` and taking the first row;
-   * the original sort is restored before returning.
-   *
-   * Throws `InvalidOperationError("LAST_REQUIRES_SORT")` (as
-   * `err(...)`) if no sort was set on the query — "last" without an
-   * ordering would return arbitrary rows from the storage layer.
-   */
+  /** Return the last row in the configured order, or fail when no order is set. */
   async last(): Promise<Result<P | null>> {
     if (this._sort === undefined || Object.keys(this._sort).length === 0) {
       return err(
@@ -616,17 +599,17 @@ export class Query<
     if (this._actor !== undefined) opts.actor = this._actor;
     if (this._unmaskReason !== undefined) opts.unmaskReason = this._unmaskReason;
 
-    try {
-      // Merge cursor condition into filter
-      let filter: ZeroshipDbFilter = this._filter;
-      if (this._afterId !== undefined) {
-        const cursorCondition: ZeroshipDbFilter = { [this._toColumn(scalarPrimaryKey(this._schema))]: { $gt: this._afterId } };
-        const hasKeys = Object.keys(filter).length > 0;
-        filter = hasKeys
-          ? { $and: [filter, cursorCondition] } as ZeroshipDbFilter
-          : cursorCondition;
-      }
+    // Merge cursor condition into filter
+    let filter: ZeroshipDbFilter = this._filter;
+    if (this._afterId !== undefined) {
+      const cursorCondition: ZeroshipDbFilter = { [this._toColumn("id")]: { $gt: this._afterId } };
+      const hasKeys = Object.keys(filter).length > 0;
+      filter = hasKeys
+        ? { $and: [filter, cursorCondition] } as ZeroshipDbFilter
+        : cursorCondition;
+    }
 
+    try {
       const rows = await this._native(this._collection, filter, opts);
       const list: PlainObject[] = Array.isArray(rows) ? rows : [];
       const mapped = list.map(d => mapResultDoc(d, this._toField)) as P[];

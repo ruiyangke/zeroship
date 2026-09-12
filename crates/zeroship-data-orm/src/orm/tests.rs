@@ -1,33 +1,35 @@
 use super::*;
-use zeroship_data_orm::encryption::ProjectKeySource;
 use crate::value;
+use zeroship_data_orm::encryption::ProjectKeySource;
 
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
 mod bulk;
 mod calendar_date;
-mod composite_identity;
+mod dynamic_reads;
+mod encrypted_upsert;
+mod exact_decimal;
 mod fixtures;
 mod generated_identity;
 mod identity;
 mod identity_contract;
 mod identity_visibility;
-mod encrypted_upsert;
+mod insert_many;
 mod joins;
 mod json;
 mod lifecycle;
 mod nested_temporal;
-mod native_tables;
-mod owned_transactions;
-mod protected_updates;
 mod protected_projections;
+mod protected_updates;
 mod schema_updates;
+mod sql_registration;
 mod timestamp;
 mod typed_arrays;
 mod typed_updates;
 mod update_operators;
 mod update_validation;
+mod upsert_contract;
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -203,7 +205,7 @@ async fn postgres_native_models_round_trip() {
     );
     let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
     let binding = DbBinding::cold_start(&app);
-    let quoted_schema = crate::sql::compile::quote_ident(&app);
+    let quoted_schema = crate::sql::mapping::quote_ident(&app);
     backend
         .execute_fixture(&format!("CREATE SCHEMA {quoted_schema}"), &[])
         .await
@@ -215,7 +217,7 @@ async fn postgres_native_models_round_trip() {
         .await
         .unwrap();
     let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
-    let quoted_role = crate::sql::compile::quote_ident(&role);
+    let quoted_role = crate::sql::mapping::quote_ident(&role);
     backend
         .execute_fixture(
             &format!(
@@ -243,6 +245,158 @@ async fn postgres_native_models_round_trip() {
         .await
         .unwrap();
     backend
+        .execute_fixture(&format!("DROP ROLE {quoted_role}"), &[])
+        .await
+        .unwrap();
+}
+
+#[compio::test]
+async fn platform_service_credentials_drive_orm_authority() {
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
+    crate::tests::fixtures::reset_engine();
+    let admin = Rc::new(
+        zeroship_data_orm::backend::postgres::PostgresBackend::connect(
+            &postgres.url(),
+            2,
+            ProjectKeySource::unavailable(),
+        )
+        .await
+        .unwrap(),
+    );
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let service_role = format!("zs_control_{suffix}");
+    let service_schema = format!("zs_platform_{suffix}");
+    let creator_schema = format!("zs_creator_{suffix}");
+    let quoted_role = crate::sql::mapping::quote_ident(&service_role);
+    let quoted_service_schema = crate::sql::mapping::quote_ident(&service_schema);
+    let quoted_creator_schema = crate::sql::mapping::quote_ident(&creator_schema);
+
+    admin
+        .execute_fixture(
+            &format!("CREATE ROLE {quoted_role} LOGIN PASSWORD 'service-fixture'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    for schema in [&service_schema, &creator_schema] {
+        admin
+            .execute_fixture(
+                &format!("CREATE SCHEMA {}", crate::sql::mapping::quote_ident(schema)),
+                &[],
+            )
+            .await
+            .unwrap();
+        for sql in table_statements(schema, &zeroship_migrate_postgres::DIALECT) {
+            admin.execute_fixture(&sql, &[]).await.unwrap();
+        }
+    }
+    admin
+        .execute_fixture(
+            &format!(
+                "GRANT USAGE ON SCHEMA {quoted_service_schema} TO {quoted_role}; \
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON {quoted_service_schema}.posts TO {quoted_role}; \
+                 ALTER TABLE {quoted_service_schema}.posts ENABLE ROW LEVEL SECURITY; \
+                 ALTER TABLE {quoted_service_schema}.posts FORCE ROW LEVEL SECURITY; \
+                 CREATE POLICY service_role_only ON {quoted_service_schema}.posts \
+                   USING (current_user = '{service_role}') \
+                   WITH CHECK (current_user = '{service_role}')"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let mut service_url = url::Url::parse(&postgres.url()).unwrap();
+    service_url.set_username(&service_role).unwrap();
+    service_url.set_password(Some("service-fixture")).unwrap();
+    let options = crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
+        .max_connections(NonZeroUsize::new(1).unwrap())
+        .connection_authority();
+    let binding = DbBinding::new(
+        "zeroship_control",
+        "platform_fixture",
+        crate::sql::SchemaName::new(&service_schema).unwrap(),
+    );
+    let db = Database::connect(
+        binding,
+        options,
+        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+    )
+    .await
+    .unwrap();
+
+    exercise_native_models(&db).await;
+    let backend = db
+        .backend
+        .get::<zeroship_data_orm::backend::postgres::PostgresBackend>()
+        .unwrap();
+    let cancelled = compio::time::timeout(
+        Duration::from_millis(50),
+        backend.query_scoped_values(db.binding.schema(), "SELECT pg_sleep(1)", &[]),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the query must be cancelled while leased"
+    );
+
+    let client = backend.pool().acquire().await.unwrap();
+    let state = client
+        .query_text_params(
+            "SELECT current_user, current_setting('statement_timeout'), \
+                    current_setting('idle_in_transaction_session_timeout'), \
+                    current_setting('lock_timeout')",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(state[0].get::<_, &str>(0), service_role);
+    assert_eq!(state[0].get::<_, &str>(1), "0");
+    assert_eq!(state[0].get::<_, &str>(2), "0");
+    assert_eq!(state[0].get::<_, &str>(3), "0");
+    drop(client);
+
+    let creator_db = Database::connect(
+        DbBinding::new(
+            "creator_journal",
+            "platform_fixture",
+            crate::sql::SchemaName::new(&creator_schema).unwrap(),
+        ),
+        crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
+            .connection_authority(),
+        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+    )
+    .await
+    .unwrap();
+    let denied = creator_db
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .expect_err("the Control login must not read a creator schema");
+    assert!(denied.message_str().contains("permission denied"));
+    assert!(!matches!(
+        denied,
+        DbError::Configuration {
+            code: crate::error::SCHEMA_NOT_PROVISIONED,
+            ..
+        }
+    ));
+
+    drop(creator_db);
+    drop(db);
+    admin
+        .execute_fixture(&format!("DROP SCHEMA {quoted_creator_schema} CASCADE"), &[])
+        .await
+        .unwrap();
+    admin
+        .execute_fixture(&format!("DROP SCHEMA {quoted_service_schema} CASCADE"), &[])
+        .await
+        .unwrap();
+    admin
         .execute_fixture(&format!("DROP ROLE {quoted_role}"), &[])
         .await
         .unwrap();
@@ -578,13 +732,11 @@ async fn mapped_models_use_the_migration_schema_and_orm_lifecycle() {
         .await
         .unwrap()
         .unwrap();
-    assert!(
-        posts
-            .find::<Post>(Filter::all(), FindOptions::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(posts
+        .find::<Post>(Filter::all(), FindOptions::default())
+        .await
+        .unwrap()
+        .is_empty());
     let collection = db.collection("posts").unwrap();
     assert_eq!(
         count(
@@ -623,14 +775,12 @@ async fn transactions_commit_rollback_and_expire_escaped_collections() {
         })
         .await
         .unwrap();
-    assert!(
-        escaped
-            .find(value!({}), value!({}))
-            .await
-            .unwrap_err()
-            .to_string()
-            .contains("settled")
-    );
+    assert!(escaped
+        .find(value!({}), value!({}))
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("settled"));
     let result: Result<(), DbError> = db
         .transaction(|tx| async move {
             tx.collection("posts")?
@@ -723,7 +873,10 @@ async fn caught_statement_failure_cannot_commit_a_poisoned_transaction() {
 #[compio::test]
 async fn preparation_rejects_a_route_for_another_database() {
     let (db, _directory) = database().await;
-    let route = CapturedRoute::pool_for_tests("another_app", crate::sql::compile::SqlDialect::Sqlite);
+    let route = CapturedRoute::pool_for_tests(
+        "another_app",
+        crate::sql::registration::SqlRegistration::sqlite(),
+    );
     let result = PreparedOperation::new(
         db.binding.clone(),
         "posts",
@@ -772,9 +925,6 @@ struct RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::executor::ScopedExecutor for RegisteredBackend {
-    fn dialect(&self) -> crate::sql::compile::SqlDialect {
-        self.inner.dialect()
-    }
     async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
         self.inner.prepare_for_app(app_id).await
     }
@@ -809,7 +959,10 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::protection::Catalog for RegisteredBackend {
-    async fn introspect_schema(&self, app_id: &str) -> Result<crate::sql::catalog::LiveSchema, DbError> {
+    async fn introspect_schema(
+        &self,
+        app_id: &str,
+    ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         self.inner.introspect_schema(app_id).await
     }
 }
@@ -837,6 +990,10 @@ impl crate::protection::Protection for RegisteredBackend {
 }
 
 impl crate::backend::Backend for RegisteredBackend {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        self.inner.sql_registration().clone()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         self.inner.publishes_committed_changes()
     }
@@ -889,16 +1046,14 @@ async fn exercise_registered_backend(mut db: Database) {
         .await
         .unwrap();
     assert_eq!(found.len(), 1);
-    assert!(
-        posts
-            .find::<Post>(
-                posts::title.eq("registered savepoint").unwrap(),
-                Default::default()
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(posts
+        .find::<Post>(
+            posts::title.eq("registered savepoint").unwrap(),
+            Default::default()
+        )
+        .await
+        .unwrap()
+        .is_empty());
     let rolled_back: Result<(), DbError> = db
         .transaction(|tx| async move {
             let _: Post = tx
@@ -911,16 +1066,14 @@ async fn exercise_registered_backend(mut db: Database) {
         })
         .await;
     assert!(rolled_back.is_err());
-    assert!(
-        posts
-            .find::<Post>(
-                posts::title.eq("registered rollback").unwrap(),
-                Default::default()
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(posts
+        .find::<Post>(
+            posts::title.eq("registered rollback").unwrap(),
+            Default::default()
+        )
+        .await
+        .unwrap()
+        .is_empty());
     assert!(
         queries.get() > 0,
         "autocommit must use the registered driver"
@@ -951,14 +1104,13 @@ async fn changing_backend_registration_refuses_an_open_transaction() {
         })
         .await;
     assert!(result.is_err());
-    assert!(
-        db.entity::<posts::Entity>()
-            .unwrap()
-            .find::<Post>(Filter::all(), Default::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(db
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[cfg(test)]
@@ -1017,15 +1169,13 @@ async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
     .await
     .expect("independent transaction admission must not block");
     assert!(result.is_err());
-    assert!(
-        first
-            .entity::<posts::Entity>()
-            .unwrap()
-            .find::<Post>(Filter::all(), Default::default())
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(first
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .unwrap()
+        .is_empty());
     let rows = second
         .entity::<posts::Entity>()
         .unwrap()
@@ -1078,12 +1228,11 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
     compio::time::timeout(
         std::time::Duration::from_secs(10),
         first.transaction(|tx| async move {
-            assert!(
-                tx.entity::<posts::Entity>()?
-                    .find::<Post>(Filter::all(), Default::default())
-                    .await?
-                    .is_empty()
-            );
+            assert!(tx
+                .entity::<posts::Entity>()?
+                .find::<Post>(Filter::all(), Default::default())
+                .await?
+                .is_empty());
             Ok(())
         }),
     )

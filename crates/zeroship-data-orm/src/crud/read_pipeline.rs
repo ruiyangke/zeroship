@@ -57,52 +57,16 @@ pub struct ApplyResult {
 ///
 /// The sequence is fixed:
 ///
-/// 1. decode (already handled by the backend/exec layer before `rows` arrives)
+/// 1. decode registered storage values
 /// 2. normalize
 /// 3. decrypt encrypted columns
 /// 4. wrap masked columns
 /// 5. apply per-query unmask overrides
 /// 6. restrict the row to its declared surface
 ///
-/// Step 6 is what makes this function the write path's answer too, not just
-/// the read path's: seven of the nine row-returning write verbs already route
-/// their `RETURNING` rows through here, so one stage covers all of them.
-/// (The other five - `updateMany`, `deleteMany`, `purgeMany`, `restoreMany`
-/// and the CAS fan-out - collapse their rows to a count and hand nothing to
-/// JS.)
-///
-/// There is no cold-schema arm. Every stage below is driven by the descriptor
-/// entry, and a collection this deploy's descriptor does not declare is refused
-/// before the first row is touched — it is not served with the coercion,
-/// decrypt and mask stages silently skipped. What used to be the "cold" case is
-/// now the `collection_not_declared` error, and what used to be a warm read of
-/// an EMPTY declared field map still behaves the same way it always did: the
-/// platform system timestamps normalize, and no creator field is coerced.
-///
-/// `route` is a PARAMETER because step 5 issues SQL of its own - one SELECT per
-/// (row, unmasked column), outside `exec` - and it has to run on the same
-/// CONNECTION as the read that produced the rows. Every caller here already
-/// holds a [`crate::tx_route::TxRoute`] and hands it over whole. Step 5 used to
-/// resolve its own backend through the engine funnel, which read ADAPTER state
-/// from an ENGINE file; the funnel now lives at `crate::tx_scope::ensure_backend`
-/// and the value travels down instead.
-///
-/// **It was a `&BackendHandle` until 2026-09-03, and a handle is not a
-/// connection.** Every caller passed `route.backend()`, which lost `in_tx` on
-/// the way in, so step 5's SELECTs went to the autocommit lane while the rows
-/// they were unmasking had come back from the transaction's. Taking the route
-/// whole is what keeps the two together; see
-/// [`super::unmask::dispatch_unmask_for_query`].
-///
-/// **The one backend reference left here is spelled
-/// `route.backend().key_store()`, and reaching for
-/// `crate::backend_handle::BackendHandle` by that path rather than the
-/// `crate::backend` re-export is not cosmetic.** `backend/mod.rs` is
-/// deliberately CONTESTED in `tests/lib/tier_direction_census.sh` - it has no
-/// settled tier - so a reference wearing that path is neither judged nor
-/// trusted: it lands in the census's DROPPED bucket, an ENGINE-to-ENGINE edge
-/// the instrument cannot rule on. `backend_handle.rs` is tiered ENGINE. Do not
-/// "simplify" a re-export path back in.
+/// Every stage is descriptor-driven. Undeclared collections fail before a row
+/// is touched. The whole route is passed because unmasking may issue reads and
+/// must use the same transaction connection as the query that produced `rows`.
 pub async fn apply(
     route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
@@ -111,28 +75,15 @@ pub async fn apply(
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
     let app_id = binding.app_id();
-    // The runtime data-access metadata (column types, encrypted
-    // wrapped type, mask kind/classification) comes from THE RUNTIME
-    // DESCRIPTOR this isolate was built from. It used to come from a live
-    // catalog read plus the migration engine's `zero-migrate:enc:` / `zero-migrate:mask:` column
-    // comments - a round trip through the same DSL the descriptor is folded
-    // from, which recovered a strict subset of it and cost one whole-schema
-    // catalog walk per cold collection.
-    //
-    // The resolution is a `Result`, not an `Option`: a collection this deploy's
-    // descriptor does not declare is refused, never served with the schema
-    // stages silently skipped.
+    // Runtime descriptors are the authority for types and protection metadata.
     let schema = scope_schema(
         crate::descriptor::collection_schema(binding, collection)?,
         &opts.schema_field_scope,
     );
-    crate::sql::codecs::decode_rows(route.dialect(), &schema, &mut rows)?;
+    route.sql_registration().decode_rows(&schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
-        // The key store comes off the handle this read ran on, not off a
-        // second resolution of its own: `route` is already here for step 5,
-        // and one handle per call is what keeps the decrypt keyed to the same
-        // backend that returned the ciphertext.
+        // Use the key store bound to the backend that returned the ciphertext.
         decrypt_rows_on_read(
             route.backend().key_store(),
             app_id,
@@ -180,7 +131,7 @@ fn scope_schema(schema: Arc<Value>, scope: &SchemaFieldScope<'_>) -> Arc<Value> 
             let Some(obj) = owned.as_object_mut() else {
                 return schema;
             };
-            obj.retain(|key, definition| key.starts_with('_') || definition["primaryKey"].as_bool() == Some(true) || fields.iter().any(|field| field == key));
+            obj.retain(|key, _| key.starts_with('_') || fields.iter().any(|field| field == key));
             Arc::new(owned)
         }
     }
@@ -210,7 +161,7 @@ async fn decrypt_rows_on_read(
 /// Restrict the public result after protection consumes internal identity and storage.
 fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
     let allowed = match surface {
-        RowSurface::Declared => crate::sql::compile::read_surface_columns(schema),
+        RowSurface::Declared => crate::sql::mapping::read_surface_columns(schema),
         RowSurface::Projected(names) => names.iter().cloned().collect(),
     };
     for row in rows.iter_mut() {
@@ -280,7 +231,8 @@ mod tests {
         // failed loudly on `not_configured`. It now reaches a working backend
         // instead, so the `assert_eq!` on `result.rows` below is the ONLY thing
         // that rules on the narrowing. Do not weaken it.
-        let (route, dir) = rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
+        let (route, dir) =
+            rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
                 &route,
@@ -296,10 +248,7 @@ mod tests {
             ))
             .expect("aggregate aliases must bypass schema-driven transforms");
 
-        assert_eq!(
-            result.rows,
-            vec![crate::value!({ "secret": 3 })]
-        );
+        assert_eq!(result.rows, vec![crate::value!({ "secret": 3 })]);
         assert!(!result.has_masked);
 
         // The control, and the reason `RowSurface` has no permissive arm: a
@@ -357,7 +306,8 @@ mod tests {
         // `wrap_masked: false` narrowing used to trip, so the `assert_eq!` on
         // `result.rows` and the `has_masked` assertion below are the ONLY
         // things ruling on it.
-        let (route, dir) = rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
+        let (route, dir) =
+            rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
                 &route,

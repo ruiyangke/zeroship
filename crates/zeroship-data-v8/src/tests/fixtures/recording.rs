@@ -2,6 +2,8 @@
 use async_trait::async_trait;
 use futures::future::LocalBoxFuture;
 use std::{cell::RefCell, rc::Rc};
+use zeroship_data_orm::sql::{catalog::LiveSchema, SchemaName};
+use zeroship_data_orm::value::Value;
 use zeroship_data_orm::{
     backend::{Backend, BackendHandle},
     connection::{BackendFactory, ConnectionFactory},
@@ -12,14 +14,24 @@ use zeroship_data_orm::{
     protection::{Catalog, Protection},
     search::{Search, SpatialSearch, VectorSearch},
 };
-use zeroship_data_orm::value::Value;
-use zeroship_data_orm::sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect};
 
 thread_local! {
-    static QUERIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static QUERIES: RefCell<Vec<RecordedQuery>> = const { RefCell::new(Vec::new()) };
 }
-fn record(sql: &str) {
-    QUERIES.with_borrow_mut(|queries| queries.push(sql.to_owned()));
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedQuery {
+    pub(crate) sql: String,
+    pub(crate) params: Vec<Value>,
+}
+
+fn record(sql: &str, params: &[Value]) {
+    QUERIES.with_borrow_mut(|queries| {
+        queries.push(RecordedQuery {
+            sql: sql.to_owned(),
+            params: params.to_vec(),
+        })
+    });
 }
 pub(crate) fn clear() {
     QUERIES.with_borrow_mut(Vec::clear);
@@ -28,17 +40,21 @@ pub(crate) fn bulk_statements() -> Vec<String> {
     QUERIES.with_borrow(|queries| {
         queries
             .iter()
-            .filter(|sql| sql.starts_with("UPDATE ") || sql.starts_with("DELETE "))
-            .cloned()
+            .filter(|query| query.sql.starts_with("UPDATE ") || query.sql.starts_with("DELETE "))
+            .map(|query| query.sql.clone())
             .collect()
     })
 }
 /// Identifier-only reads expose target resolution and upsert conflict probes.
-pub(crate) fn id_probes() -> Vec<String> {
+pub(crate) fn id_probes() -> Vec<RecordedQuery> {
     QUERIES.with_borrow(|queries| {
         queries
             .iter()
-            .filter(|sql| sql.starts_with("SELECT \"id\" FROM "))
+            .filter(|query| {
+                query
+                    .sql
+                    .starts_with("SELECT \"target\".\"id\" AS \"id\" FROM ")
+            })
             .cloned()
             .collect()
     })
@@ -50,8 +66,8 @@ pub(crate) fn connection(url: &str) -> ConnectionFactory {
 }
 struct RecordingFactory(ConnectionFactory);
 impl BackendFactory for RecordingFactory {
-    fn dialect(&self) -> SqlDialect {
-        self.0.dialect()
+    fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+        self.0.sql_registration().clone()
     }
     fn connect(
         &self,
@@ -67,6 +83,10 @@ impl BackendFactory for RecordingFactory {
 #[derive(Debug)]
 struct RecordingBackend(BackendHandle);
 impl Backend for RecordingBackend {
+    fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+        self.0.sql_registration().clone()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         self.0.publishes_committed_changes()
     }
@@ -75,9 +95,6 @@ impl Backend for RecordingBackend {
 impl ScopedExecutor for RecordingBackend {
     fn namespace<'a>(&self, app_id: &'a str, schema: &'a SchemaName) -> &'a str {
         self.0.namespace(app_id, schema)
-    }
-    fn dialect(&self) -> SqlDialect {
-        self.0.dialect()
     }
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         self.0.pool_counts()
@@ -92,7 +109,7 @@ impl ScopedExecutor for RecordingBackend {
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.query(app_id, schema, sql, params).await
     }
     async fn exec(
@@ -102,7 +119,7 @@ impl ScopedExecutor for RecordingBackend {
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.exec(app_id, schema, sql, params).await
     }
     async fn open_tx_session(
@@ -160,11 +177,11 @@ impl DriverSession for RecordingSession {
         self.0.server_process_id()
     }
     async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.query(sql, params).await
     }
     async fn exec(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.exec(sql, params).await
     }
     async fn settle(&self, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {

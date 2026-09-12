@@ -1,54 +1,21 @@
-//! Which CONNECTION a `find({ unmask })` uses, inside `db.transaction(fn)`.
-//!
-//! # The claim these tests exist to rule on
-//!
-//! `run_find` takes ONE `TxRoute` and reads its backend once, so the fence, the
-//! SELECT, the unmask fetch and the audit row all name the same
-//! `BackendHandle`. A handle is not a connection. Only the SELECT goes through
-//! `exec_query`, which honours `route.in_tx()` and issues on the app's parked
-//! transaction client; the other three call the handle directly, and every
-//! `BackendHandle` read lowers to `pg_autocommit::roled_rows`, which does its
-//! own `pool.acquire()` + `BEGIN` + `COMMIT`.
-//!
-//! Two consequences follow, and they are INDEPENDENT - each has its own test
-//! here and each can reproduce without the other:
-//!
-//! 1. a `find({ unmask })` over a row the SAME transaction inserted cannot
-//!    reach the ciphertext, because the pooled connection cannot see an
-//!    uncommitted row;
-//! 2. the audit row for a DENIED unmask commits on its own connection, so it
-//!    survives the rollback of the transaction the attempt was made inside.
-//!
-//! # Why each test carries a control that differs in ONE variable
-//!
-//! "The unmask failed" and "the fixture wrote nothing" are the same observation
-//! from the outside. Test 1 therefore runs the SAME find, on the SAME route,
-//! over the SAME row, with and without `opts.unmask` - so the only difference
-//! between the passing arm and the failing arm is which lane the unmask fetch
-//! took. Test 2 makes an ordinary write inside the same transaction that gets
-//! rolled back: "the audit row survived" means nothing unless something else
-//! that shared its transaction did not.
-//!
-//! PostgreSQL comes from an owned testcontainer with vector and PostGIS.
-//! Docker and successful fixture startup are required.
-//! Run: `cargo xtask test data --filter 'test(unmask_tx_lane::)'`
+//! Transaction routing contracts for unmask reads and their audit writes.
+//! PostgreSQL comes from the mandatory owned testcontainer.
 
 use crate::tests::fixtures;
-use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
-use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::fixture_table_sql;
+use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
 
 use std::rc::Rc;
 
+use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-use crate::sql::compile::SqlDialect;
-use crate::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip: a skipping run of a
 /// masking suite is indistinguishable from a passing one.
@@ -144,18 +111,17 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
-///
-/// The dialect is STATED, not inherited: the two test constructors stamped
-/// `Postgres` unconditionally until 2026-09-03, which happened to be right here
-/// and was wrong on every SQLite harness. This target is live-PostgreSQL only
-/// (`require_pg`), so `Postgres` is the answer its connection actually speaks.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
+    CapturedRoute::tx_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+        .bind(backend(host).await)
+        .unwrap()
 }
 
 /// A route outside any transaction. Dialect stated, as in [`tx_route`].
 async fn pool_route(host: &Host, app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend(host).await)
+    CapturedRoute::pool_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
+        .bind(backend(host).await)
+        .unwrap()
 }
 
 /// Insert one document through the real `run_insert` on `route`, returning the
@@ -184,7 +150,7 @@ async fn find_on(
     opts: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts);
+    let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts).unwrap();
     zeroship_data_orm::crud::run_find(binding, "people".to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)
@@ -205,10 +171,8 @@ fn code_of(err: &DbError) -> String {
 /// **CONSEQUENCE 1.** A `find({ unmask })` inside `db.transaction(fn)` must
 /// reach a row that same transaction inserted.
 ///
-/// The row exists only on the transaction connection. `exec_query` honours
-/// `route.in_tx()` and sees it; the unmask fetch calls `BackendHandle` directly
-/// and lands on `pg_autocommit::roled_rows`, a fresh pooled checkout that
-/// cannot.
+/// The row exists only on the transaction connection, so both the record read
+/// and its protected-column read must remain on that lane.
 ///
 /// **The control differs in exactly one token: `opts.unmask`.** Same route,
 /// same filter, same row, same transaction. The arm without the hint must

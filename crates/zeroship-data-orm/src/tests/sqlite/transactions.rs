@@ -580,11 +580,6 @@ fn a_second_cancellation_is_answered_not_re_executed() {
 
 /// The autocommit lane has an ownership rule too, and it is a *lifetime* rule:
 /// one reservation, one command.
-///
-/// `check_owner` only examined `tx_conn` until 2026-08-27, so this refusal came
-/// from `enter_running` noticing a non-`PENDING` terminal instead - reported as
-/// `statement_cancelled`, which names neither what went wrong nor why. Nothing
-/// was cancelled; a spent reservation was reused.
 #[test]
 fn a_spent_autocommit_reservation_is_refused_as_a_non_owner() {
     Host::test(|host| {
@@ -718,16 +713,8 @@ fn two_apps_hold_transactions_at_the_same_time() {
 /// A transaction connection carries ONE app's file, so a creator transaction
 /// cannot address another tenant's tables at all.
 ///
-/// The control for the arm above, and a boundary rather than a convention: the
-/// shared connection had every attached app's alias on it, so this same
-/// `DELETE` **succeeded** and removed another tenant's row. Nothing in the SQL
-/// builders emits a foreign alias today - the engine's `validate_ident` refuses
-/// a dot-qualified name before any SQL is rendered - which is exactly why the
-/// connection is ALSO the place to enforce it. This cited `cross_app_fk.rs`
-/// until 2026-09-02, itself noting it "has no production caller"; that module
-/// is deleted, and citing a checker nothing calls is not the reassurance this
-/// sentence needs. The guarantee below rests on the connection, not on either
-/// validator.
+/// The connection enforces this boundary even though builders also reject
+/// qualified creator identifiers.
 #[test]
 fn a_transaction_lane_cannot_address_another_apps_tables() {
     Host::test(|host| {

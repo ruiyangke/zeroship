@@ -4,8 +4,9 @@ use crate::{
     service::{app, frontier, journal, models},
 };
 use zeroship_data_orm::{
+    budgets::MAX_INSERT_MANY_BATCH,
     orm::{Entity, FindOptions, FromRow, Operation},
-    sql::{compile::MAX_INSERT_MANY_BATCH, RowLimit},
+    sql::RowLimit,
     value, Value,
 };
 
@@ -31,11 +32,12 @@ async fn postgres_model_journal_reads_preserve_scope_and_complete_history() {
 
 async fn read_contract(store: Rc<OrmStore>) {
     let (service, first_app, second_app, _deployments) = registered_service(store).await;
-    let shared_run = typed_id::new_workflow_run_id();
+    let run_id = typed_id::new_workflow_run_id();
+    let foreign_run = typed_id::new_workflow_run_id();
     let other_run = typed_id::new_workflow_run_id();
     let scopes = [
-        (&first_app, shared_run.as_str()),
-        (&second_app, shared_run.as_str()),
+        (&first_app, run_id.as_str()),
+        (&second_app, foreign_run.as_str()),
         (&first_app, other_run.as_str()),
     ];
     let count = i32::try_from(RowLimit::default().get()).unwrap() + 1;
@@ -74,7 +76,7 @@ async fn read_contract(store: Rc<OrmStore>) {
             .unwrap();
         generations
             .insert(value!({
-                "app_id":app_id.as_str(), "run_id":*run_id, "generation":1, "deploy_id":deploy.id,
+                "id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1, "deploy_id":deploy.id,
                 "input":json!({"scope":scope, "generation":1}).to_string(),
                 "state":"completed", "started_at":now, "terminal_at":now,
                 "output":json!({"scope":scope, "generation":1}).to_string(),
@@ -102,7 +104,7 @@ async fn read_contract(store: Rc<OrmStore>) {
                 )]
             };
             let documents: Vec<_> = checkpoints.iter().map(|step| value!({
-                "app_id":app_id.as_str(), "run_id":*run_id, "generation":generation,
+                "id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":generation,
                 "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":0,
                 "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
                 "record":serde_json::to_string(step).unwrap(),
@@ -120,7 +122,7 @@ async fn read_contract(store: Rc<OrmStore>) {
         }
     }
 
-    let history = journal::load(&mut tx, &first_app, &shared_run, 1)
+    let history = journal::load(&mut tx, &first_app, &run_id, 1)
         .await
         .unwrap();
     assert_eq!(history.len(), count as usize);
@@ -130,14 +132,22 @@ async fn read_contract(store: Rc<OrmStore>) {
     }
     let mut changed = history.last().unwrap().clone();
     changed.output = Some(json!("updated"));
-    journal::update(&mut tx, &first_app, &shared_run, 1, &changed)
+    journal::update(&mut tx, &first_app, &run_id, 1, &changed)
         .await
         .unwrap();
-    let history = journal::load(&mut tx, &first_app, &shared_run, 1)
+    let history = journal::load(&mut tx, &first_app, &run_id, 1)
         .await
         .unwrap();
     assert_eq!(history.len(), count as usize);
     assert_eq!(history.last().unwrap().output, changed.output);
+    assert!(journal::load(&mut tx, &first_app, &foreign_run, 1)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(journal::load(&mut tx, &second_app, &run_id, 1)
+        .await
+        .unwrap()
+        .is_empty());
     for (scope, (app_id, run_id)) in scopes.iter().enumerate() {
         for generation in [0, 1] {
             if scope == 0 && generation == 1 {
@@ -155,8 +165,8 @@ async fn read_contract(store: Rc<OrmStore>) {
     }
     tx.commit().await.unwrap();
 
-    // Reusing a run ID across apps and moving the head across generations
-    // exercises every component of the current-generation join.
+    // Move heads across generations while neighboring app histories retain the
+    // same workflow, step names and ordinals.
     for generation in [0, 1] {
         let mut tx = service.begin().await.unwrap();
         for (app_id, run_id) in scopes {

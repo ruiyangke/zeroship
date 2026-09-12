@@ -13,9 +13,10 @@
 
 use zeroship_data_orm::sql::{Ident, IdentError, IdentRole};
 
-const ALL_ROLES: [IdentRole; 7] = [
+const ALL_ROLES: &[IdentRole] = &[
     IdentRole::Namespace,
     IdentRole::Collection,
+    IdentRole::StoredCollection,
     IdentRole::Column,
     IdentRole::StoredColumn,
     IdentRole::Alias,
@@ -38,6 +39,7 @@ fn _all_roles_covers_the_enum(role: IdentRole) {
     match role {
         IdentRole::Namespace
         | IdentRole::Collection
+        | IdentRole::StoredCollection
         | IdentRole::Column
         | IdentRole::StoredColumn
         | IdentRole::Alias
@@ -68,7 +70,7 @@ fn no_role_accepts_text_that_is_not_an_identifier() {
         "*",
     ];
     let mut ruled_on = 0_usize;
-    for role in ALL_ROLES {
+    for &role in ALL_ROLES {
         for vector in vectors {
             let outcome = Ident::parse_as(vector, role);
             assert!(
@@ -97,7 +99,7 @@ fn no_role_accepts_text_that_is_not_an_identifier() {
 fn ordinary_names_are_accepted() {
     let vectors = ["users", "user_profiles", "a", "created_at", "x1", "A_B_9"];
     let mut ruled_on = 0_usize;
-    for role in ALL_ROLES {
+    for &role in ALL_ROLES {
         for vector in vectors {
             assert!(
                 Ident::parse_as(vector, role).is_ok(),
@@ -109,6 +111,11 @@ fn ordinary_names_are_accepted() {
     assert_eq!(ruled_on, ALL_ROLES.len() * vectors.len());
     assert!(ruled_on >= 30, "ruled on {ruled_on} pairs");
     println!("ruled on {ruled_on} (role, vector) pairs");
+}
+
+#[test]
+fn masked_suffix_is_an_ordinary_declared_column_name() {
+    assert!(Ident::parse_as("shipping_masked", IdentRole::Column).is_ok());
 }
 
 /// The 63-byte boundary is inclusive. Postgres truncates rather than erroring,
@@ -128,22 +135,58 @@ fn the_length_fence_is_inclusive_at_63() {
     println!("ruled on 2 lengths");
 }
 
-/// A table prefix cannot restrict access within a customer's bound schema.
+/// TABLE half of the pair. The shared platform prefixes and the runtime copy of
+/// each shipping backend's catalog prefix are both checked before rendering.
 #[test]
-fn table_references_accept_all_identifier_prefixes() {
-    let names = ["pg_class", "PG_CLASS", "pg_", "__zeroship_migrations", "__ZEROSHIP_x", "sqlite_master", "sqlite_sequence", "page_views", "zeroship_apps", "__zs_internal", "sqlited", "pgx", "__zero_migrate_journal", "__ZERO_MIGRATE_x"];
-    let mut ruled_on = 0;
-    for name in names {
-        assert!(Ident::parse_as(name, IdentRole::Collection).is_ok(), "{name}");
+fn the_table_fence_holds() {
+    let refused = [
+        "pg_class",
+        "PG_CLASS",
+        "pg_",
+        "__zeroship_migrations",
+        "__ZEROSHIP_x",
+        "sqlite_master",
+        "sqlite_sequence",
+    ];
+    let mut ruled_on = 0_usize;
+    for name in refused {
+        let outcome = Ident::parse_as(name, IdentRole::Collection);
+        assert!(
+            matches!(outcome, Err(IdentError::Reserved { .. })),
+            "the table fence let {name:?} through: {outcome:?}"
+        );
         ruled_on += 1;
     }
+    // The control: a name that merely resembles a reserved one must pass, or
+    // the fence is a blanket refusal wearing a table's clothes.
+    //
+    // The two `__zero_migrate` witnesses are ACCEPTED on purpose, and are here
+    // rather than absent so this test rules in both directions. That prefix
+    // fences an empty namespace: the engine's journal tables are
+    // `__zeroship_schema_*`, and the one live object carrying the token is the
+    // rebuild table, named `{table}__zero_migrate_rebuild` - a SUFFIX, which a
+    // prefix list cannot cover.
+    for name in [
+        "page_views",
+        "zeroship_apps",
+        "__zs_internal",
+        "sqlited",
+        "pgx",
+        "__zero_migrate_journal",
+        "__ZERO_MIGRATE_x",
+    ] {
+        assert!(
+            Ident::parse_as(name, IdentRole::Collection).is_ok(),
+            "the table fence over-matched {name:?}"
+        );
+        ruled_on += 1;
+    }
+    assert_eq!(ruled_on, 14);
     assert!(ruled_on >= 10, "ruled on {ruled_on} names");
     println!("ruled on {ruled_on} table names");
 }
 
-/// COLUMN half of the pair - the half a bulk move drops, leaving the survivor
-/// to make the namespace look defended. Mirrors `RESERVED_NAMES`
-/// (`query.rs:738-766`).
+/// Creator columns cannot use platform or backend catalog names.
 #[test]
 fn the_column_fence_holds() {
     let refused = [
@@ -153,8 +196,6 @@ fn the_column_fence_holds() {
         "__zeroship_migrations",
         "pg_attribute",
         "sqlite_master",
-        "ssn_masked",
-        "email_masked",
         "public",
         "pii",
         "spi",
@@ -162,25 +203,19 @@ fn the_column_fence_holds() {
         "pci",
         "internal",
     ];
-    let mut ruled_on = 0_usize;
     for name in refused {
         let outcome = Ident::parse_as(name, IdentRole::Column);
         assert!(
             matches!(outcome, Err(IdentError::Reserved { .. })),
             "the column fence let {name:?} through: {outcome:?}"
         );
-        ruled_on += 1;
     }
     for name in ["masked_ssn", "publication", "internal_id", "distance"] {
         assert!(
             Ident::parse_as(name, IdentRole::Column).is_ok(),
             "the column fence over-matched {name:?}"
         );
-        ruled_on += 1;
     }
-    assert_eq!(ruled_on, 18);
-    assert!(ruled_on >= 15, "ruled on {ruled_on} column names");
-    println!("ruled on {ruled_on} column names");
 }
 
 /// The two fences are genuinely different, which is the whole reason the role
@@ -210,10 +245,7 @@ fn an_alias_may_carry_a_platform_underscore_name_that_a_column_may_not() {
     println!("ruled on 4 alias vectors");
 }
 
-/// The seven system fields are query keys, not forbidden words.
-/// `db.users.find({ id: "..." })` is the canonical shape, and the declaration-
-/// time reservation (`query.rs:867-878`) is a different call site this crate
-/// does not have.
+/// Generated and ordinary application fields are query keys, not forbidden words.
 #[test]
 fn the_assigned_field_names_are_referenceable_columns() {
     // Spelled locally on purpose. The claim under test is about the IDENTIFIER
@@ -232,7 +264,7 @@ fn the_assigned_field_names_are_referenceable_columns() {
     ] {
         assert!(
             Ident::parse_as(name, IdentRole::Column).is_ok(),
-            "the platform field {name:?} is not referenceable as a column"
+            "the application field {name:?} is not referenceable as a column"
         );
         ruled_on += 1;
     }

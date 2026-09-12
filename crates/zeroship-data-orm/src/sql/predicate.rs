@@ -1,19 +1,18 @@
-//! Comparison and logical predicates shared by query plans.
+//! Comparison and logical predicates shared by resolved statements.
 //!
 //! Null checks are distinct nodes. Canonicalization reduces empty conjunctions to
 //! true, empty disjunctions to false, and empty membership to a constant. Ranges
 //! become comparisons so equivalent predicates share a representation.
 //!
 //! Recursive consumers require a bounded tree. `depth` measures it iteratively,
-//! and plan validation enforces `MAX_PREDICATE_DEPTH` before canonicalization or
-//! rendering.
+//! and statement validation enforces `MAX_PREDICATE_DEPTH`.
 
 use crate::sql::ident::Ident;
 use crate::sql::literal::{Literal, LiteralError, LiteralSet};
 use crate::sql::path::FieldPath;
-use core::fmt;
+use core::{cmp::Ordering, fmt};
 
-/// Maximum predicate-tree depth accepted by plan validation.
+/// Maximum predicate-tree depth accepted by statement validation.
 /// Leaves have depth one; a connective adds to its deepest child's depth.
 pub const MAX_PREDICATE_DEPTH: usize = 16;
 
@@ -30,7 +29,7 @@ pub enum CompareOp {
 
 impl CompareOp {
     /// The operator that means the same thing with the operands exchanged.
-    /// Used by [`Predicate::canonical`] so `1 < x` and `x > 1` are one plan.
+    /// Used by [`Predicate::canonical`] so `1 < x` and `x > 1` share a form.
     const fn mirrored(self) -> Self {
         match self {
             Self::Eq => Self::Eq,
@@ -55,8 +54,7 @@ pub enum MembershipOp {
 pub enum PatternOp {
     Like,
     NotLike,
-    /// Case-insensitive. `PostgreSQL`-only; a backend without it must refuse
-    /// rather than emulate, per SC-3's decision 2.
+    /// Case-insensitive. A backend without it must refuse the statement.
     ILike,
     NotILike,
 }
@@ -83,9 +81,7 @@ impl RangeBounds {
 
 /// A `LIKE` pattern.
 ///
-/// A validated newtype rather than a `String` for the same reason everything
-/// else here is one: a bare string reaching a renderer is the shape this crate
-/// exists to remove. The pattern is bound as a parameter, so its content is
+/// A validated newtype rather than a bare string. The pattern is bound as a parameter, so its content is
 /// never parsed as SQL - what this type fences is the NUL byte `PostgreSQL`
 /// `text` cannot carry.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,10 +160,8 @@ impl AggregateFunc {
 
 /// An aggregate over a column, or `COUNT(*)`.
 ///
-/// An aggregate is legal only in a `HAVING` position or a projection; SC-3
-/// names that as one of the invariants the shapes cannot enforce and that
-/// therefore needs a test. It is enforced in [`crate::sql::Select`]'s constructor,
-/// with `aggregate_operand_in_a_filter_is_refused` covering it.
+/// An aggregate is legal only in a `HAVING` position or a projection. The
+/// resolved statement constructor enforces that placement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AggregateRef {
     func: AggregateFunc,
@@ -424,8 +418,7 @@ impl Predicate {
 
     /// A bounded range, desugared to two comparisons.
     ///
-    /// See the module note: this is a constructor rather than a node so that
-    /// one logical plan has one spelling.
+    /// This is a constructor rather than a node so equivalent ranges share a form.
     ///
     /// Infallible, and provably so rather than by omission: the result is
     /// `And([Compare, Compare])`, whose depth is 2 whatever the operands are,
@@ -442,12 +435,8 @@ impl Predicate {
 
     /// Membership, with the null rule applied at construction.
     ///
-    /// `members` is a list of **optional** literals, and that signature is the
-    /// whole mechanism: a caller translating a wire array cannot get a null
-    /// past this without the `None` arm being handled, because a null is not a
-    /// [`Literal`] and never becomes one. The partition below reproduces the
-    /// lowering `query.rs` arrived at after the defect
-    /// (`query.rs:5386-5409` for `In`, `:5424-5444` for `NotIn`):
+    /// Optional literals keep SQL null outside [`Literal`] and force callers to
+    /// handle it structurally:
     ///
     /// | values | nulls | `In`                          | `NotIn`                              |
     /// | ------ | ----- | ----------------------------- | ------------------------------------ |
@@ -525,31 +514,10 @@ impl Predicate {
         }
     }
 
-    /// The canonical form of this predicate.
-    ///
-    /// Two predicates that mean the same thing must produce the same SQL, or
-    /// the driver's prepared-statement cache sees two entries for one logical
-    /// operation and hits neither. Canonicalisation is what makes that true,
-    /// and every transformation below preserves meaning:
-    ///
-    /// * **flatten** nested `And`/`Or` of the same connective (associativity),
-    ///   so `And([And([a, b]), c])` and `And([a, b, c])` converge;
-    /// * **absorb** constants - `And` drops `TRUE` and collapses on `FALSE`,
-    ///   `Or` the dual;
-    /// * **sort and deduplicate** children (commutativity and idempotence), so
-    ///   `And([b, a])` and `And([a, b])` converge. SQL does not promise an
-    ///   evaluation order for `AND` in the first place, so nothing observable
-    ///   depends on the authored order;
-    /// * **unwrap** a one-child connective and turn an empty one into its
-    ///   identity - `And([])` to `TRUE`, `Or([])` to `FALSE`;
-    /// * **push `Not` through** a constant, a double negation, and an
-    ///   `IsNull`. The last is exact rather than approximate: `IS NULL` never
-    ///   evaluates to NULL, so negating it is ordinary two-valued logic;
-    /// * **orient comparisons** so the smaller operand leads, mirroring the
-    ///   operator - `1 < x` becomes `x > 1`.
-    ///
-    /// Notably absent: no De Morgan rewriting and no reordering of anything
-    /// order-sensitive. `ORDER BY` keys are never touched, here or anywhere.
+    /// Normalize boolean structure without making SQL shape depend on literal
+    /// values. Connectives flatten, absorb constants, remove exact duplicates,
+    /// and order children by their SQL structure. Comparisons orient columns
+    /// before literals, and simple negations collapse.
     #[must_use]
     pub fn canonical(self) -> Self {
         match self {
@@ -598,6 +566,7 @@ impl Predicate {
         }
         flat.sort();
         flat.dedup();
+        flat.sort_by(predicate_structure_cmp);
         match flat.len() {
             0 => Self::Const(identity),
             1 => flat.pop().unwrap_or(Self::Const(identity)),
@@ -610,6 +579,114 @@ impl Predicate {
             }
         }
     }
+}
+
+fn predicate_structure_cmp(left: &Predicate, right: &Predicate) -> Ordering {
+    let rank = |predicate: &Predicate| match predicate {
+        Predicate::And(_) => 0,
+        Predicate::Or(_) => 1,
+        Predicate::Not(_) => 2,
+        Predicate::Compare { .. } => 3,
+        Predicate::Membership { .. } => 4,
+        Predicate::Pattern { .. } => 5,
+        Predicate::IsNull { .. } => 6,
+        Predicate::Const(_) => 7,
+    };
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (Predicate::And(left), Predicate::And(right))
+            | (Predicate::Or(left), Predicate::Or(right)) => predicate_slices_cmp(left, right),
+            (Predicate::Not(left), Predicate::Not(right)) => predicate_structure_cmp(left, right),
+            (
+                Predicate::Compare {
+                    lhs: left_lhs,
+                    op: left_op,
+                    rhs: left_rhs,
+                },
+                Predicate::Compare {
+                    lhs: right_lhs,
+                    op: right_op,
+                    rhs: right_rhs,
+                },
+            ) => operand_structure_cmp(left_lhs, right_lhs)
+                .then_with(|| left_op.cmp(right_op))
+                .then_with(|| operand_structure_cmp(left_rhs, right_rhs)),
+            (
+                Predicate::Membership {
+                    lhs: left_lhs,
+                    op: left_op,
+                    set: left_set,
+                },
+                Predicate::Membership {
+                    lhs: right_lhs,
+                    op: right_op,
+                    set: right_set,
+                },
+            ) => operand_structure_cmp(left_lhs, right_lhs)
+                .then_with(|| left_op.cmp(right_op))
+                .then_with(|| left_set.len().cmp(&right_set.len()))
+                .then_with(|| {
+                    left_set.values()[0]
+                        .type_name()
+                        .cmp(right_set.values()[0].type_name())
+                }),
+            (
+                Predicate::Pattern {
+                    lhs: left_lhs,
+                    op: left_op,
+                    escape: left_escape,
+                    ..
+                },
+                Predicate::Pattern {
+                    lhs: right_lhs,
+                    op: right_op,
+                    escape: right_escape,
+                    ..
+                },
+            ) => operand_structure_cmp(left_lhs, right_lhs)
+                .then_with(|| left_op.cmp(right_op))
+                .then_with(|| left_escape.is_some().cmp(&right_escape.is_some())),
+            (
+                Predicate::IsNull {
+                    operand: left_operand,
+                    negated: left_negated,
+                },
+                Predicate::IsNull {
+                    operand: right_operand,
+                    negated: right_negated,
+                },
+            ) => operand_structure_cmp(left_operand, right_operand)
+                .then_with(|| left_negated.cmp(right_negated)),
+            (Predicate::Const(left), Predicate::Const(right)) => left.cmp(right),
+            _ => Ordering::Equal,
+        })
+}
+
+fn predicate_slices_cmp(left: &[Predicate], right: &[Predicate]) -> Ordering {
+    for (left, right) in left.iter().zip(right) {
+        let order = predicate_structure_cmp(left, right);
+        if order != Ordering::Equal {
+            return order;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+fn operand_structure_cmp(left: &Operand, right: &Operand) -> Ordering {
+    let rank = |operand: &Operand| match operand {
+        Operand::Path(_) => 0,
+        Operand::Aggregate(_) => 1,
+        Operand::Lit(_) => 2,
+    };
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (Operand::Path(left), Operand::Path(right)) => left.cmp(right),
+            (Operand::Aggregate(left), Operand::Aggregate(right)) => left.cmp(right),
+            (Operand::Lit(left), Operand::Lit(right)) => left.type_name().cmp(right.type_name()),
+            _ => Ordering::Equal,
+        })
 }
 
 /// Why a predicate part was refused.
@@ -690,6 +767,31 @@ mod tests {
             flat,
             "nesting, order and a duplicate must all normalise away"
         );
+    }
+
+    #[test]
+    fn connective_order_does_not_depend_on_bound_values() {
+        let widths = |predicate: Predicate| match predicate {
+            Predicate::And(children) => children
+                .into_iter()
+                .map(|child| match child {
+                    Predicate::Membership { set, .. } => set.len(),
+                    _ => panic!("expected membership predicate"),
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!("expected conjunction"),
+        };
+        let member = |values: &[i64]| {
+            Predicate::membership(
+                col("age"),
+                MembershipOp::In,
+                values.iter().copied().map(Literal::Int).map(Some).collect(),
+            )
+            .unwrap()
+        };
+        let low_first = Predicate::and(vec![member(&[0]), member(&[10, 11])]).unwrap();
+        let high_first = Predicate::and(vec![member(&[9]), member(&[1, 2])]).unwrap();
+        assert_eq!(widths(low_first), widths(high_first));
     }
 
     #[test]

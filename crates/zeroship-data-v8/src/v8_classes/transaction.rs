@@ -607,13 +607,8 @@ pub(crate) fn build_settle_resolve_value(
 mod tests {
     //! Shape guards for the `Db.transaction(fn)` callback argument.
     //!
-    //! The proposal (Q-P9-C, §4.4) fixes the tx-view as **collections
-    //! only** — no `commit` / `rollback` / `collection` / `transaction` /
-    //! `live` method. These tests mint a view directly (no DB needed —
-    //! the per-thread schema cache is empty in this test context, so the
-    //! view is a bare object) and assert no tx-lifecycle method leaked
-    //! onto it. If a future change re-introduces a `commit`/`rollback`
-    //! method on the view, these fail.
+    //! The transaction view exposes collections without transaction lifecycle
+    //! or subscription methods.
     #![allow(unsafe_code)]
 
     use zeroship_runtime::init_v8;
@@ -639,8 +634,8 @@ mod tests {
         let binding = crate::tests::fixtures::binding("test_app");
         let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
 
-        // None of the legacy `Transaction` methods, nor `transaction` /
-        // `live`, may appear on the view.
+        // The transaction view exposes collections without lifecycle or
+        // subscription methods.
         for forbidden in [
             "commit",
             "rollback",
@@ -687,16 +682,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // The settle-lowering arms, MOVED here from the engine's
-    // `transaction/mod.rs` with the data-engine cut on 2026-09-03.
-    //
-    // They rule on `build_settle_resolve_value`, which is defined in THIS file
-    // and lowers an engine `SettleOutcome` into a runtime `ResolveValue`. They
-    // could not travel with the module whose outcomes they check:
-    // `zeroship-data-orm` declares neither `v8` nor `zeroship-runtime`, by
-    // design, so `ResolveValue` is not nameable there.
-    // ---------------------------------------------------------------------
+    // Adapter tests for lowering ORM settlement into V8 results.
 
     /// The settle's own code reaches the creator, UNWRAPPED.
     ///

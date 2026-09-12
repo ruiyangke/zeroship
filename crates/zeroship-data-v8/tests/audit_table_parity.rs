@@ -14,7 +14,7 @@ use zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE as SQLITE_CREATOR;
 /// failure but the one that would ship silently.
 const AUDIT_TABLE: &str = "__zeroship_audit_unmask";
 
-/// The prefix reserved for migration-provisioned declarations.
+/// The prefix that makes this name unreachable for a creator collection.
 const RESERVED_PREFIX: &str = "__zeroship_";
 
 /// The binding proper: three crates, one name.
@@ -71,32 +71,38 @@ fn the_postgres_apply_host_creates_the_relation_the_writer_targets() {
     );
 }
 
-/// Migration declarations prevent name collisions; ORM references remain
-/// transparent within the bound schema. A reserved prefix is not an access
-/// boundary for the existing table.
+/// Why the name is safe to hardcode at all, held against the fence that makes
+/// it so.
+///
+/// This is the arm the three above cannot cover: they would all stay green if
+/// the shared name were renamed to something a creator can also declare. The
+/// relation lives in the creator's OWN schema alongside their tables, so the
+/// only thing stopping a creator from declaring a colliding collection - and
+/// thereby handing the worker a relation the creator controls to write its
+/// audit log into - is that the schema authority refuses the `__zeroship_`
+/// prefix on an inbound collection name.
 #[test]
-fn audit_declaration_reservations_do_not_restrict_runtime_table_references() {
-    let vendors = zeroship_migrate::shipping_vendors();
+fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
     assert!(
         AUDIT_TABLE.starts_with(RESERVED_PREFIX),
         "{AUDIT_TABLE} left the reserved platform namespace {RESERVED_PREFIX}",
     );
     assert!(
-        zeroship_migrate::schema::query::validate_collection(vendors, AUDIT_TABLE).is_err(),
-        "migration declarations must prevent collisions with {AUDIT_TABLE}",
+        zeroship_data_orm::sql::mapping::validate_collection(AUDIT_TABLE).is_err(),
+        "the schema authority now ACCEPTS {AUDIT_TABLE} as a creator collection; a \
+         creator could declare the relation their own audit log is written into",
     );
-    assert!(
-        zeroship_data_orm::sql::compile::validate_collection(AUDIT_TABLE).is_ok(),
-        "runtime table references must accept {AUDIT_TABLE}",
-    );
-    // A declaration without the reserved prefix remains valid.
+    // The control, differing in one variable: the same name without the
+    // reserved prefix is an ordinary collection. Without this the assertion
+    // above would also pass if `validate_collection` had started refusing
+    // everything.
     let unreserved = AUDIT_TABLE.trim_start_matches('_');
     assert_ne!(
         unreserved, AUDIT_TABLE,
         "the control is the same string as the subject, so it varies nothing",
     );
     assert!(
-        zeroship_migrate::schema::query::validate_collection(vendors, unreserved).is_ok(),
+        zeroship_data_orm::sql::mapping::validate_collection(unreserved).is_ok(),
         "the control name {unreserved} is refused too, so the arm above says \
          nothing about the reserved prefix",
     );

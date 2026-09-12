@@ -5,8 +5,9 @@ use crate::{
     service::{app, models},
 };
 use zeroship_data_orm::{
+    budgets::MAX_INSERT_MANY_BATCH,
     orm::{Entity, Operation},
-    sql::{compile::MAX_INSERT_MANY_BATCH, RowLimit},
+    sql::RowLimit,
     value, Value,
 };
 
@@ -81,10 +82,11 @@ impl Fault {
 async fn contract(store: Rc<OrmStore>, fault: Fault) {
     let (service, owner, foreign, _deployments) = registered_service(store).await;
     let run = typed_id::new_workflow_run_id();
+    let foreign_run = typed_id::new_workflow_run_id();
     let neighbor = typed_id::new_workflow_run_id();
     let scopes = [
         (&owner, run.as_str()),
-        (&foreign, run.as_str()),
+        (&foreign, foreign_run.as_str()),
         (&owner, neighbor.as_str()),
     ];
     let prefix = i32::try_from(RowLimit::default().get())
@@ -110,7 +112,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
         .await
         .unwrap();
         tx.database().collection(models::generations::Entity::COLLECTION).unwrap()
-            .insert(value!({"app_id":app_id.as_str(), "run_id":*run_id, "generation":1,
+            .insert(value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":1,
                 "deploy_id":deploy.id, "input":"null", "state":"completed", "started_at":now, "terminal_at":now}))
             .await.unwrap();
         tx.database()
@@ -148,7 +150,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
                 let mut step = StepCheckpoint::completed_run(*ordinal, "step", json!({"scope":scope, "generation":generation, "ordinal":ordinal}));
                 step.name_occurrence = *ordinal;
                 step.compensation_state = Some("pending".into());
-                value!({"app_id":app_id.as_str(), "run_id":*run_id, "generation":generation,
+                value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id, "generation":generation,
                     "ordinal":i64::from(*ordinal), "name":step.name.clone(), "occurrence":i64::from(*ordinal),
                     "origin_generation":0, "kind":step.kind.clone(), "state":step.state.clone(),
                     "record":serde_json::to_string(&step).unwrap(), "compensation_attempts":i64::from(*ordinal),
@@ -157,7 +159,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
             insert(&tx, models::steps::Entity::COLLECTION, documents).await;
             let documents = [ ("input", -1), ("output", -1) ].into_iter()
                 .chain(ordinals.into_iter().map(|ordinal| ("step", ordinal)))
-                .map(|(slot, ordinal)| value!({"app_id":app_id.as_str(), "run_id":*run_id,
+                .map(|(slot, ordinal)| value!({"id":storage_id(), "app_id":app_id.as_str(), "run_id":*run_id,
                     "generation":generation, "slot":slot, "ordinal":i64::from(ordinal), "payload_id":payload.clone()}))
                 .collect();
             insert(&tx, models::payload_refs::Entity::COLLECTION, documents).await;
@@ -175,6 +177,13 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
     tx.commit().await.unwrap();
 
     let request = RequestId::mint();
+    assert!(matches!(
+        service
+            .for_app(owner.clone())
+            .restart(&RequestId::mint(), &foreign_run, RestartOptions::default())
+            .await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
     let options = RestartOptions {
         from: Some(RestartTarget {
             name: "step".into(),
@@ -189,7 +198,10 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
         .await
         .unwrap_err();
     assert!(
-        matches!(error, WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_)),
+        matches!(
+            error,
+            WorkflowServiceError::Internal(_) | WorkflowServiceError::Unavailable(_)
+        ),
         "{error}"
     );
     let mut tx = service.begin().await.unwrap();
@@ -200,24 +212,24 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
         snapshot(&mut tx, &owner, &run, 2).await,
         (Vec::new(), Vec::new())
     );
-    for table in ["generations", "requests"] {
-        let (filter, key) = if table == "generations" {
-            ("run_id=$2 AND generation=2", run.as_str())
-        } else {
-            ("id=$2", request.as_str())
-        };
-        assert!(tx
-            .query(
-                &format!(
-                    "SELECT * FROM {} WHERE app_id=$1 AND {filter}",
-                    tx.table(table)
-                ),
-                &[owner.as_str().into(), key.into()]
-            )
-            .await
-            .unwrap()
-            .is_empty());
-    }
+    assert_eq!(
+        journal_count(
+            &tx,
+            "generations",
+            json!({"app_id":owner.as_str(), "run_id":run.as_str(), "generation":2})
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        journal_count(
+            &tx,
+            "requests",
+            json!({"app_id":owner.as_str(), "request_id":request.as_str()})
+        )
+        .await,
+        0
+    );
     tx.commit().await.unwrap();
     fault.remove().await;
 
@@ -297,17 +309,9 @@ async fn insert(tx: &Transaction, collection: &str, documents: Vec<Value>) {
 
 type Snapshot = (Vec<serde_json::Value>, Vec<(String, i64, String)>);
 async fn snapshot(tx: &mut Transaction, app: &AppId, run: &str, generation: i64) -> Snapshot {
-    let params = [app.as_str().into(), run.into(), generation.into()];
-    let steps = tx
-        .query(
-            &format!(
-                "SELECT * FROM {} WHERE app_id=$1 AND run_id=$2 AND generation=$3 ORDER BY ordinal",
-                tx.table("steps")
-            ),
-            &params,
-        )
-        .await
-        .unwrap();
+    let filter = json!({"app_id":app.as_str(), "run_id":run, "generation":generation});
+    let mut steps = journal_rows(tx, "steps", filter.clone()).await;
+    steps.sort_by_key(|row| row.integer("ordinal").unwrap());
     let steps = steps.into_iter().map(|row| json!({
         "ordinal":row.integer("ordinal").unwrap(), "name":row.text("name").unwrap(),
         "occurrence":row.integer("occurrence").unwrap(), "origin":row.integer("origin_generation").unwrap(),
@@ -315,7 +319,8 @@ async fn snapshot(tx: &mut Transaction, app: &AppId, run: &str, generation: i64)
         "attempts":row.integer("compensation_attempts").unwrap(), "due":row.optional_integer("compensation_due_at").unwrap(),
         "error":row.optional_text("compensation_error").unwrap(), "retry":row.integer("compensation_retry_ms").unwrap(),
     })).collect();
-    let refs = tx.query(&format!("SELECT slot,ordinal,payload_id FROM {} WHERE app_id=$1 AND run_id=$2 AND generation=$3 ORDER BY slot,ordinal", tx.table("payload_refs")), &params).await.unwrap();
+    let mut refs = journal_rows(tx, "payload_refs", filter).await;
+    refs.sort_by_key(|row| (row.text("slot").unwrap(), row.integer("ordinal").unwrap()));
     (
         steps,
         refs.into_iter()

@@ -1,11 +1,10 @@
 //! Decode the SDK filter vocabulary into the typed predicate grammar.
 
-use crate::sql::compile::QueryError;
-use crate::value::Value;
+use crate::sql::mapping::QueryError;
 use crate::sql::{
-    CompareOp, Finite, Ident, IdentRole, Literal, MembershipOp, Operand, PatternOp, Predicate,
-    TextPattern,
+    CompareOp, Ident, IdentRole, Literal, MembershipOp, Operand, PatternOp, Predicate, TextPattern,
 };
+use crate::value::Value;
 
 fn invalid(message: impl Into<String>) -> QueryError {
     QueryError::InvalidFilter(message.into())
@@ -14,7 +13,7 @@ fn invalid(message: impl Into<String>) -> QueryError {
 /// Parse a filter before any SQL is emitted. The budget walk runs before the
 /// recursive decoder, including for filters supplied directly by native callers.
 pub fn decode(value: &Value) -> Result<Predicate, QueryError> {
-    crate::sql::compile::validate_filter_budget(value)?;
+    crate::sql::mapping::validate_filter_budget(value)?;
     decode_inner(value)
 }
 
@@ -48,7 +47,7 @@ fn decode_inner(value: &Value) -> Result<Predicate, QueryError> {
             continue;
         }
         // Keep the SDK's error vocabulary at the decoding boundary.
-        crate::sql::compile::validate_field_name(field)?;
+        crate::sql::mapping::validate_field_name(field)?;
         let field =
             Ident::parse_as(field, IdentRole::Column).map_err(|e| invalid(e.to_string()))?;
         let operand = Operand::column(field);
@@ -141,19 +140,5 @@ fn condition(lhs: Operand, operator: &str, value: &Value) -> Result<Predicate, Q
 /// JSON containers remain typed text binds, preserving PostgreSQL's contextual
 /// JSON conversion. A null has no literal representation.
 fn literal(value: &Value) -> Result<Option<Literal>, QueryError> {
-    Ok(Some(match value {
-        Value::Null => return Ok(None),
-        Value::Bool(v) => Literal::Bool(*v),
-        Value::Number(n) if n.as_i64().is_some() => Literal::Int(n.as_i64().unwrap()),
-        Value::Number(n) if n.as_u64().is_some() => Literal::Text(n.to_string()),
-        Value::Number(n) => Literal::Float(
-            Finite::new(n.as_f64().ok_or_else(|| invalid("invalid number"))?)
-                .map_err(|e| invalid(e.to_string()))?,
-        ),
-        Value::String(v) | Value::Decimal(v) => Literal::Text(v.clone()),
-        Value::Bytes(v) => Literal::Bytes(v.clone()),
-        Value::Timestamp(v) => Literal::Int(*v),
-        Value::Json(v) => Literal::Json(v.clone()),
-        v => Literal::Json(v.to_string()),
-    }))
+    Literal::try_from_value(value.clone()).map_err(|error| invalid(error.to_string()))
 }

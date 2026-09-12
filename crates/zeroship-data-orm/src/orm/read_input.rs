@@ -76,17 +76,10 @@ fn operand(value: &Value) -> Result<Operand, DbError> {
         return Ok(Operand::Aggregate(aggregate));
     }
     keys(value, &["value"])?;
-    let value = required(value, "value")?;
-    let parsed = crate::sql::filter::decode(
-        &crate::value!({"value":{"$eq":value.clone()}}),
-    )?;
-    let Predicate::And(mut children) = parsed else {
-        return Err(read::invalid("invalid literal"));
-    };
-    match children.pop() {
-        Some(Predicate::Compare { rhs, .. }) => Ok(rhs),
-        _ => Err(read::invalid("use a null predicate for null values")),
-    }
+    crate::sql::Literal::try_from_value(required(value, "value")?.clone())
+        .map_err(|error| read::invalid(error.to_string()))?
+        .map(Operand::Lit)
+        .ok_or_else(|| read::invalid("use a null predicate for null values"))
 }
 fn predicate(value: &Value, depth: usize, nodes: &mut usize) -> Result<Predicate, DbError> {
     *nodes += 1;
@@ -263,8 +256,8 @@ impl ReadQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value;
     use crate::sql::Literal;
+    use crate::value;
 
     fn query() -> Value {
         value!({"from":{"collection":"records", "alias":"r"}, "select":{"record":{"row":"r"}}})

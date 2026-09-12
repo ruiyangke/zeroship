@@ -1,20 +1,28 @@
 {
+  "schema_version": [
+    "id"
+  ],
   "workers": [
+    "id",
     "worker_id"
   ],
   "scopes": [
+    "id",
     "app_id"
   ],
   "assignments": [
+    "id",
     "app_id",
     "worker_id"
   ],
   "placement_receipts": [
+    "id",
     "app_id",
     "request_id",
     "worker_id"
   ],
   "management": [
+    "id",
     "app_id",
     "request_id",
     "run_id",

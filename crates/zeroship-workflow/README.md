@@ -54,14 +54,21 @@ rotates between assigned apps and advances past failed intents; individual calls
 are bounded by the maintenance timeout. Execution and maintenance use independent
 wake queue entries so busy polling cannot starve recovery. Production host
 composition remains unfinished; the journal-reading collector has not yet been replaced.
-`OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
+`OrmStore::connect` accepts the host's `DbBinding`, connection factory and keys.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.
-Journal model conversion is ongoing. Restart copies retained checkpoints and
+Journal reads and writes use ORM collections and generated models. Restart copies retained checkpoints and
 payload references through paged ORM reads and batch inserts in its transaction,
-preserving effect origins and compensation metadata. Remaining relational queries
-use the ORM's scoped SQL interface. Both Rust and creator code may reference workflow
-tables within their bound schema through the normal ORM.
+preserving effect origins and compensation metadata. Each table has an `id`
+primary key; app-scoped domain keys use unique indexes and scoped foreign keys.
+The engine keeps the ORM transaction callback alive until settlement; abandoning
+an operation rolls it back. Database-clock reads use a separate connection to the
+same customer database, so checking a lease cannot wait for the journal's own
+pool lease. These clock queries read no journal state.
+The integrated main ORM currently rejects the journal's reserved collection
+names during descriptor installation. Customer journal execution and its
+database tests remain blocked until native descriptor and collection APIs
+accept these declared tables. The workflow branch does not bypass that check.
 `schema::postgres_sql` binds the generated
 DDL for a provisioning host with authorized migration credentials. Runtime
 operations only verify the journal fingerprint and use ordinary DML.

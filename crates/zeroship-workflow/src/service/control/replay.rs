@@ -4,14 +4,16 @@ use super::super::{models, store::Transaction};
 use crate::WorkflowServiceError;
 use zeroship_core::app_id::AppId;
 use zeroship_data_orm::{
+    budgets::MAX_INSERT_MANY_BATCH,
     orm::{Entity, FromRow, Insertable, Operation},
-    sql::{compile::MAX_INSERT_MANY_BATCH, Predicate, RowLimit},
+    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
     Value,
 };
 
 #[derive(FromRow, Insertable)]
 #[orm(entity = models::steps)]
 struct Checkpoint {
+    id: String,
     app_id: String,
     run_id: String,
     generation: i64,
@@ -31,6 +33,7 @@ struct Checkpoint {
 #[derive(FromRow, Insertable)]
 #[orm(entity = models::payload_refs)]
 struct PayloadReference {
+    id: String,
     app_id: String,
     run_id: String,
     generation: i64,
@@ -60,10 +63,18 @@ pub(super) async fn copy_prefix(
             steps
                 .column(models::steps::generation)
                 .eq(source_generation)?,
-            steps.column(models::steps::ordinal).lt(i64::from(prefix))?,
+            Predicate::compare(
+                Operand::Path(steps.column(models::steps::ordinal).asc().path),
+                CompareOp::Lt,
+                Operand::Lit(Literal::Int(i64::from(prefix))),
+            ),
         ];
         if let Some(after) = after {
-            predicates.push(steps.column(models::steps::ordinal).gt(after)?);
+            predicates.push(Predicate::compare(
+                Operand::Path(steps.column(models::steps::ordinal).asc().path),
+                CompareOp::Gt,
+                Operand::Lit(Literal::Int(after)),
+            ));
         }
         let page = db
             .from(&steps)
@@ -77,6 +88,7 @@ pub(super) async fn copy_prefix(
         let mut documents = Vec::with_capacity(count);
         for mut row in page {
             after = Some(row.ordinal);
+            row.id = super::super::types::storage_id();
             row.generation = target_generation;
             documents.push(Value::Object(row.into_record()?));
         }
@@ -104,17 +116,28 @@ pub(super) async fn copy_prefix(
                 refs.column(models::payload_refs::slot).eq("input")?,
                 Predicate::And(vec![
                     refs.column(models::payload_refs::slot).eq("step")?,
-                    refs.column(models::payload_refs::ordinal)
-                        .lt(i64::from(prefix))?,
+                    Predicate::compare(
+                        Operand::Path(refs.column(models::payload_refs::ordinal).asc().path),
+                        CompareOp::Lt,
+                        Operand::Lit(Literal::Int(i64::from(prefix))),
+                    ),
                 ]),
             ]),
         ];
         if let Some((slot, ordinal)) = &after {
             predicates.push(Predicate::Or(vec![
-                refs.column(models::payload_refs::slot).gt(slot.as_str())?,
+                Predicate::compare(
+                    Operand::Path(refs.column(models::payload_refs::slot).asc().path),
+                    CompareOp::Gt,
+                    Operand::Lit(Literal::Text(slot.clone())),
+                ),
                 Predicate::And(vec![
                     refs.column(models::payload_refs::slot).eq(slot.as_str())?,
-                    refs.column(models::payload_refs::ordinal).gt(*ordinal)?,
+                    Predicate::compare(
+                        Operand::Path(refs.column(models::payload_refs::ordinal).asc().path),
+                        CompareOp::Gt,
+                        Operand::Lit(Literal::Int(*ordinal)),
+                    ),
                 ]),
             ]));
         }
@@ -131,6 +154,7 @@ pub(super) async fn copy_prefix(
         let mut documents = Vec::with_capacity(count);
         for mut row in page {
             after = Some((row.slot.clone(), row.ordinal));
+            row.id = super::super::types::storage_id();
             row.generation = target_generation;
             documents.push(Value::Object(row.into_record()?));
         }

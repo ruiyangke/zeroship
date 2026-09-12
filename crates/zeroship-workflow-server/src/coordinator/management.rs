@@ -4,6 +4,7 @@ use zeroship_core::{
     app_id::AppId,
     service_assertion::ServiceIssuer,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
+    typed_id,
     workflow_coordination::{
         AcknowledgeManagement, AssignedScope, ManageRun, ManagementOperation, ManagementOutcome,
         ManagementReceipt, RequestId, RestartDeploy, RestartOptions, RestartTarget, RunId,
@@ -45,10 +46,10 @@ impl Coordinator {
             if get::<i64>(&row,"pending")? >= maximum { return Err(Error::Capacity); }
             let now = now(tx).await?;
             tx.execute(
-                "INSERT INTO workflow_coordination.management(app_id,request_id,run_id,actor,operation,restart_name,restart_occurrence,restart_deploy,created_at)
-                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                "INSERT INTO workflow_coordination.management(app_id,request_id,run_id,actor,operation,restart_name,restart_occurrence,restart_deploy,created_at,id)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
                 &[&request.app_id.as_str(), &request.request_id.as_str(), &request.run_id.as_str(), &actor.as_str(),
-                  &fields.operation, &fields.name, &fields.occurrence, &fields.deploy, &now],
+                  &fields.operation, &fields.name, &fields.occurrence, &fields.deploy, &now, &typed_id::generate("wcm")],
             ).await?;
             Ok(ManagementReceipt { app_id: request.app_id.clone(), request_id: request.request_id.clone(), outcome: None })
         }).await

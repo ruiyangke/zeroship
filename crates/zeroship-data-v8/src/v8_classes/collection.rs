@@ -231,10 +231,8 @@ impl Collection {
         dispatch_delete_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
-    /// `collection.purge(filter)` — explicit hard-delete
-    /// of a single matching row. Always emits `DELETE FROM ...`
-    /// regardless of the system-fields marker. For compliance /
-    /// right-to-be-forgotten flows.
+    /// `collection.purge(filter)` — hard-delete one matching row regardless of
+    /// the descriptor's soft-delete role.
     #[v8_method]
     fn purge<'s>(
         &self,
@@ -269,8 +267,8 @@ impl Collection {
         dispatch_purge_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
-    /// `collection.restore(filter)` — clear `deleted_at`
-    /// on the first matching soft-deleted row.
+    /// `collection.restore(filter)` — clear the declared soft-delete field on
+    /// the first matching row.
     #[v8_method]
     fn restore<'s>(
         &self,
@@ -358,8 +356,8 @@ impl Collection {
 
     /// `collection.count(filter, opts?)` — count matching rows.
     ///
-    /// `opts.include_deleted: true` opts out of the
-    /// auto `AND deleted_at IS NULL` filter.
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
     #[v8_method]
     fn count<'s>(
         &self,
@@ -382,8 +380,8 @@ impl Collection {
     /// of `opts.field` across rows matching `filter`. Filter-first to
     /// match the rest of the read surface.
     ///
-    /// `opts.include_deleted: true` opts out of the
-    /// auto `AND deleted_at IS NULL` filter.
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
     #[v8_method]
     fn distinct<'s>(
         &self,
@@ -419,8 +417,8 @@ impl Collection {
     /// `collection.aggregate(pipeline, opts?)` — run an aggregation
     /// pipeline.
     ///
-    /// `opts.include_deleted: true` opts out of the
-    /// auto-prepended soft-delete `$match`.
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
     #[v8_method]
     fn aggregate<'s>(
         &self,
@@ -439,14 +437,7 @@ impl Collection {
         dispatch_aggregate(scope, self.binding.clone(), &self.name, pipeline_v, opts_v).into()
     }
 
-    /// `collection.search(args)` - vector search.
-    ///
-    /// `args` is a discriminated union:
-    /// - `{ vector: number[], k?: number, metric?, column?, filter? }`
-    ///   — pgvector nearest-neighbour search. Resolves with a row
-    ///   array; each row carries a synthetic `_distance` field.
-    /// Routes to [`dispatch_search`] which inspects the discriminator
-    /// and dispatches to the appropriate backend impl.
+    /// Run vector search through the ORM and return rows with `_distance`.
     #[v8_method]
     fn search<'s>(
         &self,
@@ -460,22 +451,7 @@ impl Collection {
         dispatch_search(scope, self.binding.clone(), &self.name, args_v).into()
     }
 
-    /// `collection.near(args)` — spatial within-radius search.
-    ///
-    /// `args` shape:
-    /// ```ts
-    /// { field: string,
-    ///   point: { lat: number, lng: number },
-    ///   radius: number,        // metres
-    ///   filter?: Filter,
-    ///   limit?: number }
-    /// ```
-    ///
-    /// Resolves with a row array; each row carries a synthetic
-    /// `_distance_m` field (the metric distance in metres). PG arm
-    /// routes to PostGIS `ST_DWithin` / `ST_Distance` against a
-    /// `geography(POINT, 4326)` column; SQLite arm returns
-    /// `spatial_unsupported` until the haversine implementation lands.
+    /// Run spatial search through the ORM and return rows with `_distance_m`.
     #[v8_method]
     fn near<'s>(
         &self,

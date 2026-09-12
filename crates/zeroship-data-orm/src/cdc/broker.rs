@@ -322,25 +322,7 @@ impl Subscription {
 /// The routing table.
 ///
 /// Indexed as a two-level map: `app_id → collection → Vec<Subscription>`.
-/// The per-collection list is scanned linearly on each publish
-/// (`O(subscribers_on_this_collection)`); a third-level index by
-/// `ReadSet` fingerprint is the natural next step if that scan ever
-/// becomes hot.
-///
-/// ## Why two levels (not a single `(String, String)` tuple key)
-///
-/// The hot path is the WAL-frame fan-out: every replicated mutation
-/// asks "are there any subscribers on `(app_id, collection)`?" before
-/// doing the more expensive event-shape work. With a tuple key, that
-/// question requires allocating a temporary `(String, String)` per
-/// call — two String heaps per WAL frame, multiplied by the number of
-/// rows per frame, on every multi-tenant worker.
-///
-/// The two-level layout lets the lookup go through `&str` borrows
-/// directly: `self.by_key.get(app)?.get(collection)?` — zero
-/// allocations on the read path. Owned Strings are still produced
-/// exactly once at subscribe-time (for `HashMap::entry`), which is
-/// the rare/cold path.
+/// Borrowed lookups avoid constructing an owned tuple on the publish path.
 pub struct Broker {
     /// Counter for [`Subscription::id`].
     next_id: u64,
@@ -943,7 +925,7 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
     }
 }
 
-/// Remove protected storage names while retaining visible system fields.
+/// Remove protected storage names while retaining visible declared fields.
 /// Events carry no descriptor, so this uses the platform’s reserved storage prefix.
 fn creator_visible_columns(columns: &[String]) -> Vec<String> {
     columns
@@ -977,7 +959,6 @@ pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
     })
     .to_string()
 }
-
 
 /// Suppress local delivery for an app until the last overlapping pause is released.
 /// The process-wide reference count coordinates pauses across worker threads.
@@ -1274,7 +1255,7 @@ mod tests {
             ChangeOp::Insert,
             Some("3"),
         )))); // overflow
-        // Queue now contains a single Resync.
+              // Queue now contains a single Resync.
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
         assert!(s.pop().is_none());
     }
@@ -1716,10 +1697,7 @@ mod tests {
 
     #[test]
     fn resume_app_with_resync_is_idempotent_pushes_multiple_resyncs() {
-        // Plan §9: "calling multiple times pushes multiple resyncs;
-        // subscribers dedup." Verify the broker side faithfully pushes
-        // one Resync per call (consumer-side dedup is a Subscription
-        // pop-time concern not exercised here).
+        // Each resume request emits a resync. Consumers may coalesce them.
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
         b.resume_app_with_resync("a");
@@ -1959,27 +1937,6 @@ mod tests {
         ));
     }
 
-    // -----------------------------------------------------------------
-    // `cdc_event_carries_masked_value_for_masked_columns` (§11)
-    //
-    // The proposal (Q-MASK-G) asserts that CDC subscribers see the
-    // MASKED representation of a masked column — never the plaintext.
-    // With sibling-column storage (Path B, docs/archive/sensitive-field-masking.md)
-    // the WAL pipeline never
-    // decrypts: `tuple_to_map` (in `wal_consumer.rs`) zips pgoutput
-    // tuple bytes verbatim into `new_tuple`, so the parent column
-    // carries ciphertext text-encoded by PG (e.g. `\xDEADBEEF` for
-    // BYTEA) and the sibling carries the pre-computed mask string.
-    //
-    // The gate below pins the contract by constructing a synthetic
-    // `ChangeEvent` mirroring the wal_consumer's output (parent =
-    // ciphertext text-encoding, sibling = masked text) and asserts
-    // both that the WS frame round-trips both columns AND that the
-    // parent column NEVER carries an obvious plaintext "ssn-shape"
-    // string. A regression that wires decrypt-on-CDC would land the
-    // plaintext in `new_tuple["ssn"]` and flip this assertion.
-    // -----------------------------------------------------------------
-
     /// The CDC tuple after the storage flip, and what a subscriber may see of
     /// it.
     ///
@@ -1995,7 +1952,7 @@ mod tests {
         let raw_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
         let masked_text = "***-**-6789";
         let plaintext = "123-45-6789";
-        let raw_col = crate::sql::compile::raw_column_name("ssn");
+        let raw_col = crate::sql::mapping::raw_column_name("ssn");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".into(), "42".into());

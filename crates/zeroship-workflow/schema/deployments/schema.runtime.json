@@ -3,6 +3,18 @@
   "collections": {
     "app_deploy_holds": {
       "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
         "app_id": {
           "type": "string",
           "required": true,
@@ -12,8 +24,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "app_id"
-          },
-          "primaryKey": true
+          }
         },
         "deploy_id": {
           "type": "string",
@@ -24,8 +35,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "deploy_id"
-          },
-          "primaryKey": true
+          }
         },
         "holder_id": {
           "type": "string",
@@ -36,8 +46,7 @@
           "projectable": true,
           "storage": {
             "valueColumn": "holder_id"
-          },
-          "primaryKey": true
+          }
         },
         "generation": {
           "type": "bigInt",
@@ -67,7 +76,17 @@
         "versioning": false,
         "strictness": "strict"
       },
-      "indexes": []
+      "indexes": [
+        {
+          "name": "app_deploy_holds_scope_key",
+          "fields": [
+            "app_id",
+            "deploy_id",
+            "holder_id"
+          ],
+          "unique": true
+        }
+      ]
     },
     "app_deploys": {
       "fields": {

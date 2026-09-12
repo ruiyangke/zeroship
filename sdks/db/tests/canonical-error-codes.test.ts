@@ -23,13 +23,14 @@ describe("canonical SDK error codes", () => {
     assert.equal(new NotFoundError("users").code, "NOT_FOUND");
 
     const optimistic = mapOptimisticConcurrencyError(
-      nativeError("version_mismatch"),
+      nativeError("concurrency_mismatch"),
       "users",
-      7,
+      { column: "revision", expected: 7 },
     );
     assert.ok(optimistic instanceof OptimisticLockError);
     assert.equal(optimistic.code, "OPTIMISTIC_CONCURRENCY");
-    assert.equal(optimistic.expectedVersion, 7);
+    assert.equal(optimistic.concurrencyColumn, "revision");
+    assert.equal(optimistic.expectedValue, 7);
 
     assert.equal(
       new ValidationError({
@@ -39,7 +40,7 @@ describe("canonical SDK error codes", () => {
     );
   });
 
-  test("native plugin-db codes map to SDK-facing canonical codes", () => {
+  test("native ORM codes map to SDK-facing canonical codes", () => {
     assert.equal(canonicalErrorCode("fk_violation"), "FOREIGN_KEY_VIOLATION");
     assert.equal(canonicalErrorCode("lock_not_available"), "LOCK_NOT_AVAILABLE");
     assert.equal(canonicalErrorCode("not_null_violation"), "NOT_NULL_VIOLATION");

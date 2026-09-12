@@ -5,18 +5,15 @@ contract, so `pnpm dev` runs an app with zero platform infra:
 
 | Primitive   | Prod tier                         | Dev tier (self-contained)            |
 | ----------- | --------------------------------- | ------------------------------------ |
-| `env.db`    | PostgreSQL                        | *none wired* — see the note below    |
+| `env.db`    | PostgreSQL                        | file-backed SQLite                   |
 | `env.kv`    | Redis                             | redb (embedded)                      |
 | `env.storage` | S3 / R2                         | LocalFs                              |
 | **auth**    | **gateway BFF + native OP**       | **in-process dev-auth provider**     |
 
-> **`env.db` has no dev tier wired today.** The row above used to promise
-> embedded SQLite. A SQLite backend exists in `plugin-db`, but no serving path
-> constructs it: `zeroship serve` registers the db plugin only when
-> `DATABASE_URL` is set, and that points at a real PostgreSQL. Compare `env.kv`
-> a few lines later in the same file, which registers redb unconditionally -
-> that is what a wired dev tier looks like. So `pnpm dev` does not run an app
-> with zero platform infra if the app touches `env.db`; it needs a database.
+`pnpm dev` supplies `sqlite:.zeroship/dev.sqlite` when no database URL is
+configured. The migration apply path and runtime resolve that same file-backed
+database through `zeroship-data-orm`; `zeroship-data-v8` exposes it as
+`env.db`. Memory databases are not part of the contract.
 
 Auth was the missing one. This note describes the dev tier: the contract it
 mirrors, the dev implementation, and the dev-only-by-construction guarantee.

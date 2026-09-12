@@ -7,4 +7,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "app_deploys_app_id_id_key" ON "app_deploys" (
 
 CREATE INDEX IF NOT EXISTS "app_deploys_app_created_idx" ON "app_deploys" ("app_id", "created_at" DESC);
 
-CREATE TABLE "app_deploy_holds" ("app_id" TEXT COLLATE BINARY NOT NULL CHECK ("app_id" IS NULL OR (typeof("app_id") = 'text' AND length("app_id") = 36 AND length(CAST("app_id" AS BLOB)) = 36 AND substr("app_id", 9, 1) = '-' AND substr("app_id", 14, 1) = '-' AND substr("app_id", 19, 1) = '-' AND substr("app_id", 24, 1) = '-' AND length("app_id") - length(replace("app_id", '-', '')) = 4 AND replace("app_id", '-', '') NOT GLOB '*[^0-9a-f]*')), "deploy_id" TEXT NOT NULL, "holder_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, CONSTRAINT "app_deploy_holds_deployment_fkey" FOREIGN KEY (app_id, deploy_id) REFERENCES app_deploys(app_id, id) ON DELETE RESTRICT, CONSTRAINT "app_deploy_holds_pkey" PRIMARY KEY (app_id, deploy_id, holder_id));
+CREATE TABLE "app_deploy_holds" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT COLLATE BINARY NOT NULL CHECK ("app_id" IS NULL OR (typeof("app_id") = 'text' AND length("app_id") = 36 AND length(CAST("app_id" AS BLOB)) = 36 AND substr("app_id", 9, 1) = '-' AND substr("app_id", 14, 1) = '-' AND substr("app_id", 19, 1) = '-' AND substr("app_id", 24, 1) = '-' AND length("app_id") - length(replace("app_id", '-', '')) = 4 AND replace("app_id", '-', '') NOT GLOB '*[^0-9a-f]*')), "deploy_id" TEXT NOT NULL, "holder_id" TEXT NOT NULL, "generation" INTEGER NOT NULL, "state" TEXT NOT NULL, CONSTRAINT "app_deploy_holds_deployment_fkey" FOREIGN KEY (app_id, deploy_id) REFERENCES app_deploys(app_id, id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "app_deploy_holds_deployment_fkey_idx" ON "app_deploy_holds" ("app_id", "deploy_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "app_deploy_holds_scope_key" ON "app_deploy_holds" ("app_id", "deploy_id", "holder_id");

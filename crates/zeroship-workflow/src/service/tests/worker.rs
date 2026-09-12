@@ -277,56 +277,38 @@ async fn maintenance_while_busy(
     }
     let mut tx = service.begin().await.unwrap();
     let due = tx.now().await.unwrap() - 1;
-    tx.execute(
-        &format!(
-            "UPDATE {} SET next_at=$2 WHERE app_id=$1",
-            tx.table("schedules")
-        ),
-        &[app.app_id().as_str().into(), due.into()],
+    journal_update(
+        &tx,
+        "schedules",
+        json!({"app_id":app.app_id().as_str()}),
+        json!({"next_at":due}),
     )
-    .await
-    .unwrap();
-    tx.execute(
-        &format!(
-            "UPDATE {} SET expires_at=$2 WHERE app_id=$1",
-            tx.table("payloads")
-        ),
-        &[app.app_id().as_str().into(), due.into()],
+    .await;
+    journal_update(
+        &tx,
+        "payloads",
+        json!({"app_id":app.app_id().as_str()}),
+        json!({"expires_at":due}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     probe.pending.set(true);
     compio::time::timeout(
         Duration::from_secs(5),
         worker.run_until(async {
             loop {
-                let mut tx = service.begin().await.unwrap();
-                let schedules = tx
-                    .query(
-                        &format!(
-                            "SELECT COUNT(*) AS total FROM {} WHERE app_id=$1",
-                            tx.table("occurrences")
-                        ),
-                        &[app.app_id().as_str().into()],
-                    )
-                    .await
-                    .unwrap();
-                let payloads = tx
-                    .query(
-                        &format!(
-                            "SELECT COUNT(*) AS total FROM {} WHERE app_id=$1 AND state='deleted'",
-                            tx.table("payloads")
-                        ),
-                        &[app.app_id().as_str().into()],
-                    )
-                    .await
-                    .unwrap();
+                let tx = service.begin().await.unwrap();
+                let schedules =
+                    journal_count(&tx, "occurrences", json!({"app_id":app.app_id().as_str()}))
+                        .await;
+                let payloads = journal_count(
+                    &tx,
+                    "payloads",
+                    json!({"app_id":app.app_id().as_str(), "state":"deleted"}),
+                )
+                .await;
                 tx.commit().await.unwrap();
-                if probe.active.get() == options().task_slots
-                    && schedules[0].integer("total").unwrap() > 0
-                    && payloads[0].integer("total").unwrap() > 0
-                {
+                if probe.active.get() == options().task_slots && schedules > 0 && payloads > 0 {
                     break;
                 }
                 compio::time::sleep(Duration::from_millis(5)).await;
@@ -362,21 +344,9 @@ async fn worker_shutdown_joins_executions_before_releasing_claims() {
         wait_for(|| probe.active.get() == options().task_slots).await;
         send.send(()).unwrap();
         wait_for(|| probe.stops.borrow().len() == options().task_slots).await;
-        let mut tx = service.begin().await.unwrap();
-        let rows = tx
-            .query(
-                &format!(
-                    "SELECT COUNT(*) AS total FROM {} WHERE state='leased'",
-                    tx.table("tasks")
-                ),
-                &[],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            rows[0].integer("total").unwrap(),
-            i64::try_from(options().task_slots).unwrap()
-        );
+        let tx = service.begin().await.unwrap();
+        let count = journal_count(&tx, "tasks", json!({"state":"leased"})).await;
+        assert_eq!(count, i64::try_from(options().task_slots).unwrap());
         tx.commit().await.unwrap();
         assert_eq!(probe.started.borrow().len(), options().task_slots);
     }
@@ -392,18 +362,9 @@ async fn worker_shutdown_joins_executions_before_releasing_claims() {
         .await
         .unwrap();
     assert_eq!(probe.active.get(), 0);
-    let mut tx = service.begin().await.unwrap();
-    let rows = tx
-        .query(
-            &format!(
-                "SELECT COUNT(*) AS total FROM {} WHERE state='leased'",
-                tx.table("tasks")
-            ),
-            &[],
-        )
-        .await
-        .unwrap();
-    assert_eq!(rows[0].integer("total").unwrap(), 0);
+    let tx = service.begin().await.unwrap();
+    let count = journal_count(&tx, "tasks", json!({"state":"leased"})).await;
+    assert_eq!(count, 0);
     tx.commit().await.unwrap();
 }
 

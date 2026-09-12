@@ -10,38 +10,21 @@ use crate::sql::compiler::CompiledQuery;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
 
-// The metric names and the emit point moved to `crate::metrics` on 2026-09-01.
-// They were private to this file, which made the BILLED surface accidentally
-// equal to "whatever flows through `run_sql` / `exec_mutation`" - and the search
-// family and every unmask statement do not.
-use crate::metrics::{DB_READS, DB_ROWS_WRITTEN, DB_WRITES, emit_db_metric};
+use crate::metrics::{emit_db_metric, DB_READS, DB_ROWS_WRITTEN, DB_WRITES};
 
 /// The op was dispatched inside a `db.transaction(fn)` callback whose
 /// transaction has since settled — a continuation that outlived its
 /// transaction (typically a promise the callback started and never
 /// awaited).
 ///
-/// Refused rather than silently autocommitted on a pooled connection.
-/// Falling back to the pool would let work the creator wrote INSIDE a
-/// transaction commit on its own after that transaction rolled back,
-/// which is the mirror image of the defect `TxRoute` fixes. Mirrors
-/// `transaction::transaction_dispatch`'s `transaction_scope_expired`.
+/// It must be refused instead of falling back to autocommit.
 fn tx_scope_expired() -> DbError {
     crate::transaction::scope::expired()
 }
 
 /// The route says "in transaction" and the transaction is still open, but
-/// its connection is checked out by another in-flight op for the same
-/// app. A transaction owns exactly ONE connection, so two of its
-/// operations cannot be in flight at once.
-///
-/// Split from [`tx_scope_expired`] deliberately: an empty tx slot has two
-/// causes and they call for opposite fixes (await your calls vs. do not
-/// leak work past the callback). Before this split both arrived as
-/// `DbError::internal("db: transaction connection lost")`, which named
-/// neither. `tx_claimed_by` is the discriminator — the top-level claim is
-/// held for the whole transaction, including the window where the client
-/// is checked out.
+/// its connection is checked out by another in-flight operation for the same
+/// app. A transaction serializes operations on its owned connection.
 fn tx_connection_busy() -> DbError {
     DbError::validation_hinted(
         "transaction_connection_busy",
@@ -64,16 +47,8 @@ fn tx_slot_unavailable(app_id: &str) -> DbError {
 /// Take this dispatch's parked transaction client, or refuse the way every
 /// other routed statement refuses.
 ///
-/// `TxClientSlotGuard::take` reports an empty slot as a bare internal error,
-/// which is not what a creator should see: a route that says "in transaction"
-/// and finds no session means either that the transaction has settled under a
-/// continuation that outlived it, or that another op is holding its one
-/// connection. [`tx_slot_unavailable`] tells those apart and mints the coded
-/// errors documented on [`TxRoute::in_tx`].
-///
-/// `pub(crate)` because the routed raw-column reads in
-/// [`crate::backend_handle`] need the same claim, and they must not re-derive
-/// the classification.
+/// An empty slot is classified as either an expired scope or concurrent use of
+/// the transaction connection.
 pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientSlotGuard, DbError> {
     route.check_scope()?;
     crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
@@ -143,21 +118,16 @@ pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbErr
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
-    // Success arm only: a count is a read op.
     emit_db_metric(app_id, DB_READS, 1);
-
-    // ONE extraction for both dialects, which is the point: this was written
-    // twice, byte-identically, once per arm, back when each arm returned on its
-    // own. Both arms hand back native values rather than a `compio_postgres::Row`, so the
-    // two dialects agree on the shape a count comes back in. PostgreSQL renders
-    // `count(*)` as INT8 (OID 20), which `row_to_value` maps to an exact
-    // `Number::from(i64)` - so `as_i64` reads it back losslessly rather than
-    // going via `f64` the way the FLOAT arms do.
-    Ok(rows
+    let count = rows
         .first()
         .and_then(|row| row.get("count"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0))
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            _ => None,
+        })
+        .ok_or_else(|| DbError::internal("count result did not return an integer"))?;
+    Ok(count)
 }
 
 /// Execute an insert/update/delete query, returning the affected
@@ -184,17 +154,8 @@ pub async fn exec_mutation(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Val
 /// `(app_id, collection)` that wake any matching subscribers in the
 /// same isolate.
 ///
-/// On error the broker is untouched — partial writes produce no
-/// events. The error message is forwarded verbatim.
-///
-/// `op` selects the [`zeroship_data_orm::cdc::ChangeOp`] tagged on the event;
-/// the caller knows whether it called `build_insert`, `build_update_one`,
-/// `build_delete_one`, etc. so we don't try to infer it from the SQL.
-///
-/// A future read-set narrowing pass could extend this helper to
-/// populate `changed_columns` from the SET clause and the logical `id`
-/// from the RETURNING row. For now this collects what's already in
-/// the result `Value`.
+/// On error the broker is untouched. The caller supplies the operation kind;
+/// returned rows supply the logical identity and changed columns.
 pub async fn exec_mutation_with_emit(
     bq: CompiledQuery,
     route: &TxRoute,
@@ -202,12 +163,6 @@ pub async fn exec_mutation_with_emit(
     op: zeroship_data_orm::cdc::ChangeOp,
     binding: &crate::binding::DbBinding,
 ) -> Result<Vec<Value>, DbError> {
-    // `exec_mutation` returns the typed `Vec<Value>` already decoded
-    // from `compio_postgres::Row`. Pre-fix we re-parsed our own JSON
-    // string here just to extract the PK + changed-column set; now we
-    // iterate the live `Value`s directly. The CRUD resolver in
-    // `crud.rs` does the final `Value::Array(rows).to_string()` once
-    // at the V8 boundary.
     crate::descriptor::collection_schema(binding, collection)?;
     let rows = exec_mutation(route, bq).await?;
     emit_for_rows(
@@ -256,13 +211,6 @@ pub async fn exec_mutation_count_with_emit(
 /// this path - the WAL consumer is a separate process concern - so the local
 /// emit below is what feeds subscribers there.
 ///
-/// **A function of the backend, taken as an argument.** This read
-/// `context::with(|c| ...)` until 2026-09-03, which is how an ENGINE file came
-/// to depend on the ADAPTER's thread state, and the census could not see it:
-/// the unqualified `context::` call does not match the extractor's
-/// `crate::`-prefixed pattern, so only the `use` at the top of this file kept
-/// the edge visible at all.
-///
 /// The registered driver explicitly declares its committed-event source.
 fn backend_publishes_committed_changes(backend: &BackendHandle) -> bool {
     backend.publishes_committed_changes()
@@ -270,39 +218,8 @@ fn backend_publishes_committed_changes(backend: &BackendHandle) -> bool {
 
 /// Build and queue/emit broker events for a mutation's RETURNING rows.
 ///
-/// Split out of [`exec_mutation_with_emit`] so the gating logic can be
-/// unit-tested without a Postgres connection: callers pass the already-
-/// fetched `Vec<Value>` and we run the same gate + per-row build the
-/// production path runs.
-///
-/// Mirrors `wal_consumer::emit_for_tuple`'s fix on the cross-worker
-/// path: short-circuit the per-row `(columns, tuple)` build before
-/// allocating anything the broker will discard.
-///
-/// Two gates, both cheap:
-///
-///   1. `broker::is_app_suppressed(app_id)` — when the WAL
-///      consumer is running for this app, it owns the publish path for
-///      events this isolate writes. The corresponding `emit_local` call
-///      would be a no-op, so building the tuple is pure waste. In
-///      production with the consumer active, EVERY mutation previously
-///      paid the build cost only to discard the result inside
-///      `emit_local`.
-///
-///   2. `broker::has_subscribers(app_id, collection)` — a single
-///      `HashMap::get` on the thread-local broker. On a table with no
-///      reactive subscribers (the common case for most mutations) the
-///      event would otherwise be built only for `broker::publish` to
-///      drop it. Conservative-true semantics: a subscriber added
-///      between this check and a subsequent mutation will see THAT
-///      mutation's event — no race, broker and exec helpers run on the
-///      same compio thread.
-///
-/// Both gates have to pass to do the work. We skip the in-tx queue
-/// path too: when in a transaction with no subscribers, queueing for
-/// the COMMIT-time drain would just defer the discard. Subscribers
-/// added mid-transaction would miss the event, mirroring the WAL
-/// consumer's same conservative-true contract.
+/// Tuple construction is skipped when the backend publishes committed changes,
+/// WAL delivery owns the app, or the collection has no subscribers.
 fn emit_for_rows(
     rows: &[Value],
     app_id: &str,
@@ -318,10 +235,7 @@ fn emit_for_rows(
         return;
     }
     if backend_publishes {
-        // SQLite has a commit-time CDC publisher wired through the writer
-        // actor's preupdate/commit hooks. The old SDK-local emit was kept
-        // for the Postgres/no-WAL-consumer path; on SQLite it races the CDC
-        // publisher and produces duplicate identical live snapshots.
+        // The backend's commit publisher owns delivery for this write.
         return;
     }
     if crate::cdc::broker::is_app_suppressed(app_id)
@@ -436,16 +350,18 @@ pub fn clear_pending_emits(app_id: &str) {
 
 #[cfg(test)]
 pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHandle) -> TxRoute {
-    let dialect = backend.dialect();
+    let registration = backend.sql_registration().clone();
     let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
-        crate::tx_route::CapturedRoute::tx_for_tests(app_id, dialect)
+        crate::tx_route::CapturedRoute::tx_for_tests(app_id, registration)
     } else {
-        crate::tx_route::CapturedRoute::pool_for_tests(app_id, dialect)
+        crate::tx_route::CapturedRoute::pool_for_tests(app_id, registration)
     };
     // Sync, and it can be: only the COLD path needs to await, and a harness
     // driving exec directly has already opened a backend. Production binds
     // through `tx_scope::bind_route`, which owns the cold arm.
-    captured.bind(backend)
+    captured
+        .bind(backend)
+        .expect("test route registration matches backend")
 }
 
 #[cfg(test)]
@@ -500,25 +416,7 @@ mod tests {
         SQLITE_ROUTE.with(|c| c.get())
     }
 
-    /// Reset the state one test owns, scoped to `app_id`:
-    ///   - that app's broker subscriptions,
-    ///   - that app's WAL suppression entry,
-    ///   - the per-test build counter and SQLite route (both thread-local).
-    ///
-    /// **Scoped on purpose.** This used to drop EVERY app's subscriptions
-    /// through what was then `drop_app`'s unscoped `None` arm - and to decrement the
-    /// suppression refcount for a hardcoded list of keys belonging to other
-    /// tests. Its doc comment described all of that as "thread-local state",
-    /// but `broker`'s registry and `wal_consumer::SUPPRESSED_APPS` are
-    /// process-global statics, and cargo runs these tests on parallel threads.
-    /// So one test's cleanup silently tore down a concurrently-running test's
-    /// world: that is what made
-    /// `exec_mutation_with_emit_skips_build_when_app_suppressed` fail in 2 of 9
-    /// consecutive runs on unmodified code.
-    ///
-    /// Scoping also makes these tests able to SEE cross-app leakage rather than
-    /// hiding it - a global reset erases the evidence of exactly the bug the
-    /// suppression refcount exists to prevent.
+    /// Reset only the state owned by one test app.
     fn reset_world(app_id: &str) {
         crate::cdc::broker::drop_app(app_id);
         crate::cdc::broker::unsuppress_app(app_id);
@@ -526,15 +424,7 @@ mod tests {
         reset_sqlite_route();
     }
 
-    /// One test's cleanup must not tear down another's world.
-    ///
-    /// The broker registry and `wal_consumer::SUPPRESSED_APPS` are
-    /// process-global statics and cargo runs these tests on parallel threads,
-    /// so a cleanup with global blast radius corrupts whatever else is running.
-    /// `reset_world` used to drop every app's subscriptions, which is what this
-    /// arm pins: it stands in for a concurrent test that owns `theirs` and checks
-    /// that our cleanup leaves it intact. On the pre-fix helper the
-    /// subscription assertion fails.
+    /// One test's cleanup must leave another app's broker state intact.
     #[test]
     fn reset_world_leaves_other_apps_untouched() {
         let mine = "app_reset_scope_mine";
@@ -570,28 +460,9 @@ mod tests {
             .block_on(f)
     }
 
-    /// A test route must speak the dialect of the connection it is bound to.
-    ///
-    /// [`ambient_route_for_tests`] stamped `SqlDialect::Postgres` on every route
-    /// it minted until 2026-09-03, because that is what
-    /// `CapturedRoute::pool_for_tests` hardcoded. Every SQLite harness that
-    /// reaches this helper - `tests::fixtures::unit_route` and the whole of
-    /// `crates/zeroship-data-orm/src/tests/sqlite/` - therefore carried a route claiming
-    /// PostgreSQL over a rusqlite connection. It did no damage only because no
-    /// path those fixtures take reads the dialect off the route; the 34
-    /// `route.dialect()` reads in `crud/mod.rs` are one fixture away.
-    ///
-    /// **There is no PostgreSQL arm here and that is not an omission**: a
-    /// `BackendHandle::Postgres` needs a live server, which no unit in this
-    /// module opens. `crates/zeroship-data-orm/src/tests/postgres/unmask_transactions.rs` is the Postgres-side harness, and
-    /// it now names its dialect at the two `CapturedRoute` constructors rather
-    /// than inheriting one. What stands in for that arm below is a control that
-    /// needs no server: the same SQLite handle, bound to a route captured with
-    /// `Postgres` explicitly, must still answer `Postgres` - so the SQLite
-    /// answer above came from the derivation in [`ambient_route_for_tests`] and
-    /// not from `bind` quietly inspecting the handle.
+    /// A captured compiler registration cannot be rebound to another backend.
     #[test]
-    fn an_ambient_test_route_speaks_the_dialect_of_the_backend_it_was_handed() {
+    fn an_ambient_route_captures_and_verifies_the_sql_registration() {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let sqlite = Rc::new(
@@ -605,23 +476,45 @@ mod tests {
 
             let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
             assert_eq!(
-                derived.dialect(),
-                crate::sql::compile::SqlDialect::Sqlite,
-                "a route bound to a SQLite handle must not claim PostgreSQL: \
-                 every builder it reaches would emit the wrong SQL",
+                derived.sql_registration().family(),
+                crate::sql::registration::SQLITE_FAMILY,
             );
 
-            let stated = crate::tx_route::CapturedRoute::pool_for_tests(
+            let mismatch = crate::tx_route::CapturedRoute::pool_for_tests(
                 "app_route_dialect",
-                crate::sql::compile::SqlDialect::Postgres,
+                crate::sql::registration::SqlRegistration::postgres(),
             )
             .bind(handle);
-            assert_eq!(
-                stated.dialect(),
-                crate::sql::compile::SqlDialect::Postgres,
-                "the dialect is the constructor's input; `bind` must not \
-                 re-derive it from the handle",
-            );
+            assert!(mismatch.is_err());
+        });
+    }
+
+    #[test]
+    fn exec_count_rejects_malformed_driver_results() {
+        run(async {
+            let (backend, dir) = crate::tests::fixtures::unit_backend();
+            let route = ambient_route_for_tests("app_count_result", backend);
+            for sql in [
+                "SELECT 1 AS other",
+                "SELECT 'one' AS count",
+                "SELECT 1.5 AS count",
+            ] {
+                let error = exec_count(
+                    &route,
+                    CompiledQuery {
+                        sql: sql.to_owned(),
+                        params: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("count result"),
+                    "unexpected error: {error}"
+                );
+            }
+            drop(route);
+            drop(dir);
         });
     }
 
@@ -901,9 +794,7 @@ mod tests {
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("7"));
-                // changed_columns excludes `created_at`/`updated_at`
-                // (none here) and surfaces every other RETURNING
-                // column; order isn't part of the contract.
+                // Every returned column is reported; order is not part of the contract.
                 let mut cols = ev.changed_columns.clone();
                 cols.sort();
                 assert_eq!(cols, vec!["id".to_string(), "title".to_string()]);
@@ -1215,19 +1106,17 @@ mod tests {
                 .expect("count-only update");
                 assert_eq!(affected, expected);
             }
-            assert!(
-                exec_mutation_count_with_emit(
-                    CompiledQuery {
-                        sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
-                        params: vec![],
-                    },
-                    &ambient_route_for_tests(app_id, handle.clone()),
-                    "missing",
-                    ChangeOp::Delete,
-                )
-                .await
-                .is_err()
-            );
+            assert!(exec_mutation_count_with_emit(
+                CompiledQuery {
+                    sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
+                    params: vec![],
+                },
+                &ambient_route_for_tests(app_id, handle.clone()),
+                "missing",
+                ChangeOp::Delete,
+            )
+            .await
+            .is_err());
 
             let events = meter.drain();
             let id = uuid::Uuid::parse_str(app_id).unwrap();
@@ -1558,7 +1447,7 @@ mod tests {
             let app_id = "p2c1leak";
             let role = zeroship_core::database_role::per_app_role_name(app_id)
                 .expect("test app role name");
-            let role_ident = crate::sql::compile::quote_ident(&role);
+            let role_ident = crate::sql::mapping::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
             // in the app role (required for SET LOCAL ROLE) and (b)
@@ -1584,7 +1473,7 @@ mod tests {
                     .expect("create app role");
                 c.simple_query(&format!(
                     "GRANT {role_ident} TO {}",
-                    crate::sql::compile::quote_ident(&login_user)
+                    crate::sql::mapping::quote_ident(&login_user)
                 ))
                 .await
                 .expect("grant membership");
@@ -1596,9 +1485,10 @@ mod tests {
             // SET LOCAL role + timeouts are live on the backend.
             let cancelled = compio::time::timeout(
                 Duration::from_millis(100),
-                crate::backend::pg_autocommit::roled_rows(
+                crate::backend::pg_autocommit::scoped_rows(
                     &pool,
                     &crate::sql::SchemaName::new(app_id).expect("fixture schema"),
+                    crate::connection::SessionAuthority::PerAppRole,
                     "SELECT pg_sleep(1)",
                     &[],
                 ),
@@ -1642,7 +1532,7 @@ mod tests {
             let _ = c
                 .simple_query(&format!(
                     "REVOKE {role_ident} FROM {}",
-                    crate::sql::compile::quote_ident(&login_user)
+                    crate::sql::mapping::quote_ident(&login_user)
                 ))
                 .await;
             let _ = c

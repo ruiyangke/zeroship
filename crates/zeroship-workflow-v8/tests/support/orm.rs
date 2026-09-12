@@ -1,5 +1,7 @@
 use std::path::Path;
-use zeroship_data_orm::{binding::DbBinding, encryption::ProjectKeySource, ConnectOptions};
+use zeroship_data_orm::{
+    binding::DbBinding, connection::ConnectionFactory, encryption::ProjectKeySource,
+};
 use zeroship_workflow::service::{
     schema,
     store::{OrmStore, SchemaName},
@@ -12,10 +14,12 @@ pub async fn store(directory: &Path) -> OrmStore {
             "test-deployment",
             SchemaName::new("workflow").unwrap(),
         ),
-        ConnectOptions::new(
-            format!("sqlite:{}", directory.join("app.sqlite").display()),
-            ProjectKeySource::unavailable(),
-        ),
+        &ConnectionFactory::for_url(&format!(
+            "sqlite:{}",
+            directory.join("app.sqlite").display()
+        ))
+        .unwrap(),
+        ProjectKeySource::unavailable(),
     )
     .await
     .unwrap();

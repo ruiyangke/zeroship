@@ -220,95 +220,35 @@ pub fn build_error_body(
     // Only `stack` is removed. `message`, `code`, `details` and `retryable`
     // still ride at 4xx on purpose — creators throw intentional 401/403
     // messages and the SDKs branch on `code`.
-    let extras = ErrorExtras { stack: None, ..extras };
+    let extras = ErrorExtras {
+        stack: None,
+        ..extras
+    };
 
     build_verbose_error_body(message, name, extras)
 }
 
-/// Error codes the platform generates itself that are safe to surface
-/// verbatim to clients even at a 5xx status. These carry no secret
-/// content — the message is a fixed platform string with no stack and no
-/// user-supplied data — so the 5xx body-sanitization rail exempts them.
-///
-/// Two families qualify:
-///
-/// 1. `capability_violation` — the gateway/dispatch capability gate's own
-///    refusal (P9).
-///
-/// 2. The **creator-facing provisioning refusal** `schema_not_provisioned`
-///    (`crates/zeroship-data-orm/src/error.rs`). The app's per-app Postgres role does
-///    not exist, so `zeroship migrate` was never run for it. It is on this
-///    list because the message is platform-authored, fixed, and interpolates
-///    nothing -- the server text and the role name (which embeds the app id)
-///    stay in the operator log. Blanking it is what produced the failure this
-///    list exists to prevent: a condition with a documented one-command fix
-///    arriving as `{"message":"internal error"}`, diagnosable only from a
-///    worker log the creator cannot read.
-///
-/// 3. The **developer-facing DB validation / CAS guardrail** family
-///    (`crates/zeroship-data-orm/src/error.rs`). These are `DbError::ValidationFailed`
-///    (and `QueryError`-derived) refusals: the plugin rejected the *shape* of
-///    a request before touching any row. They are platform-owned static
-///    message strings whose only variable content is the caller's own
-///    collection / filter shape (never another tenant's data, never a stack).
-///    Crucially they carry no 4xx `status` — a native throw materialises a
-///    `CodedError` with `.code` + `.hint` but no `.status`, so `statusFromError`
-///    defaults them to 500 and the sanitization rail would otherwise strip the
-///    very `.code` the SDK branches on (`version_mismatch` →
-///    `OptimisticLockError`, etc.). Exempting them keeps the developer-facing
-///    code on the wire without leaking anything secret. (Mirrors the TS
-///    fetch-handler rail, which already preserves any string `.code` at 5xx.)
-///
-/// ## Every code is listed TWICE, and that is not redundancy
-///
-/// The names above are what `crates/zeroship-data-orm/src/error.rs` throws. They are
-/// not what arrives here on the path a creator actually takes.
-/// `@zeroship/db` re-stamps every native error through `canonicalErrorCode`
-/// (`sdks/db/src/errors.ts:27`) *inside the isolate*, before the throw
-/// propagates out to this rail: the generic arm uppercases and
-/// underscore-separates, and `CANONICAL_CODE_OVERRIDES` renames two outright
-/// (`fk_violation` → `FOREIGN_KEY_VIOLATION`, `version_mismatch` →
-/// `OPTIMISTIC_CONCURRENCY`).
-///
-/// So until 2026-08-10 both allow-lists here tested for a spelling that had
-/// already been rewritten one layer down, and every exemption they describe
-/// was inert on the SDK path — which is the only path creator code takes.
-/// Measured on a live `pnpm dev`: an FK violation reached the caller as a
-/// bare `{"message":"internal error","name":"Error","request_id":"24"}` with
-/// no code at all. Both spellings are kept because both occur: native for a
-/// direct `env.db` call, canonical for anything through the SDK.
-///
-/// The two lists are hand-mirrored across a language boundary with nothing
-/// joining them, so a THIRD override added to `canonicalErrorCode` re-opens
-/// this silently. `examples/db-todos/tests/database.test.ts` is the only instrument
-/// that could catch that, and it deliberately asserts the FK by row count
-/// rather than by error text.
+/// Platform-authored error codes whose fixed messages may cross the server-error rail.
+/// Native and SDK-canonical spellings both appear because callers can use either surface.
 fn is_public_error_code(code: &str) -> bool {
     matches!(
         code,
         "capability_violation"
-            // The app's DB was never provisioned -- plugin-db error.rs.
-            // Message is a platform-owned constant; fix is `zeroship migrate`.
             | "schema_not_provisioned"
-            // Optimistic-concurrency (CAS) guardrails — plugin-db error.rs
-            | "version_mismatch"
-            | "version_filter_must_be_top_level"
-            | "multi_row_version_filter_unsupported"
-            // Request-shape validation refusals (QueryError + ValidationFailed)
+            | "concurrency_mismatch"
+            | "concurrency_filter_must_be_top_level"
+            | "multi_row_concurrency_filter_unsupported"
             | "invalid_filter"
             | "invalid_collection"
             | "invalid_identifier"
             | "reserved_id_prefix"
             | "immutable_assigned_field"
             | "filter_nesting_too_deep"
-            // The same set as canonicalised by `@zeroship/db`. Note
-            // `version_mismatch` becomes `OPTIMISTIC_CONCURRENCY`, not
-            // `VERSION_MISMATCH` — the mapping is a table, not a transform.
             | "CAPABILITY_VIOLATION"
             | "SCHEMA_NOT_PROVISIONED"
             | "OPTIMISTIC_CONCURRENCY"
-            | "VERSION_FILTER_MUST_BE_TOP_LEVEL"
-            | "MULTI_ROW_VERSION_FILTER_UNSUPPORTED"
+            | "CONCURRENCY_FILTER_MUST_BE_TOP_LEVEL"
+            | "MULTI_ROW_CONCURRENCY_FILTER_UNSUPPORTED"
             | "INVALID_FILTER"
             | "INVALID_COLLECTION"
             | "INVALID_IDENTIFIER"
@@ -403,7 +343,11 @@ fn build_verbose_error_body(message: &str, name: &str, extras: ErrorExtras<'_>) 
         out.push_str(d);
     }
     if let Some(r) = extras.retryable {
-        out.push_str(if r { r#","retryable":true"# } else { r#","retryable":false"# });
+        out.push_str(if r {
+            r#","retryable":true"#
+        } else {
+            r#","retryable":false"#
+        });
     }
     out.push('}');
     out
@@ -433,7 +377,10 @@ fn escape_json_string(s: &str, out: &mut String) {
 /// Extract a human-readable error message from a V8 exception value.
 /// Reads `.message` when present (Error instances); falls back to
 /// `String(exception)` for other throwables (plain strings, numbers).
-pub fn v8_exception_to_message(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> String {
+pub fn v8_exception_to_message(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> String {
     if let Some(obj) = exception.to_object(scope) {
         let msg_key = v8::String::new(scope, "message").unwrap();
         if let Some(msg_val) = obj.get(scope, msg_key.into())
@@ -466,7 +413,10 @@ pub fn v8_exception_to_name(scope: &mut v8::PinScope, exception: v8::Local<v8::V
 
 /// Read `.stack` if present. Returns `None` when absent (plain throwables,
 /// string errors) so callers can omit the field from the body.
-pub fn v8_exception_to_stack(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Option<String> {
+pub fn v8_exception_to_stack(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> Option<String> {
     let obj = exception.to_object(scope)?;
     let key = v8::String::new(scope, "stack").unwrap();
     let val = obj.get(scope, key.into())?;
@@ -479,22 +429,34 @@ pub fn v8_exception_to_stack(scope: &mut v8::PinScope, exception: v8::Local<v8::
 /// Read `.status` as a numeric HTTP status code (400-599). Returns
 /// `None` for non-numeric or out-of-range values so callers fall back
 /// to HTTP 500.
-pub fn v8_exception_to_status(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Option<u16> {
+pub fn v8_exception_to_status(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> Option<u16> {
     let obj = exception.to_object(scope)?;
     let key = v8::String::new(scope, "status").unwrap();
     let val = obj.get(scope, key.into())?;
     let n = val.int32_value(scope)?;
-    if (400..=599).contains(&n) { Some(n as u16) } else { None }
+    if (400..=599).contains(&n) {
+        Some(n as u16)
+    } else {
+        None
+    }
 }
 
 /// Read `.code` (gRPC-style structured error code). Strict — only
 /// strings forward; non-string `code` values are dropped to keep the
 /// wire contract from drifting.
-pub fn v8_exception_to_code(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Option<String> {
+pub fn v8_exception_to_code(
+    scope: &mut v8::PinScope,
+    exception: v8::Local<v8::Value>,
+) -> Option<String> {
     let obj = exception.to_object(scope)?;
     let key = v8::String::new(scope, "code").unwrap();
     let val = obj.get(scope, key.into())?;
-    if !val.is_string() { return None; }
+    if !val.is_string() {
+        return None;
+    }
     Some(val.to_rust_string_lossy(scope))
 }
 
@@ -509,7 +471,9 @@ pub fn v8_exception_to_details_json(
     let obj = exception.to_object(scope)?;
     let key = v8::String::new(scope, "details").unwrap();
     let val = obj.get(scope, key.into())?;
-    if val.is_undefined() { return None; }
+    if val.is_undefined() {
+        return None;
+    }
     v8::json::stringify(scope, val).map(|s| s.to_rust_string_lossy(scope))
 }
 
@@ -522,7 +486,9 @@ pub fn v8_exception_to_retryable(
     let obj = exception.to_object(scope)?;
     let key = v8::String::new(scope, "retryable").unwrap();
     let val = obj.get(scope, key.into())?;
-    if !val.is_boolean() { return None; }
+    if !val.is_boolean() {
+        return None;
+    }
     Some(val.boolean_value(scope))
 }
 
@@ -609,12 +575,7 @@ pub fn v8_exception_to_error_value(
 /// from `value`, and resolves the promise. If the value string is too large
 /// for V8, the promise is rejected with an error message. Runs a microtask
 /// checkpoint after resolution.
-pub fn resolve_op(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-    op_id: u32,
-    value: &str,
-) {
+pub fn resolve_op(scope: &mut v8::PinScope, state: &SharedState, op_id: u32, value: &str) {
     let resolver = state.borrow_mut().pending_resolvers.remove(&op_id);
     if let Some(resolver) = resolver {
         let r = v8::Local::new(scope, &resolver);
@@ -638,12 +599,7 @@ pub fn resolve_op(
 /// Removes the resolver from `state.pending_resolvers`, creates a V8 `Error`
 /// from `error`, and rejects the promise. Runs a microtask checkpoint after
 /// rejection.
-pub fn reject_op(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-    op_id: u32,
-    error: &str,
-) {
+pub fn reject_op(scope: &mut v8::PinScope, state: &SharedState, op_id: u32, error: &str) {
     let resolver = state.borrow_mut().pending_resolvers.remove(&op_id);
     if let Some(resolver) = resolver {
         let r = v8::Local::new(scope, &resolver);
@@ -665,23 +621,15 @@ pub fn reject_op(
 /// function with `undefined` as `this` and no arguments. For `setInterval`
 /// timers (`interval.is_some()`), re-inserts the callback for the next fire.
 /// Runs a microtask checkpoint after the call.
-pub fn fire_timer_callback(
-    scope: &mut v8::PinScope,
-    state: &SharedState,
-    timer_id: u32,
-) {
+pub fn fire_timer_callback(scope: &mut v8::PinScope, state: &SharedState, timer_id: u32) {
     let cb_opt = state.borrow_mut().timer_callbacks.remove(&timer_id);
     if let Some(cb) = cb_opt {
-        crate::core::invocation::with_captured_context(
-            scope,
-            &cb.continuation_context,
-            |scope| {
-                let func = v8::Local::new(scope, &cb.callback);
-                let undefined = v8::undefined(scope).into();
-                func.call(scope, undefined, &[]);
-                crate::core::init::perform_microtask_checkpoint(scope);
-            },
-        );
+        crate::core::invocation::with_captured_context(scope, &cb.continuation_context, |scope| {
+            let func = v8::Local::new(scope, &cb.callback);
+            let undefined = v8::undefined(scope).into();
+            func.call(scope, undefined, &[]);
+            crate::core::init::perform_microtask_checkpoint(scope);
+        });
 
         // setInterval: re-insert so next fire can retrieve it
         if cb.interval.is_some() {
@@ -701,40 +649,7 @@ mod tests {
         }
     }
 
-    /// The spellings in both allow-lists are the NATIVE ones, but nothing a
-    /// creator writes reaches this rail carrying them.
-    ///
-    /// `@zeroship/db` maps every native error through `canonicalErrorCode`
-    /// (`sdks/db/src/errors.ts:27`) *inside the isolate*, before the throw
-    /// propagates out to this rail. That function uppercases every code and
-    /// additionally renames two: `fk_violation` → `FOREIGN_KEY_VIOLATION`
-    /// and `version_mismatch` → `OPTIMISTIC_CONCURRENCY`. So the rail was
-    /// testing for a spelling that had already been rewritten one layer down.
-    ///
-    /// MEASURED against a live `pnpm dev` (`examples/db-todos`, port 3061,
-    /// 2026-08-10): the same orphan insert reached the sanitizer as the
-    /// following two representations before and after verbose serialization:
-    ///
-    /// ```text
-    /// sanitized: {"message":"internal error","name":"Error","request_id":"24"}
-    /// verbose:   {"message":"{\"code\":\"fk_violation\",...}",...,
-    ///             "code":"FOREIGN_KEY_VIOLATION"}
-    /// ```
-    ///
-    /// The second body is this file's own verbose serializer, so
-    /// `extras.code` at the rail is `FOREIGN_KEY_VIOLATION` — `Some`, but
-    /// matching neither list, hence blanked to a bare `internal error` with
-    /// no code at all. That made the whole code-kept/message-blanked third
-    /// state (and the CAS exemption above it) dead on every creator path
-    /// that goes through the SDK, which is all of them.
-    ///
-    /// Both spellings are kept: a caller using `env.db` directly, with no
-    /// SDK in the chain, still arrives with the native lowercase code.
-    ///
-    /// WHAT THIS TEST DOES NOT CATCH: it pins the two spellings that exist
-    /// today. If `canonicalErrorCode` grows a third override, nothing here
-    /// fails — the lists are hand-mirrored across a language boundary and
-    /// only `examples/db-todos/tests/database.test.ts` exercises the real join.
+    /// Native and SDK-canonical codes must both survive the sanitization rail.
     #[test]
     fn sdk_canonicalised_codes_survive_the_5xx_sanitization_rail() {
         // (canonical spelling, whether the MESSAGE may also survive)
@@ -746,7 +661,7 @@ mod tests {
             ("UNIQUE_VIOLATION", false),
             ("NOT_NULL_VIOLATION", false),
             ("CHECK_VIOLATION", false),
-            ("VERSION_FILTER_MUST_BE_TOP_LEVEL", true),
+            ("CONCURRENCY_FILTER_MUST_BE_TOP_LEVEL", true),
             ("INVALID_FILTER", true),
             ("RESERVED_ID_PREFIX", true),
         ];
@@ -825,15 +740,7 @@ mod tests {
         }
     }
 
-    /// THE ONE-VARIABLE CONTROL for the test above. Identical status,
-    /// identical message text, identical extras -- only the code differs,
-    /// and it is one that is NOT on the allow-list. A genuinely-internal
-    /// failure must still be blanked.
-    ///
-    /// If widening the list for `schema_not_provisioned` had made
-    /// everything creator-facing, this fails. That is the whole point of
-    /// running it: the sibling test alone cannot tell "the rail passes the
-    /// new code" from "the rail stopped blanking anything".
+    /// Unlisted internal failures remain blanked.
     #[test]
     fn genuinely_internal_db_failure_is_still_blanked() {
         let leaky = "this app's database is not provisioned: its per-app Postgres role \
@@ -847,29 +754,23 @@ mod tests {
         }
     }
 
-    /// Regression for `sqlite-cas-nested-version-code-dropped`: a
-    /// developer-facing DB validation / CAS guardrail throws a
-    /// `CodedError` with no `.status`, so `statusFromError` defaults it to
-    /// 500. The 5xx sanitization rail must NOT strip the `.code` for this
-    /// family — the SDK branches on it (`version_mismatch` →
-    /// `OptimisticLockError`, etc.). Pre-fix the rail returned the bare
-    /// `{message:"internal error",...}` envelope and dropped the code.
+    /// Developer-facing validation codes survive without exposing a stack.
     #[test]
     fn validation_cas_codes_survive_the_5xx_sanitization_rail() {
         for code in [
-            "version_filter_must_be_top_level",
-            "version_mismatch",
-            "multi_row_version_filter_unsupported",
+            "concurrency_filter_must_be_top_level",
+            "concurrency_mismatch",
+            "multi_row_concurrency_filter_unsupported",
             "invalid_filter",
             "invalid_collection",
             "invalid_identifier",
             "reserved_id_prefix",
             "immutable_assigned_field",
             "filter_nesting_too_deep",
-            // The pre-existing P9 capability gate code must still pass.
             "capability_violation",
         ] {
-            let body = build_error_body(500, 42, "the real message", "Error", extras_with_code(code));
+            let body =
+                build_error_body(500, 42, "the real message", "Error", extras_with_code(code));
             assert!(
                 body.contains(&format!(r#""code":"{code}""#)),
                 "code {code:?} must survive the 5xx rail, got: {body}"
@@ -896,8 +797,7 @@ mod tests {
             extras_with_code("transient"),
         );
         assert_eq!(
-            body,
-            r#"{"message":"internal error","name":"Error","request_id":"7"}"#,
+            body, r#"{"message":"internal error","name":"Error","request_id":"7"}"#,
             "non-whitelisted 5xx code must be sanitized"
         );
         assert!(!body.contains("secret connection string"));
@@ -1029,19 +929,13 @@ mod tests {
         );
         // Paired assertion: the body is still the real error, not a blank
         // envelope. Without this, deleting the whole body would pass.
-        assert!(body.contains(r#""message":"boom""#), "4xx must keep its message, got: {body}");
+        assert!(
+            body.contains(r#""message":"boom""#),
+            "4xx must keep its message, got: {body}"
+        );
     }
 
-    /// Regression for the same leak on its SECOND path — the one the 5xx
-    /// rail's own whitelist opened.
-    ///
-    /// `is_public_error_code` exists so a developer-facing DB/CAS code
-    /// (`version_mismatch`, …) survives to the SDK at 500. It is implemented
-    /// as "skip the blanking arm", so before the fix everything else in the
-    /// envelope survived too — including the stack, at a status the same
-    /// module's own comment calls "a public boundary". The exemption's
-    /// existing test (`validation_cas_codes_survive_the_5xx_sanitization_rail`)
-    /// builds its extras with no stack at all, so it cannot observe this.
+    /// Whitelisting a code does not whitelist its stack.
     #[test]
     fn whitelisted_5xx_code_exemption_does_not_carry_the_stack() {
         let body = build_error_body(
@@ -1051,7 +945,7 @@ mod tests {
             "Error",
             extras_with_stack(
                 "Error: boom\n    at ei (__user__.js:6:83399)",
-                Some("version_mismatch"),
+                Some("concurrency_mismatch"),
             ),
         );
         assert!(
@@ -1061,7 +955,7 @@ mod tests {
         // The exemption must still do its job — otherwise this "fix" would be
         // indistinguishable from deleting the whitelist.
         assert!(
-            body.contains(r#""code":"version_mismatch""#),
+            body.contains(r#""code":"concurrency_mismatch""#),
             "the whitelisted code must still survive, got: {body}"
         );
     }

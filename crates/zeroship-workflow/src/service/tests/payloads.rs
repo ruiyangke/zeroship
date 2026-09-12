@@ -109,17 +109,13 @@ async fn delayed_payload_write(operation: &str) {
         .await
         .unwrap()
         .get::<_, bool>(0));
-    let mut tx = store.begin().await.unwrap();
-    let rows = tx
-        .query(
-            &format!(
-                "SELECT state FROM {} WHERE app_id=$1 AND task_id=$2",
-                tx.table("payloads")
-            ),
-            &[app.as_str().into(), task.id.clone().into()],
-        )
-        .await
-        .unwrap();
+    let tx = store.begin().await.unwrap();
+    let rows = journal_rows(
+        &tx,
+        "payloads",
+        json!({"app_id":app.as_str(), "task_id":task.id}),
+    )
+    .await;
     if operation == "INSERT" {
         assert!(
             rows.is_empty(),
@@ -325,15 +321,13 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         )
         .await
         .is_err());
-    let mut tx = store.begin().await.unwrap();
-    let payloads = tx.table("payloads");
-    let state = tx
-        .query(
-            &format!("SELECT state FROM {payloads} WHERE app_id=$1 AND id=$2"),
-            &[a.as_str().into(), staged.id.clone().into()],
-        )
-        .await
-        .unwrap();
+    let tx = store.begin().await.unwrap();
+    let state = journal_rows(
+        &tx,
+        "payloads",
+        json!({"app_id":a.as_str(), "id":staged.id}),
+    )
+    .await;
     assert_eq!(state[0].text("state").unwrap(), "staged");
     tx.commit().await.unwrap();
     let completion = execution(json!([
@@ -563,11 +557,8 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
 }
 
 async fn expire_uploads(store: &Rc<OrmStore>) {
-    let mut tx = store.begin().await.unwrap();
-    let table = tx.table("payloads");
-    tx.execute(&format!("UPDATE {table} SET expires_at=0"), &[])
-        .await
-        .unwrap();
+    let tx = store.begin().await.unwrap();
+    journal_update(&tx, "payloads", json!({}), json!({"expires_at":0})).await;
     tx.commit().await.unwrap();
 }
 

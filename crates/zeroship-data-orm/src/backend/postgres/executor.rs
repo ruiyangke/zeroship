@@ -1,19 +1,16 @@
 //! Host database routing and transaction authority setup.
 use super::PostgresBackend;
+use crate::sql::SchemaName;
+use crate::value::Value;
 use crate::{
     driver::{Driver, LeaseKind, Session},
     error::*,
     executor::ScopedExecutor,
 };
 use async_trait::async_trait;
-use crate::value::Value;
-use crate::sql::{SchemaName, compile::SqlDialect};
 
 #[async_trait(?Send)]
 impl ScopedExecutor for PostgresBackend {
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Postgres
-    }
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         self.connection_driver().pool_counts()
     }
@@ -27,7 +24,7 @@ impl ScopedExecutor for PostgresBackend {
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
-        self.query_roled_values(schema, sql, params).await
+        self.query_scoped_values(schema, sql, params).await
     }
     async fn exec(
         &self,
@@ -36,7 +33,14 @@ impl ScopedExecutor for PostgresBackend {
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
-        super::pg_autocommit::roled_execute(self.pool(), schema, sql, params).await
+        super::pg_autocommit::scoped_execute(
+            self.pool(),
+            schema,
+            self.session_authority(),
+            sql,
+            params,
+        )
+        .await
     }
     async fn open_tx_session(
         &self,
@@ -55,7 +59,7 @@ impl ScopedExecutor for PostgresBackend {
             .batch_execute(&super::render_begin(begin))
             .await
             .map_err(|e| super::pg_error::classify(&e))?;
-        super::apply_per_app_role(client, schema).await?;
+        super::apply_session_authority(client, schema, self.session_authority()).await?;
         Ok(session)
     }
 }

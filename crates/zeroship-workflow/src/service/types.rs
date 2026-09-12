@@ -259,3 +259,8 @@ pub(crate) fn digest<T: Serialize>(value: &T) -> Result<String, WorkflowServiceE
         .map_err(|_| WorkflowServiceError::Internal("encode workflow digest".into()))?;
     Ok(hash(&bytes))
 }
+
+/// Identity of a journal row whose app-scoped domain key is separate.
+pub(crate) fn storage_id() -> String {
+    zeroship_core::typed_id::generate("wjr")
+}
