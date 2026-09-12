@@ -22,13 +22,14 @@ export function deploymentSchema(namespace) {
 
   table("app_deploy_holds", { schema: namespace }).create({
     columns: {
+      id: t.text().notNull(),
       app_id: t.uuid().notNull(),
       deploy_id: t.text().notNull(),
       holder_id: t.text().notNull(),
       generation: t.bigInt().notNull(),
       state: t.text().notNull(),
     },
-    primaryKey: ["app_id", "deploy_id", "holder_id"],
+    primaryKey: ["id"],
     foreignKeys: [{
       name: "app_deploy_holds_deployment_fkey",
       columns: ["app_id", "deploy_id"],
@@ -36,4 +37,7 @@ export function deploymentSchema(namespace) {
       onDelete: "restrict",
     }],
   });
+  table("app_deploy_holds", { schema: namespace })
+    .index("app_deploy_holds_scope_key")
+    .add({ on: ["app_id", "deploy_id", "holder_id"], unique: true });
 }

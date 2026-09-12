@@ -70,18 +70,8 @@ impl SchemaCache {
 
     /// The descriptor entry for one collection, or a typed error.
     ///
-    /// **There is no `Option` here on purpose, and that is a security rule.**
-    /// The read path used to treat an absent schema as "carry on", which is how
-    /// L24 happened: the projection allowlist stopped applying and the
-    /// read-identifier check silently passed, so a read served before the
-    /// schema arrived returned every physical column and accepted any field
-    /// name. A collection the descriptor does not declare is not a collection
-    /// this isolate can serve.
-    ///
-    /// This lives HERE rather than in the adapter's `descriptor.rs`, where it
-    /// sat until 2026-09-02, because the rule is about the store's contract -
-    /// what a miss MEANS - not about how a caller reached the store. The
-    /// adapter kept only the thread-local lookup.
+    /// An undeclared collection is denied so projection and identifier checks
+    /// cannot run without their schema authority.
     ///
     /// # Errors
     ///

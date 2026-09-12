@@ -48,7 +48,7 @@ src/storage.rs                app-storage abstraction
 
 Plugins register namespaces on `env` through `NativePlugin`:
 
-- `env.db.*` -> `crates/plugin-db`
+- `env.db.*` -> `crates/zeroship-data-v8`
 - `env.kv.*` -> `crates/zeroship-kv-v8`
 - `env.storage.*` -> `crates/zeroship-storage-v8`
 

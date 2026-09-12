@@ -2,11 +2,10 @@ import { ValidationError } from "../errors";
 import { trackCollectionAccess } from "../live";
 import type { NativeCollection } from "../native";
 import { mapFilterOutbound, mapResultDoc } from "../utils";
-import type { Filter, PlainObject, Result, Row, VectorMetric } from "../types";
+import type { Filter, GeoField, PlainObject, Result, Row, VectorField, VectorMetric } from "../types";
 
 export interface VectorGeoCollectionInternals<S> {
   _name: string;
-  _softDelete: boolean;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
@@ -35,14 +34,14 @@ export function _validateK(value: number, paramName: string): void {
   }
 }
 
-/** **P4** - vector-nearest-neighbour search. */
+/** Vector nearest-neighbour search. */
 export function searchCollection<S>(
   self: VectorGeoCollectionInternals<S>,
   args: {
     vector: number[];
     k?: number;
     metric?: VectorMetric;
-    column?: string;
+    column?: VectorField<S>;
     filter?: Filter<S>;
   },
 ): Promise<Result<(Row<S> & { _distance?: number })[]>> {
@@ -83,8 +82,6 @@ export function searchCollection<S>(
     }
     if (args.filter !== undefined) {
       nativeArgs.filter = mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn);
-    } else if (self._softDelete) {
-      nativeArgs.filter = {};
     }
     const results = await self._nativeCollection().search(nativeArgs);
     return (results ?? []).map(
@@ -96,13 +93,11 @@ export function searchCollection<S>(
   });
 }
 
-/**
- * **P4 PR 3** — spatial within-radius search.
- */
+/** Spatial within-radius search. */
 export function nearCollection<S>(
   self: VectorGeoCollectionInternals<S>,
   args: {
-    field: keyof S & string;
+    field: GeoField<S>;
     point: { lat: number; lng: number };
     radius: number;
     filter?: Filter<S>;
@@ -176,8 +171,6 @@ export function nearCollection<S>(
     if (args.limit !== undefined) nativeArgs.limit = args.limit;
     if (args.filter !== undefined) {
       nativeArgs.filter = mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn);
-    } else if (self._softDelete) {
-      nativeArgs.filter = {};
     }
 
     const results = await self._nativeCollection().near(nativeArgs);

@@ -94,10 +94,7 @@ fn register_sqlite_vec_once() {
 #[allow(dead_code)]
 pub(crate) type Row = Vec<Option<String>>;
 
-/// A typed SQLite cell - preserves the underlying storage-class
-/// discriminator across the actor boundary instead of collapsing every
-/// value to `Option<String>`. This is the row-decoder shape the
-/// `vector_search` / `spatial_near` paths consume.
+/// A SQLite cell that preserves its storage class across the actor boundary.
 #[derive(Debug, Clone)]
 pub enum TypedCell {
     /// SQLite `NULL`.
@@ -115,20 +112,7 @@ pub enum TypedCell {
     Blob(Vec<u8>),
 }
 
-/// A typed row + column names, returned by the `QueryTyped` command
-/// variant. Consumers: [`crate::search::Search::vector_search`]
-/// (vec0 JOIN result) and `spatial_near`.
-///
-/// **`pub`, and it must stay so even though NOTHING NAMES IT outside this
-/// module.** Phase 0.5's visibility audit narrowed it to `pub(crate)` on
-/// 2026-09-02 on exactly that evidence and the compiler refused with 39
-/// errors: `crates/zeroship-data-orm/src/tests/sqlite/transactions.rs` obtains one by INFERENCE from
-/// `query_typed` and then reads `.rows`, so it never writes the type's name
-/// and a reference count cannot see it. Its siblings in this file -
-/// `Interrupts`, `SqliteSession`, `TxLease`, `NextCommandGate` (and
-/// `SqliteCancelGuard`, until it was deleted as dead on 2026-09-04) - narrowed
-/// cleanly in the same pass; this one is the
-/// exception, and the reason is the return position, not the count.
+/// Column names and typed rows returned by the public session query contract.
 #[derive(Debug, Clone)]
 pub struct TypedRows {
     /// Column names in result-set order. Length matches every row's
@@ -519,44 +503,23 @@ impl SqliteSession {
     /// Open a SQLite database at `db_path`, open its autocommit connection and
     /// spawn the actor.
     ///
-    /// Transaction connections are NOT opened here: an app gets one on its
-    /// first `db.transaction()`. A dev process whose app never opens an
-    /// explicit transaction therefore holds one connection where it used to
-    /// hold two.
+    /// Transaction connections open lazily when an app begins a transaction.
     ///
-    /// The worker runs the bootstrap PRAGMA sequence synchronously on both
-    /// connections before entering the receive loop; any failure surfaces here
-    /// as a typed [`DbError`] and the worker exits without serving a
-    /// `Command`.
+    /// The initial connection completes its PRAGMA bootstrap before this
+    /// function returns. Transaction connections do the same before use.
     ///
-    /// **CDC integration**: when both `app_id` and `packet_tx` are `Some`, the
-    /// worker installs the `preupdate_hook`/`commit_hook`/`rollback_hook`
-    /// triplet on **each** connection. Both are now write paths - `tx_conn`
-    /// carries creator transactions and `op_conn` carries autocommit writes -
-    /// so installing on one would silently drop half the change stream. Each
-    /// connection gets its own dispatcher (and therefore its own transaction
-    /// buffer, which is correct: their transactions are independent) and both
-    /// publish into the same channel.
-    ///
-    /// The `app_id` parameter is currently unused inside the dispatcher
-    /// (per-event app_id is derived from the preupdate hook's `db_name`
-    /// argument - the ATTACH alias); it is retained on the signature so a
-    /// future change can repoint it.
+    /// When a CDC sender is supplied, every write connection publishes its
+    /// committed changes. The attached database alias supplies the app identity.
     pub(crate) fn open(
         db_path: &Path,
-        app_id: Option<&str>,
         packet_tx: Option<CommitSender>,
     ) -> Result<Self, DbError> {
         super::validate_database_path(db_path)?;
-        // Bound the queue at 64 in-flight commands. The single actor loop
-        // means there is no parallelism downstream; a bigger queue just delays
-        // backpressure without buying throughput, so the depth is picked to
-        // surface overload early rather than to absorb it.
+        // The bounded queue applies backpressure before the serialized actor.
         let (tx, rx) = flume::bounded::<Command>(64);
         let (startup_tx, startup_rx) = flume::bounded::<StartupSignal>(1);
 
         let db_path = db_path.to_path_buf();
-        let app_id_owned: Option<String> = app_id.map(str::to_string);
         let packet_tx_owned = packet_tx;
 
         #[cfg(test)]
@@ -567,7 +530,7 @@ impl SqliteSession {
         let worker = std::thread::Builder::new()
             .name("sqlite-session".to_string())
             .spawn(move || {
-                let mut actor = match Actor::open(db_path, app_id_owned, packet_tx_owned) {
+                let mut actor = match Actor::open(db_path, packet_tx_owned) {
                     Ok(a) => a,
                     Err(e) => {
                         let _ = startup_tx.send(Err(e));
@@ -1065,33 +1028,6 @@ impl SqliteCancelHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SqliteCancelGuard was deleted on 2026-09-04, and the rules it encoded are not
-// ---------------------------------------------------------------------------
-//
-// It was an `Option<SqliteCancelHandle>` whose `Drop` made a caller-side drop
-// cancel. Nothing ever constructed it: SC-2 asked for a drop-cancels guard and
-// SC-1 shipped EXPLICIT cancellation instead, through
-// `backend::cancel::CancellationHandle`. Its own comment said so. Inert in both
-// directions - no constructor, so its `Drop` was unreachable - which is what
-// separates it from the other unwired code in these crates, where a live
-// consumer is waiting on a producer nobody calls.
-//
-// THREE THINGS IT KNEW, for whoever builds SC-2's drop-cancel path:
-//
-//  1. DISARM BEFORE THE REPLY IS DELIVERED (SC-2 case 4). A drop that happens
-//     after the result reached the caller must not retroactively cancel it.
-//     The disarm point is that hand-off, not the end of the scope.
-//  2. A `Drop` cannot await, so the cancel is fire-and-forget: the intent plus
-//     `Interrupts::interrupt` are SYNCHRONOUS and are what actually stops a
-//     running statement. The queued `Command::Cancel` is only what makes the
-//     actor roll back and retire.
-//  3. BOTH terminal verdicts short-circuit, and `AlreadyCancelling` is not the
-//     tidier of the two. Nobody awaits a dropped guard's answer, so a `Cancel`
-//     it queues can only act; queuing a second for a reservation another caller
-//     is already cancelling asks the actor to run cleanup twice on a shared
-//     connection.
-
 async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
     rx.recv_async().await.map_err(|_| {
         DbError::internal("SqliteSession: worker dropped reply channel before producing a result")
@@ -1347,7 +1283,6 @@ struct Actor {
     /// what a refusal has to report and what a later cancellation has to check.
     op_bound: Option<u64>,
     db_path: PathBuf,
-    app_id: Option<String>,
     packet_tx: Option<CommitSender>,
     /// Monotonic command sequence. `0` is the not-running sentinel, so this
     /// starts at 1.
@@ -1365,7 +1300,6 @@ const BOOT_PRAGMAS: &str = "\
 
 fn open_lane_connection(
     db_path: &Path,
-    app_id: Option<&str>,
     packet_tx: Option<&CommitSender>,
 ) -> Result<
     (
@@ -1377,13 +1311,10 @@ fn open_lane_connection(
     register_sqlite_vec_once();
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
     super::json::register(&conn).map_err(from_sqlite)?;
+    super::decimal::register(&conn).map_err(from_sqlite)?;
     conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
     let dispatcher = match packet_tx {
-        Some(tx) => Some(crate::backend::sqlite::cdc::install(
-            &conn,
-            app_id.map(str::to_string),
-            tx.clone(),
-        )?),
+        Some(tx) => Some(crate::backend::sqlite::cdc::install(&conn, tx.clone())?),
         None => None,
     };
     Ok((conn, dispatcher))
@@ -1392,11 +1323,9 @@ fn open_lane_connection(
 impl Actor {
     fn open(
         db_path: PathBuf,
-        app_id: Option<String>,
         packet_tx: Option<CommitSender>,
     ) -> Result<Self, DbError> {
-        let (op_conn, op_dispatcher) =
-            open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref())?;
+        let (op_conn, op_dispatcher) = open_lane_connection(&db_path, packet_tx.as_ref())?;
         let interrupts = Arc::new(Interrupts::new(op_conn.get_interrupt_handle()));
         Ok(Self {
             op: LaneConn {
@@ -1410,7 +1339,6 @@ impl Actor {
             attachments: Vec::new(),
             op_bound: None,
             db_path,
-            app_id,
             packet_tx,
             seq: 0,
             #[cfg(test)]
@@ -1484,11 +1412,7 @@ impl Actor {
     /// interrupt aimed at the retired connection is refused rather than
     /// delivered to whatever the replacement is doing.
     fn recycle(&mut self, lane: Lane) {
-        let (db_path, app_id, packet_tx) = (
-            self.db_path.clone(),
-            self.app_id.clone(),
-            self.packet_tx.clone(),
-        );
+        let (db_path, packet_tx) = (self.db_path.clone(), self.packet_tx.clone());
         // A transaction lane replays only its own app's ATTACH; `op_conn`
         // replays every one. Restoring the full list onto a transaction lane
         // would hand it the reach the per-app split just removed.
@@ -1511,7 +1435,7 @@ impl Actor {
             return;
         };
         let generation = entry.generation + 1;
-        match open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref()) {
+        match open_lane_connection(&db_path, packet_tx.as_ref()) {
             Ok((conn, dispatcher)) => {
                 for (alias, path) in &attachments {
                     if let Err(e) = run_attach(&conn, alias, path) {
@@ -1617,11 +1541,8 @@ impl Actor {
             .iter()
             .find(|(alias, _)| alias == app_id)
             .map(|(_, path)| path.clone());
-        let (conn, dispatcher) = open_lane_connection(
-            &self.db_path,
-            self.app_id.as_deref(),
-            self.packet_tx.as_ref(),
-        )?;
+        let (conn, dispatcher) =
+            open_lane_connection(&self.db_path, self.packet_tx.as_ref())?;
         if let Some(path) = &path {
             run_attach(&conn, app_id, path)?;
         }
@@ -1665,21 +1586,12 @@ impl Actor {
     /// Refuse a command whose reservation does not own the connection it would
     /// run on.
     ///
-    /// **Both lanes, and the two ownership rules are genuinely different.**
-    ///
     /// - `tx_conn` has a long-lived owner: whichever transaction reservation
     ///   the actor last bound. A command naming any other one is refused.
     /// - `op_conn` has no long-lived owner at all - autocommit reservations are
     ///   minted per command and settle at that command's completion. So its
     ///   rule is the *lifetime* one: a reservation that has already run a
     ///   command is spent, and a second command naming it is stale.
-    ///
-    /// The `op_conn` half was missing until 2026-08-27, which made the sentence
-    /// "the actor rejects a command whose reservation does not match the
-    /// connection's current owner" vacuous for half the actor. A stale
-    /// autocommit reservation was still refused - incidentally, by
-    /// `enter_running` finding a non-`PENDING` terminal - and reported as
-    /// `statement_cancelled`: the wrong error naming the wrong reason.
     fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
         let lane = reservation.lane();
         let Some(entry) = self.lane_ref(lane) else {
@@ -2253,20 +2165,10 @@ fn cancelled_before_start(reservation: &Reservation) -> DbError {
 /// is one SQLite rejects inside a transaction (`PRAGMA` that writes, `VACUUM`,
 /// `ATTACH`, `DETACH`) or one that manages transactions itself.
 ///
-/// It is written so that its only failure mode is a **false negative**: it may
+/// Its conservative failure mode is a false negative: it may
 /// refuse to wrap something SQLite would have allowed, and the operation then
-/// runs unwrapped exactly as it did before SC-2. It can never wrongly decide
-/// that a `VACUUM` is safe to wrap.
-///
-/// That property rests on one rule, and the rule is the reason for the
-/// `is_empty` arm below rather than a filter: **a non-empty fragment whose
-/// leading token is not a bare alphabetic keyword is refused, not skipped.**
-/// Skipping it is how the guarantee above was false until 2026-08-27. Trimming
-/// the non-alphabetic edges off a leading `--` or `/*` leaves the empty string,
-/// the old code dropped empty words, and `all` over an empty iterator is
-/// `true`, so `"-- note\nVACUUM"` and `"/* c */ VACUUM"` both reported that a
-/// `VACUUM` was safe to wrap. Refusing an unrecognised leading token costs a
-/// wrap and keeps the direction of every mistake the same.
+/// runs unwrapped. A non-empty fragment without a bare alphabetic leading
+/// keyword is refused so comments cannot hide a transaction-control statement.
 fn permits_explicit_transaction(sql: &str) -> bool {
     const REFUSED: &[&str] = &[
         "PRAGMA",

@@ -355,7 +355,7 @@ async function typedRoundTrip(_input, _ctx) {
         payload_json: payloadJson,
     });
     const sourceRows = await coll.find(
-        { title: "typed-roundtrip", flag: 1 },
+        { title: "typed-roundtrip", flag: true },
         { limit: 1 },
     );
     const source = sourceRows[0];

@@ -23,7 +23,7 @@ import { generatedSchema } from "./_install-helper.js";
  * `toString` / `toJSON` → masked string, `unmask` success / failure,
  * multi-column unmask, `canUnmask` probe) is exercised by the Rust
  * unit tests in `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and
- * the SQLite integration target — they require the V8 + plugin-db
+ * the SQLite integration target — they require the V8 data adapter
  * runtime, which this Node test harness does not host. The type-level
  * checks below pin the SDK's ambient `declare class MaskedValue` shape.
  */
@@ -112,16 +112,6 @@ function makeNativeWithBulkUnmask(
   return { native: native as unknown as NativeDb, captured };
 }
 
-/** Native double whose Collection lacks `bulkUnmask` (legacy runtime). */
-function makeNativeMissingBulkUnmask() {
-  const native = {
-    collection(_name: string) {
-      return {};
-    },
-  };
-  return native as unknown as NativeDb;
-}
-
 describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", () => {
   function makeDb(native: NativeDb) {
     return installSchemaForTest(
@@ -182,21 +172,6 @@ describe("P9 PR 2 — Collection.bulkUnmask → native Collection.bulkUnmask", (
     assert.ok(result.error, "expected a Result.error");
     assert.equal((result.error as { code?: string }).code, "BULK_UNMASK_PARTIAL_UNAUTHORIZED");
   });
-
-  test("missing native Collection.bulkUnmask surfaces bulk_unmask_not_available", async () => {
-    const native = makeNativeMissingBulkUnmask();
-    const db = installSchemaForTest(
-      { users: schemaWrap({ ssn: t.encrypted({ of: t.string() }) }) },
-      { native },
-    );
-    const result = await db.users.bulkUnmask(
-      [{ id: "usr_01", columns: ["ssn"] }],
-      { actor: { kind: "auto" } },
-    );
-    assert.ok(result.error);
-    assert.equal((result.error as { code?: string }).code, "BULK_UNMASK_NOT_AVAILABLE");
-  });
-
   test("a native row missing from results yields an empty record for that row", async () => {
     const { native } = makeNativeWithBulkUnmask(async () => ({
       // Native returned a different rowPk — defensive: SDK must not throw.

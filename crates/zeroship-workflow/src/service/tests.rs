@@ -27,6 +27,7 @@ mod deployment_fixture;
 mod deployment_retention;
 mod deployments;
 mod frontier_models;
+mod graph;
 mod ingress_models;
 mod journal_models;
 mod orm;
@@ -48,6 +49,84 @@ mod topic_initialization;
 mod worker;
 use deployment_fixture::{Deployments, Sources};
 
+async fn journal_rows(
+    tx: &Transaction,
+    table: &str,
+    filter: serde_json::Value,
+) -> Vec<super::store::Row> {
+    use zeroship_data_orm::{orm::Output, value};
+    let collection = tx
+        .database()
+        .collection(&format!("__zeroship_workflow_{table}"))
+        .unwrap();
+    let mut rows = Vec::new();
+    loop {
+        let Output::Rows { rows: page, .. } = collection
+            .find(
+                filter.clone().into(),
+                value!({"offset":rows.len(), "limit":1000, "orderBy":{"id":"asc"}}),
+            )
+            .await
+            .unwrap()
+        else {
+            panic!("expected journal rows")
+        };
+        if page.is_empty() {
+            break;
+        }
+        rows.extend(page.into_iter().map(super::store::Row));
+    }
+    rows
+}
+
+async fn journal_insert(
+    tx: &Transaction,
+    table: &str,
+    document: serde_json::Value,
+) -> Result<(), WorkflowServiceError> {
+    tx.database()
+        .collection(&format!("__zeroship_workflow_{table}"))?
+        .insert(document.into())
+        .await?;
+    Ok(())
+}
+
+async fn journal_count(tx: &Transaction, table: &str, filter: serde_json::Value) -> i64 {
+    let zeroship_data_orm::orm::Output::Count(count) = tx
+        .database()
+        .collection(&format!("__zeroship_workflow_{table}"))
+        .unwrap()
+        .count(filter.into(), zeroship_data_orm::value!({}))
+        .await
+        .unwrap()
+    else {
+        panic!("expected journal count")
+    };
+    count
+}
+
+async fn journal_update(
+    tx: &Transaction,
+    table: &str,
+    filter: serde_json::Value,
+    patch: serde_json::Value,
+) {
+    tx.database()
+        .collection(&format!("__zeroship_workflow_{table}"))
+        .unwrap()
+        .execute(zeroship_data_orm::orm::Operation::Update {
+            filter: filter.into(),
+            patch: patch.into(),
+            many: true,
+        })
+        .await
+        .unwrap();
+}
+
+fn storage_id() -> String {
+    typed_id::generate("wfj")
+}
+
 async fn sqlite_store(path: &Path) -> OrmStore {
     let store = orm_store(
         &format!(
@@ -64,10 +143,8 @@ async fn sqlite_store(path: &Path) -> OrmStore {
 async fn orm_store(url: &str, schema: super::store::SchemaName) -> OrmStore {
     OrmStore::connect(
         zeroship_data_orm::binding::DbBinding::new("workflow", "test-deployment", schema),
-        zeroship_data_orm::ConnectOptions::new(
-            url,
-            zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
-        ),
+        &zeroship_data_orm::connection::ConnectionFactory::for_url(url).unwrap(),
+        zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
     )
     .await
     .unwrap()
@@ -292,35 +369,31 @@ async fn postgres_schema_constraints_and_transaction_rollback() {
 
 async fn storage_contract(store: &OrmStore) {
     store.verify().await.unwrap();
-    let mut tx = store.begin().await.unwrap();
-    let apps = tx.table("app_state");
-    tx.execute(
-        &format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ('app_rollback',0)"),
-        &[],
+    let tx = store.begin().await.unwrap();
+    journal_insert(
+        &tx,
+        "app_state",
+        json!({"id":storage_id(), "app_id":"app_rollback", "signal_epoch":0}),
     )
     .await
     .unwrap();
     drop(tx);
     let mut tx = store.begin().await.unwrap();
-    assert!(tx
-        .query(
-            &format!("SELECT app_id FROM {apps} WHERE app_id = 'app_rollback'"),
-            &[]
-        )
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        journal_rows(&tx, "app_state", json!({"app_id":"app_rollback"}))
+            .await
+            .is_empty()
+    );
     for app in ["app_a", "app_b"] {
-        tx.execute(
-            &format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ($1,0)"),
-            &[app.into()],
+        journal_insert(
+            &tx,
+            "app_state",
+            json!({"id":storage_id(), "app_id":app, "signal_epoch":0}),
         )
         .await
         .unwrap();
-        let deploys = tx.table("deploys");
-        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,availability_epoch) VALUES ($1,$2,$2,'{{}}',0,1,'available',0)"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
+        journal_insert(&tx, "deploys", json!({"app_id":app, "id":format!("deploy_{app}"), "hash":format!("deploy_{app}"), "manifest":"{}", "created_at":0, "active":1, "state":"available", "availability_epoch":0})).await.unwrap();
     }
-    let runs = tx.table("runs");
     insert_run(&mut tx, "app_a", "run_a", "deploy_app_a", None)
         .await
         .unwrap();
@@ -329,7 +402,6 @@ async fn storage_contract(store: &OrmStore) {
         .unwrap();
     assert!(tx.now().await.unwrap() > 0);
     tx.commit().await.unwrap();
-
     for (app, run, deploy, parent) in [
         ("app_a", "bad_deploy", "deploy_app_b", None),
         ("app_a", "bad_parent", "deploy_app_a", Some("run_b")),
@@ -338,16 +410,9 @@ async fn storage_contract(store: &OrmStore) {
         let mut tx = store.begin().await.unwrap();
         assert!(insert_run(&mut tx, app, run, deploy, parent).await.is_err());
     }
-    let mut tx = store.begin().await.unwrap();
-    assert_eq!(
-        tx.query(&format!("SELECT id FROM {runs}"), &[])
-            .await
-            .unwrap()
-            .len(),
-        2
-    );
-    let signals = tx.table("signals");
-    assert!(tx.execute(&format!("INSERT INTO {signals} (app_id,run_id,id,signal_type,payload,created_at) VALUES ('app_a','run_b','bad_signal','approval','null',0)"), &[]).await.is_err());
+    let tx = store.begin().await.unwrap();
+    assert_eq!(journal_rows(&tx, "runs", json!({})).await.len(), 2);
+    assert!(journal_insert(&tx, "signals", json!({"app_id":"app_a", "run_id":"run_b", "id":"bad_signal", "signal_type":"approval", "payload":"null", "created_at":0})).await.is_err());
 }
 
 async fn insert_run(
@@ -357,11 +422,7 @@ async fn insert_run(
     deploy: &str,
     parent: Option<&str>,
 ) -> Result<(), WorkflowServiceError> {
-    let runs = tx.table("runs");
-    tx.execute(&format!("INSERT INTO {runs} (app_id,id,workflow_name,deploy_id,generation,state,control,lease_epoch,cascade,depth,created_at,signal_epoch,parent_id) \
-        VALUES ($1,$2,'Checkout',$3,0,'queued','none',0,0,0,0,0,$4)"),
-        &[app.into(),id.into(),deploy.into(),parent.map(str::to_owned).into()]).await?;
-    Ok(())
+    journal_insert(tx, "runs", json!({"app_id":app, "id":id, "workflow_name":"Checkout", "deploy_id":deploy, "generation":0, "state":"queued", "control":"none", "lease_epoch":0, "cascade":0, "depth":0, "created_at":0, "signal_epoch":0, "parent_id":parent})).await
 }
 
 #[compio::test]
@@ -572,21 +633,21 @@ async fn task_contract(store: Rc<OrmStore>) {
     assert_ne!(new.id, run.id);
     let abandoned = service.poll(&worker).await.unwrap().unwrap();
     let mut tx = store.begin().await.unwrap();
-    let tasks = tx.table("tasks");
-    let runs = tx.table("runs");
     let expired = tx.now().await.unwrap() - 1;
-    tx.execute(
-        &format!("UPDATE {tasks} SET deadline=$2 WHERE id=$1"),
-        &[abandoned.id.clone().into(), expired.into()],
+    journal_update(
+        &tx,
+        "tasks",
+        json!({"id":abandoned.id}),
+        json!({"deadline":expired}),
     )
-    .await
-    .unwrap();
-    tx.execute(
-        &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
-        &[app.as_str().into(), new.id.clone().into(), expired.into()],
+    .await;
+    journal_update(
+        &tx,
+        "runs",
+        json!({"app_id":app.as_str(), "id":new.id}),
+        json!({"due_at":expired}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     assert!(matches!(
         service
@@ -819,9 +880,13 @@ async fn behavior_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let mut tx = store.begin().await.unwrap();
-    let steps = tx.table("steps");
-    let history=tx.query(&format!("SELECT record FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=1 AND ordinal=1"), &[app.as_str().into(),start.id.clone().into()]).await.unwrap();
+    let tx = store.begin().await.unwrap();
+    let history = journal_rows(
+        &tx,
+        "steps",
+        json!({"app_id":app.as_str(), "run_id":start.id, "generation":1, "ordinal":1}),
+    )
+    .await;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&history[0].text("record").unwrap()).unwrap()
             ["output"],
@@ -855,16 +920,14 @@ async fn behavior_contract(store: Rc<OrmStore>) {
             .await,
         Err(WorkflowServiceError::InvalidRequest(_))
     ));
-    let mut tx = store.begin().await.unwrap();
-    let runs = tx.table("runs");
-    assert!(tx
-        .query(
-            &format!("SELECT id FROM {runs} WHERE app_id=$1 AND parent_id=$2"),
-            &[app.as_str().into(), parent.id.clone().into()]
-        )
-        .await
-        .unwrap()
-        .is_empty());
+    let tx = store.begin().await.unwrap();
+    assert!(journal_rows(
+        &tx,
+        "runs",
+        json!({"app_id":app.as_str(), "parent_id":parent.id})
+    )
+    .await
+    .is_empty());
     tx.commit().await.unwrap();
     service.complete(&worker,&task.id,&task.token,execution(json!([{ "kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}}]))).await.unwrap();
     let child = service.poll(&worker).await.unwrap().unwrap();
@@ -1088,21 +1151,21 @@ async fn review_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert!(service.poll(&worker).await.unwrap().is_none());
     let mut tx = store.begin().await.unwrap();
-    let steps = tx.table("steps");
-    let runs = tx.table("runs");
     let now = tx.now().await.unwrap();
-    tx.execute(
-        &format!("UPDATE {steps} SET compensation_due_at=$3 WHERE app_id=$1 AND run_id=$2"),
-        &[app.as_str().into(), run.id.clone().into(), now.into()],
+    journal_update(
+        &tx,
+        "steps",
+        json!({"app_id":app.as_str(), "run_id":run.id}),
+        json!({"compensation_due_at":now}),
     )
-    .await
-    .unwrap();
-    tx.execute(
-        &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
-        &[app.as_str().into(), run.id.clone().into(), now.into()],
+    .await;
+    journal_update(
+        &tx,
+        "runs",
+        json!({"app_id":app.as_str(), "id":run.id}),
+        json!({"due_at":now}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     let recovered = WorkflowService::open(store.clone(), service.policies.clone())
         .await
@@ -1237,16 +1300,14 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
         .await
         .unwrap()
         .get::<_, bool>(0));
-    let mut tx = store.begin().await.unwrap();
-    let steps = tx.table("steps");
-    assert!(tx
-        .query(
-            &format!("SELECT record FROM {steps} WHERE app_id=$1 AND run_id=$2"),
-            &[app.as_str().into(), run.id.clone().into()]
-        )
-        .await
-        .unwrap()
-        .is_empty());
+    let tx = store.begin().await.unwrap();
+    assert!(journal_rows(
+        &tx,
+        "steps",
+        json!({"app_id":app.as_str(), "run_id":run.id})
+    )
+    .await
+    .is_empty());
     tx.commit().await.unwrap();
     let tx = store.begin().await.unwrap();
     let persisted = tx
@@ -1419,14 +1480,14 @@ async fn schedule_contract(store: Rc<OrmStore>) {
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
     let mut tx = store.begin().await.unwrap();
     let now = tx.now().await.unwrap();
-    let schedules = tx.table("schedules");
     let at = (now / 60_000 - 5) * 60_000;
-    tx.execute(
-        &format!("UPDATE {schedules} SET next_at=$2 WHERE app_id=$1"),
-        &[app.as_str().into(), at.into()],
+    journal_update(
+        &tx,
+        "schedules",
+        json!({"app_id":app.as_str()}),
+        json!({"next_at":at}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     // Activation notification retries must not move a persisted due frontier.
     deployments.activate(&service, &app, &deploy).await.unwrap();
@@ -1442,15 +1503,9 @@ async fn schedule_contract(store: Rc<OrmStore>) {
         fired += tick.await.unwrap().unwrap();
     }
     assert_eq!(fired, 3);
-    let mut tx = store.begin().await.unwrap();
-    let occurrences = tx.table("occurrences");
-    let rows = tx
-        .query(
-            &format!("SELECT at,run_id FROM {occurrences} WHERE app_id=$1 ORDER BY at"),
-            &[app.as_str().into()],
-        )
-        .await
-        .unwrap();
+    let tx = store.begin().await.unwrap();
+    let mut rows = journal_rows(&tx, "occurrences", json!({"app_id":app.as_str()})).await;
+    rows.sort_by_key(|row| row.integer("at").unwrap());
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].integer("at").unwrap(), at);
     let scheduled_ids: std::collections::BTreeSet<String> =
@@ -1484,22 +1539,22 @@ async fn schedule_contract(store: Rc<OrmStore>) {
     let mut tx = store.begin().await.unwrap();
     let later = tx.now().await.unwrap();
     let first = at + 180_000 + 10;
-    tx.execute(
-        &format!("UPDATE {schedules} SET next_at=$2 WHERE app_id=$1"),
-        &[app.as_str().into(), first.into()],
+    journal_update(
+        &tx,
+        "schedules",
+        json!({"app_id":app.as_str()}),
+        json!({"next_at":first}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 1);
-    let mut tx = store.begin().await.unwrap();
-    let rows = tx
-        .query(
-            &format!("SELECT run_id FROM {occurrences} WHERE app_id=$1 AND at >= $2 AND at <= $3"),
-            &[app.as_str().into(), first.into(), later.into()],
-        )
-        .await
-        .unwrap();
+    let tx = store.begin().await.unwrap();
+    let rows = journal_rows(
+        &tx,
+        "occurrences",
+        json!({"app_id":app.as_str(), "at":{"$gte":first, "$lte":later}}),
+    )
+    .await;
     assert_eq!(
         rows.iter()
             .filter(|row| row.optional_text("run_id").unwrap().is_some())
@@ -1520,13 +1575,14 @@ async fn schedule_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let mut tx = store.begin().await.unwrap();
-    tx.execute(
-        &format!("UPDATE {schedules} SET next_at=$2 WHERE app_id=$1"),
-        &[app.as_str().into(), (first + 1).into()],
+    let tx = store.begin().await.unwrap();
+    journal_update(
+        &tx,
+        "schedules",
+        json!({"app_id":app.as_str()}),
+        json!({"next_at":(first + 1)}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
     let successor = service.poll(&worker).await.unwrap().unwrap();
@@ -1548,23 +1604,19 @@ async fn schedule_contract(store: Rc<OrmStore>) {
         .activate(&service, &app, &disabled)
         .await
         .unwrap();
-    let mut tx = store.begin().await.unwrap();
-    assert!(tx
-        .query(
-            &format!("SELECT next_at FROM {schedules} WHERE app_id=$1 AND next_at IS NOT NULL"),
-            &[app.as_str().into()]
-        )
-        .await
-        .unwrap()
-        .is_empty());
-    assert!(!tx
-        .query(
-            &format!("SELECT at FROM {occurrences} WHERE app_id=$1"),
-            &[app.as_str().into()]
-        )
-        .await
-        .unwrap()
-        .is_empty());
+    let tx = store.begin().await.unwrap();
+    assert!(journal_rows(
+        &tx,
+        "schedules",
+        json!({"app_id":app.as_str(), "next_at":{"$exists":true}})
+    )
+    .await
+    .is_empty());
+    assert!(
+        !journal_rows(&tx, "occurrences", json!({"app_id":app.as_str()}))
+            .await
+            .is_empty()
+    );
     tx.commit().await.unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
 }

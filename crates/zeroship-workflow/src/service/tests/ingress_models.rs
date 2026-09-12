@@ -29,15 +29,16 @@ async fn revocation_contract(store: Rc<OrmStore>) {
         .unwrap(),
     ));
     let run_id = typed_id::new_workflow_run_id();
+    let foreign_id = typed_id::new_workflow_run_id();
     let mut tx = service.begin().await.unwrap();
-    for app_id in [&local, &foreign] {
+    for (app_id, run_id) in [(&local, &run_id), (&foreign, &foreign_id)] {
         app::lock_app(&mut tx, app_id).await.unwrap();
         let deploy = app::active_deploy(&mut tx, app_id).await.unwrap();
         let now = tx.now().await.unwrap();
         app::insert_root_run(
             &mut tx,
             app_id,
-            &run_id,
+            run_id,
             "Example",
             &deploy.id,
             &StartOptions::default(),
@@ -50,6 +51,7 @@ async fn revocation_contract(store: Rc<OrmStore>) {
     let run = SignalTarget::Run {
         run_id: run_id.clone(),
     };
+    let foreign_run = SignalTarget::Run { run_id: foreign_id };
     let topic = SignalTarget::Topic {
         topic: "updates".into(),
     };
@@ -60,8 +62,8 @@ async fn revocation_contract(store: Rc<OrmStore>) {
     };
     for revoked_target in [Some(run.clone()), Some(topic.clone()), None] {
         let mut issued = Vec::new();
-        for app_id in [&local, &foreign] {
-            for target in [&run, &topic] {
+        for (app_id, run_target) in [(&local, &run), (&foreign, &foreign_run)] {
+            for target in [run_target, &topic] {
                 let options = SignalTokenRequest {
                     target: target.clone(),
                     types: ["ready".into()].into(),
@@ -89,6 +91,19 @@ async fn revocation_contract(store: Rc<OrmStore>) {
             revoked
         );
         for (app_id, target, options, token) in issued {
+            let other_app = if app_id == &local { &foreign } else { &local };
+            assert!(matches!(
+                service
+                    .ingest_signal(
+                        &RequestId::mint(),
+                        token.as_str(),
+                        other_app,
+                        target,
+                        message.clone()
+                    )
+                    .await,
+                Err(WorkflowServiceError::NotFound(_)),
+            ));
             let denied = app_id == &local
                 && revoked_target
                     .as_ref()
@@ -172,7 +187,7 @@ async fn revocation_contract(store: Rc<OrmStore>) {
             .collection(models::requests::Entity::COLLECTION)
             .unwrap()
             .count(
-                value!({"app_id":local.as_str(), "id":request.as_str()}),
+                value!({"app_id":local.as_str(), "request_id":request.as_str()}),
                 value!({}),
             )
             .await

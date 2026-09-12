@@ -1,63 +1,39 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
-pub(crate) fn declared_primary_key_fields(
-    schema: &crate::value::Value,
-) -> impl Iterator<Item = &str> {
-    schema
-        .as_object()
-        .into_iter()
-        .flat_map(|fields| fields.iter())
-        .filter(|(_, field)| field["primaryKey"].as_bool() == Some(true))
-        .map(|(name, _)| name.as_str())
-}
-
-/// Every declared component of a collection's physical primary key.
-/// Returns logical field names; the compiler resolves their storage columns.
-///
-/// # Errors
-/// Refuses missing field maps and collections without declared key columns.
-pub fn primary_key_fields(schema: &crate::value::Value) -> Result<Vec<&str>, &'static str> {
-    schema
-        .as_object()
-        .ok_or("collection fields must be an object")?;
-    let keys: Vec<_> = declared_primary_key_fields(schema).collect();
-    if keys.is_empty() {
-        return Err("collection requires a declared primary key");
-    }
-    Ok(keys)
-}
-
-/// Every declared primary-key component is non-null and immutable after insertion.
+/// ORM collections declare a non-null `id` as their sole primary key.
 pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), &'static str> {
     use crate::value::Value;
     let fields = schema
         .as_object()
         .ok_or("collection fields must be an object")?;
-    let keys: Vec<_> = fields
-        .iter()
-        .filter(|(_, definition)| {
-            definition.get("primaryKey").and_then(Value::as_bool) == Some(true)
-        })
-        .collect();
-    if keys.is_empty() {
-        return Err("collection requires a declared primary key");
+    let id = fields
+        .get("id")
+        .ok_or("collection requires an 'id' primary key")?;
+    if id.get("primaryKey").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be declared as its primary key");
     }
-    for (_, key) in keys {
-        if key.get("required").and_then(Value::as_bool) != Some(true) {
-            return Err("primary key columns must be required and non-null");
-        }
-        if key.get("assign").is_some_and(|assignment| {
-            assignment.get("on").and_then(Value::as_str) != Some("insert")
-        }) {
-            return Err("primary key columns can only be assigned on insertion");
-        }
-        if key.get("encrypted").and_then(Value::as_bool) == Some(true)
-            || key
-                .get("mask")
-                .is_some_and(|mask| mask.get("kind").and_then(Value::as_str) != Some("none"))
-        {
-            return Err("primary key columns cannot be masked or encrypted");
-        }
+    if id.get("required").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be required and non-null");
+    }
+    if !matches!(
+        id.get("type").and_then(Value::as_str),
+        Some("string" | "text" | "id" | "integer" | "int" | "bigint" | "bigInt")
+    ) {
+        return Err("collection 'id' must use text or integer storage");
+    }
+    if is_encrypted(id) || effective_mask(id).is_some() {
+        return Err("collection 'id' cannot be encrypted or masked");
+    }
+    if id
+        .get("assign")
+        .is_some_and(|assignment| assignment.get("on").and_then(Value::as_str) != Some("insert"))
+    {
+        return Err("collection 'id' can only be assigned on insertion");
+    }
+    if fields.iter().any(|(name, def)| {
+        name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
+    }) {
+        return Err("collection 'id' must be its sole primary key");
     }
     Ok(())
 }
@@ -69,7 +45,7 @@ pub fn readable_fields(schema: &crate::value::Value) -> std::collections::BTreeS
         .into_iter()
         .flat_map(|fields| fields.iter())
         .filter(|(name, definition)| {
-            !crate::sql::compile::is_schema_metadata_key(name)
+            !crate::sql::mapping::is_schema_metadata_key(name)
                 && definition.is_object()
                 && definition
                     .get("readable")
@@ -115,48 +91,190 @@ pub fn effective_mask(field: &crate::value::Value) -> Option<EffectiveMask<'_>> 
     })
 }
 
-/// Distance metric for a vector index. The three metrics map 1:1 to
-/// pgvector's operator class set (`vector_cosine_ops`,
-/// `vector_l2_ops`, `vector_ip_ops`) and the SQLite Rust-side distance
-/// functions (`cosine_distance`, `l2_distance`, `neg_inner_product`).
-///
-/// **Why an enum, not a string** (plan §2): the SDK validates against
-/// a closed three-element set; carrying it through the Rust surface
-/// as an enum trips the rustc exhaustiveness checker if a future PR
-/// adds a fourth metric — every match arm in the impl flags rather
-/// than the new metric silently routing to a default branch.
+#[derive(Clone, Copy)]
+pub(crate) enum PredicateOperator {
+    Equality,
+    Ordering,
+    Pattern,
+}
+
+pub(crate) fn is_exact_decimal(field: &crate::value::Value) -> bool {
+    field.get("type").and_then(crate::value::Value::as_str) == Some("number")
+        && field.get("precision").is_some()
+}
+
+pub(crate) fn supports_predicate_operator(
+    field: &crate::value::Value,
+    operator: PredicateOperator,
+) -> bool {
+    let kind = field.get("type").and_then(crate::value::Value::as_str);
+    match operator {
+        PredicateOperator::Equality => matches!(
+            kind,
+            Some(
+                "string"
+                    | "text"
+                    | "id"
+                    | "ref"
+                    | "enum"
+                    | "boolean"
+                    | "bool"
+                    | "integer"
+                    | "int"
+                    | "bigint"
+                    | "bigInt"
+                    | "number"
+                    | "float"
+                    | "double"
+                    | "bytes"
+                    | "date"
+                    | "timestamp"
+                    | "timestamptz"
+                    | "calendarDate"
+                    | "time"
+                    | "json"
+                    | "object"
+                    | "array"
+                    | "union"
+            )
+        ),
+        PredicateOperator::Ordering => effective_mask(field).is_none() && supports_sorting(field),
+        PredicateOperator::Pattern => {
+            matches!(kind, Some("string" | "text" | "id" | "ref" | "enum"))
+        }
+    }
+}
+
+pub(crate) fn supports_sorting(field: &crate::value::Value) -> bool {
+    effective_mask(field).is_some()
+        || (!is_exact_decimal(field)
+            && matches!(
+            field.get("type").and_then(crate::value::Value::as_str),
+            Some(
+                "string"
+                    | "text"
+                    | "id"
+                    | "ref"
+                    | "enum"
+                    | "integer"
+                    | "int"
+                    | "bigint"
+                    | "bigInt"
+                    | "number"
+                    | "float"
+                    | "double"
+                    | "date"
+                    | "timestamp"
+                    | "timestamptz"
+                    | "calendarDate"
+                    | "time"
+            )
+        ))
+}
+
+pub(crate) fn supports_grouping(field: &crate::value::Value) -> bool {
+    effective_mask(field).is_some()
+        || (!is_exact_decimal(field)
+            && matches!(
+            field.get("type").and_then(crate::value::Value::as_str),
+            Some(
+                "string"
+                    | "text"
+                    | "id"
+                    | "ref"
+                    | "enum"
+                    | "boolean"
+                    | "bool"
+                    | "integer"
+                    | "int"
+                    | "bigint"
+                    | "bigInt"
+                    | "number"
+                    | "float"
+                    | "double"
+                    | "bytes"
+                    | "date"
+                    | "timestamp"
+                    | "timestamptz"
+                    | "calendarDate"
+                    | "time"
+            )
+        ))
+}
+
+/// Distance metric selected by a vector field descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VectorMetric {
-    /// Cosine distance: `1 - (a · b) / (||a|| · ||b||)`. PG operator
-    /// `<=>`, opclass `vector_cosine_ops`. The default for embedding
-    /// models that produce L2-normalised vectors.
+    /// Cosine distance.
     Cosine,
-    /// Euclidean (L2) distance: `sqrt(Σ (a_i - b_i)^2)`. PG operator
-    /// `<->`, opclass `vector_l2_ops`.
+    /// Euclidean distance.
     L2,
-    /// Negative inner product: `- (a · b)`. PG operator `<#>`,
-    /// opclass `vector_ip_ops`. The "negative" framing makes "smaller
-    /// is better" hold across all three metrics, so a single ORDER BY
-    /// clause works.
+    /// Negative inner product.
     InnerProduct,
 }
 
-/// A geographic point in WGS84 (EPSG:4326). Used by the spatial index
-/// surface for query input and by the `geoPoint` DDL emitter.
-///
-/// **Field order**: `lat` then `lng` — matches the SDK shape
-/// (`{ lat: number, lng: number }`) and the GeoJSON convention.
-/// Note that PostGIS `ST_MakePoint` takes `(lng, lat)`; the PG impl
-/// reorders at the SQL boundary.
-///
-/// `Copy` because it's two `f64`s — passing by value is cheaper than
-/// borrowing.
+/// A geographic point in WGS84 coordinates.
 #[derive(Debug, Clone, Copy)]
 pub struct GeoPoint {
-    /// Latitude in degrees, range `[-90, 90]`. SDK validate rejects
-    /// out-of-range values before the trait method is called.
     pub lat: f64,
-    /// Longitude in degrees, range `[-180, 180]`. SDK validate
-    /// rejects out-of-range values before the trait method is called.
     pub lng: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_sorting_exposes_only_portable_ordered_values() {
+        for kind in [
+            "string",
+            "id",
+            "ref",
+            "integer",
+            "bigInt",
+            "number",
+            "date",
+            "calendarDate",
+            "time",
+        ] {
+            assert!(supports_sorting(&crate::value!({"type": kind})), "{kind}");
+        }
+        for kind in ["boolean", "bytes", "json", "vector", "geoPoint"] {
+            assert!(!supports_sorting(&crate::value!({"type": kind})), "{kind}");
+        }
+        assert!(!supports_sorting(
+            &crate::value!({"type":"number", "precision":18, "scale":2})
+        ));
+        assert!(supports_sorting(
+            &crate::value!({"type":"number", "precision":18, "scale":2, "mask":{"kind":"full"}})
+        ));
+    }
+
+    #[test]
+    fn descriptor_grouping_exposes_only_portable_equality_values() {
+        for kind in [
+            "string",
+            "id",
+            "ref",
+            "boolean",
+            "integer",
+            "bigInt",
+            "number",
+            "bytes",
+            "date",
+            "calendarDate",
+            "time",
+        ] {
+            assert!(supports_grouping(&crate::value!({"type": kind})), "{kind}");
+        }
+        for kind in ["json", "object", "array", "union", "vector", "geoPoint"] {
+            assert!(!supports_grouping(&crate::value!({"type": kind})), "{kind}");
+        }
+        assert!(!supports_grouping(
+            &crate::value!({"type":"number", "precision":18, "scale":2})
+        ));
+        assert!(supports_grouping(
+            &crate::value!({"type":"json", "mask":{"kind":"full"}})
+        ));
+    }
 }

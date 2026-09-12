@@ -72,11 +72,18 @@ impl ThreadDbContext {
         }
         self.supplied_project_keys = keys;
     }
-    pub(crate) fn sql_dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
+    pub(crate) fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
         self.connection
             .as_ref()
-            .map(|connection| connection.factory().dialect())
-            .unwrap_or(zeroship_data_orm::sql::compile::SqlDialect::Postgres)
+            .map(|connection| connection.factory().sql_registration().clone())
+            .unwrap_or_else(zeroship_data_orm::sql::registration::SqlRegistration::postgres)
+    }
+    pub(crate) fn connection_identity(
+        &self,
+    ) -> Option<zeroship_data_orm::connection::ConnectionIdentity> {
+        self.connection
+            .as_ref()
+            .map(|connection| connection.factory().identity())
     }
     pub(crate) fn cdc_relay(&self) -> Option<zeroship_data_orm::cdc::relay::RelayConfig> {
         self.cdc_relay.clone()
@@ -129,8 +136,8 @@ mod tests {
         use zeroship_data_orm::{connection::BackendFactory, error::DbError};
         struct DelayedFactory(ConnectionFactory, flume::Receiver<()>);
         impl BackendFactory for DelayedFactory {
-            fn dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
-                self.0.dialect()
+            fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+                self.0.sql_registration().clone()
             }
             fn connect(
                 &self,

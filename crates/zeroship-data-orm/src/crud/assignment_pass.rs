@@ -49,7 +49,7 @@ pub fn prefix_for_collection(
         .and_then(|p| p.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
-    crate::sql::compile::validate_id_prefix(&prefix)?;
+    crate::sql::mapping::validate_id_prefix(&prefix)?;
     Ok(prefix)
 }
 
@@ -150,16 +150,16 @@ fn inject_into_object(
 }
 
 // ---------------------------------------------------------------------------
-// UPDATE-time validation pass + CAS-version extraction.
+// UPDATE-time validation and optimistic-concurrency extraction.
 // ---------------------------------------------------------------------------
 
 pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<(), DbError> {
-    if schema.as_object().into_iter().flat_map(|fields| fields.iter())
-        .filter(|(_, definition)| definition["primaryKey"].as_bool() == Some(true))
-        .map(|(name, _)| name.as_str()).any(|key| patch.get(key).is_some()
-            || ["$set", "$inc", "$dec", "$mul"]
-                .iter()
-                .any(|op| patch.get(*op).is_some_and(|fields| fields.get(key).is_some())))
+    if patch.get("id").is_some()
+        || ["$set", "$inc", "$dec", "$mul"].iter().any(|op| {
+            patch
+                .get(*op)
+                .is_some_and(|fields| fields.get("id").is_some())
+        })
     {
         return Err(DbError::validation(
             "immutable_primary_key",
@@ -199,10 +199,12 @@ fn refuse_and_strip(
     for name in immutable {
         if obj.contains_key(name) {
             let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
-            return Err(crate::sql::compile::QueryError::ImmutableAssignedField(format!(
-                "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
-            ))
-            .into());
+            return Err(
+                crate::sql::mapping::QueryError::ImmutableAssignedField(format!(
+                    "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
+                ))
+                .into(),
+            );
         }
     }
     for name in reassigned {
@@ -212,16 +214,24 @@ fn refuse_and_strip(
 }
 
 /// Resolve a direct equality guard on the declared concurrency field; reject nested guards.
-pub fn extract_cas_version(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConcurrencyGuard {
+    pub(crate) column: String,
+    pub(crate) expected: i64,
+}
+
+pub(crate) fn extract_concurrency_guard(
     filter: &Value,
     collection: &str,
     schema: &Value,
-) -> Result<Option<i64>, DbError> {
+) -> Result<Option<ConcurrencyGuard>, DbError> {
     let Some(column) = crate::sql::lifecycle::concurrency_column(schema)? else {
         return Ok(None);
     };
-    if filter_has_nested_version_predicate(filter, column) {
-        return Err(DbError::version_filter_must_be_top_level(collection));
+    if filter_has_nested_concurrency_predicate(filter, column) {
+        return Err(DbError::concurrency_filter_must_be_top_level(
+            collection, column,
+        ));
     }
     let Some(obj) = filter.as_object() else {
         return Ok(None);
@@ -232,32 +242,13 @@ pub fn extract_cas_version(
     // Reject operator objects ({ $gt, $in, ... }) — only a plain
     // equality predicate carries CAS semantics. `as_i64` also rejects
     // floats and strings, which is the desired strictness.
-    Ok(v.as_i64())
+    Ok(v.as_i64().map(|expected| ConcurrencyGuard {
+        column: column.to_owned(),
+        expected,
+    }))
 }
 
-/// Whether the filter constrains the entity to one non-null identity.
-pub fn filter_has_key_predicate(filter: &Value, schema: &Value) -> bool {
-    let Ok(keys) = crate::sql::descriptors::primary_key_fields(schema) else { return false; };
-    keys.into_iter().all(|key| scalar_key_predicate(filter.get(key)))
-}
-
-fn scalar_key_predicate(value: Option<&Value>) -> bool {
-    let Some(mut id) = value else {
-        return false;
-    };
-    if let Some(operators) = id.as_object() {
-        if operators.len() != 1 {
-            return false;
-        }
-        let Some(value) = operators.get("$eq") else {
-            return false;
-        };
-        id = value;
-    }
-    !id.is_null()
-}
-
-fn filter_has_nested_version_predicate(filter: &Value, column: &str) -> bool {
+fn filter_has_nested_concurrency_predicate(filter: &Value, column: &str) -> bool {
     fn combinator_contains_field(value: &Value, field: &str) -> bool {
         match value {
             Value::Array(items) => items.iter().any(|item| object_contains_field(item, field)),
@@ -295,22 +286,9 @@ pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn concurrency_filters_require_every_declared_key() {
-        let schema = crate::value!({"app":{"type":"string","primaryKey":true}, "run":{"type":"string","primaryKey":true}, "generation":{"type":"bigInt","primaryKey":true}});
-        let complete = crate::value!({"app":"a", "run":"r", "generation":{"$eq":7}});
-        assert!(super::filter_has_key_predicate(&complete, &schema));
-        for field in ["app", "run", "generation"] {
-            let mut filter = complete.clone();
-            filter.as_object_mut().unwrap().shift_remove(field);
-            assert!(!super::filter_has_key_predicate(&filter, &schema));
-            filter[field] = crate::value!({"$in":["a", "b"]});
-            assert!(!super::filter_has_key_predicate(&filter, &schema));
-        }
-    }
     use super::*;
+    use crate::sql::lifecycle::AssignedValue;
     use crate::value;
-    use crate::sql::{SchemaName, compile::{SqlDialect, build_insert_many_with_dialect}};
 
     fn schema() -> Value {
         value!({
@@ -364,18 +342,9 @@ mod tests {
         let mut docs = value!([{"title":"first", "born":0}, {"title":"second", "revision":99}]);
         apply_assignments_on_insert_many(&mut docs, &fields, "notes", None).unwrap();
         assert_ne!(docs[0]["key"], docs[1]["key"]);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let query = build_insert_many_with_dialect(
-                &SchemaName::new("app").unwrap(),
-                "notes",
-                &fields,
-                &docs,
-                dialect,
-            )
-            .unwrap();
-            let insert = query.sql.split("RETURNING").next().unwrap();
+        for document in docs.as_array().unwrap() {
             for name in ["born", "touched", "revision", "removed"] {
-                assert!(!insert.contains(&format!("\"{name}\"")), "{}", query.sql);
+                assert!(document.get(name).is_none());
             }
         }
     }
@@ -429,11 +398,14 @@ mod tests {
     }
 
     #[test]
-    fn concurrency_predicates_follow_roles_and_declared_keys() {
+    fn concurrency_predicates_follow_roles_and_identity_uses_id() {
         let fields = schema();
         assert_eq!(
-            extract_cas_version(&value!({"revision":7}), "notes", &fields).unwrap(),
-            Some(7)
+            extract_concurrency_guard(&value!({"revision":7}), "notes", &fields).unwrap(),
+            Some(ConcurrencyGuard {
+                column: "revision".into(),
+                expected: 7,
+            })
         );
         for filter in [
             value!({"version":7}),
@@ -442,51 +414,65 @@ mod tests {
             Value::Null,
         ] {
             assert_eq!(
-                extract_cas_version(&filter, "notes", &fields).unwrap(),
+                extract_concurrency_guard(&filter, "notes", &fields).unwrap(),
                 None
             );
         }
-        assert!(extract_cas_version(&value!({"$and":[{"revision":7}]}), "notes", &fields).is_err());
         assert!(
-            extract_cas_version(
-                &value!({"$or":[{"$and":[{"revision":7}]}]}),
-                "notes",
-                &fields
-            )
-            .is_err()
+            extract_concurrency_guard(&value!({"$and":[{"revision":7}]}), "notes", &fields)
+                .is_err()
         );
-        assert!(filter_has_key_predicate(&value!({"key":"note_x"}), &fields));
-        assert!(!filter_has_key_predicate(&value!({"id":"note_x"}), &fields));
+        assert!(extract_concurrency_guard(
+            &value!({"$or":[{"$and":[{"revision":7}]}]}),
+            "notes",
+            &fields
+        )
+        .is_err());
         assert_eq!(
-            extract_cas_version(&value!({"version":7}), "notes", &value!({})).unwrap(),
+            extract_concurrency_guard(&value!({"version":7}), "notes", &value!({})).unwrap(),
             None
         );
+
+        let error = extract_concurrency_guard(&value!({"$and":[{"revision":7}]}), "notes", &fields)
+            .unwrap_err();
+        assert!(error.message_str().contains("`revision`"), "{error}");
+        assert!(!error.message_str().contains("`version`"), "{error}");
     }
 
     #[test]
     fn delete_restore_and_write_expressions_follow_assignment_events() {
         let fields = schema();
         let plan = AssignmentPlan::from_schema(&fields).unwrap();
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            for (deleting, restoring) in [(false, false), (true, false), (false, true)] {
-                let mut params = Vec::new();
-                let expressions = plan
-                    .write_assignments(&fields, Some("usr_actor"), deleting, restoring)
-                    .render(dialect, &mut params, None)
-                    .unwrap()
-                    .join(", ");
-                assert!(expressions.contains("\"revision\" = \"revision\" + $"));
-                assert!(expressions.contains(&format!(
-                    "\"touched\" = {}",
-                    dialect.current_timestamp_expr()
-                )));
-                assert!(params.contains(&value!("usr_actor")));
-                assert_eq!(expressions.contains("\"removed\" ="), deleting || restoring);
-                if restoring {
-                    assert!(params.contains(&Value::Null));
-                }
-                assert!(!expressions.contains("\"born\""));
+        for (deleting, restoring) in [(false, false), (true, false), (false, true)] {
+            let assignments =
+                plan.write_assignments(&fields, Some("usr_actor"), deleting, restoring);
+            let value = |column: &str| {
+                assignments
+                    .columns
+                    .iter()
+                    .find(|assignment| assignment.column == column)
+                    .map(|assignment| &assignment.value)
+            };
+            assert!(matches!(
+                value("revision"),
+                Some(AssignedValue::Increment(1))
+            ));
+            assert!(matches!(
+                value("touched"),
+                Some(AssignedValue::CurrentTimestamp)
+            ));
+            assert!(matches!(
+                value("editor"),
+                Some(AssignedValue::Bound(actor)) if actor == &value!("usr_actor")
+            ));
+            assert_eq!(value("removed").is_some(), deleting || restoring);
+            if restoring {
+                assert!(matches!(
+                    value("removed"),
+                    Some(AssignedValue::Bound(Value::Null))
+                ));
             }
+            assert!(value("born").is_none());
         }
     }
 }

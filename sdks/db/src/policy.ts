@@ -1,12 +1,5 @@
 /**
- * **P5.5 PR 5** — `defineMaskPolicy()` per-app mask policy declarator.
- *
- * The unmask authorization layer (PR 4 shipped the wire + audit + decrypt
- * machinery; PR 4's `check_unmask_authorization` was a default-deny stub
- * that only granted the `auto` actor) now reads a per-app policy declared
- * by the creator at bootstrap time.
- *
- * ### Usage
+ * Declare the fixed per-deployment policy used to authorize unmasking.
  *
  * ```ts
  * import { defineMaskPolicy } from "@zeroship/db";
@@ -19,62 +12,19 @@
  * });
  * ```
  *
- * Call this from the app's bootstrap (the default export's bootstrap
- * hook, or at module top-level — both run before the first request
- * reaches the dispatcher). The SDK flushes the pending policy through
- * the framework-internal `__platform.setMaskPolicy` op once at app
- * init. The policy is fixed for the life of the deploy — change it by
- * editing this call and redeploying, not at runtime.
- *
- * ### Default policy
- *
- * If `defineMaskPolicy()` is NEVER called, the platform falls back to
- * PR 4's strict default: only the `auto` actor kind (system writes,
- * migrations, background jobs) can unmask. Every other actor is denied.
- *
- * ### The `auto` actor fallback rule
- *
- * Even when an app DOES declare a policy, the `auto` actor retains its
- * "everything by default" grant UNLESS the policy explicitly lists
- * `auto` with a restricted classification set. Reason: system writes
- * (migrations, background jobs, the platform itself) need uniform
- * access regardless of app policy. To restrict the system actor, list
- * `auto` explicitly in the policy.
- *
- * ### Validation
- *
- * Every classification value must be one of the six built-ins listed in
- * the `Classification` taxonomy. Anything else throws
- * `INVALID_MASK_CLASSIFICATION` at declare-time (and again at
- * Rust-time, belt-and-braces — see
- * `crates/zeroship-data-orm/src/protection/mask_policy.rs::install_mask_policy`).
+ * Declare it during app startup. The bootstrap installs it in memory and seals
+ * the declaration; changing it requires a new deployment. When absent, only
+ * the `auto` actor may unmask. A declared policy retains that grant unless it
+ * explicitly restricts `auto`.
  */
 import type { Classification } from "./types";
 
-/**
- * **P5.5 PR 5** — actor-role → allowed classifications map.
- *
- * Keys are app-defined role strings (the actor's `kind` field on the
- * context passed to `.unmask({ actor })`). The reserved `auto` key
- * covers system actors (migrations, background jobs, the platform).
- * Values are arrays of classifications the role is permitted to
- * unmask.
- *
- * Roles missing from the map are treated as having no unmask
- * privileges — any classification they request is denied.
- */
+/** Actor role to allowed classifications. Missing roles cannot unmask. */
 export interface MaskPolicy {
   readonly [role: string]: readonly Classification[];
 }
 
-/**
- * The six canonical classifications. Mirrors `Classification` in
- * `./types.ts` and `crate::diff::Classification` on the Rust side.
- *
- * Pinned here as a runtime-checkable array (not just a TS type) so
- * `defineMaskPolicy` can validate user-declared classifications
- * structurally.
- */
+/** Runtime values accepted by the classification type. */
 const VALID_CLASSIFICATIONS: readonly Classification[] = [
   "public",
   "pii",
@@ -97,24 +47,11 @@ function policyState(): MaskPolicyState {
 }
 
 /**
- * Holding slot for the policy declared by `defineMaskPolicy()` — the
- * SDK bootstrap (`@zeroship/bootstrap`) reads this once at app init
- * via `_flushPendingMaskPolicy()` and flushes through the native op.
- *
- * The slot is keyed on `globalThis` so the public `@zeroship/db` entry
- * and framework-internal `@zeroship/db/internal` entry share policy
- * state even when they are published as separate bundled ESM files.
- * Declarations may be replaced during startup. The first flush seals the
- * declaration, including the absence of a policy. Later declarations fail.
- */
-
-/**
- * **P5.5 PR 5** — declare the per-app mask policy. See module-level
- * doc-comment for usage examples.
+ * Declare the per-app mask policy.
  *
  * @throws `MASK_POLICY_IMMUTABLE` after the startup flush.
  * @throws `INVALID_MASK_CLASSIFICATION` when any classification value
- *   is not one of the six built-ins.
+ *   is unsupported.
  */
 export function defineMaskPolicy(policy: MaskPolicy): void {
   const state = policyState();
@@ -163,22 +100,7 @@ export function defineMaskPolicy(policy: MaskPolicy): void {
   state.pendingPolicy = Object.freeze(cloned);
 }
 
-/**
- * **Framework-internal** — drain the pending policy slot. The
- * `@zeroship/bootstrap` runtime-entry calls this once during app
- * init; the returned policy (when non-null) is flushed through the
- * `__platform.setMaskPolicy` native op, which installs it in the Rust
- * side's per-isolate cache. That boot-time flush is the ONLY way a
- * policy reaches the runtime. No backend persists it; changes require a
- * new deployment.
- *
- * Returns `null` when no policy has been declared — the platform
- * then keeps PR 4's default-deny stub.
- *
- * @internal — do NOT call from user code. The bootstrap is the only
- *   consumer; calling from app code would race with the bootstrap's
- *   own flush and leave the policy unflushed.
- */
+/** Drain and seal the startup policy for the bootstrap package. @internal */
 export function _flushPendingMaskPolicy(): MaskPolicy | null {
   const state = policyState();
   const p = state.pendingPolicy;
@@ -187,13 +109,7 @@ export function _flushPendingMaskPolicy(): MaskPolicy | null {
   return p;
 }
 
-/**
- * **Test-only** — inspect the pending slot without draining it. Used
- * by the SDK unit tests to verify `defineMaskPolicy` parked the right
- * shape; production code never reads the pending slot directly.
- *
- * @internal
- */
+/** Inspect the pending startup policy without draining it. @internal */
 export function _peekPendingMaskPolicy(): MaskPolicy | null {
   return policyState().pendingPolicy;
 }

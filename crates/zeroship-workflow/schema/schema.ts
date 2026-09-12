@@ -1,4 +1,4 @@
-import { table, t } from "../../../packages/zero-migrate/dist/index.js";
+import { dialect, table, t } from "../../../packages/zero-migrate/dist/index.js";
 
 // The customer owns the journal. Provisioning supplies its resolved schema;
 // both database adapters use the canonical definition and reserved table names.
@@ -17,10 +17,32 @@ export function workflowSchema(namespace) {
   const appFk = (name) => fk(`${name}_app`, ["app_id"], "app_state", ["app_id"]);
   const runFk = (name) => fk(`${name}_run`, ["app_id", "run_id"], "runs", ["app_id", "id"]);
   const generationFk = (name) => fk(`${name}_generation`, ["app_id", "run_id", "generation"], "generations", ["app_id", "run_id", "generation"]);
-  const create = (name, columns, primaryKey, foreignKeys = [], uniques = []) => {
+  const create = (name, columns, domainKey, foreignKeys = [], uniques = []) => {
     owned(name);
+    columns = { id: text(), ...columns };
     Object.keys(columns).forEach(column => columnsInSchema.add(column));
-    table(name, { schema: namespace }).create({ columns, primaryKey, foreignKeys });
+    const domainUnique = domainKey.length === 1 && domainKey[0] === "id"
+      ? []
+      : [{ name: owned(`${name}_scope_key`), on: domainKey, unique: true }];
+    const definition = { columns, primaryKey: ["id"], foreignKeys, indexes: domainUnique };
+    const selfReferences = foreignKeys.filter(key => key.references.table === name);
+    if (selfReferences.length) {
+      // PostgreSQL needs the scoped unique index before adding self references;
+      // SQLite needs those references declared inside CREATE TABLE.
+      dialect({
+        postgres: () => {
+          table(name, { schema: namespace }).create({
+            ...definition, foreignKeys: foreignKeys.filter(key => key.references.table !== name),
+          });
+          for (const { name: constraint, ...reference } of selfReferences) {
+            table(name, { schema: namespace }).foreignKey(constraint).add(reference);
+          }
+        },
+        sqlite: () => { table(name, { schema: namespace }).create(definition); },
+      });
+    } else {
+      table(name, { schema: namespace }).create(definition);
+    }
     for (const unique of uniques) {
       table(name, { schema: namespace }).index(owned(unique.name)).add({ on: unique.columns, unique: true });
     }
@@ -29,7 +51,7 @@ export function workflowSchema(namespace) {
 
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
   create("app_state", {
-    ...identity(), signal_epoch: integer(),
+    ...identity(), signal_epoch: integer().default(0),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
   }, ["app_id"]);
@@ -133,8 +155,8 @@ export function workflowSchema(namespace) {
   ]);
   index("subscriptions", "topic", ["app_id", "topic", "id"]);
   create("requests", {
-    ...identity(), id: text(), operation: text(), digest: text(), result: text(), expires_at: integer(),
-  }, ["app_id", "id"], [appFk("requests")]);
+    ...identity(), request_id: text(), operation: text(), digest: text(), result: text(), expires_at: integer(),
+  }, ["app_id", "request_id"], [appFk("requests")]);
   index("requests", "expiry", ["expires_at"]);
   create("occurrences", {
     ...identity(), schedule_id: text(), at: integer(), run_id: t.text(),

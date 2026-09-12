@@ -13,10 +13,18 @@ use chrono::DateTime;
 use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation},
-    sql::{Predicate, RowLimit},
+    orm::{Entity, FindOptions, FromRow, Operation},
+    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
     value,
 };
+
+#[derive(FromRow)]
+#[orm(entity = models::waits)]
+struct WaitingParent {
+    id: String,
+    run_id: String,
+    generation: i64,
+}
 
 pub(crate) async fn invocation(
     tx: &mut Transaction,
@@ -555,7 +563,6 @@ pub(crate) async fn finish(
 ) -> Result<RunState, WorkflowServiceError> {
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
-    let runs = tx.table("runs");
     tx.database().collection(models::runs::Entity::COLLECTION)?.update(
         value!({"app_id":app.as_str(), "id":id.clone()}),
         value!({"state":state.as_str(), "control":"none", "task_id":null, "due_at":null, "key":null, "terminal_at":now}),
@@ -576,8 +583,7 @@ pub(crate) async fn finish(
             filter:value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation}), many:true,
         }).await?;
     }
-    let waits = tx.table("waits");
-    tx.execute(&format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND task_id IS NULL AND control='none' AND state IN ('waiting','sleeping','queued') AND EXISTS (SELECT 1 FROM {waits} w WHERE w.app_id=$1 AND w.run_id={runs}.id AND w.generation={runs}.generation AND w.child_id=$2)"), &[app.as_str().into(),id.clone().into(),now.into()]).await?;
+    wake_parents(tx, app, &id, now).await?;
     emit(
         tx,
         app,
@@ -588,6 +594,73 @@ pub(crate) async fn finish(
     )
     .await?;
     Ok(state)
+}
+
+async fn wake_parents(
+    tx: &Transaction,
+    app: &AppId,
+    child: &str,
+    now: i64,
+) -> Result<(), WorkflowServiceError> {
+    let db = tx.database();
+    let run = db.entity::<models::runs::Entity>()?.alias("r")?;
+    let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
+    let runs = db.collection(models::runs::Entity::COLLECTION)?;
+    let page_limit = RowLimit::default().get();
+    let mut after: Option<String> = None;
+    loop {
+        let mut filter = vec![
+            wait.column(models::waits::app_id).eq(app.as_str())?,
+            wait.column(models::waits::child_id).eq(Some(child))?,
+            run.column(models::runs::task_id).eq(None::<String>)?,
+            run.column(models::runs::control).eq("none")?,
+            Predicate::Or(vec![
+                run.column(models::runs::state).eq("waiting")?,
+                run.column(models::runs::state).eq("sleeping")?,
+                run.column(models::runs::state).eq("queued")?,
+            ]),
+        ];
+        if let Some(after) = &after {
+            filter.push(Predicate::compare(
+                Operand::Path(wait.column(models::waits::id).asc().path),
+                CompareOp::Gt,
+                Operand::Lit(Literal::Text(after.clone())),
+            ));
+        }
+        let page = db
+            .from(&wait)
+            .inner_join(
+                &run,
+                Predicate::And(vec![
+                    wait.column(models::waits::app_id)
+                        .eq_column(run.column(models::runs::app_id))?,
+                    wait.column(models::waits::run_id)
+                        .eq_column(run.column(models::runs::id))?,
+                    wait.column(models::waits::generation)
+                        .eq_column(run.column(models::runs::generation))?,
+                ]),
+            )?
+            .filter(Predicate::And(filter))
+            .order_by(wait.column(models::waits::id).asc())
+            .select(wait.row::<WaitingParent>())?
+            .limit(page_limit)?
+            .all()
+            .await?;
+        let count = page.len();
+        for parent in page {
+            runs.execute(Operation::Update {
+                filter: value!({"app_id":app.as_str(), "id":parent.run_id, "generation":parent.generation,
+                    "task_id":null, "control":"none", "state":{"$in":["waiting","sleeping","queued"]}}),
+                patch: value!({"due_at":now}),
+                many: true,
+            }).await?;
+            after = Some(parent.id);
+        }
+        if count < page_limit as usize {
+            break;
+        }
+    }
+    Ok(())
 }
 
 async fn link_continuation(
@@ -673,7 +746,11 @@ async fn compensation_failures(
             )),
         ];
         if let Some(after) = after {
-            filter.push(source.column(models::steps::ordinal).lt(after)?);
+            filter.push(Predicate::compare(
+                Operand::Path(source.column(models::steps::ordinal).asc().path),
+                CompareOp::Lt,
+                Operand::Lit(Literal::Int(after)),
+            ));
         }
         let page = db
             .from(&source)
@@ -716,15 +793,27 @@ async fn retarget_parent_steps(
         ];
         if let Some((run_id, generation, ordinal)) = &after {
             filter.push(Predicate::Or(vec![
-                step.column(models::steps::run_id).gt(run_id.as_str())?,
+                Predicate::compare(
+                    Operand::Path(step.column(models::steps::run_id).asc().path),
+                    CompareOp::Gt,
+                    Operand::Lit(Literal::Text(run_id.clone())),
+                ),
                 Predicate::And(vec![
                     step.column(models::steps::run_id).eq(run_id.as_str())?,
-                    step.column(models::steps::generation).gt(*generation)?,
+                    Predicate::compare(
+                        Operand::Path(step.column(models::steps::generation).asc().path),
+                        CompareOp::Gt,
+                        Operand::Lit(Literal::Int(*generation)),
+                    ),
                 ]),
                 Predicate::And(vec![
                     step.column(models::steps::run_id).eq(run_id.as_str())?,
                     step.column(models::steps::generation).eq(*generation)?,
-                    step.column(models::steps::ordinal).gt(*ordinal)?,
+                    Predicate::compare(
+                        Operand::Path(step.column(models::steps::ordinal).asc().path),
+                        CompareOp::Gt,
+                        Operand::Lit(Literal::Int(*ordinal)),
+                    ),
                 ]),
             ]));
         }

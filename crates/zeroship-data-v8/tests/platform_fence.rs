@@ -143,6 +143,32 @@ const _procedures = { probe };
 }
 
 #[test]
+fn resolver_cannot_be_captured_during_creator_module_evaluation() {
+    let user_code = r#"
+import { env } from "zeroship";
+const capturedResolver = globalThis.__zsDbPlatform;
+const capturedPlatform = typeof capturedResolver === "function"
+    ? capturedResolver(env.db)
+    : undefined;
+function probe() {
+    return {
+        resolver: typeof capturedResolver,
+        platform: typeof capturedPlatform,
+    };
+}
+const _procedures = { probe };
+"#;
+    let src = format!("{user_code}\n{SHIM}");
+    let (status, body) = dispatch(&src, "probe");
+    assert_eq!(status, 200, "probe should succeed; body={body}");
+    assert_eq!(
+        body["json"],
+        serde_json::json!({ "resolver": "undefined", "platform": "undefined" }),
+        "creator module evaluation must run after the resolver is removed: {body}"
+    );
+}
+
+#[test]
 fn creator_globals_cannot_defer_production_mask_policy_sealing() {
     let user_code = r#"
 import { defineMaskPolicy } from "@zeroship/db";

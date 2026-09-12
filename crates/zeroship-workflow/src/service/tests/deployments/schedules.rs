@@ -98,17 +98,15 @@ async fn scheduled_artifact_contract(store: Rc<OrmStore>) {
         .unwrap();
 
     let mut tx = service.begin().await.unwrap();
-    let schedules = tx.table("schedules");
     let due = tx.now().await.unwrap() - 1;
-    tx.execute(&format!("UPDATE {schedules} SET next_at=$1"), &[due.into()])
-        .await
-        .unwrap();
-    tx.execute(
-        &format!("UPDATE {schedules} SET last_checked_at=-1 WHERE app_id=$1"),
-        &[app.as_str().into()],
+    journal_update(&tx, "schedules", json!({}), json!({"next_at":due})).await;
+    journal_update(
+        &tx,
+        "schedules",
+        json!({"app_id":app.as_str()}),
+        json!({"last_checked_at":-1}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     assert_eq!(
         service.tick_schedules().await.unwrap(),
@@ -116,27 +114,16 @@ async fn scheduled_artifact_contract(store: Rc<OrmStore>) {
         "unavailable code blocked another app's schedule"
     );
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
-    let mut tx = service.begin().await.unwrap();
-    let occurrences = tx.table("occurrences");
-    let deferred = tx
-        .query(
-            &format!("SELECT COUNT(*) AS total FROM {schedules} WHERE app_id=$1 AND next_at=$2"),
-            &[app.as_str().into(), due.into()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        usize::try_from(deferred[0].integer("total").unwrap()).unwrap(),
-        deploy.schedules.len()
-    );
-    let admitted = tx
-        .query(
-            &format!("SELECT COUNT(*) AS total FROM {occurrences} WHERE app_id=$1"),
-            &[app.as_str().into()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(admitted[0].integer("total").unwrap(), 0);
+    let tx = service.begin().await.unwrap();
+    let deferred = journal_count(
+        &tx,
+        "schedules",
+        json!({"app_id":app.as_str(), "next_at":due}),
+    )
+    .await;
+    assert_eq!(usize::try_from(deferred).unwrap(), deploy.schedules.len());
+    let admitted = journal_count(&tx, "occurrences", json!({"app_id":app.as_str()})).await;
+    assert_eq!(admitted, 0);
     tx.commit().await.unwrap();
 
     objects
@@ -157,18 +144,9 @@ async fn scheduled_artifact_contract(store: Rc<OrmStore>) {
         );
     }
     assert_eq!(fired, deploy.schedules.len());
-    let mut tx = service.begin().await.unwrap();
-    let resumed = tx
-        .query(
-            &format!("SELECT COUNT(*) AS total FROM {occurrences} WHERE app_id=$1 AND at=$2"),
-            &[app.as_str().into(), due.into()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        usize::try_from(resumed[0].integer("total").unwrap()).unwrap(),
-        deploy.schedules.len()
-    );
+    let tx = service.begin().await.unwrap();
+    let resumed = journal_count(&tx, "occurrences", json!({"app_id":app.as_str(), "at":due})).await;
+    assert_eq!(usize::try_from(resumed).unwrap(), deploy.schedules.len());
     tx.commit().await.unwrap();
 }
 
@@ -181,13 +159,8 @@ async fn postgres_schedule_rechecks_artifact_after_waiting_for_app_lock() {
         .activate(&service, &app, &scheduled_deployment(1))
         .await
         .unwrap();
-    let mut tx = service.begin().await.unwrap();
-    tx.execute(
-        &format!("UPDATE {} SET next_at=0", tx.table("schedules")),
-        &[],
-    )
-    .await
-    .unwrap();
+    let tx = service.begin().await.unwrap();
+    journal_update(&tx, "schedules", json!({}), json!({"next_at":0})).await;
     tx.commit().await.unwrap();
 
     let blocker = connect(&fixture.admin_url).await;

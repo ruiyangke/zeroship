@@ -1,17 +1,13 @@
-import { scalarPrimaryKey } from "../schema";
 import { isIdValue } from "../identity.js";
 import {
   ValidationError,
   OptimisticLockError,
   mapOptimisticConcurrencyError,
+  type ConcurrencyExpectation,
 } from "../errors";
 import { trackCollectionAccess } from "../live";
 import { IdLoader } from "../loader";
-import {
-  requireBoundNativeCapability,
-  requireNativeCapability,
-  type NativeCollection,
-} from "../native";
+import type { NativeCollection } from "../native";
 import { Query } from "../query";
 import type { NormalizedSchema } from "../schema";
 import {
@@ -28,6 +24,7 @@ import {
 } from "../validate";
 import {
   type Actor,
+  type DistinctField,
   type Filter,
   type FieldDef,
   type IdValue,
@@ -37,6 +34,7 @@ import {
   type Result,
   type Row,
   type RowInput,
+  type SortSpec,
   type UpsertOptions,
   type UpdateExpression,
   type WithRelations,
@@ -54,8 +52,6 @@ export interface CrudCollectionInternals<
 > {
   _name: string;
   _schema: NormalizedSchema;
-  _softDelete: boolean;
-  _versioning: boolean;
   _indexes: readonly NamedIndexSpec[];
   _knownFields: Set<string>;
   _idLoader: IdLoader<Row<S>, IdValue> | null;
@@ -132,21 +128,18 @@ export function validateArrayPushOps(
   }
 }
 
-/**
- * D4 — return the caller-supplied `version: N` value from a filter,
- * but only when versioning is enabled on this collection AND the
- * value is a plain number (not a `$gt`/`$in`/etc. operator). Returns
- * `null` otherwise so callers can short-circuit to the non-CAS path.
- */
-export function extractCasVersion(
+/** Return a direct equality guard on the descriptor's concurrency field. */
+export function extractConcurrencyGuard(
   schema: Record<string, FieldDef>,
   filter: PlainObject,
-): number | null {
+): ConcurrencyExpectation | null {
   const column = Object.keys(schema).find((key) => schema[key].concurrency === true);
   if (column === undefined) return null;
   if (filter === null || typeof filter !== "object") return null;
   const v = filter[column];
-  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "number" && Number.isSafeInteger(v)) {
+    return { column, expected: v };
+  }
   return null;
 }
 
@@ -195,7 +188,7 @@ export function getCollection<
   opts: {
     actor?: Actor;
     select?: (string & keyof Row<S>)[];
-    orderBy?: Record<string, 1 | -1>;
+    orderBy?: SortSpec<S>;
     unmask?: (string & keyof Row<S>)[];
     unmaskReason?: string;
     with?: WithSpec;
@@ -206,7 +199,6 @@ export function getCollection<
   const isBareId = isIdValue(idOrFilter);
   if (
     isBareId &&
-    Object.keys(self._schema).filter(name => self._schema[name]?.primaryKey === true).join() === "id" &&
     opts.select === undefined &&
     opts.orderBy === undefined &&
     opts.unmask === undefined &&
@@ -218,7 +210,7 @@ export function getCollection<
     return self._run(() => self._loadById(idOrFilter, txDepthAtCall));
   }
   return self._run(async () => {
-    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
       _maybeWarnUnindexedFilter(
@@ -352,7 +344,7 @@ export function findCollection<
       : undefined,
     self._schema,
   );
-  if (opts?.with !== undefined) q.with(opts.with);
+  if (opts?.with !== undefined) q.with(opts.with as never);
   return q;
 }
 
@@ -401,7 +393,7 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -409,7 +401,7 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
     const fields = extractUpdateFields(updateObj);
     checkPartial(fields, self._schema);
     validateArrayPushOps(updateObj, self._schema);
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
     const mappedFilter = mapFilterOutbound(
       filter as ZeroshipDbFilter,
       self._toColumn,
@@ -419,14 +411,14 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
     try {
       result = await self._nativeCollection().update(mappedFilter, mappedUpdate);
     } catch (e) {
-      if (casVersion !== null) {
-        throw mapOptimisticConcurrencyError(e, self._name, casVersion);
+      if (concurrency !== null) {
+        throw mapOptimisticConcurrencyError(e, self._name, concurrency);
       }
       throw e;
     }
     if (result === null) {
-      if (casVersion !== null) {
-        throw new OptimisticLockError(casVersion, self._name);
+      if (concurrency !== null) {
+        throw new OptimisticLockError(concurrency, self._name);
       }
       return null;
     }
@@ -445,7 +437,7 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
     const fields = extractUpdateFields(updateObj);
     checkPartial(fields, self._schema);
     validateArrayPushOps(updateObj, self._schema);
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
     const mappedFilter = mapFilterOutbound(
       filter as ZeroshipDbFilter,
       self._toColumn,
@@ -455,13 +447,13 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
     try {
       n = await self._nativeCollection().updateMany(mappedFilter, mappedUpdate);
     } catch (e) {
-      if (casVersion !== null) {
-        throw mapOptimisticConcurrencyError(e, self._name, casVersion);
+      if (concurrency !== null) {
+        throw mapOptimisticConcurrencyError(e, self._name, concurrency);
       }
       throw e;
     }
-    if (n === 0 && casVersion !== null) {
-      throw new OptimisticLockError(casVersion, self._name);
+    if (n === 0 && concurrency !== null) {
+      throw new OptimisticLockError(concurrency, self._name);
     }
     return { count: n };
   });
@@ -473,16 +465,16 @@ export function deleteCollection<S, N extends string, AllSchemas extends Record<
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
 
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const result = await self._nativeCollection().delete(mapped);
     if (result === null) {
-      if (casVersion !== null) throw new OptimisticLockError(casVersion, self._name);
+      if (concurrency !== null) throw new OptimisticLockError(concurrency, self._name);
       return null;
     }
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
@@ -501,12 +493,12 @@ export function deleteManyCollection<S, N extends string, AllSchemas extends Rec
     self._indexes,
   );
   return self._run(async () => {
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
 
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const n = await self._nativeCollection().deleteMany(mapped);
-    if (n === 0 && casVersion !== null) {
-      throw new OptimisticLockError(casVersion, self._name);
+    if (n === 0 && concurrency !== null) {
+      throw new OptimisticLockError(concurrency, self._name);
     }
     return { deletedCount: n };
   });
@@ -518,18 +510,12 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const purge = requireBoundNativeCapability(self._nativeCollection(), "purge", {
-      code: "PURGE_NOT_AVAILABLE",
-      message:
-        "@zeroship/db: env.db.<collection>.purge not available — " +
-        "runtime is missing the P7 PR 5 purge surface.",
-    });
-    const result = await purge(mapped);
+    const result = await self._nativeCollection().purge(mapped);
     if (result === null) return null;
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
   });
@@ -548,17 +534,7 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const purgeMany = requireBoundNativeCapability(
-      self._nativeCollection(),
-      "purgeMany",
-      {
-        code: "PURGE_NOT_AVAILABLE",
-        message:
-          "@zeroship/db: env.db.<collection>.purgeMany not available — " +
-          "runtime is missing the P7 PR 5 purge surface.",
-      },
-    );
-    const n = await purgeMany(mapped);
+    const n = await self._nativeCollection().purgeMany(mapped);
     return { purgedCount: n };
   });
 }
@@ -569,18 +545,12 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const restore = requireBoundNativeCapability(self._nativeCollection(), "restore", {
-      code: "RESTORE_NOT_AVAILABLE",
-      message:
-        "@zeroship/db: env.db.<collection>.restore not available — " +
-        "runtime is missing the P7 PR 5 restore surface.",
-    });
-    const result = await restore(mapped);
+    const result = await self._nativeCollection().restore(mapped);
     if (result === null) return null;
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
   });
@@ -599,17 +569,7 @@ export function restoreManyCollection<S, N extends string, AllSchemas extends Re
   );
   return self._run(async () => {
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
-    const restoreMany = requireBoundNativeCapability(
-      self._nativeCollection(),
-      "restoreMany",
-      {
-        code: "RESTORE_NOT_AVAILABLE",
-        message:
-          "@zeroship/db: env.db.<collection>.restoreMany not available — " +
-          "runtime is missing the P7 PR 5 restore surface.",
-      },
-    );
-    const n = await restoreMany(mapped);
+    const n = await self._nativeCollection().restoreMany(mapped);
     return { restoredCount: n };
   });
 }
@@ -627,11 +587,16 @@ export function countCollection<S, N extends string, AllSchemas extends Record<s
   });
 }
 
-export function distinctCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
+export function distinctCollection<
+  S,
+  N extends string,
+  AllSchemas extends Record<string, unknown>,
+  K extends DistinctField<S> & keyof Row<S>,
+>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  field: string & keyof Row<S>,
+  field: K,
   filter: Filter<S> = {} as Filter<S>,
-): Promise<Result<(string | number | boolean | null)[]>> {
+): Promise<Result<Exclude<Row<S>[K], undefined>[]>> {
   trackCollectionAccess(self._name);
   validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
   {
@@ -654,7 +619,7 @@ export function distinctCollection<S, N extends string, AllSchemas extends Recor
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const column = self._toColumn(field);
     const result = await self._nativeCollection().distinct(mapped, { field: column });
-    return result ?? [];
+    return (result ?? []) as Exclude<Row<S>[K], undefined>[];
   });
 }
 

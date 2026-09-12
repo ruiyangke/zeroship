@@ -17,12 +17,8 @@ use zeroship_data_orm::lock_policy::BoundedLockAcquire;
 /// contract.
 ///
 /// **Must be consumed via `release().await`.**
-/// `Drop` cannot await the unlock SQL, so a guard dropped without
-/// that call leaks the session-scoped advisory lock until
-/// the PG session ends (typically when the pool recycles the
-/// connection — could be tens of seconds to minutes). The
-/// `#[must_use]` annotation surfaces accidental drops as compile-time
-/// warnings on common patterns (e.g. `let _ = acquire(...).await`).
+/// `Drop` cannot await the unlock SQL, so it discards the connection instead
+/// of returning a session with an advisory lock to the pool.
 #[must_use = "LockGuard must be released via .release().await; \
               dropping it leaks the session-scoped advisory lock"]
 #[derive(Debug)]
@@ -56,39 +52,16 @@ impl LockGuard {
     ///
     /// The caller releases with `release().await`.
     ///
-    /// Takes a [`LockScope`] rather than a raw
-    /// `(key: String, tag: &'static str)` pair. The
-    /// [`BoundedLockAcquire::acquire`] default impl derives the underlying
-    /// `(key1, key2)` strings via [`LockScope::to_keys`] (§7.2 /
-    /// §10.5); we cache the derived pair locally so `release()`'s
-    /// `pg_advisory_unlock` matches the acquisition exactly even if
-    /// `LockScope::to_keys` ever changed shape. It takes `&LockScope`
-    /// (not by value) so the caller can keep a single binding (and
-    /// reuse it if it ever needs to release outside the guard).
-    ///
-    /// The underlying acquisition is bounded —
-    /// `LockManager::acquire`'s default impl loops on
-    /// `pg_try_advisory_lock` with a 0/50/200/500/1000ms schedule
-    /// (~1.75s worst case) and surfaces `DbError::LockContention`
-    /// on exhaustion, rather than calling `acquire_advisory_lock`
-    /// directly and stalling indefinitely on `pg_advisory_lock`,
-    /// which would give any app that held its own lock a within-app DoS lever
-    /// against subsequent operations using the same scope. The guard's lifecycle invariants
-    /// are unaffected: on `Ok` the lock is held by `self.client` and
-    /// will be released via [`Self::release`];
-    /// on `Err` no lock is held and `client` drops back to the pool.
+    /// The bounded policy derives and retries the native lock keys. This guard
+    /// retains the same keys so release targets the acquired lock.
     pub async fn acquire<B: LockManager<Client = compio_postgres::PoolConnection>>(
         backend: &B,
         client: PoolConnection,
         scope: &LockScope,
     ) -> Result<Self, DbError> {
         let (key, tag) = scope.to_keys();
-        // Route through the typed `LockManager::acquire` surface,
-        // which dispatches to `try_acquire_with_backoff`
-        // — bounded retry instead of the legacy blocking
-        // `acquire_advisory_lock` primitive. Construction shape is
-        // otherwise unchanged: on Err the lock was never held and
-        // `client` will drop back to the pool at the error site.
+        // The typed lock policy bounds acquisition. On error the lock was
+        // never held and the client returns to the pool.
         backend.acquire(&client, scope).await?;
         Ok(Self {
             client: Some(client),
@@ -100,16 +73,7 @@ impl LockGuard {
 
     /// Release the lock and return the (now-unlocked) pooled client.
     ///
-    /// Idempotent — calling `release()` a second time on a moved-out
-    /// guard is a no-op that returns `Ok(None)`. In practice the guard
-    /// is consumed by `release()`, so a "second call" only happens if
-    /// the caller stashed the guard somewhere; the type system makes
-    /// that ergonomically awkward.
-    ///
-    /// The unlock SQL is best-effort: errors from the underlying
-    /// `query_text_params` are swallowed (matches the pre-existing
-    /// inline sites; the session-scoped lock will auto-release when
-    /// the backend session ends if the explicit unlock failed).
+    /// The session releases the lock automatically if explicit unlock fails.
     pub async fn release(mut self) -> Result<Option<PoolConnection>, DbError> {
         if self.released {
             return Ok(self.client.take());
@@ -259,38 +223,15 @@ mod tests {
         assert_eq!(guard.tag, "snapshot_restore");
     }
 
-    /// Structural invariant pin:
-    /// `self.released = true` MUST appear AFTER the unlock-SQL
-    /// `.await` in the `release()` function body. Otherwise a
-    /// cancellation mid-await silently leaks the lock with no Drop
-    /// log (because Drop sees `released = true` and short-circuits).
-    ///
-    /// Mirrors the byte-offset structural test on
-    /// `mint_subscription` (`v8_classes/subscription.rs::tests::
-    /// mint_subscription_does_not_leak_broker_entry_on_v8_alloc_failure`)
-    /// — invariant lives in the source layout, not in observable
-    /// runtime state, so we pin it via include_str! + index search.
-    ///
-    /// A future contributor who reorders the flip to happen BEFORE
-    /// awaiting the unlock SQL trips this test at compile-time
-    /// without needing a live PG fixture.
+    /// Cancellation must leave the guard unreleased so `Drop` discards the
+    /// connection. This structural check pins the state transition after the
+    /// unlock await.
     #[test]
     fn release_flips_flag_after_unlock_await_structural() {
         let src = include_str!("lock_guard.rs");
         // Locate the release() function body.
         //
-        // The needle is SPLIT so this test's own source cannot satisfy it.
-        // `include_str!` pulls in these very lines, so a whole-literal needle
-        // matches ITSELF - and on 2026-09-02 it did: promoting `release` from
-        // `pub(crate)` to `pub` for the crate extraction left the old literal
-        // matching only here, at the end of the file, so the search below found
-        // no following doc comment and the test failed. It failed LOUDLY by
-        // luck. Had one more doc-commented item followed this test, the
-        // assertion would have passed while inspecting a string literal, and
-        // [I42] would have been silently unguarded.
-        //
-        // Same technique as `direct_connection_sites_do_not_grow` in
-        // `zeroship-data-v8/src/tests/integration.rs`, for the same reason.
+        // Split the needle so this test's source does not match itself.
         let release_start = src
             .find(concat!("pub async", " fn release("))
             .expect("release fn signature should exist");

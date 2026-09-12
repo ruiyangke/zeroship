@@ -9,16 +9,13 @@ struct ObservedDriver<D> {
 }
 #[async_trait(?Send)]
 impl<D: Driver> Driver for ObservedDriver<D> {
-    fn dialect(&self) -> SqlDialect {
-        self.inner.dialect()
-    }
     async fn acquire(&self, kind: LeaseKind) -> Result<Session, DbError> {
         self.acquisitions.set(self.acquisitions.get() + 1);
         self.inner.acquire(kind).await
     }
 }
 
-pub(crate) async fn native_commands(driver: impl Driver) {
+pub(crate) async fn native_commands(driver: impl Driver, blob_type: &str) {
     let driver = ObservedDriver {
         inner: driver,
         acquisitions: Cell::new(0),
@@ -26,10 +23,6 @@ pub(crate) async fn native_commands(driver: impl Driver) {
     let session = driver.acquire(LeaseKind::Transaction).await.unwrap();
     assert_eq!(driver.acquisitions.get(), 1);
     session.exec("BEGIN", &[]).await.unwrap();
-    let blob_type = match driver.dialect() {
-        SqlDialect::Postgres => "BYTEA",
-        SqlDialect::Sqlite => "BLOB",
-    };
     session.exec(&format!("CREATE TEMP TABLE driver_values (id BIGINT PRIMARY KEY, payload {blob_type}, label TEXT)"), &[]).await.unwrap();
     let bytes = Value::Bytes(vec![0, 255, 128, 39]);
     assert_eq!(

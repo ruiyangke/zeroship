@@ -307,44 +307,32 @@ mod tests {
                 other => panic!("expected CodedError, got {other:?}"),
             }
         }
-        assert!(
-            op_hint(DbError::Serialization {
-                message: "x".into()
-            })
-            .is_some()
-        );
-        assert!(
-            op_hint(DbError::Transient {
-                message: "x".into()
-            })
-            .is_some()
-        );
+        assert!(op_hint(DbError::Serialization {
+            message: "x".into()
+        })
+        .is_some());
+        assert!(op_hint(DbError::Transient {
+            message: "x".into()
+        })
+        .is_some());
         // LockContention is retriable — must also carry a hint.
-        assert!(
-            op_hint(DbError::LockContention {
-                message: "x".into()
-            })
-            .is_some()
-        );
+        assert!(op_hint(DbError::LockContention {
+            message: "x".into()
+        })
+        .is_some());
         // Non-retryable violations must not advise a retry.
-        assert!(
-            op_hint(DbError::UniqueViolation {
-                message: "x".into()
-            })
-            .is_none()
-        );
-        assert!(
-            op_hint(DbError::FkViolation {
-                message: "x".into()
-            })
-            .is_none()
-        );
-        assert!(
-            op_hint(DbError::Internal {
-                message: "x".into()
-            })
-            .is_none()
-        );
+        assert!(op_hint(DbError::UniqueViolation {
+            message: "x".into()
+        })
+        .is_none());
+        assert!(op_hint(DbError::FkViolation {
+            message: "x".into()
+        })
+        .is_none());
+        assert!(op_hint(DbError::Internal {
+            message: "x".into()
+        })
+        .is_none());
     }
 
     /// The helper returns the first element of a non-empty slice. The
@@ -539,15 +527,15 @@ mod tests {
     fn from_query_error_assigns_distinct_codes() {
         let cases = [
             (
-                crate::compile::QueryError::InvalidFilter("bad".into()),
+                crate::mapping::QueryError::InvalidFilter("bad".into()),
                 "invalid_filter",
             ),
             (
-                crate::compile::QueryError::InvalidCollection("bad".into()),
+                crate::mapping::QueryError::InvalidCollection("bad".into()),
                 "invalid_collection",
             ),
             (
-                crate::compile::QueryError::InvalidIdent("bad".into()),
+                crate::mapping::QueryError::InvalidIdent("bad".into()),
                 "invalid_identifier",
             ),
         ];
@@ -567,12 +555,12 @@ mod tests {
     fn reserved_prefix_and_assigned_field_errors_carry_actionable_hints() {
         for (query_error, expected_code, word) in [
             (
-                crate::compile::validate_id_prefix("usr").unwrap_err(),
+                crate::mapping::validate_id_prefix("usr").unwrap_err(),
                 "reserved_id_prefix",
                 "prefix",
             ),
             (
-                crate::compile::QueryError::ImmutableAssignedField(
+                crate::mapping::QueryError::ImmutableAssignedField(
                     "field 'born' is assigned".into(),
                 ),
                 "immutable_assigned_field",
@@ -594,50 +582,42 @@ mod tests {
             "version",
             "deleted_at",
         ] {
-            crate::compile::validate_field_name_for_declaration(name).unwrap();
+            crate::mapping::validate_field_name(name).unwrap();
         }
     }
 
-    /// `DbError::version_mismatch` stamps the canonical
-    /// `version_mismatch` code; carries a hint advising re-read +
-    /// retry.
     #[test]
-    fn version_mismatch_stamps_canonical_code_and_hint() {
-        let e = DbError::version_mismatch("posts", Some("post_x"), 5).to_op_error();
+    fn concurrency_mismatch_stamps_canonical_code_and_hint() {
+        let e = DbError::concurrency_mismatch("posts", Some("post_x"), "revision", 5).to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, "version_mismatch");
+                assert_eq!(code, "concurrency_mismatch");
                 let h = hint.as_deref().expect("must carry a retry hint");
                 assert!(h.to_lowercase().contains("retry"), "hint: {h}");
             }
             other => panic!("expected CodedError, got {other:?}"),
         }
-        // Message body includes the collection + id + expected version
-        // so SDK consumers don't have to reconstruct the context.
         assert!(e.message.contains("posts"), "message: {}", e.message);
         assert!(e.message.contains("post_x"), "message: {}", e.message);
+        assert!(e.message.contains("revision"), "message: {}", e.message);
         assert!(e.message.contains("5"), "message: {}", e.message);
     }
 
-    /// `DbError::version_mismatch` without a row id omits the id
-    /// segment from the message (used for multi-row UPDATEs whose
-    /// filter doesn't carry id).
     #[test]
-    fn version_mismatch_message_handles_missing_id() {
-        let e = DbError::version_mismatch("posts", None, 5).to_op_error();
+    fn concurrency_mismatch_message_handles_missing_id() {
+        let e = DbError::concurrency_mismatch("posts", None, "revision", 5).to_op_error();
         assert!(e.message.contains("posts"));
+        assert!(e.message.contains("revision"));
         assert!(e.message.contains("5"));
     }
 
-    /// `DbError::multi_row_version_filter_unsupported` stamps the
-    /// canonical code; carries a remediation hint pointing at the
-    /// per-id loop.
     #[test]
-    fn multi_row_version_filter_unsupported_stamps_canonical_code() {
-        let e = DbError::multi_row_version_filter_unsupported("posts").to_op_error();
+    fn multi_row_concurrency_filter_unsupported_stamps_canonical_code() {
+        let e =
+            DbError::multi_row_concurrency_filter_unsupported("posts", "revision").to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, "multi_row_version_filter_unsupported");
+                assert_eq!(code, "multi_row_concurrency_filter_unsupported");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }
             other => panic!("expected CodedError, got {other:?}"),
@@ -645,11 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn version_filter_must_be_top_level_stamps_canonical_code() {
-        let e = DbError::version_filter_must_be_top_level("posts").to_op_error();
+    fn concurrency_filter_must_be_top_level_stamps_canonical_code() {
+        let e = DbError::concurrency_filter_must_be_top_level("posts", "revision").to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, "version_filter_must_be_top_level");
+                assert_eq!(code, "concurrency_filter_must_be_top_level");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }
             other => panic!("expected CodedError, got {other:?}"),

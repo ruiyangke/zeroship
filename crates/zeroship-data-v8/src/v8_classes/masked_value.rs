@@ -75,7 +75,8 @@ pub struct MaskedValue {
     pub(crate) binding: DbBinding,
     /// The collection name (e.g. `"users"`).
     pub(crate) collection: String,
-    /// Opaque token for the complete declared row key.
+    /// Stringified row primary key (`"usr_..."` or the numeric id
+    /// as a string).
     pub(crate) row_pk: String,
     /// The column name (e.g. `"ssn"`).
     pub(crate) column: String,

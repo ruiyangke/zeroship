@@ -22,7 +22,7 @@ async fn database(url: &str) -> Database {
             "deployment-holds-test",
             SchemaName::new(schema).unwrap(),
         ),
-        ConnectOptions::new(url, ProjectKeySource::unavailable()),
+        ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
         collections().unwrap(),
     )
     .await
@@ -58,6 +58,33 @@ fn assert_conflict<T: std::fmt::Debug>(result: Result<T, WorkflowServiceError>) 
     );
 }
 
+#[derive(FromRow)]
+#[orm(entity = holds)]
+struct StoredHoldIdentity {
+    id: String,
+}
+
+async fn stored_hold_identity(database: &Database, holder: &HoldScope, deployment: &str) -> String {
+    let rows = database
+        .entity::<holds::Entity>()
+        .unwrap()
+        .find::<StoredHoldIdentity>(
+            holds::app_id
+                .eq(holder.app.uuid().to_string())
+                .unwrap()
+                .and(holds::deploy_id.eq(deployment).unwrap())
+                .and(holds::holder_id.eq(holder.holder.clone()).unwrap()),
+            FindOptions::default(),
+        )
+        .await
+        .unwrap();
+    let [row] = rows.as_slice() else {
+        panic!("holder scope must identify a stored receipt");
+    };
+    typed_id::parse_with_prefix(&row.id, "dhr").unwrap();
+    row.id.clone()
+}
+
 #[compio::test]
 async fn sqlite_holds_survive_reconnection_and_fence_reclamation() {
     let dir = tempfile::tempdir().unwrap();
@@ -73,8 +100,8 @@ async fn sqlite_holds_survive_reconnection_and_fence_reclamation() {
 async fn postgres_holds_survive_reconnection_and_fence_reclamation() {
     let fixture = Postgres::start().await;
     contract(&fixture.url).await;
-    let worker = connect(&fixture.url).await;
-    let error = worker
+    let control = connect(&fixture.url).await;
+    let error = control
         .query("SELECT * FROM customer.__zeroship_workflow_runs", &[])
         .await
         .unwrap_err();
@@ -100,6 +127,7 @@ async fn contract(url: &str) {
     assert_eq!(receipt.app_id, app);
     assert_eq!(receipt.holder_id, holder.holder);
     assert_eq!(receipt.state, HoldState::Held);
+    let stored_id = stored_hold_identity(&db, &holder, &deployment).await;
     assert_eq!(
         holds
             .acquire(&holder, &deployment, generation(1))
@@ -160,38 +188,52 @@ async fn contract(url: &str) {
         released
     );
     assert_conflict(restarted.acquire(&holder, &deployment, generation(1)).await);
-    let tx = db.begin_transaction().await.unwrap();
-    assert_conflict(fence_reclamation(&tx, &app, &deployment).await);
-    tx.rollback().await.unwrap();
+    assert_conflict(
+        transact(&db, async |tx| {
+            fence_reclamation(&tx, &app, &deployment).await
+        })
+        .await,
+    );
 
     let renewed = restarted
         .acquire(&holder, &deployment, generation(2))
         .await
         .unwrap();
     assert_eq!(renewed.generation, generation(2));
+    assert_eq!(
+        stored_hold_identity(&db, &holder, &deployment).await,
+        stored_id
+    );
     assert_conflict(holds.release(&holder, &deployment, generation(1)).await);
     assert_conflict(holds.acquire(&holder, &deployment, generation(1)).await);
     holds
         .release(&peer, &deployment, generation(1))
         .await
         .unwrap();
-    let tx = db.begin_transaction().await.unwrap();
-    assert_conflict(fence_reclamation(&tx, &app, &deployment).await);
-    tx.rollback().await.unwrap();
+    assert_conflict(
+        transact(&db, async |tx| {
+            fence_reclamation(&tx, &app, &deployment).await
+        })
+        .await,
+    );
     holds
         .release(&holder, &deployment, generation(2))
         .await
         .unwrap();
 
-    let tx = db.begin_transaction().await.unwrap();
-    assert_conflict(finish_reclamation(&tx, &app, &deployment).await);
-    tx.rollback().await.unwrap();
-    let tx = db.begin_transaction().await.unwrap();
-    assert_eq!(
-        fence_reclamation(&tx, &app, &deployment).await.unwrap(),
-        hash
+    assert_conflict(
+        transact(&db, async |tx| {
+            finish_reclamation(&tx, &app, &deployment).await
+        })
+        .await,
     );
-    tx.rollback().await.unwrap();
+    assert_conflict(
+        transact(&db, async |tx| {
+            assert_eq!(fence_reclamation(&tx, &app, &deployment).await?, hash);
+            Err::<(), _>(conflict("collector aborted"))
+        })
+        .await,
+    );
     holds
         .acquire(&holder, &deployment, generation(3))
         .await
@@ -201,12 +243,13 @@ async fn contract(url: &str) {
         .await
         .unwrap();
 
-    let tx = db.begin_transaction().await.unwrap();
     assert_eq!(
-        fence_reclamation(&tx, &app, &deployment).await.unwrap(),
+        transact(&db, async |tx| fence_reclamation(&tx, &app, &deployment)
+            .await)
+        .await
+        .unwrap(),
         hash
     );
-    tx.commit().await.unwrap();
     assert_conflict(restarted.acquire(&holder, &deployment, generation(4)).await);
     assert_conflict(
         holds
@@ -219,13 +262,12 @@ async fn contract(url: &str) {
         .await
         .unwrap();
     for _ in 0..2 {
-        let tx = db.begin_transaction().await.unwrap();
-        assert_eq!(
-            fence_reclamation(&tx, &app, &deployment).await.unwrap(),
-            hash
-        );
-        finish_reclamation(&tx, &app, &deployment).await.unwrap();
-        tx.commit().await.unwrap();
+        transact(&db, async |tx| {
+            assert_eq!(fence_reclamation(&tx, &app, &deployment).await?, hash);
+            finish_reclamation(&tx, &app, &deployment).await
+        })
+        .await
+        .unwrap();
     }
     assert_conflict(holds.acquire(&holder, &deployment, generation(4)).await);
     // The closed deployment has not closed admission for another deployment.
@@ -246,14 +288,64 @@ async fn contract(url: &str) {
         db.collection(models::app_deploy_holds::Entity::COLLECTION).unwrap()
             .update(value!({"app_id":app.uuid().to_string(), "deploy_id":suspect, "holder_id":holder.holder}), patch)
             .await.unwrap();
-        let tx = db.begin_transaction().await.unwrap();
-        assert_conflict(fence_reclamation(&tx, &app, &suspect).await);
-        tx.rollback().await.unwrap();
+        assert_conflict(
+            transact(&db, async |tx| fence_reclamation(&tx, &app, &suspect).await).await,
+        );
         assert!(matches!(
             holds.acquire(&holder, &suspect, generation(1)).await,
             Err(WorkflowServiceError::Internal(_))
         ));
     }
+
+    callback_errors_and_cancellation_roll_back(&db, &holds, &app).await;
+}
+
+async fn callback_errors_and_cancellation_roll_back(
+    database: &Database,
+    holds: &DeploymentHolds,
+    app: &AppId,
+) {
+    let deployment = seed(database, app, &"d".repeat(64)).await;
+    for error in [
+        WorkflowServiceError::InvalidRequest("invalid command".into()),
+        WorkflowServiceError::Unauthenticated,
+        WorkflowServiceError::PermissionDenied,
+        WorkflowServiceError::NotFound("missing record".into()),
+        WorkflowServiceError::Conflict("changed record".into()),
+        WorkflowServiceError::ResourceExhausted("capacity".into()),
+        WorkflowServiceError::PayloadTooLarge,
+        WorkflowServiceError::Unavailable("peer unavailable".into()),
+        WorkflowServiceError::Timeout,
+        WorkflowServiceError::Internal("host failure".into()),
+    ] {
+        let result = transact(database, async |tx| {
+            fence_reclamation(&tx, app, &deployment).await?;
+            Err::<(), _>(error.clone())
+        })
+        .await;
+        assert_eq!(result, Err(error));
+    }
+
+    let (fenced, ready) = futures::channel::oneshot::channel();
+    compio::time::timeout(Duration::from_secs(10), async {
+        let mut pending = Box::pin(transact(database, async |tx| {
+            fence_reclamation(&tx, app, &deployment).await?;
+            fenced.send(()).unwrap();
+            std::future::pending::<Result<(), WorkflowServiceError>>().await
+        }));
+        match futures::future::select(&mut pending, ready).await {
+            futures::future::Either::Left(_) => panic!("collector completed before cancellation"),
+            futures::future::Either::Right((ready, _)) => ready.unwrap(),
+        }
+        drop(pending);
+        // An aborted collector must release both its writes and ORM admission.
+        holds
+            .acquire(&scope(app), &deployment, generation(1))
+            .await
+            .unwrap();
+    })
+    .await
+    .expect("cancelled collector must release deployment admission");
 }
 
 #[compio::test]
@@ -263,26 +355,28 @@ async fn postgres_reclamation_serializes_with_concurrent_hold_acquisition() {
     let holds = DeploymentHolds::new(database(&fixture.url).await).unwrap();
     let app = AppId::mint();
     let deployment = seed(&db, &app, &"a".repeat(64)).await;
-    let tx = db.begin_transaction().await.unwrap();
-    fence_reclamation(&tx, &app, &deployment).await.unwrap();
     let holder = scope(&app);
-    let attempt =
-        compio::runtime::spawn(
-            async move { holds.acquire(&holder, &deployment, generation(1)).await },
-        );
-    // Observe the real competing database lock before committing the collector.
-    // This proves the ordering without assuming a scheduler delay.
-    compio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let row = fixture.admin.query_one(
-                "SELECT count(*) FROM pg_stat_activity WHERE usename = 'metadata_worker' AND wait_event_type = 'Lock'",
-                &[],
-            ).await.unwrap();
-            if row.get::<_, i64>(0) > 0 { break; }
-            compio::time::sleep(Duration::from_millis(10)).await;
-        }
-    }).await.expect("hold acquisition must wait for the reclamation transaction");
-    tx.commit().await.unwrap();
+    let attempt = transact(&db, async |tx| {
+        fence_reclamation(&tx, &app, &deployment).await?;
+        let attempt = compio::runtime::spawn(async move {
+            holds.acquire(&holder, &deployment, generation(1)).await
+        });
+        // Observe the real competing database lock before committing the collector.
+        // This proves the ordering without assuming a scheduler delay.
+        compio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let row = fixture.admin.query_one(
+                    "SELECT count(*) FROM pg_stat_activity WHERE usename = 'zeroship_control' AND wait_event_type = 'Lock'",
+                    &[],
+                ).await.unwrap();
+                if row.get::<_, i64>(0) > 0 { break; }
+                compio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("hold acquisition must wait for the reclamation transaction");
+        Ok(attempt)
+    })
+    .await
+    .unwrap();
     assert_conflict(
         compio::time::timeout(Duration::from_secs(10), attempt)
             .await
@@ -338,18 +432,18 @@ impl Postgres {
         let port = container.get_host_port_ipv4(5432).unwrap();
         let admin = connect(&format!("postgres://postgres@{host}:{port}/postgres")).await;
         admin.batch_execute(
-            "CREATE SCHEMA zeroship; CREATE ROLE app_zeroship_role NOLOGIN; \
-             CREATE ROLE metadata_worker LOGIN; GRANT app_zeroship_role TO metadata_worker; \
+            "CREATE SCHEMA zeroship; \
+             CREATE ROLE zeroship_control LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOBYPASSRLS; \
              CREATE SCHEMA customer; CREATE TABLE customer.__zeroship_workflow_runs (id text PRIMARY KEY);"
         ).await.unwrap();
         admin.batch_execute(POSTGRES_SCHEMA).await.unwrap();
         admin.batch_execute(
-            "GRANT USAGE ON SCHEMA zeroship TO app_zeroship_role; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA zeroship TO app_zeroship_role;"
+            "GRANT USAGE ON SCHEMA zeroship TO zeroship_control; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA zeroship TO zeroship_control;"
         ).await.unwrap();
         Self {
             _container: container,
-            url: format!("postgres://metadata_worker@{host}:{port}/postgres"),
+            url: format!("postgres://zeroship_control@{host}:{port}/postgres"),
             admin,
         }
     }

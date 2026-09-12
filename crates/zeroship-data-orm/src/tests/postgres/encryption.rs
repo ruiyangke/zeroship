@@ -5,9 +5,9 @@ use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
 
-use crate::value::{Value, value};
+use crate::value::{value, Value};
 
-use crate::sql::compile::*;
+use crate::sql::mapping::*;
 
 use zeroship_data_orm::error::DbError;
 
@@ -217,13 +217,13 @@ fn encrypted_randomised_row_swap_rejected() {
 /// the migration engine creates it, then CRUD driven ENTIRELY by the RUNTIME
 /// DESCRIPTOR:
 ///   - insert through the REAL write pipeline -> AEAD-encrypts the encrypted
-///     column and populates the masked sibling;
+///     column and populates the masked display value;
 ///   - read raw rows back, finalize through the REAL read pipeline -> decrypts
 ///     the encrypted column to plaintext and wraps the masked column.
 ///
 /// **The metadata source changed and the round trip did not.** This test used to
 /// plant `COMMENT ON COLUMN ... 'zero-migrate:enc:...'` / `'zero-migrate:mask:...'` sentinels and
-/// assert the data plane RECOVERED the encryption mode and mask kind from the
+/// assert the data plane recovered encryption and mask policy from the
 /// live catalog. That recovery is deleted: the sentinels were emitted by the
 /// migration engine out of the same DSL the descriptor is folded from, so the
 /// catalog could only ever agree with the descriptor or be stale, and the read
@@ -292,7 +292,7 @@ fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
             pool.batch_execute(&format!(
                 r#"CREATE SCHEMA IF NOT EXISTS "{app}";
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
+CREATE TABLE "{app}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
   "name" TEXT NOT NULL,
   "ssn" BYTEA,
   "phone" TEXT,
@@ -380,20 +380,20 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
             // `::vector` cast (compio-postgres infers a `vector`-typed param from the
             // bind otherwise, which it cannot encode an `&str` into).
             pool.execute(
-        &format!(
+                &format!(
             "INSERT INTO \"{app}\".\"people\" (id, name, ssn, phone, \"{phone_raw}\", embedding) \
              VALUES ($1, $2, $3::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
         ),
-        &[
-            &row_id.as_str(),
-            &"Ada",
-            &ciphertext,
-            &phone_mask.as_str(),
-            &phone_real.as_str(),
-        ],
-    )
-    .await
-    .unwrap();
+                &[
+                    &row_id.as_str(),
+                    &"Ada",
+                    &ciphertext,
+                    &phone_mask.as_str(),
+                    &phone_real.as_str(),
+                ],
+            )
+            .await
+            .unwrap();
 
             // ----- READ (real pipeline, introspected metadata) -----
             // Fetch the raw row the way the SELECT builder would: the encrypted blob

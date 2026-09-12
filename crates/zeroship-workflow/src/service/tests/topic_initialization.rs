@@ -115,6 +115,47 @@ async fn initialization_contract(first: OrmStore, second: OrmStore) {
             .await
             .unwrap();
     }
+
+    first
+        .for_app(local.clone())
+        .revoke_signal_tokens(&RequestId::mint(), None)
+        .await
+        .unwrap();
+    let (a, b) = futures::join!(
+        first.register_app(&local, configured_policy(1, AppPolicy::default())),
+        second.register_app(&local, configured_policy(1, AppPolicy::default())),
+    );
+    a.unwrap();
+    b.unwrap();
+    for token in replacements {
+        assert_eq!(
+            second
+                .ingest_signal(
+                    &RequestId::mint(),
+                    token.as_str(),
+                    &local,
+                    &target,
+                    message.clone()
+                )
+                .await,
+            Err(WorkflowServiceError::Unauthenticated)
+        );
+    }
+    let replacement = first
+        .for_app(local.clone())
+        .issue_signal_token(&RequestId::mint(), token_options(&target))
+        .await
+        .unwrap();
+    second
+        .ingest_signal(
+            &RequestId::mint(),
+            replacement.as_str(),
+            &local,
+            &target,
+            message,
+        )
+        .await
+        .unwrap();
 }
 
 async fn issue_concurrently(

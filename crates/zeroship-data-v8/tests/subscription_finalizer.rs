@@ -14,10 +14,8 @@
 //!      `request_garbage_collection_for_testing`.
 //!   4. Asserts `broker::app_subscription_count("test_app") == 0`.
 //!
-//! Before this PR the handle-id-based registry (`SUBSCRIPTIONS` in
-//! the legacy `callbacks.rs`) had no way to detect that the JS-side AsyncIterable
-//! had been dropped without `.return()`, so this would have stayed
-//! at 1 indefinitely.
+//! This pins cleanup when the JS-side AsyncIterable is dropped without
+//! `.return()`.
 
 #![allow(unsafe_code)]
 

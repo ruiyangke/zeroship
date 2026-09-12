@@ -96,20 +96,18 @@ async fn local_catalog_preserves_identity_holds_and_reclamation_after_reopen() {
         Err(WorkflowServiceError::PermissionDenied)
     ));
 
-    let tx = catalog.database.begin_transaction().await.unwrap();
-    assert_conflict(fence_reclamation(&tx, &app, &deployment).await);
-    tx.rollback().await.unwrap();
+    assert_conflict(fence_reclamation(&catalog.database, &app, &deployment).await);
     catalog
         .release(&holder, &deployment, generation(1))
         .await
         .unwrap();
-    let tx = catalog.database.begin_transaction().await.unwrap();
-    fence_reclamation(&tx, &app, &deployment).await.unwrap();
-    tx.commit().await.unwrap();
+    fence_reclamation(&catalog.database, &app, &deployment)
+        .await
+        .unwrap();
     assert_conflict(catalog.record_deployment(&app, &hash, &encoded).await);
-    let tx = catalog.database.begin_transaction().await.unwrap();
-    finish_reclamation(&tx, &app, &deployment).await.unwrap();
-    tx.commit().await.unwrap();
+    finish_reclamation(&catalog.database, &app, &deployment)
+        .await
+        .unwrap();
     let reopened = DeploymentHolds::open_local(&path).await.unwrap();
     assert_conflict(reopened.record_deployment(&app, &hash, &encoded).await);
     assert_conflict(reopened.acquire(&holder, &deployment, generation(2)).await);
@@ -140,9 +138,74 @@ async fn postgres_concurrent_registration_preserves_the_winning_identity() {
             .unwrap(),
         deployment
     );
-    let tx = first.database.begin_transaction().await.unwrap();
-    assert_conflict(fence_reclamation(&tx, &app, &deployment).await);
-    tx.rollback().await.unwrap();
+    assert_conflict(
+        transact(&first.database, async |tx| {
+            fence_reclamation(&tx, &app, &deployment).await
+        })
+        .await,
+    );
+}
+
+#[compio::test]
+async fn postgres_collector_helpers_keep_the_lock_and_fence_in_one_transaction() {
+    let fixture = Postgres::start().await;
+    let db = database(&fixture.url).await;
+    let ledger = DeploymentHolds::new(db.clone()).unwrap();
+    let app = AppId::mint();
+    let hash = "b".repeat(64);
+    let deployment = seed(&db, &app, &hash).await;
+    fixture.admin.batch_execute(
+        "CREATE FUNCTION zeroship.require_collector_transaction() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+           IF NEW.retention_state IS DISTINCT FROM OLD.retention_state
+              AND current_setting('workflow.collector_lock', true) IS DISTINCT FROM OLD.id THEN
+             RAISE EXCEPTION 'collector lock did not survive until its state change';
+           END IF;
+           PERFORM set_config('workflow.collector_lock', NEW.id, true);
+           RETURN NEW;
+         END $$;
+         CREATE TRIGGER require_collector_transaction BEFORE UPDATE ON zeroship.app_deploys
+         FOR EACH ROW EXECUTE FUNCTION zeroship.require_collector_transaction();",
+    ).await.unwrap();
+
+    // The marker is transaction-local: an autocommit lock cannot authorize a
+    // later state change, even if the pool returns the same connection.
+    assert!(db
+        .collection(deploys::Entity::COLLECTION)
+        .unwrap()
+        .update(
+            value!({"id":deployment}),
+            value!({"retention_state":"reclaiming"}),
+        )
+        .await
+        .is_err());
+    let holder = scope(&app);
+    ledger
+        .acquire(&holder, &deployment, generation(1))
+        .await
+        .unwrap();
+    assert_conflict(fence_reclamation(&db, &app, &deployment).await);
+    ledger
+        .release(&holder, &deployment, generation(1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fence_reclamation(&db, &app, &deployment).await.unwrap(),
+        hash
+    );
+    assert_conflict(ledger.acquire(&holder, &deployment, generation(2)).await);
+    finish_reclamation(&db, &app, &deployment).await.unwrap();
+    let records = db
+        .entity::<deploys::Entity>()
+        .unwrap()
+        .find::<DeploymentRecord>(deploys::id.eq(deployment).unwrap(), FindOptions::default())
+        .await
+        .unwrap();
+    let [record] = records.as_slice() else {
+        panic!("collector must preserve the deployment tombstone");
+    };
+    assert_eq!(record.retention_state, "deleted");
 }
 
 #[compio::test]

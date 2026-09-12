@@ -14,8 +14,8 @@ use sha2::{Digest, Sha256};
 use std::{cell::Cell, rc::Rc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation, Output},
-    sql::Predicate,
+    orm::{Entity, FindOptions, FromRow, Operation, Output},
+    sql::{CompareOp, Literal, Operand, Predicate},
     value, Value,
 };
 use zeroship_storage::{
@@ -24,6 +24,13 @@ use zeroship_storage::{
 };
 
 pub(crate) const MAX_COLLECTION_BATCH: usize = 1024;
+
+#[derive(FromRow)]
+#[orm(entity = models::payloads)]
+struct ExpiredPayload {
+    app_id: String,
+    id: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
@@ -291,17 +298,44 @@ impl WorkflowService {
         }
         let storage = storage(self)?;
         let mut tx = self.begin().await?;
-        let table = tx.table("payloads");
         let now = tx.now().await?;
-        let (scope, app_ids) = tx.host_app_scope()?;
-        let candidates = tx.query(&format!("SELECT app_id,id FROM {table} WHERE app_id IN ({scope}) AND state IN ('uploading','staged','deleting','deleted') AND expires_at <= $2 ORDER BY expires_at,app_id,id LIMIT $3"), &[app_ids,now.into(),(limit as i64).into()]).await?;
+        let db = tx.database();
+        let object = db.entity::<models::payloads::Entity>()?.alias("p")?;
+        let candidates = db
+            .from(&object)
+            .filter(Predicate::And(vec![
+                Predicate::Or(
+                    tx.host_app_ids()?
+                        .into_iter()
+                        .map(|app| object.column(models::payloads::app_id).eq(app.as_str()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Predicate::Or(
+                    ["uploading", "staged", "deleting", "deleted"]
+                        .into_iter()
+                        .map(|state| object.column(models::payloads::state).eq(state))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Predicate::compare(
+                    Operand::Path(object.column(models::payloads::expires_at).asc().path),
+                    CompareOp::Lte,
+                    Operand::Lit(Literal::Int(now)),
+                ),
+            ]))
+            .order_by(object.column(models::payloads::expires_at).asc())
+            .order_by(object.column(models::payloads::app_id).asc())
+            .order_by(object.column(models::payloads::id).asc())
+            .select(object.row::<ExpiredPayload>())?
+            .limit(limit as i64)?
+            .all()
+            .await?;
         tx.commit().await?;
         let mut collected = 0;
         for candidate in candidates {
-            let app = AppId::parse(&candidate.text("app_id")?).map_err(|_| {
+            let app = AppId::parse(&candidate.app_id).map_err(|_| {
                 WorkflowServiceError::Internal("invalid payload app identity".into())
             })?;
-            let id = candidate.text("id")?;
+            let id = candidate.id;
             let mut tx = self.begin().await?;
             lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
@@ -491,7 +525,7 @@ async fn attach(
     tx.database()
         .collection(models::payload_refs::Entity::COLLECTION)?
         .insert(value!({
-            "app_id":app.as_str(), "run_id":run_id, "generation":generation, "slot":kind,
+            "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":run_id, "generation":generation, "slot":kind,
             "ordinal":ordinal, "payload_id":id.as_str(),
         }))
         .await?;
@@ -560,7 +594,11 @@ async fn owned_reference(
             object.column(models::payloads::run_id).eq(id.as_str())?,
             object.column(models::payloads::generation).eq(generation)?,
             object.column(models::payloads::task_id).eq(task.as_str())?,
-            object.column(models::payloads::expires_at).gt(now)?,
+            Predicate::compare(
+                Operand::Path(object.column(models::payloads::expires_at).asc().path),
+                CompareOp::Gt,
+                Operand::Lit(Literal::Int(now)),
+            ),
         ]));
     }
     let rows = db

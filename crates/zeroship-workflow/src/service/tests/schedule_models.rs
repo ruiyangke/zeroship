@@ -4,8 +4,9 @@ use crate::service::{
     ScheduleTiming,
 };
 use zeroship_data_orm::{
+    budgets::MAX_INSERT_MANY_BATCH,
     orm::{Entity, FindOptions, Operation, Output},
-    sql::{compile::MAX_INSERT_MANY_BATCH, RowLimit},
+    sql::RowLimit,
     value,
 };
 
@@ -87,6 +88,10 @@ async fn history_contract(store: Rc<OrmStore>) {
         .map(|_| typed_id::new_workflow_schedule_id())
         .collect();
     ids.sort();
+    let mut foreign_ids: Vec<_> = (0..count)
+        .map(|_| typed_id::new_workflow_schedule_id())
+        .collect();
+    foreign_ids.sort();
     let mut tx = service.begin().await.unwrap();
     let now = tx.now().await.unwrap();
     for app_id in [&local, &foreign] {
@@ -98,7 +103,7 @@ async fn history_contract(store: Rc<OrmStore>) {
             .map(|(index, id)| {
                 let item = registration(&format!("historical-{index}"));
                 value!({
-                    "app_id":app_id.as_str(), "id":id.clone(), "name":item.name.clone(),
+                    "app_id":app_id.as_str(), "id":if app_id == &local {id.clone()} else {foreign_ids[index].clone()}, "name":item.name.clone(),
                     "workflow_name":item.workflow_name.clone(), "deploy_id":deploy.id.clone(),
                     "definition":serde_json::to_string(&item).unwrap(),
                     "next_at":if index + 1 == count {None} else {Some(now + 3_600_000)},
@@ -149,7 +154,9 @@ async fn history_contract(store: Rc<OrmStore>) {
         );
     }
     let other = schedule(&tx, &foreign, &selected.name).await;
-    assert_eq!(other.id, current.id);
+    assert_eq!(other.id, *foreign_ids.last().unwrap());
+    assert_ne!(other.id, current.id);
+    assert_eq!(other.name, current.name);
     assert_ne!(other.deploy_id, current.deploy_id);
     assert_eq!(other.revision, 0);
     assert!(other.next_at.is_none());

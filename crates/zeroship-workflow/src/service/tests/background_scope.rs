@@ -89,39 +89,42 @@ async fn seed_app(
 // journal state; none may be selected, advanced or repaired by this host.
 async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
     let mut tx = service.begin().await.unwrap();
-    let apps = tx.table("app_state");
-    let deploys = tx.table("deploys");
-    let schedules = tx.table("schedules");
-    let source_deploy = tx
-        .query(
-            &format!("SELECT id FROM {deploys} WHERE app_id=$1 AND active=1"),
-            &[source.as_str().into()],
-        )
-        .await
-        .unwrap()[0]
-        .text("id")
-        .unwrap();
+    let source_deploy = journal_rows(
+        &tx,
+        "deploys",
+        json!({"app_id":source.as_str(), "active":1}),
+    )
+    .await
+    .remove(0);
+    let source_schedules = journal_rows(&tx, "schedules", json!({"app_id":source.as_str()})).await;
     for _ in 0..140 {
         let app = AppId::mint();
-        tx.execute(
-            &format!("INSERT INTO {apps} (app_id,signal_epoch,last_polled_at) VALUES ($1,0,-1)"),
-            &[app.as_str().into()],
-        )
-        .await
-        .unwrap();
-        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,availability_epoch) SELECT $1,id,hash,manifest,created_at,active,state,availability_epoch FROM {deploys} WHERE app_id=$2 AND active=1"), &[app.as_str().into(),source.as_str().into()]).await.unwrap();
+        journal_insert(&tx, "app_state", json!({"id":storage_id(), "app_id":app.as_str(), "signal_epoch":0, "last_polled_at":-1})).await.unwrap();
+        let deploy_id = typed_id::generate("dep");
+        let mut deploy = serde_json::to_value(&source_deploy.0).unwrap();
+        deploy["id"] = json!(deploy_id);
+        deploy["app_id"] = json!(app.as_str());
+        journal_insert(&tx, "deploys", deploy).await.unwrap();
         crate::service::app::insert_root_run(
             &mut tx,
             &app,
             &typed_id::new_workflow_run_id(),
             "Example",
-            &source_deploy,
+            &deploy_id,
             &StartOptions::default(),
             0,
         )
         .await
         .unwrap();
-        tx.execute(&format!("INSERT INTO {schedules} (app_id,id,name,workflow_name,deploy_id,definition,next_at,revision,anchor_at,last_checked_at) SELECT $1,id,name,workflow_name,deploy_id,definition,0,revision,anchor_at,-1 FROM {schedules} WHERE app_id=$2"), &[app.as_str().into(),source.as_str().into()]).await.unwrap();
+        for source_schedule in &source_schedules {
+            let mut schedule = serde_json::to_value(&source_schedule.0).unwrap();
+            schedule["id"] = json!(typed_id::new_workflow_schedule_id());
+            schedule["app_id"] = json!(app.as_str());
+            schedule["deploy_id"] = json!(deploy_id);
+            schedule["next_at"] = json!(0);
+            schedule["last_checked_at"] = json!(-1);
+            journal_insert(&tx, "schedules", schedule).await.unwrap();
+        }
         crate::service::signals::publish(
             &mut tx,
             &app,
@@ -163,26 +166,22 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         )
         .await
         .unwrap();
-    let mut tx = service.begin().await.unwrap();
+    let tx = service.begin().await.unwrap();
     for (table, column) in [
         ("tasks", "deadline"),
         ("runs", "due_at"),
         ("schedules", "next_at"),
         ("payloads", "expires_at"),
     ] {
-        tx.execute(&format!("UPDATE {} SET {column}=0", tx.table(table)), &[])
-            .await
-            .unwrap();
+        journal_update(&tx, table, json!({}), json!({column:0})).await;
     }
-    tx.execute(
-        &format!(
-            "UPDATE {} SET expires_at=1 WHERE app_id=$1",
-            tx.table("payloads")
-        ),
-        &[assigned.as_str().into()],
+    journal_update(
+        &tx,
+        "payloads",
+        json!({"app_id":assigned.as_str()}),
+        json!({"expires_at":1}),
     )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
 
     let reopened = WorkflowService::open(store, Arc::new(HostPolicies::default()))
@@ -202,26 +201,18 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     assert_eq!(task.invocation.app_id, assigned.as_str());
     assert_eq!(reopened.tick_schedules().await.unwrap(), 1);
     assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
-    let mut tx = service.begin().await.unwrap();
-    let broadcasts = tx.table("broadcasts");
-    let completed = tx
-        .query(
-            &format!("SELECT app_id,id FROM {broadcasts} WHERE finished=1"),
-            &[],
-        )
-        .await
-        .unwrap();
+    let tx = service.begin().await.unwrap();
+    let completed = journal_rows(&tx, "broadcasts", json!({"finished":1})).await;
     assert_eq!(completed.len(), 1);
     assert_eq!(completed[0].text("app_id").unwrap(), assigned.as_str());
     assert_eq!(completed[0].text("id").unwrap(), assigned_broadcast.id);
-    let pending = tx
-        .query(
-            &format!("SELECT COUNT(*) AS total FROM {broadcasts} WHERE app_id<>$1 AND finished=0"),
-            &[assigned.as_str().into()],
-        )
-        .await
-        .unwrap();
-    assert!(pending[0].integer("total").unwrap() > 128);
+    let pending = journal_count(
+        &tx,
+        "broadcasts",
+        json!({"app_id":{"$ne":assigned.as_str()}, "finished":0}),
+    )
+    .await;
+    assert!(pending > 128);
     tx.commit().await.unwrap();
 
     reopened
@@ -245,62 +236,39 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         .unwrap()
         .is_some());
 
-    let mut tx = service.begin().await.unwrap();
-    tx.execute(
-        &format!("UPDATE {} SET deadline=0 WHERE id=$1", tx.table("tasks")),
-        &[task.id.clone().into()],
+    let tx = service.begin().await.unwrap();
+    journal_update(&tx, "tasks", json!({"id":task.id}), json!({"deadline":0})).await;
+    journal_update(
+        &tx,
+        "runs",
+        json!({"app_id":assigned.as_str()}),
+        json!({"due_at":0}),
     )
-    .await
-    .unwrap();
-    tx.execute(
-        &format!("UPDATE {} SET due_at=0 WHERE app_id=$1", tx.table("runs")),
-        &[assigned.as_str().into()],
-    )
-    .await
-    .unwrap();
+    .await;
     tx.commit().await.unwrap();
     assert!(reopened.poll(&worker).await.unwrap().is_none());
-    let mut tx = service.begin().await.unwrap();
-    let recovered = tx
-        .query(
-            &format!("SELECT state FROM {} WHERE id=$1", tx.table("tasks")),
-            &[task.id.into()],
-        )
-        .await
-        .unwrap();
+    let tx = service.begin().await.unwrap();
+    let recovered = journal_rows(&tx, "tasks", json!({"id":task.id})).await;
     assert_eq!(recovered[0].text("state").unwrap(), "expired");
-    let foreign_task = tx
-        .query(
-            &format!("SELECT state FROM {} WHERE app_id=$1", tx.table("tasks")),
-            &[foreign.as_str().into()],
-        )
-        .await
-        .unwrap();
+    let foreign_task = journal_rows(&tx, "tasks", json!({"app_id":foreign.as_str()})).await;
     assert_eq!(foreign_task.len(), 1);
     assert_eq!(foreign_task[0].text("state").unwrap(), "leased");
-    let foreign_occurrences = tx
-        .query(
-            &format!(
-                "SELECT COUNT(*) AS total FROM {} WHERE app_id<>$1",
-                tx.table("occurrences")
-            ),
-            &[assigned.as_str().into()],
-        )
-        .await
-        .unwrap();
-    assert_eq!(foreign_occurrences[0].integer("total").unwrap(), 0);
-    let foreign_runs = tx
-        .query(
-            &format!(
-                "SELECT COUNT(*) AS total FROM {} WHERE app_id<>$1 AND state<>'queued'",
-                tx.table("runs")
-            ),
-            &[assigned.as_str().into()],
-        )
-        .await
-        .unwrap();
     assert_eq!(
-        foreign_runs[0].integer("total").unwrap(),
+        journal_count(
+            &tx,
+            "occurrences",
+            json!({"app_id":{"$ne":assigned.as_str()}})
+        )
+        .await,
+        0
+    );
+    assert_eq!(
+        journal_count(
+            &tx,
+            "runs",
+            json!({"app_id":{"$ne":assigned.as_str()}, "state":{"$ne":"queued"}})
+        )
+        .await,
         1,
         "only the original foreign lease may be running"
     );

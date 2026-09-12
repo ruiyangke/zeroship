@@ -63,7 +63,7 @@ for (const value of ["secret", null, { $eq: "secret" }, { $in: ["A", "B"] }, { $
 test("count and distinct reject encrypted values", async () => {
   const db = dbWithEncrypted();
   await assert.rejects(() => db.users.count({ secret: "X" } as never), { code: "ENCRYPTED_FIELD_NOT_FILTERABLE" });
-  await assert.rejects(() => db.users.distinct("secret"), { code: "DISTINCT_ON_ENCRYPTED_FIELD_UNSUPPORTED" });
+  await assert.rejects(() => db.users.distinct("secret" as never), { code: "DISTINCT_ON_ENCRYPTED_FIELD_UNSUPPORTED" });
 });
 
 test("plain fields remain filterable beside encrypted fields", () => {

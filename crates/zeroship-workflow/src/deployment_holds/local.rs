@@ -30,7 +30,8 @@ impl DeploymentHolds {
                 ConnectOptions::new(
                     format!("sqlite:{}", path.display()),
                     ProjectKeySource::unavailable(),
-                ),
+                )
+                .connection_authority(),
                 collections()?,
             )
             .await;

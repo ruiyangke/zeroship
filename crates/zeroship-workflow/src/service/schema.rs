@@ -7,8 +7,8 @@ use crate::WorkflowServiceError;
 /// Initialize the SQLite file already selected by the host's ORM binding.
 /// PostgreSQL provisioning belongs to the authorized migration host.
 pub async fn initialize_local(store: &super::store::OrmStore) -> Result<(), WorkflowServiceError> {
-    use zeroship_data_orm::{sql::compile::SqlDialect, Value};
-    if store.backend.dialect() != SqlDialect::Sqlite {
+    use zeroship_data_orm::{sql::registration::SQLITE_FAMILY, Value};
+    if store.backend.sql_registration().family() != SQLITE_FAMILY {
         return Ok(());
     }
     let rows = store
@@ -46,7 +46,7 @@ pub const RUNTIME_DESCRIPTOR: &str = include_str!("../../schema/schema.runtime.j
 pub fn postgres_sql(schema: &super::store::SchemaName) -> String {
     POSTGRES_TEMPLATE.replace(
         "\"__zeroship_workflow_schema\"",
-        &zeroship_data_orm::sql::compile::quote_ident(schema.as_str()),
+        &zeroship_data_orm::sql::mapping::quote_ident(schema.as_str()),
     )
 }
 

@@ -10,12 +10,28 @@ use crate::{
     validation, WorkflowServiceError,
 };
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation, Output},
-    sql::{Predicate, RowLimit},
+    orm::{Entity, FindOptions, FromRow, Operation, Output},
+    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
     value,
 };
+
+const MAX_DEPENDENCY_INSPECTIONS: usize = 16_384;
+
+#[derive(FromRow)]
+#[orm(entity = models::runs)]
+struct RunParent {
+    parent_id: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = models::waits)]
+struct ChildDependency {
+    id: String,
+    child_id: Option<String>,
+}
 
 pub(crate) async fn load(
     tx: &mut Transaction,
@@ -35,7 +51,11 @@ pub(crate) async fn load(
             source.column(models::steps::generation).eq(generation)?,
         ];
         if let Some(after) = after {
-            predicates.push(source.column(models::steps::ordinal).gt(after)?);
+            predicates.push(Predicate::compare(
+                Operand::Path(source.column(models::steps::ordinal).asc().path),
+                CompareOp::Gt,
+                Operand::Lit(Literal::Int(after)),
+            ));
         }
         let page = db
             .from(&source)
@@ -187,7 +207,7 @@ pub(crate) async fn append(
             ));
         }
         steps.insert(value!({
-            "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
+            "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
             "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":i64::from(step.name_occurrence),
             "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
             "record":encode(&step)?, "compensation_retry_ms":policy.compensation_retry_ms,
@@ -195,7 +215,7 @@ pub(crate) async fn append(
         if step.state == "running" {
             tx.database().collection(models::waits::Entity::COLLECTION)?
                 .insert(value!({
-                    "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
+                    "id":super::types::storage_id(), "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
                     "ordinal":i64::from(step.ordinal), "kind":step.kind.clone(), "signal_type":step.signal_type.clone(),
                     "topic":step.topic.clone(), "max_signal_age":step.max_signal_age_ms,
                     "due_at":step.wake_at.map(|time|time.timestamp_millis()), "child_id":step.child_run_id.clone(),
@@ -246,21 +266,10 @@ async fn child(
         return invalid("child workflow is absent from the pinned deployment");
     }
     let options = step.child_options.clone().unwrap_or_default();
-    let runs = tx.table("runs");
     if let Some(key) = &options.key {
         if let Some(row) = keyed_run(tx, app, name, key).await? {
             let id = row.id;
-            // A keyed child must not introduce an ancestor wait cycle.
-            let ancestors=tx.query(&format!("WITH RECURSIVE ancestors AS (SELECT id,parent_id FROM {runs} WHERE app_id=$1 AND id=$2 UNION ALL SELECT r.id,r.parent_id FROM {runs} r JOIN ancestors a ON a.parent_id=r.id WHERE r.app_id=$1) SELECT id FROM ancestors WHERE id=$3"), &[app.as_str().into(),parent.text("id")?.into(),id.clone().into()]).await?;
-            if !ancestors.is_empty() {
-                return invalid("child workflow would wait on its ancestor");
-            }
-            let waits = tx.table("waits");
-            let cycle = tx.query(&format!("WITH RECURSIVE dependencies(id) AS (SELECT id FROM {runs} WHERE app_id=$1 AND id=$2 UNION SELECT w.child_id FROM {waits} w JOIN dependencies d ON w.run_id=d.id JOIN {runs} r ON r.app_id=w.app_id AND r.id=w.run_id AND r.generation=w.generation WHERE w.app_id=$1 AND w.child_id IS NOT NULL) SELECT id FROM dependencies WHERE id=$3"),
-                &[app.as_str().into(),id.clone().into(),parent.text("id")?.into()]).await?;
-            if !cycle.is_empty() {
-                return invalid("child workflow would create a dependency cycle");
-            }
+            validate_child_dependency(tx, app, &parent.text("id")?, &id).await?;
             return Ok(id);
         }
     }
@@ -294,6 +303,133 @@ async fn child(
         )
         .await?;
     Ok(id)
+}
+
+/// The caller holds the app lock across validation and insertion of its wait.
+/// Inspect current generations only and refuse an unprovable graph on budget
+/// exhaustion rather than accepting a potentially cyclic child dependency.
+async fn validate_child_dependency(
+    tx: &Transaction,
+    app: &AppId,
+    parent: &str,
+    child: &str,
+) -> Result<(), WorkflowServiceError> {
+    let db = tx.database();
+    let runs = db.entity::<models::runs::Entity>()?;
+    let mut remaining = MAX_DEPENDENCY_INSPECTIONS;
+    let mut ancestors = BTreeSet::new();
+    let mut ancestor = Some(parent.to_owned());
+    while let Some(id) = ancestor {
+        inspect_dependency(&mut remaining)?;
+        if id == child {
+            return invalid("child workflow would wait on its ancestor");
+        }
+        if !ancestors.insert(id.clone()) {
+            return Err(WorkflowServiceError::Internal(
+                "workflow ancestry contains a cycle".into(),
+            ));
+        }
+        ancestor = runs
+            .find::<RunParent>(
+                models::runs::app_id
+                    .eq(app.as_str())?
+                    .and(models::runs::id.eq(id.as_str())?),
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| WorkflowServiceError::Internal("workflow ancestor is missing".into()))?
+            .parent_id;
+    }
+    let run = runs.alias("r")?;
+    let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
+    let mut pending = vec![(child.to_owned(), false)];
+    let mut active = BTreeSet::new();
+    let mut completed = BTreeSet::new();
+    let page_limit = RowLimit::default().get();
+    while let Some((id, exiting)) = pending.pop() {
+        if exiting {
+            active.remove(&id);
+            completed.insert(id);
+            continue;
+        }
+        if id == parent {
+            return invalid("child workflow would create a dependency cycle");
+        }
+        if active.contains(&id) {
+            return Err(WorkflowServiceError::Internal(
+                "workflow dependencies contain a cycle".into(),
+            ));
+        }
+        if completed.contains(&id) {
+            continue;
+        }
+        inspect_dependency(&mut remaining)?;
+        active.insert(id.clone());
+        pending.push((id.clone(), true));
+        let mut after: Option<String> = None;
+        loop {
+            let mut filter = vec![
+                wait.column(models::waits::app_id).eq(app.as_str())?,
+                wait.column(models::waits::run_id).eq(id.as_str())?,
+                Predicate::is_not_null(Operand::Path(
+                    wait.column(models::waits::child_id).asc().path,
+                )),
+            ];
+            if let Some(after) = &after {
+                filter.push(Predicate::compare(
+                    Operand::Path(wait.column(models::waits::id).asc().path),
+                    CompareOp::Gt,
+                    Operand::Lit(Literal::Text(after.clone())),
+                ));
+            }
+            let page = db
+                .from(&wait)
+                .inner_join(
+                    &run,
+                    Predicate::And(vec![
+                        wait.column(models::waits::app_id)
+                            .eq_column(run.column(models::runs::app_id))?,
+                        wait.column(models::waits::run_id)
+                            .eq_column(run.column(models::runs::id))?,
+                        wait.column(models::waits::generation)
+                            .eq_column(run.column(models::runs::generation))?,
+                    ]),
+                )?
+                .filter(Predicate::And(filter))
+                .order_by(wait.column(models::waits::id).asc())
+                .select(wait.row::<ChildDependency>())?
+                .limit(page_limit)?
+                .all()
+                .await?;
+            let count = page.len();
+            for edge in page {
+                inspect_dependency(&mut remaining)?;
+                after = Some(edge.id);
+                let target = edge.child_id.ok_or_else(|| {
+                    WorkflowServiceError::Internal("workflow child dependency is missing".into())
+                })?;
+                pending.push((target, false));
+            }
+            if count < page_limit as usize {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn inspect_dependency(remaining: &mut usize) -> Result<(), WorkflowServiceError> {
+    *remaining = remaining.checked_sub(1).ok_or_else(|| {
+        WorkflowServiceError::ResourceExhausted(
+            "workflow dependency inspection limit reached".into(),
+        )
+    })?;
+    Ok(())
 }
 
 /// Resolve durable waits using the service clock and app-scoped mailboxes.
@@ -346,8 +482,16 @@ pub(crate) async fn resolve(
                     signals
                         .column(models::signals::consumed_generation)
                         .eq(None::<i64>)?,
-                    signals.column(models::signals::created_at).gte(oldest)?,
-                    signals.column(models::signals::created_at).lte(latest)?,
+                    Predicate::compare(
+                        Operand::Path(signals.column(models::signals::created_at).asc().path),
+                        CompareOp::Gte,
+                        Operand::Lit(Literal::Int(oldest)),
+                    ),
+                    Predicate::compare(
+                        Operand::Path(signals.column(models::signals::created_at).asc().path),
+                        CompareOp::Lte,
+                        Operand::Lit(Literal::Int(latest)),
+                    ),
                     Predicate::Or(vec![
                         signals
                             .column(models::signals::target_generation)

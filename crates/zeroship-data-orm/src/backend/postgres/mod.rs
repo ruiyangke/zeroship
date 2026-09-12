@@ -42,6 +42,10 @@ pub(crate) fn default_pool_capacity() -> usize {
 }
 
 impl crate::backend::Backend for PostgresBackend {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        crate::sql::registration::SqlRegistration::postgres()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         false
     }

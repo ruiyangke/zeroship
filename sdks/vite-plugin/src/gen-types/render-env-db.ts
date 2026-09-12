@@ -23,6 +23,8 @@ export interface RuntimeFieldDef {
   unique?: boolean;
   min?: number;
   max?: number;
+  precision?: number;
+  scale?: number;
   enum?: unknown[];
   mask?: { kind?: string; classification?: string };
   default?: unknown;
@@ -82,15 +84,8 @@ export const GENERATED_ENV_DB_BANNER =
   "// `InferSchema`/`Row`/`Collections`/`Db`/`Id<>`/`MaskedValue<>` inference\n" +
   "// chain a declared schema would.\n" +
   "//\n" +
-  "// That equivalence is about TYPES, not about DDL, and the difference is not\n" +
-  "// cosmetic: feeding this file back in as a declared schema would NOT\n" +
-  "// reproduce the columns the migrations built. `int`, `integer`, `bigInt`,\n" +
-  "// `number` and `float` all render as `t.number()`, because `@zeroship/db`\n" +
-  "// has no integer builder — so an `int` column that the migration created as\n" +
-  "// INTEGER would come back as DOUBLE PRECISION.\n" +
-  "//\n" +
-  "// Read `t.number()` here as \"some numeric column\", not as the column's\n" +
-  "// type. The schema source above remains the ground truth for DDL.\n";
+  "// This module reconstructs runtime types. Fixed-precision numeric facets are\n" +
+  "// preserved, while the migration source remains the authority for DDL.\n";
 
 /**
  * Render the generated `env.db.ts` from a parsed v2 runtime descriptor.
@@ -167,7 +162,7 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
 
   let chain: string;
   if (hasEncrypted) {
-    chain = renderEncryptedBase(def.type);
+    chain = renderEncryptedBase(def);
   } else if (typeof def.refTarget === "string" && def.refTarget.length > 0) {
     // A relation is identified by its relation METADATA, not by the `type`
     // token, which describes storage. This mirrors the same decision already
@@ -205,6 +200,8 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
       case "int":
       case "integer":
       case "number":
+        chain = renderNumberBase(def);
+        break;
       case "float":
         chain = "t.number()";
         break;
@@ -278,13 +275,19 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
 }
 
 /** Render the logical plaintext type; the host owns project-key selection. */
-function renderEncryptedBase(type: RuntimeFieldDef["type"]): string {
-  switch (type) {
+function renderEncryptedBase(def: RuntimeFieldDef): string {
+  switch (def.type) {
     case "string": return "t.encrypted()";
-    case "number": return "t.encrypted({ of: t.number() })";
+    case "number": return `t.encrypted({ of: ${renderNumberBase(def)} })`;
     case "bytes": return "t.encrypted({ of: t.bytes() })";
-    default: throw new Error(`Unsupported encrypted field type: ${type}`);
+    default: throw new Error(`Unsupported encrypted field type: ${def.type}`);
   }
+}
+
+function renderNumberBase(def: RuntimeFieldDef): string {
+  if (typeof def.precision !== "number") return "t.number()";
+  const scale = typeof def.scale === "number" ? def.scale : 0;
+  return `t.numeric({ precision: ${renderNumber(def.precision)}, scale: ${renderNumber(scale)} })`;
 }
 
 /** `t.id(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */

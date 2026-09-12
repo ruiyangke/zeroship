@@ -1,8 +1,8 @@
 //! SQLite codecs contracts.
 use super::fixtures::*;
 
+use crate::tests::fixtures::schema::fixture_table_sql_sqlite;
 use crate::tests::fixtures::Host;
-use crate::tests::fixtures::schema::fixture_table_sql_for;
 
 use zeroship_migrate::schema::query::FkEmission;
 
@@ -16,8 +16,6 @@ use crate::tests::fixtures::DatabaseFixture;
 #[test]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
     Host::test(|host| {
-        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
-
         host.run(async {
             let app = "t134_spelling";
             let coll = "events";
@@ -29,12 +27,11 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             // it could never observe a change to the emitter it claimed to test -
             // the comment asserted a mechanism the code did not drive.
             let schema = crate::value!({ "occurred_at": { "type": "date" } });
-            let ddl = fixture_table_sql_for(
+            let ddl = fixture_table_sql_sqlite(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &FkEmission::Inline,
-                SqlDialect::Sqlite,
             )
             .expect("build DDL");
             for stmt in ddl.split(";\n") {
@@ -52,7 +49,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             // catches a regression in the emitter without needing a row at all.
             assert!(
                 ddl.contains("strftime('%Y-%m-%dT%H:%M:%fZ','now')"),
-                "the emitted system-field default must be the ISO-T spelling, got: {ddl}"
+                "the emitted timestamp default must use the ISO-T spelling, got: {ddl}"
             );
 
             // Row A: id only, so `created_at` is written BY THE EMITTED DEFAULT.
@@ -72,14 +69,14 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
                 "id": "b_bind",
                 "occurred_at": 1_756_700_000_000_i64,
             });
-            let bq = build_insert_with_dialect(
+            let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
-                &schema,
+                &runtime_schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             assert_eq!(
                 bq.params[1],
                 crate::value!("2025-09-01T04:13:20.000Z"),

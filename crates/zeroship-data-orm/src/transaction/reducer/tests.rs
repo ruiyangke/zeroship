@@ -1,16 +1,4 @@
-//! Arms for the SC-1 reducer.
-//!
-//! Every test states where it would fail today. The reducer did not exist
-//! before this change, so "the module did not compile" is true of all of them
-//! and is not informative on its own; each arm therefore also names the
-//! **implementation** it would go red against, which is the property that
-//! makes it evidence rather than decoration.
-//!
-//! `docs/proposals/2026-08-26-runtime-db-binding-verification-record.md` class
-//! 7 is the one these are written against: *what state does this fixture make
-//! impossible?* Where an arm's name states a general property, it either
-//! drives the whole set (`TxState::FORCEABLE`, `DenyReason::ALL`) or names the
-//! cases it does not cover.
+//! Transaction reducer state-transition tests.
 
 use std::time::{Duration, Instant};
 

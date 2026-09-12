@@ -4,13 +4,13 @@
 //! the request's identity, actor, read set and transaction route synchronously;
 //! execution can then yield without consulting another request's context.
 
+pub use crate::value::Value;
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
-pub use crate::value::Value;
 
-use crate::{backend::BackendHandle, sql::compiler::CompiledQuery, crud, tx_route::CapturedRoute};
+use crate::{backend::BackendHandle, crud, sql::compiler::CompiledQuery, tx_route::CapturedRoute};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -91,7 +91,7 @@ impl Database {
 
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
         self.context.with(|| {
-            crate::sql::compile::validate_collection(name)?;
+            crate::sql::mapping::validate_collection(name)?;
             crate::descriptor::collection_schema(&self.binding, name)?;
             Ok(Collection {
                 database: self.clone(),
@@ -130,9 +130,19 @@ impl Database {
     {
         self.context
             .scope(async {
-                let transaction = self.begin_transaction().await?;
-                let result = body(transaction.database().clone()).await;
-                transaction.finish(result).await
+                self.check_scope()?;
+                let route = self.capture_route().bind(self.backend.clone())?;
+                let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
+                let active = Rc::new(Cell::new(true));
+                let _guard = ScopeGuard(active.clone());
+                let mut transaction = self.clone();
+                transaction.scope = Some(active.clone());
+                transaction.transaction_scope = Some(
+                    crate::transaction::scope::TransactionScope::current(self.binding.app_id())?,
+                );
+                let result = body(transaction).await;
+                active.set(false);
+                frame.finish(result).await
             })
             .await
     }
@@ -146,8 +156,16 @@ impl Database {
             self.transaction_scope.as_ref(),
             self.binding.app_id(),
             self.binding.schema().clone(),
-            self.backend.dialect(),
+            self.backend.sql_registration().clone(),
+            self.backend.connection_identity(),
         )
+    }
+}
+
+struct ScopeGuard(Rc<Cell<bool>>);
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        self.0.set(false);
     }
 }
 
@@ -169,6 +187,18 @@ pub struct Collection {
 }
 
 impl Collection {
+    fn dispatch(
+        &self,
+        prepared: Result<PreparedOperation, DbError>,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let backend = self.database.backend.clone();
+        let scope = self.database.scope.clone();
+        async move {
+            check_scope(scope.as_ref())?;
+            prepared?.execute(backend).await
+        }
+    }
+
     /// Prepare immediately, before returning the future to an executor.
     pub fn execute(
         &self,
@@ -185,12 +215,47 @@ impl Collection {
                     operation,
                 )
             });
-            let backend = db.backend.clone();
-            let scope = db.scope.clone();
-            async move {
-                check_scope(scope.as_ref())?;
-                prepared?.execute(backend).await
-            }
+            self.dispatch(prepared)
+        })
+    }
+
+    fn update_model(
+        &self,
+        filter: model::ModelPredicate,
+        patch: Value,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let db = &self.database;
+        db.context.with(|| {
+            let prepared = db.check_scope().and_then(|()| {
+                PreparedOperation::new_model_update(
+                    db.binding.clone(),
+                    &self.name,
+                    db.capture_route(),
+                    db.actor_id.clone(),
+                    filter,
+                    patch,
+                )
+            });
+            self.dispatch(prepared)
+        })
+    }
+
+    fn delete_model(
+        &self,
+        filter: model::ModelPredicate,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let db = &self.database;
+        db.context.with(|| {
+            let prepared = db.check_scope().and_then(|()| {
+                PreparedOperation::new_model_delete(
+                    db.binding.clone(),
+                    &self.name,
+                    db.capture_route(),
+                    db.actor_id.clone(),
+                    filter,
+                )
+            });
+            self.dispatch(prepared)
         })
     }
 
@@ -271,11 +336,50 @@ impl<E: Entity> EntityCollection<E> {
         filter: Filter<E>,
         options: FindOptions,
     ) -> impl Future<Output = Result<Vec<R>, DbError>> + use<E, R> {
-        let future = self.validate().map(|()| {
-            self.collection
-                .find(filter.into_value(), options.into_value::<E, R>())
+        let future = self.validate().and_then(|()| {
+            let mut source = ReadSource::new(E::COLLECTION, "source");
+            source.include_deleted = options.include_deleted;
+            let mut query = ReadQuery::new(source);
+            query.model_filter = Some(filter.into_predicate());
+            query.limit = options
+                .limit
+                .map(crate::sql::RowLimit::new)
+                .transpose()
+                .map_err(|error| DbError::validation("invalid_read", error.to_string()))?
+                .unwrap_or_default();
+            query.offset = options
+                .offset
+                .map(crate::sql::RowOffset::new)
+                .transpose()
+                .map_err(|error| DbError::validation("invalid_read", error.to_string()))?
+                .unwrap_or_default();
+            query.projection.push(ReadProjection::Row {
+                output: "model".into(),
+                source: "source".into(),
+                fields: Some(R::COLUMNS.iter().map(|field| (*field).into()).collect()),
+                optional: false,
+            });
+            Ok(self.collection.database.read(query))
         });
-        async move { decode_rows::<E, R>(future?.await?) }
+        async move {
+            let Output::Rows { rows, .. } = future?.await? else {
+                return Err(DbError::internal("model read returned a count"));
+            };
+            rows.into_iter()
+                .map(|row| {
+                    let Value::Object(mut fields) = row else {
+                        return Err(DbError::internal("model read returned a non-record"));
+                    };
+                    let Value::Object(model) = fields
+                        .swap_remove("model")
+                        .ok_or_else(|| DbError::internal("model read omitted its projection"))?
+                    else {
+                        return Err(DbError::internal("model projection was not a record"));
+                    };
+                    R::from_row(Row::new(model))
+                })
+                .collect()
+        }
     }
     pub fn insert<I: Insertable<E>, R: FromRow<E>>(
         &self,
@@ -300,8 +404,8 @@ impl<E: Entity> EntityCollection<E> {
             .validate()
             .and_then(|()| changes.into_changes())
             .map(|fields| {
-                self.collection.update(
-                    filter.into_value(),
+                self.collection.update_model(
+                    filter.into_predicate(),
                     Value::Object([("$set".into(), Value::Object(fields))].into()),
                 )
             });
@@ -311,12 +415,13 @@ impl<E: Entity> EntityCollection<E> {
         &self,
         filter: Filter<E>,
     ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, R> {
-        let future = self
-            .validate()
-            .map(|()| self.collection.delete(filter.into_value()));
+        let future = self.validate().map(|()| {
+            self.collection.delete_model(filter.into_predicate())
+        });
         async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
     }
 }
+
 fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbError> {
     let Output::Rows { rows, .. } = output else {
         return Err(DbError::internal("expected model rows"));
@@ -330,17 +435,15 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
 }
 mod codecs;
 mod model;
-mod transaction;
-pub use transaction::Transaction;
-pub use codecs::{Decimal, Point, Protected, sql_types};
+pub use codecs::{sql_types, Decimal, Point, Protected};
 pub use model::*;
 pub mod read;
 pub use read::{ReadJoin, ReadProjection, ReadQuery, ReadSource};
 mod read_builder;
 mod read_input;
-pub use read_builder::*;
-pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
 pub use crate::value::Record;
+pub use read_builder::*;
+pub use zeroship_data_macros::{schema, Changeset, FromRow, Insertable};
 
 /// Implementation support for generated metadata.
 #[doc(hidden)]
@@ -435,7 +538,7 @@ enum Plan {
     Insert(Value),
     InsertMany(Value),
     Update {
-        filter: Value,
+        filter: crud::predicate::Input,
         patch: Value,
         many: bool,
     },
@@ -452,7 +555,7 @@ enum Plan {
     Aggregate {
         query: CompiledQuery,
         groups: Vec<String>,
-        columns: Option<Vec<String>>,
+        projection: Option<crud::aggregate::AggregateProjection>,
     },
     Distinct {
         query: CompiledQuery,
@@ -492,13 +595,7 @@ impl PreparedOperation {
         actor_id: Option<String>,
         operation: Operation,
     ) -> Result<Self, DbError> {
-        if route.app_id() != binding.app_id() || route.schema() != binding.schema() {
-            return Err(DbError::internal(
-                "ORM binding does not match the captured database route",
-            ));
-        }
-        crate::sql::compile::validate_collection(collection)?;
-        crate::descriptor::collection_schema(&binding, collection)?;
+        validate_target(&binding, collection, &route)?;
         let plan = match operation {
             Operation::Read(query) => {
                 if query.source.collection != collection {
@@ -506,12 +603,12 @@ impl PreparedOperation {
                 }
                 Plan::Read(Box::new(read::PreparedRead::new(
                     &binding,
-                    route.dialect(),
+                    route.sql_registration(),
                     *query,
                 )?))
             }
             Operation::Find { filter, options } => {
-                let plan = crud::plan_find(&binding, collection, &filter, &options);
+                let plan = crud::plan_find(&binding, collection, &filter, &options)?;
                 Plan::Find {
                     filter,
                     plan: Box::new(plan),
@@ -524,7 +621,7 @@ impl PreparedOperation {
                 patch,
                 many,
             } => Plan::Update {
-                filter,
+                filter: filter.into(),
                 patch,
                 many,
             },
@@ -566,11 +663,11 @@ impl PreparedOperation {
                 &binding, &route, collection, filter, &options,
             )?),
             Operation::Aggregate { pipeline, options } => {
-                let (query, columns) =
+                let (query, projection) =
                     crud::plan_aggregate(&binding, &route, collection, &pipeline, &options)?;
                 Plan::Aggregate {
                     query,
-                    columns,
+                    projection,
                     groups: crud::aggregate_group_fields(&pipeline),
                 }
             }
@@ -585,13 +682,13 @@ impl PreparedOperation {
             }
             Operation::Search { arguments } => Plan::Search(crud::plan_search(
                 &binding,
-                route.dialect(),
+                route.sql_registration(),
                 collection,
                 &arguments,
             )?),
             Operation::Near { arguments } => Plan::Near(crud::plan_near(
                 &binding,
-                route.dialect(),
+                route.sql_registration(),
                 collection,
                 &arguments,
             )?),
@@ -603,6 +700,58 @@ impl PreparedOperation {
             route,
             actor_id,
             plan,
+        })
+    }
+
+    fn new_model_update(
+        binding: DbBinding,
+        collection: &str,
+        route: CapturedRoute,
+        actor_id: Option<String>,
+        filter: model::ModelPredicate,
+        patch: Value,
+    ) -> Result<Self, DbError> {
+        validate_target(&binding, collection, &route)?;
+        Ok(Self {
+            context: crate::orm_context::current(),
+            binding,
+            collection: collection.to_owned(),
+            route,
+            actor_id,
+            plan: Plan::Update {
+                filter: filter.into(),
+                patch,
+                many: false,
+            },
+        })
+    }
+
+    fn new_model_delete(
+        binding: DbBinding,
+        collection: &str,
+        route: CapturedRoute,
+        actor_id: Option<String>,
+        filter: model::ModelPredicate,
+    ) -> Result<Self, DbError> {
+        validate_target(&binding, collection, &route)?;
+        let query = crud::plan_delete_one_input(
+            &binding,
+            &route,
+            collection,
+            filter.into(),
+            actor_id.as_deref(),
+        )?;
+        Ok(Self {
+            context: crate::orm_context::current(),
+            binding,
+            collection: collection.to_owned(),
+            route,
+            actor_id,
+            plan: Plan::Mutation {
+                query,
+                operation: ChangeOp::Update,
+                many: false,
+            },
         })
     }
 
@@ -621,12 +770,7 @@ impl PreparedOperation {
             actor_id,
             plan,
         } = self;
-        if route.dialect() != backend.dialect() {
-            return Err(DbError::internal(
-                "ORM backend does not match the prepared dialect",
-            ));
-        }
-        let route = route.bind(backend);
+        let route = route.bind(backend)?;
         let result = match plan {
             Plan::Read(plan) => Box::pin(plan.execute(&binding, &route)).await?,
             Plan::Find { filter, plan } => {
@@ -706,9 +850,9 @@ impl PreparedOperation {
             Plan::Aggregate {
                 query,
                 groups,
-                columns,
+                projection,
             } => Box::pin(crud::exec_aggregate_read(
-                binding, collection, route, query, groups, columns,
+                binding, collection, route, query, groups, projection,
             ))
             .await?
             .into(),
@@ -739,4 +883,19 @@ impl PreparedOperation {
         };
         Ok(result)
     }
+}
+
+fn validate_target(
+    binding: &DbBinding,
+    collection: &str,
+    route: &CapturedRoute,
+) -> Result<(), DbError> {
+    if route.app_id() != binding.app_id() || route.schema() != binding.schema() {
+        return Err(DbError::internal(
+            "ORM binding does not match the captured database route",
+        ));
+    }
+    crate::sql::mapping::validate_collection(collection)?;
+    crate::descriptor::collection_schema(binding, collection)?;
+    Ok(())
 }

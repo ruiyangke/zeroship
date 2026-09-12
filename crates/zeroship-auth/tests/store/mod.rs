@@ -2,6 +2,8 @@
 
 mod email_verification;
 mod identities;
+mod magic_completions;
+mod magic_links;
 mod password_reset;
 mod rate_limit;
 mod session_visibility;

@@ -1,6 +1,6 @@
 //! Runtime and database state owned explicitly by each engine test.
 use crate::connection::{ConnectionFactory, LocalConnection};
-use crate::{backend, sql::compile, crud, encryption, error::DbError, exec, transaction};
+use crate::{backend, crud, encryption, error::DbError, exec, transaction};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 type ProjectKeys = Option<Arc<encryption::SuppliedProjectKeys>>;
@@ -70,13 +70,14 @@ impl Host {
         connection.ensure(self.key_source()).await
     }
 
-    pub(crate) fn dialect(&self) -> compile::SqlDialect {
+    pub(crate) fn sql_family(&self) -> crate::sql::registration::SqlFamily {
         self.connection
             .borrow()
             .as_ref()
             .expect("fixture connection")
             .factory()
-            .dialect()
+            .sql_registration()
+            .family()
     }
 
     pub(crate) fn reset(&self) {
@@ -139,7 +140,6 @@ impl Host {
     ) -> Result<(), DbError> {
         let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
         let backend = self.backend().await?;
-        let dialect = self.dialect();
         // The route the V8 dispatcher would have captured. The protection-floor
         // fence reads the live catalog, so the helper has to stand in for that half
         // of the dispatcher's frame too - a helper that skipped it would let a test
@@ -147,7 +147,6 @@ impl Host {
         let route = exec::ambient_route_for_tests(app_id, backend.clone());
         crud::prepare_insert_many_docs_for_binding(
             backend.key_store(),
-            dialect,
             &route,
             docs,
             &binding,
@@ -289,11 +288,20 @@ fn fixture_configuration_follows_its_owner_across_nested_scopes() {
                 "sqlite:{}",
                 directory.path().join("control.sqlite").display()
             ));
-            assert_eq!(postgres.dialect(), compile::SqlDialect::Postgres);
-            assert_eq!(sqlite.dialect(), compile::SqlDialect::Sqlite);
+            assert_eq!(
+                postgres.sql_family(),
+                crate::sql::registration::POSTGRES_FAMILY
+            );
+            assert_eq!(sqlite.sql_family(), crate::sql::registration::SQLITE_FAMILY);
             sqlite.reset();
-            assert_eq!(postgres.dialect(), compile::SqlDialect::Postgres);
+            assert_eq!(
+                postgres.sql_family(),
+                crate::sql::registration::POSTGRES_FAMILY
+            );
         });
-        assert_eq!(postgres.dialect(), compile::SqlDialect::Postgres);
+        assert_eq!(
+            postgres.sql_family(),
+            crate::sql::registration::POSTGRES_FAMILY
+        );
     });
 }

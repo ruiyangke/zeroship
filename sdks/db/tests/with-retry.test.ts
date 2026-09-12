@@ -19,7 +19,7 @@ describe("withRetry", () => {
     const result = await withRetry(async () => {
       calls += 1;
       if (calls < 3) {
-        throw new OptimisticLockError(calls, "products");
+        throw new OptimisticLockError({ column: "revision", expected: calls }, "products");
       }
       return "done";
     });
@@ -31,13 +31,13 @@ describe("withRetry", () => {
     let calls = 0;
     const err = await withRetry(async () => {
       calls += 1;
-      throw new OptimisticLockError(7, "x");
+      throw new OptimisticLockError({ column: "revision", expected: 7 }, "x");
     }, { max: 3 }).then(
       () => null,
       (e) => e,
     );
     assert.ok(err instanceof OptimisticLockError);
-    assert.equal(err.expectedVersion, 7);
+    assert.equal(err.expectedValue, 7);
     assert.equal(calls, 3);
   });
 
@@ -56,7 +56,7 @@ describe("withRetry", () => {
     let calls = 0;
     await withRetry(async () => {
       calls += 1;
-      throw new OptimisticLockError(1);
+      throw new OptimisticLockError({ column: "revision", expected: 1 });
     }).catch(() => {});
     assert.equal(calls, 3);
   });
@@ -89,7 +89,9 @@ describe("withRetry", () => {
     await withRetry(
       async () => {
         calls += 1;
-        if (calls < 3) throw new OptimisticLockError(calls);
+        if (calls < 3) {
+          throw new OptimisticLockError({ column: "revision", expected: calls });
+        }
         return "done";
       },
       {
@@ -108,7 +110,7 @@ describe("withRetry", () => {
     await withRetry(
       async () => {
         calls += 1;
-        throw new OptimisticLockError(1);
+        throw new OptimisticLockError({ column: "revision", expected: 1 });
       },
       { max: 1 },
     ).catch(() => {});
@@ -135,7 +137,10 @@ describe("withRetry", () => {
   });
 
   test("isOptimisticLockError matches OptimisticLockError instances", () => {
-    assert.equal(isOptimisticLockError(new OptimisticLockError(1)), true);
+    assert.equal(
+      isOptimisticLockError(new OptimisticLockError({ column: "revision", expected: 1 })),
+      true,
+    );
     assert.equal(isOptimisticLockError(new Error("x")), false);
     assert.equal(isOptimisticLockError("not an error"), false);
     assert.equal(isOptimisticLockError(null), false);
@@ -149,7 +154,7 @@ describe("withRetry", () => {
 
   test("isOptimisticLockError maps the native optimistic-concurrency code", () => {
     const e = new Error("x");
-    (e as Error & { code: string }).code = "version_mismatch";
+    (e as Error & { code: string }).code = "concurrency_mismatch";
     assert.equal(isOptimisticLockError(e), true);
   });
 });

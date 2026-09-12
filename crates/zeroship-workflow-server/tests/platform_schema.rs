@@ -16,8 +16,15 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         .admin
         .batch_execute(
             "CREATE SCHEMA customer;
-         CREATE TABLE customer.__zeroship_workflow_runs(secret text);
-         INSERT INTO customer.__zeroship_workflow_runs VALUES('private-customer-input');",
+         CREATE TABLE customer.__zeroship_workflow_runs(id text PRIMARY KEY,secret text);",
+        )
+        .await
+        .unwrap();
+    fixture
+        .admin
+        .execute(
+            "INSERT INTO customer.__zeroship_workflow_runs(id,secret) VALUES($1,'private-customer-input')",
+            &[&zeroship_core::workflow_coordination::RunId::mint().as_str()],
         )
         .await
         .unwrap();
@@ -37,7 +44,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         "SELECT * FROM zeroship.plans",
         "UPDATE zeroship.worker_instances SET status='active'",
         "UPDATE workflow_coordination.schema_version SET fingerprint='forged'",
-        "CREATE TABLE workflow_coordination.extra(data text)",
+        "CREATE TABLE workflow_coordination.extra(id text PRIMARY KEY,data text)",
         "SET ROLE zeroship_workflow_migrator",
     ] {
         assert!(

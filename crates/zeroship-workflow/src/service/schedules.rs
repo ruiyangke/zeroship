@@ -10,10 +10,17 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Output},
-    sql::{Predicate, RowLimit},
+    orm::{Entity, FindOptions, FromRow, Output},
+    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
     value,
 };
+
+#[derive(FromRow)]
+#[orm(entity = models::schedules)]
+struct DueSchedule {
+    app_id: String,
+    id: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -171,7 +178,11 @@ pub(crate) async fn reconcile(
     loop {
         let mut filter = vec![source.column(models::schedules::app_id).eq(app.as_str())?];
         if let Some(after) = &after {
-            filter.push(source.column(models::schedules::id).gt(after.as_str())?);
+            filter.push(Predicate::compare(
+                Operand::Path(source.column(models::schedules::id).asc().path),
+                CompareOp::Gt,
+                Operand::Lit(Literal::Text(after.clone())),
+            ));
         }
         let page = db
             .from(&source)
@@ -236,17 +247,51 @@ impl WorkflowService {
     pub async fn tick_schedules(&self) -> Result<usize, WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let now = tx.now().await?;
-        let schedules = tx.table("schedules");
-        let deploys = tx.table("deploys");
-        let (scope, app_ids) = tx.host_app_scope()?;
-        let due=tx.query(&format!("SELECT s.app_id,s.id FROM {schedules} s WHERE s.app_id IN ({scope}) AND next_at <= $2 AND EXISTS (SELECT 1 FROM {deploys} d WHERE d.app_id=s.app_id AND d.id=s.deploy_id AND d.state='available') ORDER BY last_checked_at,next_at,s.app_id,s.id LIMIT 128"), &[app_ids,now.into()]).await?;
+        let db = tx.database();
+        let schedule = db.entity::<models::schedules::Entity>()?.alias("s")?;
+        let deploy = db.entity::<models::deploys::Entity>()?.alias("d")?;
+        let due = db
+            .from(&schedule)
+            .inner_join(
+                &deploy,
+                Predicate::And(vec![
+                    schedule
+                        .column(models::schedules::app_id)
+                        .eq_column(deploy.column(models::deploys::app_id))?,
+                    schedule
+                        .column(models::schedules::deploy_id)
+                        .eq_column(deploy.column(models::deploys::id))?,
+                    deploy.column(models::deploys::state).eq("available")?,
+                ]),
+            )?
+            .filter(Predicate::And(vec![
+                Predicate::Or(
+                    tx.host_app_ids()?
+                        .into_iter()
+                        .map(|app| schedule.column(models::schedules::app_id).eq(app.as_str()))
+                        .collect::<Result<Vec<_>, _>>()?,
+                ),
+                Predicate::compare(
+                    Operand::Path(schedule.column(models::schedules::next_at).asc().path),
+                    CompareOp::Lte,
+                    Operand::Lit(Literal::Int(now)),
+                ),
+            ]))
+            .order_by(schedule.column(models::schedules::last_checked_at).asc())
+            .order_by(schedule.column(models::schedules::next_at).asc())
+            .order_by(schedule.column(models::schedules::app_id).asc())
+            .order_by(schedule.column(models::schedules::id).asc())
+            .select(schedule.row::<DueSchedule>())?
+            .limit(128)?
+            .all()
+            .await?;
         tx.commit().await?;
         let mut fired = 0;
         for candidate in due {
-            let app = AppId::parse(&candidate.text("app_id")?).map_err(|_| {
+            let app = AppId::parse(&candidate.app_id).map_err(|_| {
                 WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
             })?;
-            let id = candidate.text("id")?;
+            let id = candidate.id;
             let mut tx = self.begin().await?;
             let policy = lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
@@ -379,7 +424,7 @@ impl WorkflowService {
                         fired += 1;
                         Some(run_id)
                     };
-                    occurrences.insert(value!({"app_id":app.as_str(), "schedule_id":id.clone(), "at":at, "run_id":run_id})).await?;
+                    occurrences.insert(value!({"id":super::types::storage_id(), "app_id":app.as_str(), "schedule_id":id.clone(), "at":at, "run_id":run_id})).await?;
                 }
                 at = registration.schedule.next_after(at, anchor)?;
                 if at > now {

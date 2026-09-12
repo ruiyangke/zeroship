@@ -33,6 +33,7 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
             database.context().clone(),
             store.binding.clone(),
             store.backend.clone(),
+            store.clock.clone(),
         )
         .unwrap(),
     );
@@ -120,6 +121,7 @@ async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
         database.context().clone(),
         store.binding.clone(),
         store.backend.clone(),
+        store.clock.clone(),
     )
     .is_err());
     let retained = database
@@ -215,7 +217,7 @@ fn sqlite_journal_objects_and_foreign_keys_stay_in_the_reserved_namespace() {
 
 #[test]
 fn orm_queries_can_name_all_journal_tables() {
-    use zeroship_data_orm::sql::compile::validate_collection;
+    use zeroship_data_orm::sql::mapping::validate_collection;
     assert!(validate_collection("orders").is_ok());
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(schema::SQLITE_SQL).unwrap();

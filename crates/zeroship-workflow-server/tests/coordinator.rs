@@ -4,7 +4,11 @@
 )]
 
 use compio_postgres::{Client, NoTls};
-use std::{collections::BTreeMap, num::NonZeroU32, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    num::NonZeroU32,
+    time::Duration,
+};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -13,9 +17,12 @@ use testcontainers::{
 use zeroship_core::{
     app_id::AppId,
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
+    typed_id,
     workflow_coordination::*,
 };
 use zeroship_workflow_server::coordinator::{Coordinator, Error, Options, SCHEMA_SQL};
+
+type StoredIds = BTreeMap<(String, String, String), String>;
 
 struct Fixture {
     _postgres: Container<GenericImage>,
@@ -46,9 +53,15 @@ impl Fixture {
                 "CREATE ROLE coordinator_test LOGIN;
              CREATE SCHEMA workflow_coordination;
              CREATE SCHEMA customer;
-             CREATE TABLE customer.__zeroship_workflow_history(secret text);
-             INSERT INTO customer.__zeroship_workflow_history VALUES('customer-private-history');
+             CREATE TABLE customer.__zeroship_workflow_history(id text PRIMARY KEY,secret text);
              REVOKE ALL ON SCHEMA customer FROM PUBLIC;",
+            )
+            .await
+            .unwrap();
+        admin
+            .execute(
+                "INSERT INTO customer.__zeroship_workflow_history(id,secret) VALUES($1,'customer-private-history')",
+                &[&typed_id::generate("wfh")],
             )
             .await
             .unwrap();
@@ -73,6 +86,45 @@ impl Fixture {
         Coordinator::connect(&self.runtime_url, options)
             .await
             .unwrap()
+    }
+    async fn stored_ids(&self) -> StoredIds {
+        let rows = self.admin.query(
+            "SELECT 'workers' AS kind,worker_id AS scope,'' AS subject,id FROM workflow_coordination.workers
+             UNION ALL SELECT 'scopes',app_id,'',id FROM workflow_coordination.scopes
+             UNION ALL SELECT 'assignments',app_id,worker_id,id FROM workflow_coordination.assignments
+             UNION ALL SELECT 'placement_receipts',app_id,request_id,id FROM workflow_coordination.placement_receipts
+             UNION ALL SELECT 'management',app_id,request_id,id FROM workflow_coordination.management",
+            &[],
+        ).await.unwrap();
+        assert!(!rows.is_empty());
+        let mut stored = BTreeMap::new();
+        let mut unique = BTreeSet::new();
+        for row in rows {
+            let kind: String = row.get("kind");
+            let scope: String = row.get("scope");
+            let subject: String = row.get("subject");
+            let id: String = row.get("id");
+            match kind.as_str() {
+                "workers" | "scopes" => assert_eq!(id, scope),
+                "assignments" => assert!(typed_id::parse_with_prefix(&id, "wca").is_ok()),
+                "placement_receipts" => assert!(typed_id::parse_with_prefix(&id, "wcp").is_ok()),
+                "management" => assert!(typed_id::parse_with_prefix(&id, "wcm").is_ok()),
+                _ => panic!("unexpected metadata table"),
+            }
+            assert!(unique.insert(id.clone()));
+            assert!(stored.insert((kind, scope, subject), id).is_none());
+        }
+        stored
+    }
+}
+fn assert_ids_retained(before: &StoredIds, after: &StoredIds) {
+    assert!(!before.is_empty());
+    for (key, id) in before {
+        assert_eq!(
+            after.get(key),
+            Some(id),
+            "storage identity changed: {key:?}"
+        );
     }
 }
 async fn connect(url: &str) -> Client {
@@ -149,6 +201,17 @@ async fn replicas_fence_placement_retries_and_capacity() {
     let (first, second) = futures::join!(a.assign(&request), b.assign(&request));
     let assignment = first.unwrap();
     assert_eq!(assignment, second.unwrap());
+    let initial_ids = fixture.stored_ids().await;
+    b.register(
+        &worker,
+        &RegisterWorker {
+            capacity: NonZeroU32::new(1).unwrap(),
+            state: WorkerState::Ready,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(fixture.stored_ids().await, initial_ids);
     let mut conflict = request.clone();
     conflict.expected_revision = Some(assignment.revision);
     assert_eq!(b.assign(&conflict).await, Err(Error::Conflict));
@@ -167,6 +230,7 @@ async fn replicas_fence_placement_retries_and_capacity() {
     };
     let replacement = b.assign(&next_request).await.unwrap();
     assert!(replacement.revision > assignment.revision);
+    assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
     assert_eq!(
         a.renew(&worker, &assigned(&assignment)).await,
         Err(Error::Denied)
@@ -228,7 +292,9 @@ async fn wake_hints_and_release_require_current_ownership_and_a_responsible_peer
     } else {
         (&second, &w2, &r2)
     };
+    let released_ids = fixture.stored_ids().await;
     assert_eq!(b.release(worker, receipt).await, Ok(()));
+    assert_eq!(fixture.stored_ids().await, released_ids);
     assert_eq!(a.renew(worker, &assigned(old)).await, Err(Error::Denied));
     assert_eq!(
         a.publish_wake(worker, &wake(old, 3)).await,
@@ -240,6 +306,7 @@ async fn wake_hints_and_release_require_current_ownership_and_a_responsible_peer
     };
     let replacement = a.assign(&request).await.unwrap();
     assert!(replacement.revision > old.revision);
+    assert_ids_retained(&released_ids, &fixture.stored_ids().await);
     assert_eq!(b.release(worker, receipt).await, Ok(()));
     assert_eq!(
         b.assignments(worker, None).await.unwrap(),
@@ -345,6 +412,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
     let (left, right) = futures::join!(a.manage(&actor, &one), b.manage(&actor, &one));
     let receipt = left.unwrap();
     assert_eq!(receipt, right.unwrap());
+    let initial_ids = fixture.stored_ids().await;
     assert_eq!(a.recovery_scopes(None).await.unwrap(), vec![app.clone()]);
     let mut changed = one.clone();
     changed.run_id = RunId::mint();
@@ -387,6 +455,7 @@ async fn management_is_durable_bounded_typed_and_assignment_scoped() {
         receipt
     );
     assert_eq!(b.manage(&actor, &one).await.unwrap(), receipt);
+    assert_ids_retained(&initial_ids, &fixture.stored_ids().await);
     assert_eq!(
         b.management_receipt(&app, &one.request_id).await.unwrap(),
         Some(receipt)
@@ -533,7 +602,9 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         .await
         .is_err());
     assert!(runtime
-        .batch_execute("CREATE TABLE workflow_coordination.injected(data jsonb)")
+        .batch_execute(
+            "CREATE TABLE workflow_coordination.injected(id text PRIMARY KEY,data jsonb)"
+        )
         .await
         .is_err());
     assert!(runtime
@@ -545,6 +616,21 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
     assert!(!columns.is_empty());
     for (table, columns) in columns {
         assert!(!columns.is_empty());
+        let primary = fixture
+            .admin
+            .query_one(
+                "SELECT ARRAY(
+               SELECT a.attname::text FROM unnest(c.conkey) WITH ORDINALITY AS key(attnum,position)
+               JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=key.attnum
+               ORDER BY key.position
+             ) AS columns FROM pg_constraint c
+             JOIN pg_class t ON t.oid=c.conrelid JOIN pg_namespace n ON n.oid=t.relnamespace
+             WHERE n.nspname='workflow_coordination' AND t.relname=$1 AND c.contype='p'",
+                &[&table],
+            )
+            .await
+            .unwrap();
+        assert_eq!(primary.get::<_, Vec<String>>("columns"), ["id"], "{table}");
         for column in columns {
             let row = fixture.admin.query_one(
                 "SELECT c.collname FROM pg_attribute a JOIN pg_class t ON t.oid=a.attrelid

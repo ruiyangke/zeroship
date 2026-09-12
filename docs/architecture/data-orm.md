@@ -4,12 +4,6 @@ Rust applications and worker TypeScript use the same ORM behavior. Application
 models, collection operations, and transaction callbacks do not carry a backend
 type parameter. The host chooses the database during setup.
 
-The customer schema is transparent to both Rust and creator code. ORM collection
-references accept all table prefixes, including `__zeroship_workflow_*`.
-Identifier validation prevents malformed or schema-qualified collection names;
-the host's bound schema and database role determine access. Runtime descriptors
-still supply model metadata, and normal field protection applies to operations.
-
 ```text
 Rust models                         Worker TypeScript
      |                                     |
@@ -119,17 +113,48 @@ registered backend, allowing a host-defined implementation or instrumentation
 wrapper. Rust models continue using `schema!`, `FromRow`, `Insertable`, and
 `Changeset`. TypeScript continues using `env.db`.
 
+Native platform services use the same `Database` API without a V8 adapter. The
+service database URL authenticates as the service role already provisioned by
+the platform schema. `connection_authority` keeps that login authority instead
+of deriving a creator role from the bound schema:
+
+```rust,ignore
+use zeroship_data_orm::{binding::DbBinding, sql::SchemaName, ConnectOptions, Database};
+
+let db = Database::connect(
+    DbBinding::new(
+        "zeroship_control",
+        schema_revision,
+        SchemaName::new("zeroship")?,
+    ),
+    ConnectOptions::new(control_database_url, project_keys)
+        .connection_authority(),
+    control_collections,
+).await?;
+```
+
+The option accepts no role name and grants no privilege. PostgreSQL permissions
+come from the URL's login role, such as `zeroship_control`. The ORM still applies
+transaction-local statement, lock, and idle limits. Both pooled operations and
+explicit transactions use the authority fixed when the backend opens, and that
+choice participates in connection identity. A route captured from one backend
+therefore cannot settle on a backend opened with another authority.
+
+`DbBinding` remains role-free. For a platform service, its logical id scopes
+transactions and in-memory metadata, its deploy token identifies the installed
+descriptor revision, and its schema names the qualified SQL namespace. Control
+owns access to platform tables. Workers retain the default per-app role path and
+reach Control-owned metadata through authenticated service APIs.
+
 Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.
 
-Every ORM collection declares its primary key explicitly. Keys may use named or
-composite columns; each component is required and immutable after insertion.
-Artifact packing, runtime installation and Rust schema generation validate this
-contract. Key values come from declared generators or explicit input; the ORM
-injects neither columns nor generators. Joined reads, concurrency checks and
-encryption use the complete key. Protected projections retain the key internally
-and omit it from the public result when it was not selected.
+Every ORM collection declares a required `id` as its sole primary key. Artifact
+packing, runtime installation and Rust schema generation validate this contract.
+ID values come from the declared generator or explicit input; the ORM injects neither columns
+nor generators. Other column names and lifecycle assignments remain
+schema-driven. Projections and aggregate results may omit `id`.
 
 Worker hosts supply the ORM factory to the V8 service:
 
@@ -220,8 +245,8 @@ existing `with` relation loader remains a separate operation.
 
 ## Driver contract
 
-`driver::Driver` exposes a configured physical connection source: SQL dialect,
-acquisition, and pool diagnostics. It accepts no application binding or keys and
+`driver::Driver` exposes a configured physical connection source: acquisition
+and pool diagnostics. It accepts no application binding or keys and
 requires no search, catalog, masking, or change-publication implementation.
 `DriverSession` executes SQL with native parameters, returns rows or affected-row
 counts, and handles settlement, cancellation, cleanup, and discard.
@@ -271,9 +296,9 @@ implementation still allocates records and futures and copies some inputs.
 The ORM refuses caller-supplied typed-ID assignments before insert, batch insert, or
 upsert can mutate rows. Upsert conflict keys must be declared, supplied,
 application-owned fields. The SQL compiler rejects malformed or repeated
-conflict columns. A conflicting row keeps its identity; a new row gets a
-platform-generated identity. The assignment pass remains idempotent because
-input validation runs before it.
+conflict columns. A conflicting row keeps its identity; a new row gets the
+descriptor-declared generated identity. The assignment pass remains idempotent
+because input validation runs before it.
 
 Collection descriptors carry assignment generators and explicit primary-key,
 concurrency and soft-delete roles. The ORM resolves assignments per collection;
@@ -320,7 +345,7 @@ JSON null is an element when used as an operand; null columns remain null.
 The dialect renderer lives in `zeroship_data_orm::sql`.
 
 The SQL module also owns the shared update grammar. It validates assignments
-before system-field and protection transforms, rejecting conflicting writes and
+before declared generators and protection transforms, rejecting conflicting writes and
 nonnumeric arithmetic operands. Normalization moves literal values under `$set`
 so every assigned field passes through the same encryption and masking path.
 Explicit `$set` values remain literal JSON even when they contain operator keys.
@@ -349,17 +374,6 @@ not downcast to concrete drivers. Registering another execution implementation
 requires no new backend enum variant in those paths.
 
 ## Session ownership and transactions
-
-Rust callers can use `Database::transaction` for a callback or
-`Database::begin_transaction` for an owned `orm::Transaction`. Its `database()`
-provides scoped model and collection handles; `commit`, `rollback`, and drop
-expire those handles. Nested transactions use savepoints, and a parent cannot
-settle while its child is open. Cancellation cleans up in the originating ORM
-context even if another context is active when the handle is dropped.
-
-`Transaction::query_sql` and `execute_sql` run a `CompiledQuery` on that same
-frame for operations the model API cannot express. These low-level methods do
-not apply model protection or CDC; ordinary records use collection operations.
 
 ```text
 ordinary operation                 explicit transaction
@@ -407,9 +421,11 @@ quarantine unfinished work before physical resources can be reused.
 ## SQL portability and extension points
 
 The driver standardizes execution. The SQL compiler owns syntax differences.
-A backend pairs its execution implementation with a supported `SqlDialect`.
-Adding another SQL language extends the SQL compiler; it does not require
-rewriting application models or shared transaction policy.
+A backend pairs execution with an immutable `SqlRegistration` containing its
+compiler, storage codecs, effective support, SQL family, and opaque identity.
+Adding another SQL language registers another implementation of the shared
+statement contract; it does not require a central vendor enum or changes to
+application models and transaction policy.
 
 Portable behavior is established by tests, including native types, null/default
 handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship_data_orm::sql` with a native byte
@@ -465,8 +481,8 @@ CRUD pipeline invokes these conversions at the appropriate points around
 protection transforms without choosing a concrete backend. Namespace selection
 belongs to the host executor.
 
-The runtime has one catalog contract (`Catalog`) and one search contract
-(`Search`). `Driver` and `DriverSession` own physical execution. Conformance
+The runtime uses `Catalog` for protection evidence and `Search` for ORM search
+strategies. `Driver` and `DriverSession` own physical execution. Conformance
 fixtures use a separate test-only `DatabaseFixture` helper with native values.
 There is no production text-parameter execution trait or backend DDL type mapper;
 the migration engine remains the authority for schema creation.

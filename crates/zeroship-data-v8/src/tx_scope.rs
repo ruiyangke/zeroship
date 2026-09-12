@@ -9,7 +9,7 @@
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::transaction::scope::TransactionScope;
 
-const SCOPE_SYMBOL_KEY: &str = "zeroship.plugin-db.txScope";
+const SCOPE_SYMBOL_KEY: &str = "zeroship.data-v8.txScope";
 
 fn scope_symbol<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Symbol>> {
     let key = v8::String::new(scope, SCOPE_SYMBOL_KEY)?;
@@ -95,20 +95,10 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
     scope.set_continuation_preserved_embedder_data(local);
 }
 
-/// Which SQL dialect this thread's statements must be written in.
-///
-/// **The one place the dialect question is asked**, and it is here because the
-/// answer is ADAPTER state: [`crate::context::ThreadDbContext::sql_dialect`]
-/// owns both inputs (an open backend, else the service's selection). The engine
-/// used to ask it directly from `crud::current_sql_dialect`, which was the last
-/// ENGINE-to-ADAPTER edge on `tests/lib/tier_direction_census.sh`.
-///
-/// It answers WITHOUT an open backend, which is what makes the stamp below
-/// possible at all - the eager `plan_*` half runs before anything is opened.
-/// Pinned by `tx_route`'s
-/// `a_configured_sqlite_dialect_is_captured_without_an_open_backend`.
-pub(crate) fn configured_dialect() -> crate::compile::SqlDialect {
-    crate::context::with(|c| c.sql_dialect())
+/// Capture this thread's compiler, codecs, and support without opening a backend.
+pub(crate) fn configured_sql_registration() -> zeroship_data_orm::sql::registration::SqlRegistration
+{
+    crate::context::with(|c| c.sql_registration())
 }
 
 /// Relay configuration resolved from this isolate's database service.
@@ -119,7 +109,7 @@ pub(crate) fn cdc_relay() -> Option<zeroship_data_orm::cdc::relay::RelayConfig> 
 /// Read the transaction frame out of V8 and freeze a [`TxRoute`] from it.
 ///
 /// This is the whole of the V8 half of routing, and it lives here because this
-/// module is where the context map is. [`TxRoute::capture`] still owns the
+/// module is where the context map is. [`crate::tx_route::CapturedRoute::capture`] owns the
 /// comparison that decides the route - it takes the observation, not the scope -
 /// so the SEC-1 property is stated once, in the type that carries it, and
 /// `tx_route.rs` names no `v8::` type.
@@ -128,15 +118,8 @@ pub(crate) fn cdc_relay() -> Option<zeroship_data_orm::cdc::relay::RelayConfig> 
 /// correct at the dispatch boundary: the runtime's continuation slot rotates on
 /// the next pump turn.
 ///
-/// **WHY A CACHED DIALECT CANNOT GO STALE.** The dialect is stamped once, here,
-/// and every statement of this dispatch - the ones the sync prelude plans and
-/// the ones the async body builds after `bind_route` - is written in it. That is
-/// sound because the only thing that changes a thread's configured dialect is
-/// `ThreadDbContext::set_resource`, which the service calls at REQUEST
-/// ADMISSION, never inside a dispatch; capture and bind are both inside one
-/// dispatch. Re-reading it in the async body would be the weaker choice, not the
-/// safer one: it could answer a different dialect than the prelude planned
-/// against, which is precisely the split this stamp closes.
+/// Compiler, codecs, and effective support are stamped together. Backend binding
+/// verifies that identity after an asynchronous open.
 ///
 /// **It takes the binding, not an app id, because the route carries BOTH
 /// identities.** The tenant decides the transaction frame, the lane key, the
@@ -151,7 +134,8 @@ pub(crate) fn capture_route(
         current_tx_scope(scope).as_ref(),
         binding.app_id(),
         binding.schema().clone(),
-        configured_dialect(),
+        configured_sql_registration(),
+        crate::context::with(|context| context.connection_identity()),
     )
 }
 
@@ -174,36 +158,13 @@ pub async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> 
 pub(crate) async fn bind_route(
     captured: crate::tx_route::CapturedRoute,
 ) -> Result<crate::tx_route::TxRoute, DbError> {
-    Ok(captured.bind(ensure_backend().await?))
+    captured.bind(ensure_backend().await?)
 }
 
 #[cfg(test)]
 mod tests {
-    //! ## The capture arms
-    //!
-    //! ESTABLISHED: `capture_route`'s answer tracks the async-scope marker, and
-    //! it is NOT the ambient `has_tx_for` answer - `capture` says "in the
-    //! transaction" at a moment when `has_tx_for` says "no transaction parked",
-    //! so the two discriminators are provably different functions. Reverting
-    //! `CapturedRoute::capture` to the pre-fix
-    //! `tx_lanes::with(|l| l.has_tx_for(app_id))` fails three of the four.
-    //!
-    //! NOT ESTABLISHED, stated rather than implied:
-    //!   - that every `dispatch_*` actually calls `capture`. Nothing at runtime
-    //!     can check that; it is enforced by the TYPE (the exec entry points
-    //!     take `&TxRoute`, and `TxRoute` has no other production constructor)
-    //!     and end to end by `examples/db-todos/tests/database.test.ts` (`cxPlain`).
-    //!   - the OTHER direction of the #254 defect - an app with a transaction
-    //!     genuinely PARKED in the per-isolate slot while an unrelated dispatch
-    //!     runs. Reaching that state needs a real `Session` (a live
-    //!     Postgres `Client` or SQLite session handle), which these tests
-    //!     deliberately do not open. It is covered by `cxPlain` on both tiers.
-    //!   - anything about which CONNECTION the exec path then picks.
-    //!
-    //! **These five arms lived in the engine's `tx_route.rs`** and moved here
-    //! with the data-engine cut: every name they drive except `tx_lanes` is this
-    //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
-    //! per-isolate context at all.
+    //! Route capture follows the continuation scope. Database-backed tests cover
+    //! the connection selected after that captured route is bound.
 
     use zeroship_runtime::init_v8;
 
@@ -223,15 +184,7 @@ mod tests {
             .block_on(f)
     }
 
-    /// The dialect is knowable COLD, and the capture is where that is proven.
-    ///
-    /// This lived in `crud/mod.rs` as
-    /// `configured_sqlite_dialect_does_not_require_an_open_backend`, pinned on
-    /// the engine's own `current_sql_dialect()` - the function that read the
-    /// context from an ENGINE file. It is here rather than deleted because the
-    /// property it pins is what permits the stamp at all: nine `plan_*`
-    /// functions build SQL in the synchronous prelude, so if the dialect needed
-    /// an open backend the whole design would be unavailable.
+    /// SQL registration is captured before a backend is opened.
     /// The fixture binding: app id and schema are the same string here, which
     /// is what production still mints. Spelled once so the tests below read the
     /// route`s two identities off ONE source, as `mint_db` does.
@@ -244,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
+    fn a_configured_sqlite_registration_is_captured_without_an_open_backend() {
         in_scope!(let scope);
         crate::tests::fixtures::reset_context();
         crate::tests::fixtures::set_database_url("sqlite:route-test.sqlite");
@@ -253,8 +206,10 @@ mod tests {
             "precondition: nothing has opened a backend on this thread"
         );
         assert_eq!(
-            super::capture_route(scope, &app_a_binding()).dialect(),
-            crate::compile::SqlDialect::Sqlite
+            super::capture_route(scope, &app_a_binding())
+                .sql_registration()
+                .family(),
+            zeroship_data_orm::sql::registration::SQLITE_FAMILY
         );
         crate::tests::fixtures::reset_context();
     }
@@ -337,7 +292,10 @@ mod tests {
         assert!(crate::context::with(|context| context.backend()).is_none());
         run(async {
             let backend = super::ensure_backend().await.expect("open cold backend");
-            assert_eq!(backend.dialect(), crate::compile::SqlDialect::Sqlite);
+            assert_eq!(
+                backend.sql_registration().family(),
+                zeroship_data_orm::sql::registration::SQLITE_FAMILY
+            );
             assert!(crate::context::with(|context| context.backend()).is_some());
         });
         crate::tests::fixtures::reset_context();

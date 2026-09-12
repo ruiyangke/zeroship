@@ -90,7 +90,7 @@ impl CollectionFixture {
                 .unwrap(),
         );
         let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
-        let schema = crate::sql::compile::quote_ident(&app);
+        let schema = crate::sql::mapping::quote_ident(&app);
         backend
             .execute_fixture(&format!("CREATE SCHEMA {schema}"), &[])
             .await
@@ -113,14 +113,14 @@ impl CollectionFixture {
         crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
             .await
             .unwrap();
-        let role = crate::sql::compile::quote_ident(
+        let role = crate::sql::mapping::quote_ident(
             &zeroship_core::database_role::per_app_role_name(&app).unwrap(),
         );
         backend
             .execute_fixture(
                 &format!(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON {schema}.{} TO {role}",
-                    crate::sql::compile::quote_ident(collection)
+                    crate::sql::mapping::quote_ident(collection)
                 ),
                 &[],
             )
@@ -145,13 +145,12 @@ impl CollectionFixture {
     }
 
     pub async fn replace_from_migration(&mut self, collection: &str, migration: &str) {
-        self.replace_from_migration_with_policy(collection, migration, zeroship_migrate_server::policy::CONFINED_CEILING_TOML).await;
-    }
-
-    pub async fn replace_from_migration_with_policy(&mut self, collection: &str, migration: &str, policy: &str) {
         let migration: zeroship_migrate::model::ir::MigrationIr =
             serde_json::from_str(migration).unwrap();
-        let policy = zeroship_migrate::effective_policy_from_charter_toml(policy).unwrap();
+        let policy = zeroship_migrate::effective_policy_from_charter_toml(
+            zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
+        )
+        .unwrap();
         let namespace = if self.sqlite_file.is_some() {
             "main"
         } else {
@@ -183,8 +182,8 @@ impl CollectionFixture {
         .unwrap();
         let table = format!(
             "{}.{}",
-            crate::sql::compile::quote_ident(namespace),
-            crate::sql::compile::quote_ident(collection)
+            crate::sql::mapping::quote_ident(namespace),
+            crate::sql::mapping::quote_ident(collection)
         );
         let ddl = format!("DROP TABLE {table};{}", statements.join(";"));
         if let Some(file) = &self.sqlite_file {
@@ -197,7 +196,7 @@ impl CollectionFixture {
             backend.pool().batch_execute(&ddl).await.unwrap();
             backend.pool().batch_execute(&format!(
                 "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {role}; GRANT USAGE ON ALL SEQUENCES IN SCHEMA {} TO {role}",
-                crate::sql::compile::quote_ident(namespace),
+                crate::sql::mapping::quote_ident(namespace),
             )).await.unwrap();
         }
         let runtime: Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
@@ -218,9 +217,9 @@ impl CollectionFixture {
         });
         let mut fields = fields.as_ref().clone();
         for (old, new) in names {
-            let table = crate::sql::compile::quote_ident(collection);
-            let column = crate::sql::compile::quote_ident(old);
-            let renamed = crate::sql::compile::quote_ident(new);
+            let table = crate::sql::mapping::quote_ident(collection);
+            let column = crate::sql::mapping::quote_ident(old);
+            let renamed = crate::sql::mapping::quote_ident(new);
             if let Some(file) = &self.sqlite_file {
                 rusqlite::Connection::open(file)
                     .unwrap()
@@ -255,34 +254,40 @@ impl CollectionFixture {
         .unwrap();
     }
 
-    pub async fn rename_collection(&mut self, original: &str, renamed: &str) {
-        crate::sql::compile::validate_collection(renamed).unwrap();
-        let fields = self.database.context.with(|| {
-            crate::descriptor::collection_schema(&self.database.binding, original).unwrap()
-        });
-        let original = crate::sql::compile::quote_ident(original);
-        let target = crate::sql::compile::quote_ident(renamed);
+    pub async fn add_unique_index(&self, collection: &str, fields: &[&str]) {
+        let namespace = self.database.binding.schema().as_str();
+        let name = format!("{collection}_{}_fixture", fields.join("_"));
+        let columns = fields
+            .iter()
+            .map(|field| crate::sql::mapping::quote_ident(field))
+            .collect::<Vec<_>>()
+            .join(", ");
         if let Some(file) = &self.sqlite_file {
+            let sql = format!(
+                "CREATE UNIQUE INDEX {} ON {} ({columns})",
+                crate::sql::mapping::quote_ident(&name),
+                crate::sql::mapping::quote_ident(collection),
+            );
             rusqlite::Connection::open(file)
                 .unwrap()
-                .execute_batch(&format!("ALTER TABLE {original} RENAME TO {target}"))
+                .execute_batch(&sql)
                 .unwrap();
         } else {
-            let (backend, namespace, _) = self.postgres.as_ref().unwrap();
-            backend
-                .execute_fixture(
-                    &format!("ALTER TABLE {namespace}.{original} RENAME TO {target}"),
-                    &[],
-                )
+            let sql = format!(
+                "CREATE UNIQUE INDEX {} ON {}.{} ({columns})",
+                crate::sql::mapping::quote_ident(&name),
+                crate::sql::mapping::quote_ident(namespace),
+                crate::sql::mapping::quote_ident(collection),
+            );
+            self.postgres
+                .as_ref()
+                .unwrap()
+                .0
+                .pool()
+                .batch_execute(&sql)
                 .await
                 .unwrap();
         }
-        self.database = Database::from_schema(
-            self.database.binding.clone(),
-            self.database.backend.clone(),
-            vec![(renamed.into(), fields.as_ref().clone())],
-        )
-        .unwrap();
     }
 
     pub async fn close(self) {
