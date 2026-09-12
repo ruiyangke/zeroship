@@ -316,8 +316,6 @@ async fn target_epoch(
         }
         SignalTarget::Topic { topic } => {
             signals::validate_topic(topic)?;
-            let topics = tx.table("topics");
-            tx.execute(&format!("INSERT INTO {topics} (app_id,topic,signal_epoch) VALUES ($1,$2,0) ON CONFLICT (app_id,topic) DO NOTHING"), &[app.as_str().into(),topic.clone().into()]).await?;
             let rows = tx
                 .database()
                 .entity::<models::topics::Entity>()?
@@ -331,12 +329,16 @@ async fn target_epoch(
                     },
                 )
                 .await?;
-            Ok(rows
-                .first()
-                .ok_or_else(|| {
-                    WorkflowServiceError::Internal("workflow signal topic is missing".into())
-                })?
-                .signal_epoch)
+            if let Some(row) = rows.first() {
+                return Ok(row.signal_epoch);
+            }
+            // Callers hold the app lock through commit, so initialization cannot
+            // race another issuer or overwrite a persisted revocation epoch.
+            tx.database()
+                .collection(models::topics::Entity::COLLECTION)?
+                .insert(value!({"app_id":app.as_str(), "topic":topic, "signal_epoch":0}))
+                .await?;
+            Ok(0)
         }
     }
 }
