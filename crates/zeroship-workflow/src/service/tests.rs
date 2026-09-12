@@ -650,6 +650,35 @@ async fn behavior_contract(store: Rc<OrmStore>) {
             .control,
         ControlIntent::Pause
     );
+    let mut tx = store.begin().await.unwrap();
+    let before = super::app::lock_run(&mut tx, &app, &start.id)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    for (operation, control) in [
+        (RunOperation::Resume, "none"),
+        (RunOperation::Pause, "pause"),
+    ] {
+        scope
+            .transition(&RequestId::mint(), &start.id, operation)
+            .await
+            .unwrap();
+        let mut tx = store.begin().await.unwrap();
+        let after = super::app::lock_run(&mut tx, &app, &start.id)
+            .await
+            .unwrap();
+        assert_eq!(after.text("control").unwrap(), control);
+        for field in ["task_id", "state"] {
+            assert_eq!(after.text(field).unwrap(), before.text(field).unwrap());
+        }
+        for field in ["generation", "lease_epoch", "due_at"] {
+            assert_eq!(
+                after.integer(field).unwrap(),
+                before.integer(field).unwrap()
+            );
+        }
+        tx.commit().await.unwrap();
+    }
     let receipt=service.complete(&worker,&task.id,&task.token,execution(json!([
         {"kind":"StepCompleted","ordinal":0,"name":"charge","output":{"charge":"accepted"},"compensable":true},
         {"kind":"Wait","ordinal":1,"name":"approval","signalType":"approved"}

@@ -8,8 +8,9 @@ zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json"
 pub use journal::{
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
     __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
-    __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_steps as steps,
-    __zeroship_workflow_subscriptions as subscriptions, __zeroship_workflow_waits as waits,
+    __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_signals as signals,
+    __zeroship_workflow_steps as steps, __zeroship_workflow_subscriptions as subscriptions,
+    __zeroship_workflow_tasks as tasks, __zeroship_workflow_waits as waits,
 };
 
 #[derive(FromRow)]
