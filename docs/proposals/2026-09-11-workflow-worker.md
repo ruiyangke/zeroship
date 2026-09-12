@@ -62,6 +62,13 @@ Native PostgreSQL and SQLite contracts exercise restart, lost replies, corrupt
 records, foreign assignments, timeout and shutdown. The production retention
 cutover remains pending.
 
+The existing production worker still uses `claim_workflow_run`, which joins
+customer journal rows with `zeroship.apps`, `zeroship.plans` and
+`zeroship.app_deploys`. Its startup database posture requires those platform read
+grants. These paths and grants violate the revised ownership rule and must be
+removed with production composition; the new engine's customer binding does not
+establish that boundary for the old worker binary.
+
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify
 their canonical content hash. Runtime bootstrap preserves creator module paths;
@@ -79,9 +86,11 @@ and collections. History reads seek through ordered pages, and status joins each
 run to its current generation using the complete app-scoped key. Invocation and
 restart load generation inputs through the same generated model. Restart checks
 live leases and waiting children through the ORM, then atomically expires tasks,
-cleans up waits and signals, and advances the generation. Its recursive graph
-check and statements that copy checkpoints and payload references remain
-explicit SQL while conversion proceeds.
+cleans up waits and signals, and advances the generation. Retained checkpoints
+and payload references are copied through ordered ORM pages and batch inserts
+inside that transaction. The copy preserves effect origins and compensation
+metadata, and retains only the selected prefix and input references. Its recursive
+graph check remains explicit SQL while conversion proceeds.
 The remaining journal operations use the ORM's explicit SQL interface. ORM table
 references permit every table prefix for Rust and creator code within the bound
 customer schema. The existing Control store's removal remains pending.
@@ -138,6 +147,15 @@ workflow scheduling and the internal workflow-advance request path.
 
 ## Ownership
 
+Workers may access only their authorized creator databases. Control and other
+platform services may access only the control database. Sharing the Rust ORM
+library does not share database authority: worker hosts receive no control
+database credentials, and platform services receive no creator database
+credentials. Cross-boundary management and deployment-hold operations use
+authenticated service contracts; each receiving process writes only its own
+database. The existing Control journal-reading operations violate this boundary
+and must be removed during the replacement.
+
 ```text
 Platform Control and Gateway
   app/deploy authorization, routing, usage accounting
@@ -191,7 +209,7 @@ and production cutover described below remain implementation targets.
 | Customer database | Authoritative workflow history, run state, durable ready work, timers, signals, leases and payload references. |
 | Customer object storage | Large workflow inputs and results. |
 | App deployment bundle store | The app's existing deployed code, dependencies and runtime descriptor. Workflow execution reuses this artifact under a durable deployment hold. |
-| Provisioning host | Apply the canonical migration definition with explicitly authorized customer migration credentials. Runtime workflow operations use ordinary DML. |
+| Creator-side provisioning host | Apply the canonical migration definition using the creator's authorized database connection. Platform services do not receive that connection. Runtime workflow operations use ordinary DML. |
 
 The platform may route customer requests as it does other app traffic; routing
 does not authorize storing their contents in platform workflow tables or logs.

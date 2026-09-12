@@ -21,6 +21,8 @@ use zeroship_data_orm::{
     value,
 };
 
+mod replay;
+
 impl AppWorkflows {
     pub async fn transition(
         &self,
@@ -297,11 +299,7 @@ impl AppWorkflows {
                 "state":"queued", "started_at":now,
             }))
             .await?;
-        let steps_table = tx.table("steps");
-        tx.execute(&format!("INSERT INTO {steps_table} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms) SELECT app_id,run_id,$4,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_attempts,compensation_due_at,compensation_error,compensation_retry_ms FROM {steps_table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal<$5"),
-            &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;
-        let refs = tx.table("payload_refs");
-        tx.execute(&format!("INSERT INTO {refs} (app_id,run_id,generation,slot,ordinal,payload_id) SELECT app_id,run_id,$4,slot,ordinal,payload_id FROM {refs} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND (slot='input' OR (slot='step' AND ordinal<$5))"), &[self.app.as_str().into(),run_id.into(),current.into(),generation.into(),i64::from(prefix).into()]).await?;
+        replay::copy_prefix(&tx, &self.app, run_id, current, generation, prefix).await?;
         tx.database().collection(models::runs::Entity::COLLECTION)?.update(
             value!({"app_id":self.app.as_str(), "id":run_id}),
             value!({"generation":generation, "deploy_id":deploy.clone(), "state":"queued", "control":"none",

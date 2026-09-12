@@ -35,6 +35,7 @@ mod output_writes;
 mod payload_models;
 mod payloads;
 mod policy;
+mod restart_models;
 mod runner;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
