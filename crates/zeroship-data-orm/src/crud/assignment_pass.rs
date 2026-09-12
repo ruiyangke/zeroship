@@ -150,7 +150,7 @@ fn inject_into_object(
 }
 
 // ---------------------------------------------------------------------------
-// UPDATE-time validation pass + CAS-version extraction.
+// UPDATE-time validation and optimistic-concurrency extraction.
 // ---------------------------------------------------------------------------
 
 pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<(), DbError> {
@@ -214,16 +214,24 @@ fn refuse_and_strip(
 }
 
 /// Resolve a direct equality guard on the declared concurrency field; reject nested guards.
-pub fn extract_cas_version(
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ConcurrencyGuard {
+    pub(crate) column: String,
+    pub(crate) expected: i64,
+}
+
+pub(crate) fn extract_concurrency_guard(
     filter: &Value,
     collection: &str,
     schema: &Value,
-) -> Result<Option<i64>, DbError> {
+) -> Result<Option<ConcurrencyGuard>, DbError> {
     let Some(column) = crate::sql::lifecycle::concurrency_column(schema)? else {
         return Ok(None);
     };
-    if filter_has_nested_version_predicate(filter, column) {
-        return Err(DbError::version_filter_must_be_top_level(collection));
+    if filter_has_nested_concurrency_predicate(filter, column) {
+        return Err(DbError::version_filter_must_be_top_level(
+            collection, column,
+        ));
     }
     let Some(obj) = filter.as_object() else {
         return Ok(None);
@@ -234,10 +242,13 @@ pub fn extract_cas_version(
     // Reject operator objects ({ $gt, $in, ... }) — only a plain
     // equality predicate carries CAS semantics. `as_i64` also rejects
     // floats and strings, which is the desired strictness.
-    Ok(v.as_i64())
+    Ok(v.as_i64().map(|expected| ConcurrencyGuard {
+        column: column.to_owned(),
+        expected,
+    }))
 }
 
-fn filter_has_nested_version_predicate(filter: &Value, column: &str) -> bool {
+fn filter_has_nested_concurrency_predicate(filter: &Value, column: &str) -> bool {
     fn combinator_contains_field(value: &Value, field: &str) -> bool {
         match value {
             Value::Array(items) => items.iter().any(|item| object_contains_field(item, field)),
@@ -390,8 +401,11 @@ mod tests {
     fn concurrency_predicates_follow_roles_and_identity_uses_id() {
         let fields = schema();
         assert_eq!(
-            extract_cas_version(&value!({"revision":7}), "notes", &fields).unwrap(),
-            Some(7)
+            extract_concurrency_guard(&value!({"revision":7}), "notes", &fields).unwrap(),
+            Some(ConcurrencyGuard {
+                column: "revision".into(),
+                expected: 7,
+            })
         );
         for filter in [
             value!({"version":7}),
@@ -400,21 +414,29 @@ mod tests {
             Value::Null,
         ] {
             assert_eq!(
-                extract_cas_version(&filter, "notes", &fields).unwrap(),
+                extract_concurrency_guard(&filter, "notes", &fields).unwrap(),
                 None
             );
         }
-        assert!(extract_cas_version(&value!({"$and":[{"revision":7}]}), "notes", &fields).is_err());
-        assert!(extract_cas_version(
+        assert!(
+            extract_concurrency_guard(&value!({"$and":[{"revision":7}]}), "notes", &fields)
+                .is_err()
+        );
+        assert!(extract_concurrency_guard(
             &value!({"$or":[{"$and":[{"revision":7}]}]}),
             "notes",
             &fields
         )
         .is_err());
         assert_eq!(
-            extract_cas_version(&value!({"version":7}), "notes", &value!({})).unwrap(),
+            extract_concurrency_guard(&value!({"version":7}), "notes", &value!({})).unwrap(),
             None
         );
+
+        let error = extract_concurrency_guard(&value!({"$and":[{"revision":7}]}), "notes", &fields)
+            .unwrap_err();
+        assert!(error.message_str().contains("`revision`"), "{error}");
+        assert!(!error.message_str().contains("`version`"), "{error}");
     }
 
     #[test]

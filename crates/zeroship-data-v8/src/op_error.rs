@@ -591,7 +591,7 @@ mod tests {
     /// retry.
     #[test]
     fn version_mismatch_stamps_canonical_code_and_hint() {
-        let e = DbError::version_mismatch("posts", Some("post_x"), 5).to_op_error();
+        let e = DbError::version_mismatch("posts", Some("post_x"), "version", 5).to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "version_mismatch");
@@ -612,7 +612,7 @@ mod tests {
     /// filter doesn't carry id).
     #[test]
     fn version_mismatch_message_handles_missing_id() {
-        let e = DbError::version_mismatch("posts", None, 5).to_op_error();
+        let e = DbError::version_mismatch("posts", None, "version", 5).to_op_error();
         assert!(e.message.contains("posts"));
         assert!(e.message.contains("5"));
     }
@@ -622,7 +622,7 @@ mod tests {
     /// per-id loop.
     #[test]
     fn multi_row_version_filter_unsupported_stamps_canonical_code() {
-        let e = DbError::multi_row_version_filter_unsupported("posts").to_op_error();
+        let e = DbError::multi_row_version_filter_unsupported("posts", "version").to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "multi_row_version_filter_unsupported");
@@ -634,7 +634,7 @@ mod tests {
 
     #[test]
     fn version_filter_must_be_top_level_stamps_canonical_code() {
-        let e = DbError::version_filter_must_be_top_level("posts").to_op_error();
+        let e = DbError::version_filter_must_be_top_level("posts", "version").to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
                 assert_eq!(code, "version_filter_must_be_top_level");

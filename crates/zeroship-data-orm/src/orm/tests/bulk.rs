@@ -52,6 +52,27 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
         ),
         total
     );
+    let Output::Rows { rows, .. } = entries
+        .find(value!({"label":"entry-0"}), value!({}))
+        .await
+        .unwrap()
+    else {
+        panic!("find must return rows")
+    };
+    let id = rows[0]["id"].clone();
+    let error = entries
+        .update(value!({"id":id,"revision":1}), value!({"status":"stale"}))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        &error,
+        DbError::ValidationFailed {
+            code: "version_mismatch",
+            ..
+        }
+    ));
+    assert!(error.message_str().contains("`revision`"), "{error}");
+    assert!(!error.message_str().contains("`version`"), "{error}");
     assert_eq!(
         count(
             entries
