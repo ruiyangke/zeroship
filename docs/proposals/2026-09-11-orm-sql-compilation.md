@@ -401,6 +401,11 @@ The replaced insert SQL bodies and the insert-side SQLite boolean lowering pass
 are removed. Generated identity allocation is registered with the compiler and
 executed by a scoped backend service. SQLite writer reservation and PostgreSQL
 sequence allocation no longer branch on the runtime dialect in CRUD code.
+Protected upsert now refuses null conflict values before allocation because its
+identity probe cannot match the databases' default nullable uniqueness semantics.
+Live database cases cover complete composite targets, unrelated unique failures,
+no-change updates, supplied and generated identities, nested frames, cancellation,
+and commit-aware effects around a skipped identity guard.
 
 ## Implementation checklist
 
@@ -412,7 +417,7 @@ sequence allocation no longer branch on the runtime dialect in CRUD code.
 - [x] Capture registration and verify it against bound backends and scoped sessions.
 - [x] Replace production upsert construction with a resolved statement and capability preflight.
 - [x] Move generated-identity allocation behind the scoped ORM backend service.
-- [ ] Verify protected upsert concurrency, nullable targets, no-change updates, and effects.
+- [x] Verify protected upsert concurrency, nullable targets, no-change updates, and effects.
 - [ ] Cut over other writes and remove their replaced renderers.
 - [ ] Cut over ordinary and relational reads, including direct Rust expressions and bound pagination.
 - [ ] Cut over search and internal protection SQL and remove remaining runtime enum dispatch.
