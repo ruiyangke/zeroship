@@ -1,0 +1,22 @@
+[package]
+name = "zeroship-workflow-v8"
+version = "0.1.0"
+edition = "2021"
+description = "V8 binding and local executor for zeroship workflows"
+
+[dependencies]
+zeroship-workflow = { workspace = true }
+zeroship-runtime = { workspace = true }
+zeroship-runtime-macros = { workspace = true }
+async-trait = { workspace = true }
+compio = { workspace = true }
+serde_json = { workspace = true }
+v8 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+
+[lints]
+workspace = true

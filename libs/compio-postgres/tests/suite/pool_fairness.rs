@@ -42,11 +42,11 @@ fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
 async fn queued_callers_acquire_in_fifo_parking_order() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
-    let held = pool.get().await.expect("hold the pool's only connection");
+    let held = pool.acquire().await.expect("hold the pool's only connection");
     let mut waiters = Vec::with_capacity(CALLERS);
 
     for caller in 0..CALLERS {
-        let mut acquire = Box::pin(pool.get());
+        let mut acquire = Box::pin(pool.acquire());
         assert!(
             poll_once(acquire.as_mut()).is_pending(),
             "caller {caller} acquired before the sole connection was released"
@@ -93,8 +93,8 @@ async fn queued_callers_acquire_in_fifo_parking_order() {
 async fn fresh_caller_cannot_barge_a_parked_waiter_after_release() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
-    let held = pool.get().await.expect("hold the pool's only connection");
-    let mut earlier = Box::pin(pool.get());
+    let held = pool.acquire().await.expect("hold the pool's only connection");
+    let mut earlier = Box::pin(pool.acquire());
     assert!(poll_once(earlier.as_mut()).is_pending());
     assert_eq!(pool.pending_count(), 1, "earlier caller did not park");
 
@@ -102,7 +102,7 @@ async fn fresh_caller_cannot_barge_a_parked_waiter_after_release() {
 
     // This caller is first polled only after the release, before the woken
     // earlier caller is re-polled. A shared-idle handoff lets it barge here.
-    let mut later = Box::pin(pool.get());
+    let mut later = Box::pin(pool.acquire());
     let mut observed = Vec::with_capacity(2);
     let later_parked = match poll_once(later.as_mut()) {
         Poll::Pending => true,
@@ -153,8 +153,8 @@ async fn fresh_caller_cannot_barge_a_capacity_woken_waiter() {
     let mut pool_config = config(1, 1);
     pool_config.after_release(|_| false);
     let pool = connect_pool(&url, pool_config).await;
-    let held = pool.get().await.expect("hold the pool's only connection");
-    let mut earlier = Box::pin(pool.get());
+    let held = pool.acquire().await.expect("hold the pool's only connection");
+    let mut earlier = Box::pin(pool.acquire());
     assert!(poll_once(earlier.as_mut()).is_pending());
     assert_eq!(pool.pending_count(), 1, "earlier caller did not park");
 
@@ -165,7 +165,7 @@ async fn fresh_caller_cannot_barge_a_capacity_woken_waiter() {
     drop(held);
     assert_eq!(pool.total_count(), 0, "rejected return kept its slot");
 
-    let mut later = Box::pin(pool.get());
+    let mut later = Box::pin(pool.acquire());
     assert!(
         poll_once(later.as_mut()).is_pending(),
         "fresh caller completed before the capacity-woken FIFO head"
@@ -203,13 +203,13 @@ async fn cancelling_parked_waiter_preserves_handoff_and_capacity() {
     let url = test_url();
     let pool = connect_pool(&url, config(1, 1)).await;
     let initial_total = pool.total_count();
-    let held = pool.get().await.expect("hold the pool's only connection");
+    let held = pool.acquire().await.expect("hold the pool's only connection");
 
-    let mut cancelled = Box::pin(pool.get());
+    let mut cancelled = Box::pin(pool.acquire());
     assert!(poll_once(cancelled.as_mut()).is_pending());
     assert_eq!(pool.pending_count(), 1);
 
-    let mut successor = Box::pin(pool.get());
+    let mut successor = Box::pin(pool.acquire());
     assert!(poll_once(successor.as_mut()).is_pending());
     assert_eq!(pool.pending_count(), 2);
 
@@ -251,7 +251,7 @@ async fn uncontended_callers_never_enter_the_wait_queue() {
     let mut observed = Vec::with_capacity(CALLERS);
 
     for caller in 0..CALLERS {
-        let mut acquire = Box::pin(pool.get());
+        let mut acquire = Box::pin(pool.acquire());
         let client = match poll_once(acquire.as_mut()) {
             Poll::Ready(Ok(client)) => client,
             Poll::Ready(Err(error)) => panic!("caller {caller} failed to acquire: {error}"),
@@ -293,10 +293,10 @@ async fn a_sub_second_acquire_timeout_is_reported_accurately() {
     .await
     .expect("build a single-connection pool");
 
-    let _held = pool.get().await.expect("hold the only connection");
+    let _held = pool.acquire().await.expect("hold the only connection");
 
     let error = pool
-        .get()
+        .acquire()
         .await
         .expect_err("a second checkout cannot succeed while the only one is held");
 

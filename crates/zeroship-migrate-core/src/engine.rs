@@ -581,7 +581,7 @@ impl MigrationEngine {
         let mut historical_live = LiveSchema::default();
         let mut cumulative_ops: Vec<Op> = Vec::new();
         let mut effective_registry = registry.clone();
-        let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
+        let guard = GuardConfig::from_policy(policy.clone(), dialect.clone(), project);
         let author = IrAuthor::new(self.vendors, project, app, dialect, policy);
         let mut aggregate = AggregateOutcome::default();
         let preserves_authored_logical_columns = backend.preserves_authored_logical_columns();
@@ -4302,6 +4302,7 @@ mod tests {
         GuardConfig::from_policy(
             crate::test_fixtures::no_inject("proj_acme"),
             crate::test_fixtures::POSTGRES,
+            "proj_acme",
         )
     }
 
@@ -4428,6 +4429,7 @@ mod tests {
             "app_acme",
             crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         )
         .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
         .unwrap();
@@ -4447,6 +4449,7 @@ mod tests {
             "app_acme",
             crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         )
         .wrap(
             "rce",
@@ -4473,6 +4476,7 @@ mod tests {
             "app_acme",
             crate::test_fixtures::POSTGRES,
             crate::test_fixtures::no_inject("proj_acme"),
+            "proj_acme",
         );
         let a = raw
             .wrap("rce", "COPY \"proj_acme\".\"t\" TO PROGRAM 'sh'", None)

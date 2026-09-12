@@ -7,8 +7,7 @@ use compio_postgres::Client;
 use ntex::http::StatusCode;
 use zeroship_authn::BearerVerifier;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
+use zeroship_id::{AppId, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
@@ -79,9 +78,7 @@ impl ControlPlaneAuthenticator {
         app_id: &AppId,
         required_action: Action,
     ) -> Result<VerifiedCaller, AuthError> {
-        let resource = Resource::App {
-            id: app_id.clone(),
-        };
+        let resource = Resource::App { id: app_id.clone() };
         resource
             .validate_ids()
             .map_err(|message| AuthError::Infrastructure(message.to_owned()))?;
@@ -104,12 +101,8 @@ impl ControlPlaneAuthenticator {
         }
 
         if requires_organization_owner(required_action)
-            && !caller_holds_organization_ownership(
-                &self.control_pg,
-                &seed.principal_id,
-                app_id,
-            )
-            .await?
+            && !caller_holds_organization_ownership(&self.control_pg, &seed.principal_id, app_id)
+                .await?
         {
             return Err(AuthError::Forbidden);
         }

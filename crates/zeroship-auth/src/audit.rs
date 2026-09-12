@@ -6,6 +6,7 @@
 use compio_postgres::{Client, GenericClient};
 use ntex::web::HttpRequest;
 use serde_json::{json, Value};
+use zeroship_core::UserId;
 
 use crate::error::Result;
 use crate::headers::RequestContext;
@@ -15,7 +16,7 @@ use crate::store::audit as store;
 pub struct AuditEvent<'a> {
     pub event_type: &'a str,
     pub outcome: &'a str, // "success" | "failure"
-    pub user_id: Option<&'a zeroship_core::user_id::UserId>,
+    pub user_id: Option<&'a UserId>,
     pub client_id: Option<&'a str>,
     pub request_id: Option<String>,
     pub ip: Option<std::net::IpAddr>,

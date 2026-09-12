@@ -94,7 +94,7 @@ async fn a_streamed_transaction_with_a_savepoint_decodes() {
 
         let mut config = common::replication_config("cpg_subtxn");
         config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
-        let mut replication =
+        let replication =
             compio_postgres::replication::connect_replication(common::suite_tls(), &config)
                 .await
                 .expect("replication connect failed");
@@ -230,7 +230,7 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
 
         let mut config = common::replication_config("cpg_subabort");
         config.options(format!("-c logical_decoding_work_mem={DECODING_WORK_MEM}"));
-        let mut replication =
+        let replication =
             compio_postgres::replication::connect_replication(common::suite_tls(), &config)
                 .await
                 .expect("replication connect failed");
@@ -270,7 +270,6 @@ async fn a_stream_abort_never_lands_inside_an_open_chunk() {
                     }
                 }
                 Some(ReplicationMessage::PrimaryKeepalive { .. }) => continue,
-                Some(_) => {}
                 None => break,
             }
         }

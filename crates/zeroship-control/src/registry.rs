@@ -6,13 +6,12 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
-    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
-    RouteMap, VersionMap,
-    FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
+    GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry,
+    RouteEntry, RouteMap, VersionMap, FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
+use zeroship_core::UserId;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -278,15 +277,14 @@ impl Registry {
         let project_id = match project_id {
             Some(project_id) => project_id,
             None => {
-                personal_project =
-                    crate::organizations::ensure_personal_project(self, owner_id)
-                        .await
-                        .map_err(|err| {
-                            RegistryError::Database(format!(
-                                "provision personal project for {}: {err:?}",
-                                owner_id.as_str()
-                            ))
-                        })?;
+                personal_project = crate::organizations::ensure_personal_project(self, owner_id)
+                    .await
+                    .map_err(|err| {
+                        RegistryError::Database(format!(
+                            "provision personal project for {}: {err:?}",
+                            owner_id.as_str()
+                        ))
+                    })?;
                 personal_project.as_str()
             }
         };
@@ -333,9 +331,16 @@ impl Registry {
                         "project_role.rank",
                         &crate::organizations::ladder_rank_of(crate::organizations::ROLE_ADMIN),
                     ),
-                    developer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
+                    developer =
+                        crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
                 ),
-                &[&app_id.as_str(), &name, &plan_id, &project_id, &owner_id.as_str()],
+                &[
+                    &app_id.as_str(),
+                    &name,
+                    &plan_id,
+                    &project_id,
+                    &owner_id.as_str(),
+                ],
             )
             .await?;
         let Some(row) = rows.first() else {
@@ -424,7 +429,8 @@ impl Registry {
                         "project_role.rank",
                         &crate::organizations::ladder_rank_of(crate::organizations::ROLE_ADMIN),
                     ),
-                    viewer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_VIEWER),
+                    viewer =
+                        crate::organizations::ladder_rank_of(crate::organizations::ROLE_VIEWER),
                 ),
                 &[&owner_id.as_str()],
             )
@@ -641,7 +647,12 @@ impl Registry {
                                                        m.migration_id DESC \
                                               LIMIT 1) \
                        END",
-                &[&deploy_hash, &manifest_json, &id.as_str(), &descriptor_sha256],
+                &[
+                    &deploy_hash,
+                    &manifest_json,
+                    &id.as_str(),
+                    &descriptor_sha256,
+                ],
             )
             .await?;
         if n == 0 {
@@ -716,9 +727,14 @@ impl Registry {
     pub async fn get_manifest_json(&self, id: &AppId) -> Result<Option<String>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT manifest_json FROM zeroship.apps WHERE id = $1", &[&id.as_str()])
+            .query(
+                "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
+                &[&id.as_str()],
+            )
             .await?;
-        Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("manifest_json")))
+        Ok(rows
+            .first()
+            .and_then(|r| r.get::<_, Option<String>>("manifest_json")))
     }
 
     /// Change the plan for an app.
@@ -902,14 +918,17 @@ impl Registry {
                 }
             });
             let runtime = runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id);
-            map.insert(id, AppVersionInfo {
-                deploy_hash: hash,
-                runtime,
-                plan_id,
-                env_version,
-                manifest,
-                net_policy,
-            });
+            map.insert(
+                id,
+                AppVersionInfo {
+                    deploy_hash: hash,
+                    runtime,
+                    plan_id,
+                    env_version,
+                    manifest,
+                    net_policy,
+                },
+            );
         }
         Ok(map)
     }
@@ -983,35 +1002,37 @@ impl Registry {
             let manifest_json: Option<String> = row.get("manifest_json");
             let manifest = manifest_json
                 .as_deref()
-                .and_then(|j| match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
-                    Ok(m) => match m.validate() {
-                        Ok(()) => Some(m),
+                .and_then(
+                    |j| match serde_json::from_str::<zeroship_bundle::Manifest>(j) {
+                        Ok(m) => match m.validate() {
+                            Ok(()) => Some(m),
+                            Err(e) => {
+                                // `error`, not `warn`: the passthrough fallback below
+                                // installs a single `*` resource with `auth: Anon,
+                                // publicly_accessible: true`, so an app that was
+                                // auth-gated is now serving everything to anonymous
+                                // callers. That is a security downgrade, not a
+                                // degraded-service notice.
+                                tracing::error!(
+                                    app_id = %id.as_str(),
+                                    error = %e,
+                                    "registry: invalid manifest — falling back to passthrough, \
+                                     which serves EVERY route as anonymous-public"
+                                );
+                                None
+                            }
+                        },
                         Err(e) => {
-                            // `error`, not `warn`: the passthrough fallback below
-                            // installs a single `*` resource with `auth: Anon,
-                            // publicly_accessible: true`, so an app that was
-                            // auth-gated is now serving everything to anonymous
-                            // callers. That is a security downgrade, not a
-                            // degraded-service notice.
                             tracing::error!(
                                 app_id = %id.as_str(),
                                 error = %e,
-                                "registry: invalid manifest — falling back to passthrough, \
+                                "registry: manifest parse failure — falling back to passthrough, \
                                  which serves EVERY route as anonymous-public"
                             );
                             None
                         }
                     },
-                    Err(e) => {
-                        tracing::error!(
-                            app_id = %id.as_str(),
-                            error = %e,
-                            "registry: manifest parse failure — falling back to passthrough, \
-                             which serves EVERY route as anonymous-public"
-                        );
-                        None
-                    }
-                })
+                )
                 .unwrap_or_else(zeroship_bundle::Manifest::passthrough);
             map.insert(
                 id,
@@ -1035,7 +1056,10 @@ impl Registry {
                     spend_state: row
                         .get::<_, Option<String>>("spend_state")
                         .as_deref()
-                        .map_or(zeroship_core::types::SpendState::Allow, crate::spend::parse_spend_state),
+                        .map_or(
+                            zeroship_core::types::SpendState::Allow,
+                            crate::spend::parse_spend_state,
+                        ),
                     // Creator account state from the LEFT-JOINed
                     // organization_billing_status (via the owner membership). NULL
                     // (no status row) ⇒ Active; an unrecognised TEXT value fails
@@ -1080,30 +1104,24 @@ impl Registry {
             .await?;
         let mut by_user = HashMap::<UserId, GatewayPrincipalLifecycle>::new();
         for row in &rows {
-            let user_id_raw: String = row.get("id");
-            let Ok(user_id) = UserId::parse(&user_id_raw) else {
-                tracing::error!(
-                    user_id = %user_id_raw,
-                    "registry: gateway snapshot: users row has a malformed id; skipping"
-                );
-                continue;
-            };
-            let lifecycle = by_user.entry(user_id.clone()).or_insert_with(|| {
-                GatewayPrincipalLifecycle {
-                    user_id,
-                    disabled: row.get("disabled"),
-                    anonymized: row.get("anonymized"),
-                    deletion_requested: row.get("deletion_requested"),
-                    deletion_scheduled: row.get("deletion_scheduled"),
-                    pairwise_subjects: Vec::new(),
-                }
-            });
+            let user_id = crate::user_id::from_row(row, "id", "gateway lifecycle user")?;
+            let lifecycle =
+                by_user
+                    .entry(user_id.clone())
+                    .or_insert_with(|| GatewayPrincipalLifecycle {
+                        user_id,
+                        disabled: row.get("disabled"),
+                        anonymized: row.get("anonymized"),
+                        deletion_requested: row.get("deletion_requested"),
+                        deletion_scheduled: row.get("deletion_scheduled"),
+                        pairwise_subjects: Vec::new(),
+                    });
             if let Some(subject) = row.get::<_, Option<String>>("pairwise_sub") {
                 lifecycle.pairwise_subjects.push(subject);
             }
         }
         let mut principal_lifecycle: Vec<_> = by_user.into_values().collect();
-        principal_lifecycle.sort_by_key(|lifecycle| lifecycle.user_id.clone());
+        principal_lifecycle.sort_by(|left, right| left.user_id.cmp(&right.user_id));
         let family_revocations = conn
             .query(
                 "SELECT client_id, sub, \
@@ -1262,6 +1280,30 @@ fn name_reads_as_an_app_id(name: &str) -> bool {
         && name[..APP_ID_PREFIX.len()].eq_ignore_ascii_case(APP_ID_PREFIX)
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Convert a query row into an `AppRecord`.
+///
+/// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
+///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
+fn row_to_record(row: &compio_postgres::Row) -> Result<AppRecord, RegistryError> {
+    let id_raw: String = row.get("id");
+    let id = AppId::parse(&id_raw).map_err(|e| {
+        RegistryError::Database(format!("apps.id {id_raw} is not a canonical app id: {e}"))
+    })?;
+    Ok(AppRecord {
+        id,
+        name: row.get("name"),
+        plan_id: row.get("plan_id"),
+        deploy_hash: row.get("deploy_hash"),
+        archived_at: row.get("archived_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
+}
+
 #[cfg(test)]
 mod name_validation_tests {
     use super::*;
@@ -1300,10 +1342,7 @@ mod name_validation_tests {
         // The whole prefix is reserved, not only the bodies that parse.
         for name in ["app_", "app_x", "APP_something", "App_Mixed"] {
             assert!(
-                matches!(
-                    validate_app_name(name),
-                    Err(RegistryError::ReservedName(_))
-                ),
+                matches!(validate_app_name(name), Err(RegistryError::ReservedName(_))),
                 "{name} claims the id namespace and must be refused too"
             );
         }
@@ -1345,36 +1384,4 @@ mod name_validation_tests {
             Err(RegistryError::InvalidInput(_))
         ));
     }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Convert a query row into an `AppRecord`.
-///
-/// Columns: id (TEXT, the canonical `app_<base62>` rendering), name (TEXT),
-///          plan_id (TEXT), deploy_hash (TEXT | NULL), archived_at
-///          (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
-///
-/// # Errors
-///
-/// [`RegistryError::Database`] if the `id` column does not hold a canonical
-/// app id. `AppId` has no `FromSql` impl - decoding through a fallible
-/// `String` read and parse is the only route in, and it is what keeps a
-/// malformed row from being mistaken for a real app.
-fn row_to_record(row: &compio_postgres::Row) -> Result<AppRecord, RegistryError> {
-    let id_raw: String = row.get("id");
-    let id = AppId::parse(&id_raw).map_err(|e| {
-        RegistryError::Database(format!("apps.id {id_raw} is not a canonical app id: {e}"))
-    })?;
-    Ok(AppRecord {
-        id,
-        name: row.get("name"),
-        plan_id: row.get("plan_id"),
-        deploy_hash: row.get("deploy_hash"),
-        archived_at: row.get("archived_at"),
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
-    })
 }

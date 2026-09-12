@@ -488,40 +488,24 @@ fn encrypted_domain_history(base: Value) -> Vec<Value> {
     )]
 }
 
-/// `ColType::Encrypted` recurses into its inner type in `col_type_to_token`, so an
-/// encrypted DOMAIN column routes through the same resolution - and it now completes
-/// it, on BOTH producers.
-///
-/// This test was renamed from a name that asserted the column is left untouched, which
-/// pinned `type: "string"` / `wraps: "string"` for a domain over `int`. That pin was
-/// deliberate: resolving the runtime descriptor alone would have left the catalog
-/// sentinel the LOWER stamps still saying `string`, so the two would disagree about how
-/// a live column is encrypted. The lower now resolves the same domain through the same
-/// walk, so the pin is replaced by the correct answer rather than deleted.
-///
-/// `wraps` is not decoration: it selects which type-checker validates the plaintext
-/// before the encrypt pass swaps bytes in (`schema::diff::EncryptionMeta::wraps`), so
-/// `string` over an integer domain ran the wrong validator on every write.
-///
-/// Asserted on CONTENT, never on `ok` - the pre-fix answer was `ok=true` too.
+/// An encrypted domain resolves its base type to the runtime plaintext codec.
 #[test]
-fn an_encrypted_domain_column_reports_its_base_type_and_wraps() {
+fn an_encrypted_domain_column_reports_its_plaintext_type() {
     for dialect in DIALECTS {
         let (fields, runtime_json) = fields_for(&encrypted_domain_history(json!("int")), dialect);
         assert_eq!(
-            fields["amount"]["type"], "int",
+            fields["amount"]["type"], "number",
             "{dialect}: an encrypted domain column reports the domain's BASE token:\n{runtime_json}"
         );
         assert_eq!(
-            fields["amount"]["encrypted"]["wraps"], "number",
-            "{dialect}: and the `wraps` that must agree with the catalog \
-             sentinel:\n{runtime_json}"
+            fields["amount"]["encrypted"], true,
+            "{dialect}: the field uses encrypted storage:\n{runtime_json}"
         );
     }
 }
 
 /// The control that proves the value is RESOLVED rather than hardcoded to `number`:
-/// a domain over a string base still reports `string`/`string`.
+/// a domain over a string base still reports `string`.
 #[test]
 fn an_encrypted_domain_over_a_string_base_still_reports_string() {
     for dialect in DIALECTS {
@@ -534,8 +518,8 @@ fn an_encrypted_domain_over_a_string_base_still_reports_string() {
             "{dialect}: a domain over varchar keeps the string token:\n{runtime_json}"
         );
         assert_eq!(
-            fields["amount"]["encrypted"]["wraps"], "string",
-            "{dialect}: and wraps stays string:\n{runtime_json}"
+            fields["amount"]["encrypted"], true,
+            "{dialect}: the field uses encrypted storage:\n{runtime_json}"
         );
     }
 }
@@ -590,7 +574,7 @@ fn an_encrypted_domain_chain_resolves_and_a_cycle_terminates_unchanged() {
     for dialect in DIALECTS {
         let (fields, runtime_json) = fields_for(&chain, dialect);
         assert_eq!(
-            fields["amount"]["encrypted"]["wraps"], "number",
+            fields["amount"]["type"], "number",
             "{dialect}: a domain over a domain resolves to the ultimate base:\n{runtime_json}"
         );
 
@@ -601,7 +585,7 @@ fn an_encrypted_domain_chain_resolves_and_a_cycle_terminates_unchanged() {
         if let Some(runtime_json) = reply.runtime_json {
             let fields = runtime_fields(&runtime_json, "amounts");
             assert_eq!(
-                fields["amount"]["encrypted"]["wraps"], "string",
+                fields["amount"]["type"], "string",
                 "{dialect}: a cycle leaves the column unchanged, never invented:\n{runtime_json}"
             );
         }
@@ -634,8 +618,8 @@ fn an_encrypted_column_over_an_undeclared_domain_is_unchanged() {
         if let Some(runtime_json) = reply.runtime_json {
             let fields = runtime_fields(&runtime_json, "amounts");
             assert_eq!(
-                fields["amount"]["encrypted"]["wraps"], "string",
-                "{dialect}: an undeclared domain leaves wraps alone:\n{runtime_json}"
+                fields["amount"]["type"], "string",
+                "{dialect}: an undeclared domain leaves the logical type unchanged:\n{runtime_json}"
             );
         }
     }

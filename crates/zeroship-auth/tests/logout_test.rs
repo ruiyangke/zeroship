@@ -24,10 +24,7 @@ use common::test_auth_config;
 
 #[ntex::test]
 async fn logout_route_is_registered_returns_not_404() {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[logout_test] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db_url = crate::common::test_database_url();
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
@@ -115,10 +112,7 @@ async fn logout_route_is_registered_returns_not_404() {
 /// 405 (route exists, method missing). Cover that.
 #[ntex::test]
 async fn logout_post_is_registered_returns_not_404_or_405() {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[logout_test] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db_url = crate::common::test_database_url();
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
@@ -193,13 +187,7 @@ async fn logout_post_is_registered_returns_not_404_or_405() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn logout_post_revokes_local_session_cookie() {
-    let db_url = match zeroship_core::config::test_database_url_opt() {
-        Some(db_url) => db_url,
-        None => {
-            zeroship_test_support::skip("[logout_test] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
+    let db_url = crate::common::test_database_url();
 
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
         .await
@@ -217,7 +205,7 @@ async fn logout_post_revokes_local_session_cookie() {
     let session = sessions::create(
         &pg_client,
         &sessions::CreateSession {
-            user_id: &user.id,
+            user_id: user.id.clone(),
             auth_method: "password",
             amr: vec!["pwd".to_string()],
             acr: None,
@@ -245,8 +233,7 @@ async fn logout_post_revokes_local_session_cookie() {
             .state(pg.clone())
             .state(issuer)
             .service(
-                web::resource("/logout")
-                    .route(web::post().to(zeroship_auth::ui::logout::post)),
+                web::resource("/logout").route(web::post().to(zeroship_auth::ui::logout::post)),
             ),
     )
     .await;
@@ -260,7 +247,10 @@ async fn logout_post_revokes_local_session_cookie() {
         .header("content-type", "application/x-www-form-urlencoded")
         .header(
             "cookie",
-            format!("__Host-zsidp_csrf={csrf}; __Host-zsidp_session={}", session.id),
+            format!(
+                "__Host-zsidp_csrf={csrf}; __Host-zsidp_session={}",
+                session.id
+            ),
         )
         .set_payload(body)
         .to_request();
@@ -282,13 +272,22 @@ async fn logout_post_revokes_local_session_cookie() {
         .get("revoked");
     assert!(revoked, "logout must revoke the local session cookie id");
 
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id.as_str()])
-        .await
-        .ok();
-    pg.execute("DELETE FROM zeroship.idp_sessions WHERE id = $1", &[&session.id])
-        .await
-        .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.audit_events WHERE actor_user_id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.idp_sessions WHERE id = $1",
+        &[&session.id],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }

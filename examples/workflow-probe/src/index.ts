@@ -1,20 +1,7 @@
 "use server";
 
-// workflow-probe -- the missing runnable fixture for the durable-workflow leg
-// of the dev-vs-deployed comparison (docs/pilot/e2e-scenarios.md, scenario 11).
-//
-// Why it exists. `tests/e2e_durable_workflows.sh` already drives the deployed
-// workflow engine hard, but it builds its app from an inline heredoc and packs
-// the `.zship` by hand, so it proves the ENGINE works and says nothing about
-// whether a workflow authored in a normal vite app reaches that engine.
-// `examples/workflows-order` is the shipped sample and is typecheck-only
-// (#166): no vite config, no dev script, no build, in no test. Neither
-// instrument can see the seam between "a creator writes a Workflow class" and
-// "the platform runs it", which is exactly where this scenario lives.
-//
-// Every probe case is deterministic apart from the run id and the wall clock,
-// so the harness can diff the RESULTS of the dev run against the deployed run
-// rather than diffing the code.
+// The example-owned tests exercise these workflows locally and deployed.
+// Results are deterministic apart from run identity and elapsed time.
 
 import { query, mutation } from "@zeroship/rpc/server";
 import { env } from "zeroship";
@@ -50,7 +37,7 @@ const kv = (env as unknown as { kv: ProbeKv }).kv;
 // nothing about whether a compensator fired. Writing the trail to kv gives the
 // harness a side channel that exists on both sides (redb in dev, Redis
 // deployed) and is already proven identical across them by
-// tests/e2e_dev_vs_deployed_kv.sh, so a difference here is a workflow
+// examples/kv-dashboard/tests/rpc.test.ts, so a difference here is a workflow
 // difference and not a kv one.
 const TRAIL_KEY = "wfprobe:trail";
 
@@ -146,15 +133,7 @@ export class CompensateCase extends Workflow<{ label: string }, unknown> {
 
 const CASES: Record<string, { workflow: string; input: unknown }> = {
   basic: { workflow: "BasicCase", input: { label: "probe" } },
-  // 20s, not 1.5s. The harness times this run and asserts it took at least
-  // 15s, because a `step.sleep` that was silently a no-op would still
-  // complete, still journal `before`/`after`, and still diff clean against a
-  // dev tier that did the same. The duration has to dominate the deployed
-  // engine's own latency for "slept" and "did not sleep" to be distinguishable
-  // at all: MEASURED on 2026-08-09, a deployed run of a case with NO sleep
-  // takes 4.1-5.4s end to end (basic 5353ms, child 4151ms, compensate 4143ms),
-  // so a 6s sleep left the two outcomes overlapping. See
-  // tests/e2e_dev_vs_deployed_workflows.sh, the `elapsed` verdict.
+  // The test observes the sleeping state and checks elapsed time.
   sleep: { workflow: "SleepCase", input: { ms: 20000 } },
   signal: { workflow: "SignalCase", input: { label: "probe" } },
   child: { workflow: "ChildCase", input: { n: 21 } },

@@ -40,6 +40,7 @@ use zeroship_control::billing_read::{outstanding_billing, LocalInvoicing};
 use zeroship_control::erasure::{preflight, ErasureRemedy};
 use zeroship_control::organizations::{self, AddMemberBody, OrganizationError};
 use zeroship_control::Registry;
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -62,14 +63,14 @@ impl Fx {
         Self { registry, pg }
     }
 
-    async fn seed_user(&self, label: &str) -> Uuid {
-        let id = Uuid::new_v4();
-        let email = format!("{label}-{}@zeroship.test", id.simple());
+    async fn seed_user(&self, label: &str) -> UserId {
+        let id = UserId::mint();
+        let email = format!("{label}-{}@zeroship.test", id.as_str());
         self.pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, $3, NOW())",
-                &[&id, &email, &label],
+                &[&id.as_str(), &email, &label],
             )
             .await
             .expect("insert user");
@@ -168,7 +169,7 @@ impl Fx {
 }
 
 struct Deployed {
-    owner: Uuid,
+    owner: UserId,
     app: Uuid,
     organization: String,
     project: String,
@@ -191,7 +192,7 @@ async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
     let fx = Fx::new().await;
     let d = fx.first_deploy("livedel").await;
 
-    let err = organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    let err = organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect_err("a live app must not be deleted");
     assert!(
@@ -207,12 +208,15 @@ async fn a_live_app_is_not_deleted_and_an_archived_one_is() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect("an archived app is deleted");
 
     let (archived, deleted, project) = fx.app_state(d.app).await;
-    assert!(archived && deleted, "the marker is set and archive survives");
+    assert!(
+        archived && deleted,
+        "the marker is set and archive survives"
+    );
     assert!(
         project.is_none(),
         "a deleted app leaves its project, which is what lets the project go"
@@ -249,7 +253,7 @@ async fn a_deleted_app_is_not_restored() {
         .expect("archive again")
         .expect("the app exists");
 
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect("delete");
 
@@ -277,10 +281,10 @@ async fn deleting_an_app_needs_admin_authority() {
     let developer = fx.seed_user("rankdel-dev").await;
     organizations::add_member(
         &fx.registry,
-        d.owner,
+        &d.owner,
         &d.organization,
         &AddMemberBody {
-            user_id: developer,
+            user_id: developer.clone(),
             role: "developer".to_string(),
         },
         None,
@@ -293,18 +297,15 @@ async fn deleting_an_app_needs_admin_authority() {
         .expect("archive")
         .expect("the app exists");
 
-    let err = organizations::delete_app(&fx.registry, developer, d.app, None)
+    let err = organizations::delete_app(&fx.registry, &developer, d.app, None)
         .await
         .expect_err("a developer must not delete an app");
-    assert!(
-        matches!(err, OrganizationError::Insufficient(_)),
-        "{err:?}"
-    );
+    assert!(matches!(err, OrganizationError::Insufficient(_)), "{err:?}");
     let (_, deleted, _) = fx.app_state(d.app).await;
     assert!(!deleted, "the refused delete wrote nothing");
 
     // The CONTROL: the owner, differing only in rank, succeeds.
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect("the owner deletes it");
 
@@ -360,7 +361,7 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect("delete");
 
@@ -438,7 +439,10 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         .await
         .expect("read usage through the organization")[0]
         .get::<_, i64>("n");
-    assert_eq!(seen, 1, "a detached app is still the organization's to bill");
+    assert_eq!(
+        seen, 1,
+        "a detached app is still the organization's to bill"
+    );
     outstanding_billing(&fx.pg, &d.organization, LocalInvoicing::Yes)
         .await
         .expect("the debt predicate still runs over a deleted app");
@@ -459,7 +463,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 
     // 1. Erase the account: refused, sole owner of a live organization, and the
     //    remedy names the projects.
-    let report = preflight(&fx.pg, d.owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, &d.owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     let blocker = report
@@ -473,13 +477,13 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
     // 2. Dissolve: refused, it still owns projects.
     let err = organizations::dissolve_organization(
         &fx.registry,
-        d.owner,
+        &d.owner,
         &d.organization,
         LocalInvoicing::Yes,
         None,
     )
-        .await
-        .expect_err("an organization owning a project is not dissolved");
+    .await
+    .expect_err("an organization owning a project is not dissolved");
     assert!(
         matches!(err, OrganizationError::OrganizationHasProjects(n) if n == 1),
         "{err:?}"
@@ -487,7 +491,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
 
     // 3. Delete the project: refused, it still owns an app. THIS is the refusal
     //    whose remedy did not exist.
-    let err = organizations::delete_project(&fx.registry, d.owner, &d.project, None)
+    let err = organizations::delete_project(&fx.registry, &d.owner, &d.project, None)
         .await
         .expect_err("a project owning an app is not deleted");
     assert!(
@@ -496,7 +500,7 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
     );
 
     // 4. Delete the app: refused until archived, then done.
-    let err = organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    let err = organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect_err("a live app is not deleted");
     assert!(matches!(err, OrganizationError::AppNotArchived), "{err:?}");
@@ -505,30 +509,30 @@ async fn the_closure_funnel_terminates_for_a_sole_creator_who_deployed() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, d.owner, d.app, None)
+    organizations::delete_app(&fx.registry, &d.owner, d.app, None)
         .await
         .expect("the funnel's last step exists");
 
     // 5. The project now goes.
-    organizations::delete_project(&fx.registry, d.owner, &d.project, None)
+    organizations::delete_project(&fx.registry, &d.owner, &d.project, None)
         .await
         .expect("a project whose last app is deleted can be deleted");
 
     // 6. The organization now closes.
     organizations::dissolve_organization(
         &fx.registry,
-        d.owner,
+        &d.owner,
         &d.organization,
         LocalInvoicing::Yes,
         None,
     )
-        .await
-        .expect("an organization whose last project is gone can be dissolved");
+    .await
+    .expect("an organization whose last project is gone can be dissolved");
 
     // 7. And the human is erasable: the dissolved organization is no longer an
     //    ownership blocker, and the retained usage owes nothing (its period is
     //    the current month, which the unbilled arm excludes by design).
-    let report = preflight(&fx.pg, d.owner, LocalInvoicing::Yes)
+    let report = preflight(&fx.pg, &d.owner, LocalInvoicing::Yes)
         .await
         .expect("preflight");
     assert!(
@@ -572,7 +576,7 @@ async fn a_deleted_app_refuses_every_write_that_would_resurrect_it() {
         .await
         .expect("archive")
         .expect("the app exists");
-    organizations::delete_app(&fx.registry, dead.owner, dead.app, None)
+    organizations::delete_app(&fx.registry, &dead.owner, dead.app, None)
         .await
         .expect("delete");
 

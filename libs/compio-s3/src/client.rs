@@ -1548,7 +1548,7 @@ mod tests {
             }
         });
         let slow = Box::pin(slow); // make it Unpin for the adapter bound
-        // Consumers (e.g. plugin-storage `S3Chunks`) pin the returned stream;
+        // Consumers (e.g. zeroship-storage `S3Chunks`) pin the returned stream;
         // do the same here.
         let mut s = Box::pin(timeout_body_stream(slow, (), Duration::from_millis(50)));
         // First chunk arrives promptly.

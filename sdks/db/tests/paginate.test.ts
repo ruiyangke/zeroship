@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { Query } from "../src/query.js";
+import { FixtureQuery as Query } from "./_query-fixture.js";
 
 type PlainObject = Record<string, unknown>;
 
@@ -391,19 +391,7 @@ function makeFilteringNative(rows: PlainObject[]) {
 
 describe("Query.paginate — the seek must cover every ordering key", () => {
   test("multi-key sort does not silently drop rows across a page boundary", async () => {
-    // ORDER BY is emitted as the user's sort verbatim - one term per key, with
-    // NO primary-key tiebreak appended (build_order_by_with_validator in
-    // crates/zeroship-schema/src/query.rs pushes exactly one term per supplied
-    // key and appends nothing). But the seek predicate is built from
-    // `keys[0]` plus `id` (`_buildSeekFilter`), i.e. it assumes the order is
-    // `(firstKey, id)`.
-    //
-    // When those disagree - any multi-key sort - the seek skips rows that sort
-    // AFTER the page boundary by the real ordering but have a smaller id.
-    // Fixture: within status="open", created_at order is 100, 200, 300 while
-    // the ids are "1", "5", "2". A page of 2 ends at id "5"; the seek then
-    // asks for id > "5", so id "2" (created_at 300, which genuinely belongs on
-    // page 2) can never be returned by any subsequent page.
+    // The seek predicate must use the same complete ordering as the query.
     const rows: PlainObject[] = [
       { id: "1", status: "open", created_at: 100 },
       { id: "5", status: "open", created_at: 200 },

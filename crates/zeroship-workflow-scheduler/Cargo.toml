@@ -23,7 +23,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-serial_test = "3"
+testcontainers = { version = "0.28", features = ["blocking"] }
 toml = { workspace = true }
 
 [[bin]]

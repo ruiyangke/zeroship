@@ -76,7 +76,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # TWO SOURCE ROOTS SINCE 2026-09-03. The ENGINE tier - which is where nearly
 # every vendor-value holder this census reports lives - left
-# `zeroship-plugin-db/src` for `zeroship-data-engine/src`. Pinned to the first
+# `zeroship-data-v8/src` for `zeroship-data-orm/src`. Pinned to the first
 # root the census would have scanned the adapter and CDC files that stayed and
 # printed a small clean number about the ~22k lines that went.
 #
@@ -84,8 +84,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # of tier_direction_census.sh: what this asks - does a NON-VENDOR tier hold a
 # vendor value - is a question about tiers, not about cargo packages.
 SRC_ROOTS=(
-  "$ROOT/crates/zeroship-plugin-db/src"
-  "$ROOT/crates/zeroship-data-engine/src"
+  "$ROOT/crates/zeroship-data-v8/src"
+  "$ROOT/crates/zeroship-data-orm/src"
 )
 for _root in "${SRC_ROOTS[@]}"; do
   [ -d "$_root" ] || { echo "no such tree: $_root" >&2; exit 1; }
@@ -147,7 +147,7 @@ prod() {
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
     # NO ARMS for ./broker.rs, ./read_set.rs, ./backend/postgres.rs,
     # ./backend/pg_*.rs, ./backend/sqlite/*, ./encryption/*, ./error.rs or
@@ -155,13 +155,11 @@ tier_of_file() {
     # for a file this region does not hold is a pattern matching nothing - kept
     # in step with tier_direction_census.sh, where the two censuses judging one
     # file differently is defect 1.
-    ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # `descriptor.rs` and `backend/mod.rs`: ENGINE, settled by the 2026-09-03
     # cut. See the same two arms in tier_direction_census.sh.
     ./descriptor.rs|./backend/mod.rs)                    echo ENGINE ;;
-    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./assignments.rs|./metrics.rs) echo ENGINE ;;
     ./context.rs|./service.rs|./op_error.rs)             echo ADAPTER ;;
-    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
     *)                                                   echo CONTESTED ;;
   esac
 }

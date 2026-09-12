@@ -14,7 +14,7 @@
  *    the `AND deleted_at IS NULL` auto-filter.
  *
  * The runtime-side soft-delete is verified by the Rust integration
- * tests in `crates/zeroship-plugin-db/tests/sqlite_integration.rs`; this file
+ * tests in `crates/zeroship-data-orm/src/tests/sqlite/assignments.rs`; this file
  * confirms the SDK boundary is wired correctly.
  */
 import { test, describe } from "node:test";
@@ -77,21 +77,6 @@ function makeNativeRecording() {
     _captured: captured,
   };
   return { native: native as unknown as NativeDb, captured };
-}
-
-/** Native double for legacy-runtime simulation: omits the PR 5 ops
- *  entirely so the SDK's typed `*_not_available` errors fire. */
-function makeNativeMissingPurge() {
-  const native = {
-    collection(_name: string) {
-      return {
-        async insert(doc: AnyRec) {
-          return { id: "x", ...doc };
-        },
-      };
-    },
-  };
-  return native as unknown as NativeDb;
 }
 
 describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", () => {
@@ -180,41 +165,5 @@ describe("P7 PR 5 — soft-delete: purge + restore + include_deleted opt-out", (
     assert.equal(result.error, null);
     assert.deepEqual(result.data, { restoredCount: 2 });
     assert.deepEqual(captured.restoreManyFilter, {});
-  });
-
-  test("purge_throws_purge_not_available_when_runtime_lacks_it", async () => {
-    const native = makeNativeMissingPurge();
-    const db = installSchemaForTest(
-      {
-        posts: schemaWrap({
-          title: t.string().required(),
-        }),
-      },
-      { native },
-    );
-    const result = await db.posts.purge("post_x");
-    assert.ok(result.error, "must error when native surface missing");
-    assert.equal(
-      (result.error as Error & { code?: string }).code,
-      "PURGE_NOT_AVAILABLE",
-    );
-  });
-
-  test("restore_throws_restore_not_available_when_runtime_lacks_it", async () => {
-    const native = makeNativeMissingPurge();
-    const db = installSchemaForTest(
-      {
-        posts: schemaWrap({
-          title: t.string().required(),
-        }),
-      },
-      { native },
-    );
-    const result = await db.posts.restore("post_x");
-    assert.ok(result.error, "must error when native surface missing");
-    assert.equal(
-      (result.error as Error & { code?: string }).code,
-      "RESTORE_NOT_AVAILABLE",
-    );
   });
 });

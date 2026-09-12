@@ -20,7 +20,7 @@
 //! WHY THIS COMMAND EXISTS. Applying migrations is what creates the app's
 //! schema, its migrator role, and the `app_<id>_role` the runtime does
 //! `SET LOCAL ROLE` to on every `env.db` call
-//! (`crates/zeroship-data-engine/src/auth/bootstrap.rs`). Nothing else in the platform
+//! (`tests/fixtures/data/roles.rs`). Nothing else in the platform
 //! creates that role - `migrated`'s apply path is its only producer
 //! (`crates/zeroship-migrate-server/src/apply.rs`). Deploy an app that uses `env.db` without
 //! applying its migrations and the FIRST database call fails with

@@ -21,20 +21,6 @@
 // types from `@zeroship/types` without re-importing them.
 
 /**
- * Operator-facing replication namespace, surfaced as
- * `__platform.replication`. Apps don't call these — the deploy
- * orchestrator / control plane does (via this package's runtime-entry).
- */
-interface ZeroshipReplication {
-  /**
-   * Run the C1 watchdog query against `pg_replication_slots`. Returns a
-   * JSON array of slot health records `[{slot, active, restartLsn,
-   * confirmedFlushLsn, lagBytes, walStatus}]`.
-   */
-  watchdog(): Promise<string>;
-}
-
-/**
  * The platform-internal capability handle (P9 §8) — set on the native
  * `env.db` object under a V8 private symbol and reached only via the
  * runtime's `globalThis.__zsDbPlatform(db)` resolver. Holds the
@@ -48,7 +34,4 @@ interface ZeroshipDbPlatform {
    * boot from `defineMaskPolicy()`'s pending-slot drain.
    */
   setMaskPolicy(policy: Record<string, string[]>): Promise<Record<string, never>>;
-
-  /** Mint (or return the cached) Replication namespace wrapper. */
-  replication: ZeroshipReplication;
 }

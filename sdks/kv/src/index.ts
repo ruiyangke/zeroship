@@ -15,16 +15,16 @@
 //
 // Backends (selected by the runtime, identical wire contract): redb
 // (single-process persistent — the default; ZEROSHIP_KV_PATH) and Redis
-// (distributed; ZEROSHIP_KV_URL).
+// (distributed; selected through the host's KV TOML configuration).
 
 import { env } from "zeroship";
 
 /**
- * The native `env.kv` surface registered by the Rust `KvPlugin`. Every
+ * The native `env.kv` surface registered by the Rust `KvBinding`. Every
  * method returns a Promise; validation failures (bad key/value/args)
  * throw synchronously as `TypeError`s before the Promise is created.
  *
- * Wire contract (verified against `crates/zeroship-plugin-kv/src/dispatch.rs`):
+ * Wire contract (verified against `crates/zeroship-kv-v8/src/dispatch.rs`):
  * - `get` resolves the raw stored string, or JS `null` if missing — it
  *   does NOT JSON-wrap, so a single `JSON.parse` round-trips a value the
  *   SDK stored via `JSON.stringify`.
@@ -56,7 +56,7 @@ function getNativeKv(): NativeKv {
   const k = (env as { kv?: NativeKv } | undefined)?.kv;
   if (!k) {
     throw new Error(
-      "@zeroship/kv: env.kv not available — is the KvPlugin registered on this runtime?",
+      "@zeroship/kv: env.kv not available — is the KvBinding registered on this runtime?",
     );
   }
   return k;

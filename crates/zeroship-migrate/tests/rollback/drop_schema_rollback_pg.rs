@@ -104,7 +104,11 @@ async fn apply_doc(
         &zeroship_migrate_postgres::DIALECT,
         &pol,
     );
-    let guard = GuardConfig::from_policy(pol.clone(), zeroship_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(
+        pol.clone(),
+        zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+    );
     let folded = fold_ops(
         zeroship_migrate::shipping_vendors(),
         history,
@@ -154,7 +158,11 @@ async fn schema_exists(session: &PgDevSession, name: &str) -> Result<bool, Strin
 fn pg_guard(cfg: &ExecutorConfig) -> Box<dyn zeroship_migrate::MigrationGuard> {
     guard_for(
         zeroship_migrate::shipping_vendors(),
-        &GuardConfig::from_policy(policy(&cfg.project_schema), zeroship_migrate_postgres::DIALECT),
+        &GuardConfig::from_policy(
+            policy(&cfg.project_schema),
+            zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+        ),
     )
 }
 

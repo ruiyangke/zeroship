@@ -1,70 +1,33 @@
-/**
- * Platform-assigned fields: `validateDoc` neither REQUIRES them of the caller
- * nor MATERIALISES a value for them, and it never touches the caller's object.
- *
- * These three are one property with three consequences, which is why they are
- * tested together. A field carrying an `assign` is one the PLATFORM computes
- * (`policies/confined-system-shape.inject.toml`), so:
- *
- *   - demanding it of the caller is wrong - `insert({ path: "/x" })` must work
- *     on a collection whose descriptor marks `id`/`created_at`/`updated_at`/
- *     `version` `required: true` with no default;
- *   - filling one in is wrong - a value the SDK invents would reach the SQL
- *     builder and pre-empt the generator the runtime is about to run;
- *   - and neither may be achieved by editing the document the caller handed us.
- *
- * The last is an operator constraint on this file specifically, and it had NO
- * test before this one. The earlier SDK satisfied the first two by DELETING the
- * system fields from the insert input (`stripRuntimeSystemFields`), which is
- * exactly the shape now forbidden: a validator that edits its input makes the
- * caller's object depend on whether it was validated, and makes a retry after a
- * failed insert observe a different document than the first attempt.
- *
- * The `assign` here is not written by hand - it is the charter's own binding,
- * reaching the FieldDef through the generated projection - so a charter that
- * stopped declaring one would fail these tests rather than quietly widening
- * what the caller must supply.
- */
+// Assignment validation uses the declared fixture schema and leaves caller input intact.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { validateDoc } from "../src/validate.js";
 import { ValidationError } from "../src/errors.js";
 import type { NormalizedSchema } from "../src/schema.js";
-import {
-  CONFINED_SYSTEM_SHAPE_ASSIGNMENTS,
-  CONFINED_SYSTEM_SHAPE_COLUMN_NAMES,
-} from "../src/generated/confined-system-shape.generated.js";
+import { generatedSchema } from "./_install-helper.js";
+const generatedColumnNames = Object.keys(generatedSchema);
+const generatedAssignments = Object.fromEntries(
+  Object.entries(generatedSchema).map(([name, builder]) => [name, builder.toFieldDef().assign!]),
+);
 
-/**
- * A collection shaped like a real descriptor: the platform's columns marked
- * `required: true` with no default (which is what the migration fold emits),
- * plus one ordinary creator field.
- */
+// Omit defaults so the fixture exercises assignment metadata alone.
 function descriptorLikeSchema(): NormalizedSchema {
   const schema: NormalizedSchema = {
     path: { type: "string", required: true },
   };
-  for (const name of CONFINED_SYSTEM_SHAPE_COLUMN_NAMES) {
-    const assign = CONFINED_SYSTEM_SHAPE_ASSIGNMENTS[name];
+  for (const name of generatedColumnNames) {
+    const assign = generatedAssignments[name];
     schema[name] = { type: "string", required: true, ...(assign ? { assign } : {}) };
   }
   return schema;
 }
 
 describe("platform-assigned fields are not required of the caller", () => {
-  test("the charter actually declares assignments (anti-vacuity)", () => {
-    // Every assertion below is vacuous if the projection carries no bindings:
-    // a schema with no `assign` anywhere would make the "not required" tests
-    // fail rather than pass, but the "not materialised" ones would pass for the
-    // wrong reason. Pin the input first.
-    assert.ok(
-      CONFINED_SYSTEM_SHAPE_COLUMN_NAMES.length > 0,
-      "the charter projection carries no columns",
-    );
-    assert.ok(
-      Object.keys(CONFINED_SYSTEM_SHAPE_ASSIGNMENTS).length > 0,
-      "no charter column carries an `assign`; these tests would prove nothing",
-    );
+  test("the fixture declares assignment generators", () => {
+    assert.ok(generatedColumnNames.length > 0, "fixture must declare columns");
+    for (const [name, assignment] of Object.entries(generatedAssignments)) {
+      assert.ok(assignment, `${name} must declare its generator`);
+    }
   });
 
   test("a document supplying only creator fields validates", () => {
@@ -81,7 +44,7 @@ describe("platform-assigned fields are not required of the caller", () => {
       "the validated document must reach the native op carrying ONLY what the " +
         "caller supplied - an invented id or timestamp would pre-empt the runtime",
     );
-    for (const name of Object.keys(CONFINED_SYSTEM_SHAPE_ASSIGNMENTS)) {
+    for (const name of Object.keys(generatedAssignments)) {
       assert.ok(!(name in out), `${name} must not be present at all, not even as undefined`);
     }
   });
@@ -110,13 +73,9 @@ describe("platform-assigned fields are not required of the caller", () => {
   });
 
   test("an assign beats a default rather than materialising the seed", () => {
-    // `version` is the live instance: the charter gives it BOTH an
-    // `assign = increment(1)` and a DDL `DEFAULT 1`, because the generator is
-    // the normal path and the DDL default is the backstop for writes that never
-    // reach the runtime. If the default arm won, the seed would be written into
-    // the row and the runtime's bump would be pre-empted.
+    // Leave initialization to the database default for an assigned counter.
     const schema: NormalizedSchema = {
-      version: {
+      revision: {
         type: "number",
         required: true,
         default: 1,
@@ -137,8 +96,7 @@ describe("validateDoc does not touch the document it is given", () => {
     assert.equal(
       JSON.stringify(doc),
       before,
-      "validateDoc mutated its input; the caller's object must survive validation " +
-        "byte for byte, which is what the deleted stripRuntimeSystemFields did not do",
+      "validateDoc must leave the caller's object unchanged",
     );
     assert.notEqual(out, doc, "the result must be a fresh object, not the input");
     assert.ok("created_at" in doc, "the input still carries the key it was given");

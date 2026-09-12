@@ -6,7 +6,7 @@ use zeroship_authz::{
     load_platform_policies, lower, policy_hash, Action, Condition, Effect, Policy, Resource,
     Statement,
 };
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 
 #[test]
 fn wrapper_lowers_to_valid_cedar_source() {
@@ -146,9 +146,7 @@ fn time_window_lowers_to_utc_minute_predicate() {
 
     let source = lower(&policy);
 
-    assert!(source.contains(
-        "(context.now_minute_utc >= 540 && context.now_minute_utc < 1020)"
-    ));
+    assert!(source.contains("(context.now_minute_utc >= 540 && context.now_minute_utc < 1020)"));
     assert!(!source.contains("lowers to true"));
     PolicySet::from_str(&source).expect("lowered policy should parse as Cedar");
 }

@@ -25,18 +25,19 @@
 //! mint. The function emits its own audit events so callers cannot forget to.
 
 use serde_json::json;
+use zeroship_core::UserId;
 
 use crate::audit::{self, AuditEvent};
 use crate::identity::eligibility;
 use crate::identity::password;
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::store::users;
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 
 /// A successfully-verified local user. Carrying the whole row lets the caller
 /// mint a session (login.rs) without a second DB round-trip.
 #[derive(Debug, Clone)]
 pub struct VerifiedUser {
-    pub id: zeroship_core::user_id::UserId,
+    pub id: UserId,
     pub credential_version: i64,
 }
 

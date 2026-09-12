@@ -164,6 +164,7 @@ ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-broker-secret"
 e2e_platform_op_up "$WORK/sk.pem" "$WORK" || exit 1
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DBURL"
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 ZEROSHIP_CONTROL_STRIPE_SECRET_KEY="sk_test_unused" \
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --config "$CFG_TOML" \
   --blob-store "$WORK/blobs" \

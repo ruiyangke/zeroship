@@ -1,8 +1,8 @@
 # Runtime DB binding: construction-time schema binding
 
 **Status.** PARTIAL - the descriptor is the shipped sole schema authority
-(`crates/zeroship-data-engine/src/descriptor.rs`, over
-`zeroship_data_core::schema_cache`) and `registerModel` is gone, but the private
+(`crates/zeroship-data-orm/src/descriptor.rs`, over
+`zeroship_data_orm::schema_cache`) and `registerModel` is gone, but the private
 module map, the artifact/init channel and the isolate-owned binding do not
 exist; the descriptor still arrives on `globalThis.__zsRuntimeDescriptor`
 (`crates/zeroship-runtime/src/core/init.rs:3445`).
@@ -41,7 +41,7 @@ only v2; a non-v2 descriptor is refused outright
 (`sdks/bootstrap/src/install-schema.ts:106`, `:183`).
 
 **The end state replaces the last two hops.** The descriptor arrives through a
-generic artifact bag, `zeroship-plugin-db` parses and semantically validates it,
+generic artifact bag, `zeroship-data-v8` parses and semantically validates it,
 and a private pre-user bootstrap module synchronously creates the JS collection
 wrappers. Neither the global nor a public bootstrap module survives. (Not built:
 Open 3.)
@@ -65,7 +65,7 @@ What one authority costs, stated because nothing else covers it:
 
 ### 2. Binding and identity
 
-`DbBinding { app_id, deploy_token }` (`crates/zeroship-data-core/src/binding.rs:15`)
+`DbBinding { app_id, deploy_token }` (`crates/zeroship-data-orm/src/binding.rs`)
 is the shipped identity: a worker thread keeps isolates for one app at several
 deploys, so `app_id` alone does not identify the metadata a CRUD receiver was
 minted to use. Every production binding is minted from the isolate's own
@@ -115,7 +115,7 @@ invalidates the runtime rather than silently re-homing its bindings. Constructio
 stays I/O-free (SQLite requires this) because adoption happens at first read.
 
 The comparison machinery ships and is tested: `SchemaEpoch`
-(`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97`),
+(`crates/zeroship-data-orm/src/transaction/reducer/identity.rs`),
 `Verdict::Deny(DenyReason::StaleAppIncarnation)` at `:254`, `Verdict::ReResolve`
 at `:260` and `:266`, with the setup-outcome adapter in `reducer/mod.rs`. **In
 production it is a tautology**: the single construction site
@@ -137,7 +137,7 @@ The repository invariant in `AGENTS.md`. Its two halves as they bear here:
 
 Consequences that are settled: there is no HMAC session anchor and no
 `SessionMinter`; `__zeroship_admin` does not exist and nothing replaced it
-(`crates/zeroship-data-engine/src/auth/bootstrap.rs`); CDC slot and publication
+(`crates/zeroship-data-orm/src/auth/bootstrap.rs`); CDC slot and publication
 ownership belongs to the CDC relay. SQLite has no `session_ctx` at all and binds
 context through the session actor's per-call state instead - two tiers
 disagreeing about where identity is enforced is evidence that the Rust-boundary
@@ -149,10 +149,10 @@ invariant points at, not a restoration of deleted definer-rights functions.
 
 The live counter-example is DB-3: app JS reached a privileged unmask call and
 could pass `actor: { kind: "auto" }` to read its own PII/PHI/PCI. It is fenced by
-`sanitize_app_actor` (`crates/zeroship-data-engine/src/crud/unmask.rs:321`), called
+`sanitize_app_actor` (`crates/zeroship-data-orm/src/protection/unmask.rs`), called
 at **five** sites - `v8_classes/masked_value.rs:300` and `:423`, `crud/mod.rs:669`,
 `unmask.rs:1514` and `:1629`. Count them with
-`grep -rn 'sanitize_app_actor(' crates/zeroship-plugin-db/src`, un-truncated.
+`grep -rn 'sanitize_app_actor(' crates/zeroship-data-v8/src`, un-truncated.
 
 ### 4. Trust roots
 
@@ -265,7 +265,7 @@ silent no-op and dispatch never awaits it.
 
 The backend split is a **crate** split, not a module split, and it is done:
 `zeroship-data-core`, `zeroship-data-postgres`, `zeroship-data-sqlite` and
-`zeroship-data-query-builder` exist. `docs/proposals/2026-08-31-data-crate-shape.md`
+`zeroship-data-sql` exist. `docs/proposals/2026-08-31-data-crate-shape.md`
 owns the boundary rules and the remaining cuts.
 
 Neutral SPI types: `DbBackendFactory`, `DbBackend`, `OpSession`, `DbTransaction`,
@@ -274,8 +274,8 @@ One name per type.
 
 **Ownership.** A session owns its resources and carries no borrows. A session
 that borrows its pool checkout cannot offer a `finish` returning a `'static`
-future, so the choice is an **owned pooled lease**: `Pool::get_owned` preserving
-the borrowed wrapper's return and timeout behaviour. `PgOpSession` drives raw
+future, so `Pool::acquire` returns an owned `PoolConnection` with automatic
+return and a bounded acquisition deadline. `PgOpSession` drives raw
 `BEGIN`/`COMMIT`/`ROLLBACK` and must **not** store `Transaction<'_>`, which holds
 `&'a mut Client`. Raw transaction control carries the obligation the borrowing
 wrapper discharges: PostgreSQL may answer `COMMIT` with a `ROLLBACK` tag, checked
@@ -295,9 +295,9 @@ state; the data plane neither reads nor acts on a recovery target.
 
 The declared schema is the only schema the SQL builders read. Live introspection
 survives only test-gated: `pg_introspect::read_live_schema`
-(`crates/zeroship-data-postgres/src/pg_introspect.rs:66`) is reachable only
+(`crates/zeroship-data-orm/src/backend/postgres/pg_introspect.rs`) is reachable only
 through a `#[cfg(feature = "test-helpers")]` `SchemaIntrospect` impl
-(`crates/zeroship-data-postgres/src/postgres.rs:493`).
+(`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`).
 
 Every source gate scoping to a boundary file must **first assert that the file
 exists**. `backend/api.rs` and `backend/factory.rs` do not exist; a negative grep
@@ -321,7 +321,7 @@ changes the operator to `IS NULL`.
 This is tenant isolation, not robustness: a throwing getter on a filter key that
 is silently dropped turns `updateMany({tenantId: <throwing getter>, status})`
 into `WHERE status = ...` across every tenant's rows. Shipped, with `DecodeError`
-in `crates/zeroship-plugin-db/src/v8_bridge.rs`.
+in `crates/zeroship-data-v8/src/v8_bridge.rs`.
 
 Pipeline: validate descriptor membership; singleflight lazy backend
 initialization; `backend.prepare(request)` returning an `OpSession` (route plus
@@ -357,7 +357,7 @@ columns are never creator-visible keys on any path.
 
 **The mutation-side producer is suppressed in production, so delivery must be
 designed against the WAL consumer.** `broker::is_app_suppressed`
-(`crates/zeroship-data-core/src/broker.rs:806`, called at `:858` and from
+(`crates/zeroship-data-orm/src/cdc/broker.rs`, called at `:858` and from
 `exec.rs:466`) gates the mutation-side publish: when the WAL consumer runs for an
 app it owns the publish path for events that isolate writes. The real producer is
 `wal_consumer::emit_for_tuple`, which holds no operation context, and `publish` /
@@ -369,7 +369,7 @@ the wire contract is that document's.
 **Backends must distinguish "no such relation" from "relation present, not
 enumerated"** wherever a relation is enumerated at all. The PostgreSQL attribute
 scan restricts to `relkind = 'r'`
-(`crates/zeroship-data-postgres/src/pg_introspect.rs:101`, `:362`) while the
+(`crates/zeroship-data-orm/src/backend/postgres/pg_introspect.rs`, `:362`) while the
 platform elsewhere models `'r','p','v','m','f'` and publishes `'p'`. A
 partitioned creator table's parent is `relkind = 'p'`, so it is invisible to that
 scan and "no metadata" reads the same as "no protection needed". That scan is now
@@ -414,10 +414,10 @@ Deleted concretely: `defineMaskPolicy()` and the policy slot
 (`sdks/db/src/policy.ts:120`), the `_flushPendingMaskPolicy` /
 `_peekPendingMaskPolicy` drain (`policy.ts:178`); the
 `zeroship.db.setMaskPolicy` native op
-(`crates/zeroship-plugin-db/src/v8_classes/db_platform.rs:100`) and its
+(`crates/zeroship-data-v8/src/v8_classes/db_platform.rs`) and its
 `dispatch_set_mask_policy_field` dispatch; the SQLite JSON sidecar
 (`<db_dir>/mask_policies.json`,
-`crates/zeroship-data-sqlite/src/mask_policy_store.rs:35`); and the broad
+DELETED: `crates/zeroship-data-orm/src/backend/sqlite/mask_policy_store.rs`); and the broad
 `DbPlatform` V8 class with its private slot and creator-facing replication
 diagnostics. There is consequently **no `maskPolicyReady` promise and no
 readiness gate**.
@@ -457,7 +457,7 @@ with a validated floor (`crates/zeroship-core/src/config/secrets.rs`).
 
 The reason is cryptographic, and the ordering matters.
 `canonical_aad(collection, column, row_pk_bytes)`
-(`crates/zeroship-data-core/src/encryption/aad.rs`) binds domain separation more
+(`crates/zeroship-data-orm/src/encryption/aad.rs`) binds domain separation more
 tightly than per-column keys ever did: it separates *rows*, which keys never did
 at any granularity, and it authenticates the column name, which is the property a
 per-column key was reaching for. It binds the wire version FIRST, so the version
@@ -518,7 +518,7 @@ conflict winner's stored id atomically before encryption, preserve
 internal transaction so behaviour does not change with encryption mode.
 
 **Connections always come from a pool.** `acquire_dedicated_client`
-(`crates/zeroship-data-postgres/src/postgres.rs:370`) is a pooled checkout whose
+(`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`) is a pooled checkout whose
 error arm distinguishes "this worker hit its own pool ceiling" from "the server
 is unreachable", so the concurrent-transaction ceiling is the pool's size. The
 one exception is logical replication: a session opened with
@@ -538,8 +538,8 @@ nothing.
 
 **There is no per-operation cross-process flock lease.** An exclusive flock
 survives for **restore's file swap only** - the one thing WAL does not cover,
-since a lock release must not leave a connection bound to an obsolete inode. The
-`:memory:` process-local guard is retained.
+since a lock release must not leave a connection bound to an obsolete inode.
+SQLite requires filesystem storage; memory database selectors are refused.
 
 The actor keeps two connections per session (`tx_conn` for the one explicit
 transaction, `op_conn` for autocommit work), so an app's autocommit **reads**
@@ -549,7 +549,7 @@ running statement rather than only inter-statement gaps. The acceptance arm is
 connections, so an "ops" arm cannot pass. Cancellation is wired end to end -
 `transaction/driver.rs:975` -> `cancel_and_reclaim` (`:1032`) -> `TxCanceller` ->
 `SqliteCancelHandle::cancel`
-(`crates/zeroship-data-sqlite/src/session.rs:1093`) -> `Interrupts::interrupt`.
+(`crates/zeroship-data-orm/src/backend/sqlite/session.rs`) -> `Interrupts::interrupt`.
 
 SQLite serializes top-level transaction admission per
 `(thread-resource, app_id, incarnation)`; the cross-isolate non-contention arm is
@@ -581,7 +581,7 @@ requirement did not go away with it.
 **The encryption `KeyStore` is unbounded and on the hot path.** Its own module
 documentation states it: once a `(app_id, key_id)` entry is inserted it stays for
 the lifetime of the `KeyStore`, and there is no rotation surface
-(`crates/zeroship-data-core/src/encryption/keys.rs:56`). It holds tenant key
+(`crates/zeroship-data-orm/src/encryption/keys.rs`). It holds tenant key
 material for every encrypted app the thread has ever served, and it belongs to
 the backend, which lives in the thread-local context until backend reset or
 thread exit - **not** isolate eviction. Key resolution runs per encrypted column
@@ -789,7 +789,7 @@ These constraints bind any future change to this design.
   must also be bound into the AAD, or downgrade is not tag-detectable.
 - **Table-name secrecy is not a security boundary.** `db.collection(name)` mints
   a collection for any non-empty string
-  (`crates/zeroship-plugin-db/src/v8_classes/db.rs:123`, `:130`).
+  (`crates/zeroship-data-v8/src/v8_classes/db.rs`, `:130`).
   *Addressability* must be what authority decides.
 - **Module-specifier secrecy is not a security boundary either.** A per-runtime
   nonce leaks through `new Error().stack`. The private map is the boundary.
@@ -838,7 +838,7 @@ These constraints bind any future change to this design.
    ceiling reaching the service at composition. Basis for the estimate: the three
    host files (`modules.rs`, `dynamic_import.rs`, `bootstrap_modules.rs`), the
    worker's `cache.rs` construction path, and 112 `BackendHandle` references in
-   `crates/zeroship-plugin-db/src`.
+   `crates/zeroship-data-v8/src`.
 
 4. **The mask-policy artifact wire.** BUILDABLE, 8-12 hours. The carrier is
    decided (the artifact channel that already carries the descriptor). Owed: the
@@ -856,9 +856,9 @@ These constraints bind any future change to this design.
    configuration" does not name what they read.
 
 6. **Wire the `DbPlan` IR.** BUILDABLE, 12-20 hours.
-   `zeroship-data-query-builder` exists and its shared core, read and search
+   `zeroship-data-sql` exists and its shared core, read and search
    families are built, but it is a `[dev-dependencies]` entry of
-   `zeroship-plugin-db` and `grep -rn data_query_builder crates/zeroship-plugin-db/src/`
+   `zeroship-data-v8` and `grep -rn data_query_builder crates/zeroship-data-v8/src/`
    returns 0. No shipped binary links it. Three items are closed on paper by
    pointing at it and are not actually closed: prepare-once, the role-divergence
    fix, and the plan-family port. The relation and effects families additionally
@@ -934,11 +934,11 @@ These constraints bind any future change to this design.
     unmeasurable and cannot be asserted by any gate. Current size: 17,275 lines
     over 7 modules, `query.rs` alone 14,309. Current consumers: five manifests -
     `zeroship-data-core`, `zeroship-data-postgres`, `zeroship-data-sqlite`,
-    `zeroship-data-query-builder` and `zeroship-plugin-db` - with 18
-    `zeroship_schema` references in `crates/zeroship-plugin-db/src`. One surface
+    `zeroship-data-sql` and `zeroship-data-v8` - with 18
+    `zeroship_schema` references in `crates/zeroship-data-v8/src`. One surface
     is security-critical: `validate_collection`'s reserved-`__zeroship` prefix
     check is the sole guardian of that namespace, and it now has a twin in
-    `crates/zeroship-data-query-builder/src/ident.rs`.
+    `crates/zeroship-data-orm/src/sql/ident.rs`.
 
 13. **Fail closed at boot on a missing or unparseable descriptor.** BUILDABLE,
     4-6 hours. Invariant 4 is enforced per-collection at call time
@@ -958,11 +958,11 @@ These constraints bind any future change to this design.
 
 15. **Where does the PITR placeholder go?** BUILDABLE, 2-4 hours. One live
     statement still names the deleted `__zeroship_admin` schema and therefore
-    fails on every database: `crates/zeroship-data-postgres/src/postgres.rs:877`
+    fails on every database: `crates/zeroship-data-orm/src/backend/postgres/implementation.rs`
     inserts into `__zeroship_admin.pitr_targets`, and its own comment at
     `:846-847` says the schema no longer exists. PITR targets are control-plane
     state; the data plane's `pitr_replay` member and its SQLite stub
-    (`crates/zeroship-data-sqlite/src/lib.rs:1688`) go with the table.
+    (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`) go with the table.
 
 ---
 
@@ -1007,8 +1007,8 @@ record.
   and nothing replaced them, deliberately.
 - **Do not use `<field>_masked` or `mask_sibling_column_for_field`.** The storage
   flip shipped: the sibling is `__zs_raw__<field>`
-  (`crates/zeroship-schema/src/query.rs:2207`, `raw_column_name` at `:2232`),
-  covered by `crates/zeroship-plugin-db/tests/mask_flip.rs` and documented at
+  (`crates/zeroship-schema/src/query.rs:2207`, `raw_column_name` at `:2232`), (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+  covered by `crates/zeroship-data-v8/tests/mask_flip.rs` and documented at
   `docs/reference/db.md:1602`. `mask_sibling_column_for_field` occurs zero times
   in `crates/`.
 - **Do not write a source gate scoped to a path that does not exist.** It matches

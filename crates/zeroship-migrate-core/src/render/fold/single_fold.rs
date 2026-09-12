@@ -1,161 +1,13 @@
-//! **The single fold, and its five projections.** Specified by
-//! `docs/proposals/single-fold-and-effects.md` section G.
+//! Fold migration operations into catalog and authored schema state.
 //!
-//! ONE traversal decides what an op means; five typed projections read the value it
-//! produces. A projection here MAY NOT walk the op stream, and none of them takes
-//! `&[Op]` - that is the rule enforced by the signatures below rather than by review.
+//! The traversal advances both states for each selected dialect operation.
+//! Projections read the completed state rather than replaying operations. Named
+//! constraint and index identities survive renames until their objects are dropped.
 //!
-//! The fifth, `FoldedSchema::project_collection_descriptors`, is the OUTBOUND export
-//! surface: the typed `CollectionDescriptor` set `project_field_defs` used to build
-//! privately and throw away. `project_field_defs` is now a map over it, so the two
-//! read one recovery rather than two.
-//!
-//! # Four projections are LIVE; one is not
-//!
-//! This module shipped dead, and the consumers moved onto it one at a time in
-//! blast-radius order. ONE `fold` call inside `render_artifacts` now feeds three of
-//! them:
-//!
-//! * `FoldedSchema::project_runtime_metadata` replaced a standalone metadata walker;
-//! * `FoldedSchema::project_authoring_tables` replaced a standalone op walker,
-//!   and is the source model `env.db.ts` is rendered from;
-//! * `FoldedSchema::project_field_defs` replaced a standalone `FieldDef` walker, and is
-//!   the wire `FieldDef` map behind `schema.runtime.json` and behind
-//!   `LiveSchema::sdk_schemas`.
-//!
-//! (Backticks rather than intra-doc links on purpose, for a reason narrower than it
-//! first looks. A `//!` module-level comment here resolves paths in the PARENT
-//! module's scope, not this module's: a bare `[FoldedSchema]` fails from `//!` while
-//! the identical bare link resolves from a `///` further down this same file, and
-//! `[super::fold_ops_onto]` resolves against `render` rather than `render::fold`. So
-//! anything named from this block needs an ABSOLUTE `crate::` path, and a
-//! `pub(crate)` item cannot be linked from public docs at all whatever path you give
-//! it. `cargo doc` IS now gated - a counted, two-sided pin - so a dangling link here
-//! no longer ships green, which is why the three that were dangling are fixed rather
-//! than tolerated.)
-//!
-//! All three walkers are deleted. `fold` itself is production code, and so is everything
-//! those three projections read - which is now the whole of `AuthoredState` except
-//! `project_snapshot`'s neutral/vendor split.
-//!
-//! `project_snapshot` is the last one still reachable only from tests, which is what
-//! `#![cfg_attr(not(test), allow(dead_code))]` below still covers - it and the two
-//! `FoldedSchema` fields it reads, measured by deleting the attribute. See the last
-//! section for why the `fold_ops_onto` extraction did not retire it.
-//!
-//! Moving `project_field_defs` also collapsed a duplicate: `render_artifacts` ran the
-//! structural catalog replay TWICE per render until that move - once through `fold`,
-//! once through the `FieldDef` walker's own `fold_ops` call - and the second one left
-//! with the walker. The `fold_ops_onto` extraction has since collapsed the second
-//! duplicate below it:
-//! `flatten_dialectal_ops` ran twice per `fold` and now runs once.
-//!
-//! # What the live projections cost the model
-//!
-//! Moving a consumer is where a projection's claim to be DERIVED gets tested, and
-//! each move so far has failed that test in exactly one place.
-//!
-//! `project_runtime_metadata` re-derived the implicit unique index name
-//! `{table}_{column}_key` from the columns it could see - which silently renamed the
-//! index on every `renameTable` and `renameColumn`, naming an object no catalog has.
-//! The fix is `ImplicitUniqueIndex`, carried by this traversal, and it is decision 4
-//! of the proposal working as written: a projection that needs a fact the model does
-//! not carry is a MODEL change, not a second replay. The differential corpus could not
-//! see it - no stream there crosses a `unique` column with a rename - so it was found by
-//! writing streams for the carriers rather than by re-running the gate.
-//!
-//! `project_authoring_tables` found the reverse: the model was RIGHT and the artifact had been wrong
-//! for as long as that separate walker existed. It had no
-//! `Op::AlterPrimaryKey` arm at all, so `env.db.ts` kept declaring the key the
-//! migration replaced, dropped or added, and kept `.autoIncrement()` on a column the
-//! same op stripped identity from. This traversal's `Op::AlterPrimaryKey` arm is what
-//! corrects it, and the correction is adjudicated against a live PostgreSQL in
-//! `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs` - applied for real, key read out of
-//! `pg_catalog` - rather than against this module's own opinion. The recorded corpus
-//! was blind to it for a measurable reason: its one `alterPrimaryKey` fixture is
-//! REFUSED on all three dialects (`table \`orders\` does not exist`), so no fixture in
-//! it renders an artifact carrying the op at all.
-//!
-//! The `Op::DropPartition` arm below moved with it, from "recorded as a choice" to
-//! measured; see its comment.
-//!
-//! `project_field_defs` found the same shape, several times over. The projection gate
-//! had recorded ONE divergence for it; a sweep of the walker against it over every
-//! PREFIX of the corpus and of a carrier set written for the constraint LIFECYCLE found
-//! several more, and the recorded fixtures contributed none of them. They are all one
-//! rule: the walker it replaced lifted a constraint's facet onto a column eagerly
-//! and kept a private side map to un-lift from, and never kept that side map in step
-//! with the constraint - so a dropped `UNIQUE`, a dropped `CHECK` bound, a dropped
-//! `CHECK` membership, and a column re-added under a dropped column's name all carried
-//! facets the catalog does not have. This projection derives every one of them from the
-//! constraints the model still holds, which is why `Op::DropConstraint` and
-//! `Op::DropColumn` below need no un-lift arm: there is nothing to un-lift.
-//!
-//! What that move did NOT get is a live adjudication of the rebuild DDL, and the reason
-//! is worth carrying here. `LiveSchema::sdk_schemas` is read by exactly one caller,
-//! `render/lower.rs`'s SQLite `renameColumn`, and on the deploy path that rename takes
-//! the `preserve_stored_shape` arm - which replays SQLite's own `CREATE TABLE` and never
-//! looks inside the map. Measured: corrupting every column in the map the engine builds
-//! fails NOTHING in the whole test suite; emptying it fails one test, on absence.
-//! `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs` pins both halves and covers the other arm.
-//!
-//! # What the model carries, measured rather than promised
-//!
-//! [`crate::model::schema_model::SchemaModel`] is the NEUTRAL half and it is
-//! bounded to TABLES: of [`SchemaSnapshot`]'s object families it carries only that one. So
-//! `fold(ops) -> SchemaModel` as the proposal spells it CANNOT reproduce `fold_ops`
-//! today, because a stream that creates a view produces a model with nowhere to put
-//! it. [`crate::render::fold::single_fold::FoldedSchema`] names that gap instead of
-//! hiding it:
-//!
-//! * `model` - the neutral tables plus their [`crate::model::schema_model::VendorFacts`].
-//! * `unmodelled` - the twelve object families the neutral model does not carry yet
-//!   (views, sequences, named types, roles, schemas, extensions, functions, policies,
-//!   triggers, partitions, per-table RLS, vendor object identities). Its `tables` map
-//!   is deliberately left EMPTY: tables live in `model`, and a second copy would be a
-//!   second answer.
-//! * `authored` - the AUTHORED half, at IR resolution. Section C's requirement that
-//!   "the model must be RICHER than either current type, not a common subset" is this
-//!   field: the catalog half flattens a type to a `data_type` string, and every
-//!   `setColumnType` row in section B was a facet that flattening lost.
-//!
-//! # Where the catalog half comes from, stated plainly
-//!
-//! The catalog rules are DRIVEN BY THIS TRAVERSAL. They live in
-//! `CatalogFold::advance` next door, which is `fold_ops_onto`'s former loop body, and
-//! the loop below calls it one op at a time beside `AuthoredState::advance`. So there
-//! is no longer any op-stream walking here that a projection could be accused of, and
-//! no opaque block: both halves see the same op before either sees the next, and
-//! `flatten_dialectal_ops` runs ONCE for the pair rather than once per half.
-//!
-//! `fold_ops_onto` survives and is unchanged in behaviour - it is now `seed`, a loop of
-//! `advance`, and `finish` - because drift, the MySQL expected state,
-//! `engine::refresh_historical_live` and the node host's rollback and inverse recovery
-//! all fold onto a LIVE base, which this module never does.
-//!
-//! The blocker this doc used to record was stated slightly wrong, and the correction is
-//! the load-bearing part. It read: the registry is seeded from
-//! `NamedTypeRegistry::default()` "rather than from `base`". There is nowhere in `base`
-//! to seed it from - [`SchemaSnapshot`]'s `named_types` map carries a kind and a
-//! comment, never a member list or a base type - so seeding was never the fix. CARRYING
-//! was. The registry is a field of `CatalogFold`, written by `createEnum` and
-//! `createDomain` and read by every later `createTable`, `addColumn` and
-//! `setColumnType`; a drive that re-entered `fold_ops_onto` per op would reset it, which
-//! is exactly what the old wording predicted and is measured here rather than assumed:
-//! rebuilding this loop that way makes the corpus refuse eight prefixes with ``enum
-//! `tier` is not registered`` - on SQLite and MySQL, and never on PostgreSQL, because
-//! `enum_schema_or` falls back to the project schema there and answers identically.
-//! Two more fields have the same shape and no snapshot slot either,
-//! `attached_partition_tables` and `created_partition_comments`.
-//!
-//! One honest limit survives the move. NOTHING IN PRODUCTION READS THE CATALOG HALF
-//! THIS FOLD PRODUCES: all three live projections read `authored` and `named_types`
-//! only, so `model` and `unmodelled` exist here for `project_snapshot`, which is still
-//! test-only, and for the fail-closed refusal every projection inherits. That is why
-//! `#![cfg_attr(not(test), allow(dead_code))]` below is STILL load-bearing - measured
-//! by deleting it, which warns on exactly `project_snapshot` and the two fields it
-//! reads, and on nothing else. It goes when a consumer reads the catalog half, which is
-//! the `refresh_historical_live` / drift move, not this one.
+//! The neutral model carries tables; remaining catalog families stay in
+//! `unmodelled`. Authored state preserves information needed by runtime descriptors
+//! and TypeScript schema generation. The catalog projection is also available for
+//! comparison with the independent live-schema fold.
 
 #![cfg_attr(not(test), allow(dead_code))]
 
@@ -165,9 +17,9 @@ use zeroship_migrate_backend::registry::VendorSet;
 use indexmap::IndexMap;
 
 use super::{
-    flatten_dialectal_ops, fold_create_column_to_field, fold_named_type_error,
-    lift_named_type_facets, recover_check_facet, recover_fk_policy, resolved_inject_prefix_len,
-    CatalogFold, FoldError, RecoveredCheck, FOLD_OWNER_APP,
+    CatalogFold, FOLD_OWNER_APP, FoldError, RecoveredCheck, flatten_dialectal_ops,
+    fold_create_column_to_field, fold_named_type_error, lift_named_type_facets,
+    recover_check_facet, recover_fk_policy, resolved_inject_prefix_len,
 };
 use crate::model::ir::{ColType, IrColumn, IrConstraintKind, IrIndex, Op, TableRuntimeOptions};
 use crate::model::schema_model::SchemaModel;
@@ -175,13 +27,13 @@ use crate::model::snapshot::SchemaSnapshot;
 use crate::model::table_shape::ResolvedInject;
 use crate::render::declarative::CollectionDescriptor;
 use crate::render::gen_types::{
-    add_runtime_index, constraint_uses_local_column, derived_unique_index_name,
-    effective_constraint_name, effective_index_name, for_each_expr_mut, index_uses_column,
-    named_constraint, named_index, plain_index_fields, rename_constraint_local_column,
-    rename_expr_column, rename_expr_table, rename_index_column, replace_name, AuthoringTable,
-    RuntimeCollectionMetadata, RuntimeIndexDescriptor,
+    AuthoringTable, RuntimeCollectionMetadata, RuntimeIndexDescriptor, add_runtime_index,
+    constraint_uses_local_column, derived_unique_index_name, effective_constraint_name,
+    effective_index_name, for_each_expr_mut, index_uses_column, named_constraint, named_index,
+    plain_index_fields, rename_constraint_local_column, rename_expr_column, rename_expr_table,
+    rename_index_column, replace_name,
 };
-use crate::render::lower::{resolve_encrypted_inner_domain_in_column, NamedTypeRegistry};
+use crate::render::lower::{NamedTypeRegistry, resolve_encrypted_inner_domain_in_column};
 use zeroship_migrate_ir::dialect::DialectId;
 use zeroship_migrate_policy::EffectivePolicy;
 
@@ -202,6 +54,7 @@ pub(crate) struct AuthoredTable {
     /// Runtime-visible collection options, stated by `createTable`'s
     /// `runtimeOptions` and by `setTableOptions`.
     pub runtime_options: TableRuntimeOptions,
+    pub assignments: BTreeMap<String, zeroship_migrate_policy::Assignment>,
     /// The columns the policy-resolved inject prefix owns as the ID primary key.
     ///
     /// Decided at `createTable` from the [`ResolvedInject`] the charter yields, which
@@ -348,12 +201,39 @@ impl AuthoredState<'_> {
                 let resolved_inject = ResolvedInject::for_table(effective, effective_schema, name)
                     .map_err(|error| FoldError::Render(error.to_string()))?;
                 let injected_prefix_len = resolved_inject_prefix_len(columns, &resolved_inject);
+                let object = zeroship_migrate_policy::ObjectName::table(
+                    effective_schema.as_bytes().to_vec(),
+                    name.as_bytes().to_vec(),
+                );
+                let mut assignments: BTreeMap<String, zeroship_migrate_policy::Assignment> =
+                    effective
+                        .injects_for(&object)
+                        .into_iter()
+                        .flat_map(|spec| spec.columns.iter())
+                        .filter_map(|column| {
+                            column
+                                .assign
+                                .as_ref()
+                                .map(|assign| (column.name.clone(), assign.clone()))
+                        })
+                        .collect();
                 let mut id_primary_key_columns = BTreeSet::new();
                 let mut implicit_unique_indexes = Vec::new();
                 for (index, column) in columns.iter().enumerate() {
+                    if let Some(assignment) = assignments.get_mut(&column.name) {
+                        if assignment.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
+                            && column.identity.is_some()
+                        {
+                            assignment.by = zeroship_migrate_policy::AssignmentGenerator::Identity;
+                        }
+                    }
                     if index < injected_prefix_len
-                        && column.name == "id"
-                        && resolved_inject.owns_id_primary_key()
+                        && assignments.get(&column.name).is_some_and(|assignment| {
+                            assignment.by == zeroship_migrate_policy::AssignmentGenerator::TypedId
+                        })
+                        && primary_key
+                            .as_ref()
+                            .is_some_and(|key| key.contains(&column.name))
                     {
                         id_primary_key_columns.insert(column.name.clone());
                     }
@@ -386,6 +266,7 @@ impl AuthoredState<'_> {
                             schema: schema.clone(),
                         },
                         runtime_options: runtime_options.clone().unwrap_or_default(),
+                        assignments,
                         id_primary_key_columns,
                         implicit_unique_indexes,
                     },
@@ -499,6 +380,7 @@ impl AuthoredState<'_> {
                 if let Some(state) = self.tables.get_mut(table) {
                     state.core.columns.shift_remove(column);
                     state.id_primary_key_columns.remove(column);
+                    state.assignments.remove(column);
                     if state
                         .core
                         .primary_key
@@ -534,6 +416,9 @@ impl AuthoredState<'_> {
                     }
                     if state.id_primary_key_columns.remove(from) {
                         state.id_primary_key_columns.insert(to.clone());
+                    }
+                    if let Some(assignment) = state.assignments.remove(from) {
+                        state.assignments.insert(to.clone(), assignment);
                     }
                     if let Some(primary_key) = &mut state.core.primary_key {
                         replace_name(primary_key, from, to);
@@ -1082,6 +967,8 @@ impl FoldedSchema {
             let mut metadata = RuntimeCollectionMetadata {
                 options: table.runtime_options.clone(),
                 indexes: Vec::new(),
+                assignments: table.assignments.clone(),
+                primary_key: table.core.primary_key.clone().unwrap_or_default(),
             };
             for index in &table.implicit_unique_indexes {
                 add_runtime_index(

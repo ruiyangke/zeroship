@@ -116,13 +116,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use zeroship_authz::{Action as AuthzAction, Resource};
-use zeroship_mailer::templates::OrganizationInvite;
-use zeroship_mailer::{Address, Email};
-use zeroship_core::app_id::AppId;
 use zeroship_core::invite_id::InviteId;
 use zeroship_core::organization_id::OrganizationId;
 use zeroship_core::project_id::ProjectId;
-use zeroship_core::user_id::UserId;
+use zeroship_core::{AppId, UserId};
+use zeroship_mailer::templates::OrganizationInvite;
+use zeroship_mailer::{Address, Email};
 
 use crate::audit::{self, Action as AuditAction, AuditEntry};
 use crate::authz_guard::AuthzGuard;
@@ -820,23 +819,19 @@ const ORGANIZATION_COLUMNS: &str =
     "o.id, o.slug::text AS slug, o.name, o.billing_email::text AS billing_email, \
      o.personal_owner_id, o.created_at, o.updated_at, o.dissolved_at";
 
-fn row_to_organization(row: &compio_postgres::Row) -> Result<OrganizationRecord, OrganizationError> {
-    let personal_owner_id: Option<String> = row.get("personal_owner_id");
-    let personal_owner_id = personal_owner_id
-        .map(|raw| {
-            UserId::parse(&raw).map_err(|e| {
-                OrganizationError::Invalid(format!(
-                    "organizations.personal_owner_id {raw:?} is not a valid user id: {e}"
-                ))
-            })
-        })
-        .transpose()?;
+fn row_to_organization(
+    row: &compio_postgres::Row,
+) -> Result<OrganizationRecord, OrganizationError> {
     Ok(OrganizationRecord {
         id: row.get("id"),
         slug: row.get("slug"),
         name: row.get("name"),
         billing_email: row.get("billing_email"),
-        personal_owner_id,
+        personal_owner_id: crate::user_id::optional_from_row(
+            row,
+            "personal_owner_id",
+            "organization personal owner",
+        )?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         dissolved_at: row.get("dissolved_at"),
@@ -875,10 +870,10 @@ pub async fn get_organization<C: GenericClient + Sync>(
         .query(&sql, &[&organization_id])
         .await
         .map_err(|err| db_error(&err, "get organization"))?;
-    match rows.first() {
-        Some(row) => row_to_organization(row),
-        None => Err(OrganizationError::OrganizationNotFound),
-    }
+    row_to_organization(
+        rows.first()
+            .ok_or(OrganizationError::OrganizationNotFound)?,
+    )
 }
 
 pub async fn list_members<C: GenericClient + Sync>(
@@ -900,15 +895,9 @@ pub async fn list_members<C: GenericClient + Sync>(
         .map_err(|err| db_error(&err, "list members"))?;
     rows.iter()
         .map(|row| {
-            let raw_user_id: String = row.get("user_id");
-            let user_id = UserId::parse(&raw_user_id).map_err(|e| {
-                OrganizationError::Invalid(format!(
-                    "organization_members row has a malformed user id {raw_user_id:?}: {e}"
-                ))
-            })?;
             Ok(MemberRecord {
                 organization_id: row.get("organization_id"),
-                user_id,
+                user_id: crate::user_id::from_row(row, "user_id", "organization member")?,
                 email: row.get("email"),
                 name: row.get("name"),
                 role: row.get("role"),
@@ -952,7 +941,12 @@ pub async fn list_projects<C: GenericClient + Sync>(
     let rows = pg
         .query(
             &sql,
-            &[&organization_id, &principal.as_str(), &admin_rank, &ROLE_VIEWER],
+            &[
+                &organization_id,
+                &principal.as_str(),
+                &admin_rank,
+                &ROLE_VIEWER,
+            ],
         )
         .await
         .map_err(|err| db_error(&err, "list projects"))?;
@@ -1030,15 +1024,9 @@ pub async fn list_project_members<C: GenericClient + Sync>(
         .map_err(|err| db_error(&err, "list project members"))?;
     rows.iter()
         .map(|row| {
-            let raw_user_id: String = row.get("user_id");
-            let user_id = UserId::parse(&raw_user_id).map_err(|e| {
-                OrganizationError::Invalid(format!(
-                    "project_members row has a malformed user id {raw_user_id:?}: {e}"
-                ))
-            })?;
             Ok(ProjectMemberRecord {
                 project_id: row.get("project_id"),
-                user_id,
+                user_id: crate::user_id::from_row(row, "user_id", "project member")?,
                 email: row.get("email"),
                 role: row.get("role"),
                 added_at: row.get("added_at"),
@@ -1222,7 +1210,11 @@ pub async fn create_organization(
     tx.execute(
         "INSERT INTO zeroship.projects (id, organization_id, slug, name, created_by) \
          VALUES ($1, $2, 'default', 'Default', $3)",
-        &[&project_id.as_str(), &organization_id.as_str(), &principal.as_str()],
+        &[
+            &project_id.as_str(),
+            &organization_id.as_str(),
+            &principal.as_str(),
+        ],
     )
     .await
     .map_err(|err| db_error(&err, "create default project"))?;
@@ -1583,7 +1575,15 @@ pub async fn remove_member(
         admin = ladder_rank_of(ROLE_ADMIN),
     );
     let rows = tx
-        .query(&sql, &[&organization_id, &user_id.as_str(), &principal.as_str(), &ROLE_OWNER])
+        .query(
+            &sql,
+            &[
+                &organization_id,
+                &user_id.as_str(),
+                &principal.as_str(),
+                &ROLE_OWNER,
+            ],
+        )
         .await
         .map_err(|err| db_error(&err, "remove member"))?;
 
@@ -1820,7 +1820,7 @@ pub async fn transfer_ownership(
     body: &TransferOwnershipBody,
     source_ip: Option<&str>,
 ) -> Result<(), OrganizationError> {
-    if &body.user_id == principal {
+    if body.user_id.as_str() == principal.as_str() {
         return Err(OrganizationError::Invalid(
             "ownership transfer needs a different member as its target".to_string(),
         ));
@@ -1847,12 +1847,19 @@ pub async fn transfer_ownership(
     let promoted = tx
         .query(
             &promote,
-            &[&organization_id, &body.user_id.as_str(), &principal.as_str(), &ROLE_OWNER],
+            &[
+                &organization_id,
+                &body.user_id.as_str(),
+                &principal.as_str(),
+                &ROLE_OWNER,
+            ],
         )
         .await
         .map_err(|err| db_error(&err, "promote new owner"))?;
     if promoted.is_empty() {
-        return Err(classify_transfer_refusal(&tx, organization_id, principal, &body.user_id).await);
+        return Err(
+            classify_transfer_refusal(&tx, organization_id, principal, &body.user_id).await,
+        );
     }
 
     // Step down. The organization now has at least two owners, so this cannot
@@ -2387,16 +2394,9 @@ pub async fn redeem_invite(
     };
     let invite_id: String = row.get("id");
     let role: String = row.get("role");
-    let raw_invited_by: Option<String> = row.get("invited_by");
-    let invited_by = raw_invited_by
-        .map(|raw| {
-            UserId::parse(&raw).map_err(|e| {
-                OrganizationError::Invalid(format!(
-                    "organization_invites row has a malformed invited_by {raw:?}: {e}"
-                ))
-            })
-        })
-        .transpose()?;
+    let invited_by =
+        crate::user_id::optional_from_row(row, "invited_by", "organization invite issuer")?;
+    let invited_by_sql = invited_by.as_ref().map(UserId::as_str);
 
     // The seat itself. No rank predicate: the claim above IS the authority, and
     // it re-derived the inviter's live rank against the frozen role rather than
@@ -2412,7 +2412,7 @@ pub async fn redeem_invite(
             &organization_id,
             &principal.as_str(),
             &role,
-            &invited_by.as_ref().map(UserId::as_str),
+            &invited_by_sql,
         ],
     )
     .await
@@ -2655,12 +2655,23 @@ pub async fn delete_project(
     let rows = tx
         .query(
             &sql,
-            &[&project_id, &organization_id, &principal.as_str(), &ROLE_ADMIN],
+            &[
+                &project_id,
+                &organization_id,
+                &principal.as_str(),
+                &ROLE_ADMIN,
+            ],
         )
         .await
         .map_err(|err| db_error(&err, "delete project"))?;
     let Some(row) = rows.first() else {
-        return Err(classify_project_deletion_refusal(&tx, &organization_id, principal, project_id).await);
+        return Err(classify_project_deletion_refusal(
+            &tx,
+            &organization_id,
+            principal,
+            project_id,
+        )
+        .await);
     };
     let slug: String = row.get("slug");
 
@@ -2782,7 +2793,15 @@ pub async fn delete_app(
         admin = ladder_rank("$4"),
     );
     let rows = tx
-        .query(&sql, &[&app_id.as_str(), &organization_id, &principal.as_str(), &ROLE_ADMIN])
+        .query(
+            &sql,
+            &[
+                &app_id.as_str(),
+                &organization_id,
+                &principal.as_str(),
+                &ROLE_ADMIN,
+            ],
+        )
         .await
         .map_err(|err| db_error(&err, "delete app"))?;
     let Some(row) = rows.first() else {
@@ -3287,18 +3306,16 @@ pub async fn ensure_personal_project(
 
 /// The slug of a personal organization.
 ///
-/// Derived from the owner's id rather than their name, so a collision needs
-/// two owners whose base62 bodies differ only by case (astronomically
-/// unlikely over the 22-char alphabet, and the `slug` UNIQUE constraint is
-/// still the backstop either way) and needs no retry loop. It is ugly on
-/// purpose and it is not permanent: `organization:write` renames it, and a
-/// creator who never looks at it never meets it.
+/// Derived from the owner's id rather than their name, so it is globally unique
+/// by construction and needs no retry loop. It is ugly on purpose and it is not
+/// permanent: `organization:write` renames it, and a creator who never looks at
+/// it never meets it.
 fn personal_slug(owner: &UserId) -> String {
-    // `validate_slug` admits only lowercase-or-digit-or-hyphen, so the id's
-    // base62 body (which is case-sensitive and hyphen-free) is lowercased
-    // rather than rendered as-is.
-    let body = owner.as_str().split_once('_').map_or(owner.as_str(), |(_, body)| body);
-    format!("personal-{}", body.to_lowercase())
+    let (_, body) = owner
+        .as_str()
+        .split_once('_')
+        .expect("UserId always contains its prefix separator");
+    format!("personal-{body}")
 }
 
 async fn ensure_personal_organization<C: GenericClient + Sync>(
@@ -3456,7 +3473,10 @@ async fn classify_seat_refusal<C: GenericClient + Sync>(
         // `actor_seated` and the floor arm below cannot fire.
         floor = floor.map_or_else(|| "0".to_string(), ladder_rank_of),
     );
-    let rows = match tx.query(&sql, &[&organization_id, &principal.as_str(), &role]).await {
+    let rows = match tx
+        .query(&sql, &[&organization_id, &principal.as_str(), &role])
+        .await
+    {
         Ok(rows) => rows,
         Err(err) => return db_error(&err, "classify seat refusal"),
     };
@@ -3623,7 +3643,12 @@ async fn classify_project_deletion_refusal<C: GenericClient + Sync>(
     let rows = match tx
         .query(
             &sql,
-            &[&organization_id, &principal.as_str(), &project_id, &ROLE_ADMIN],
+            &[
+                &organization_id,
+                &principal.as_str(),
+                &project_id,
+                &ROLE_ADMIN,
+            ],
         )
         .await
     {
@@ -3669,7 +3694,15 @@ async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
         admin = ladder_rank("$4"),
     );
     let rows = match tx
-        .query(&sql, &[&organization_id, &principal.as_str(), &app_id.as_str(), &ROLE_ADMIN])
+        .query(
+            &sql,
+            &[
+                &organization_id,
+                &principal.as_str(),
+                &app_id.as_str(),
+                &ROLE_ADMIN,
+            ],
+        )
         .await
     {
         Ok(rows) => rows,
@@ -3705,7 +3738,12 @@ async fn classify_transfer_refusal<C: GenericClient + Sync>(
                  WHERE organization_id = $1 AND user_id = $2 AND role = $4)::bigint AS actor_owns, \
                (SELECT COUNT(*) FROM zeroship.organization_members \
                  WHERE organization_id = $1 AND user_id = $3)::bigint AS target_seated",
-            &[&organization_id, &principal.as_str(), &target.as_str(), &ROLE_OWNER],
+            &[
+                &organization_id,
+                &principal.as_str(),
+                &target.as_str(),
+                &ROLE_OWNER,
+            ],
         )
         .await;
     let rows = match rows {
@@ -3754,7 +3792,9 @@ async fn classify_project_seat_refusal<C: GenericClient + Sync>(
         }
         // The one caller is `add_project_member`, whose INSERT carries the
         // `admin` floor.
-        Ok(_) => classify_seat_refusal(tx, organization_id, principal, role, Some(ROLE_ADMIN)).await,
+        Ok(_) => {
+            classify_seat_refusal(tx, organization_id, principal, role, Some(ROLE_ADMIN)).await
+        }
         Err(err) => db_error(&err, "classify project seat refusal"),
     }
 }
@@ -3784,10 +3824,7 @@ async fn read_member<C: GenericClient + Sync>(
     let row = rows.first().ok_or(OrganizationError::MemberNotFound)?;
     Ok(MemberRecord {
         organization_id: row.get("organization_id"),
-        // The row was fetched by `m.user_id = $2` against this same id, so the
-        // parameter IS the value; no need to round-trip it through a read the
-        // driver has no `FromSql<UserId>` for.
-        user_id: user_id.clone(),
+        user_id: crate::user_id::from_row(row, "user_id", "organization member")?,
         email: row.get("email"),
         name: row.get("name"),
         role: row.get("role"),
@@ -4962,16 +4999,13 @@ mod tests {
         let two = UserId::mint();
         assert_ne!(personal_slug(&one), personal_slug(&two));
         validate_slug(&personal_slug(&one)).expect("the personal slug must satisfy the grammar");
-        // The id must be rendered WITHOUT hyphens-as-separators problems: the
-        // base62 body carries no hyphen, and lowercasing it does not
-        // introduce one.
         assert!(
             personal_slug(&one).starts_with("personal-"),
             "a personal slug is recognisable as one"
         );
         assert!(
             !personal_slug(&one)["personal-".len()..].contains('-'),
-            "the owner id is rendered without its prefix separator"
+            "the owner id is rendered in simple form"
         );
     }
 

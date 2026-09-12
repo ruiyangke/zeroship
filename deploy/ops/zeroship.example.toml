@@ -67,7 +67,7 @@ pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 #
 # To skip consent for the console, set this to the console's per-app PKCE client
 # id, which `zeroship-control --bootstrap-console` prints:
-#   client_id_for_app(console_app_id(console_host))  => "oac_<base62>"
+#   client_id_for_app(console_app_id(console_host))  => "oac_<base36>"
 # e.g. for console.zeroship.ai:
 # trusted_oauth_clients = ["oac_<your-console-client-id>"]
 trusted_oauth_clients = []
@@ -158,7 +158,15 @@ broker_secret_file = "/etc/zeroship/secrets/broker_secret"
 
 [worker]
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/worker_database_url"
-kv_url = "urn:zeroship:file:/etc/zeroship/secrets/kv_url"
+cdc_relay_url = "wss://cdc-relay:9094/internal/v1/cdc/subscribe"
+cdc_relay_ca_file = "/etc/zeroship/secrets/cdc-cert.pem"
+kv_config = "urn:zeroship:file:/etc/zeroship/secrets/kv.toml"
+
+[data_cdc_server]
+database_url = "urn:zeroship:file:/etc/zeroship/secrets/cdc_database_url"
+listen = "0.0.0.0:9094"
+tls_cert_file = "/etc/zeroship/secrets/cdc-cert.pem"
+tls_key_file = "/etc/zeroship/secrets/cdc-key.pem"
 
 [migrate_server]
 database_url = "urn:zeroship:file:/etc/zeroship/secrets/migrated_database_url"

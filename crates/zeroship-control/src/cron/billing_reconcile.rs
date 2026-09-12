@@ -188,10 +188,7 @@ pub struct BillingSafetyNetSummary {
 /// Return the next correction sequence for a changed corrected quantity. A prior
 /// correction to the same quantity means a re-run with the same numbers is a no-op.
 #[must_use]
-pub fn next_correction_seq(
-    history: &[CorrectionHistory],
-    corrected_quantity: i64,
-) -> Option<u32> {
+pub fn next_correction_seq(history: &[CorrectionHistory], corrected_quantity: i64) -> Option<u32> {
     if history
         .iter()
         .any(|h| h.corrected_quantity == corrected_quantity)
@@ -303,7 +300,10 @@ fn outside_tolerance(delta: i64, tolerance: i64) -> bool {
 /// on any tick during month M, we bill month M-1.
 #[must_use]
 pub fn previous_period_start_unix(now_unix: i64) -> i64 {
-    let dt = Utc.timestamp_opt(now_unix, 0).single().unwrap_or_else(Utc::now);
+    let dt = Utc
+        .timestamp_opt(now_unix, 0)
+        .single()
+        .unwrap_or_else(Utc::now);
     let (year, month) = if dt.month() == 1 {
         (dt.year() - 1, 12)
     } else {
@@ -333,11 +333,7 @@ pub fn period_end_unix(period_start_unix: i64) -> i64 {
 }
 
 #[must_use]
-pub fn period_settled(
-    now_unix: i64,
-    period_start_unix: i64,
-    settle_window: Duration,
-) -> bool {
+pub fn period_settled(now_unix: i64, period_start_unix: i64, settle_window: Duration) -> bool {
     let Some(settled_at) = period_end_unix(period_start_unix)
         .checked_add(i64::try_from(settle_window.as_secs()).unwrap_or(i64::MAX))
     else {
@@ -360,7 +356,10 @@ pub fn invoice_item_idempotency_key(
     period_start_unix: i64,
     segment_no: i16,
 ) -> String {
-    format!("billitem:{organization_id}:{}:{period_start_unix}:{segment_no}", app_id.as_str())
+    format!(
+        "billitem:{organization_id}:{}:{period_start_unix}:{segment_no}",
+        app_id.as_str()
+    )
 }
 
 /// Deterministic Stripe `Idempotency-Key` for the per-run invoice create.
@@ -395,9 +394,9 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 /// resulted in a finalized invoice).
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
-    let stripe = StripeClient::new(
-        crate::SecretString::new(state.stripe_secret_key.expose_secret().to_string()),
-    )
+    let stripe = StripeClient::new(crate::SecretString::new(
+        state.stripe_secret_key.expose_secret().to_string(),
+    ))
     .with_base_url(state.stripe_base_url.clone());
     tick_with(state, &stripe, Utc::now().timestamp()).await
 }
@@ -448,7 +447,9 @@ pub async fn tick_with<S: StripeApi>(
         .await?;
     let acquired = got.first().is_some_and(|r| r.get::<_, bool>("locked"));
     if !acquired {
-        tracing::debug!("billing_reconcile: advisory lock held by another instance — skipping tick");
+        tracing::debug!(
+            "billing_reconcile: advisory lock held by another instance — skipping tick"
+        );
         return Ok(0);
     }
 
@@ -544,7 +545,10 @@ async fn sweep<S: StripeApi>(
             continue;
         }
         let organization_id: String = row.get("organization_id");
-        apps_by_organization.entry(organization_id).or_default().push(app_id);
+        apps_by_organization
+            .entry(organization_id)
+            .or_default()
+            .push(app_id);
     }
 
     let mut billed = 0usize;
@@ -560,7 +564,10 @@ async fn sweep<S: StripeApi>(
 
     for organization_id in apps_by_organization.keys() {
         let subject = crate::metering::provider::SubjectRef(organization_id.clone());
-        match invoicer.close_period(&subject, billing_period).await.map_err(RegistryError::from)
+        match invoicer
+            .close_period(&subject, billing_period)
+            .await
+            .map_err(RegistryError::from)
         {
             Ok(crate::metering::provider::InvoiceRef(Some(_))) => billed += 1,
             Ok(crate::metering::provider::InvoiceRef(None)) => {
@@ -707,10 +714,7 @@ fn safety_net_periods(
     vec![current, previous]
 }
 
-fn add_safety_net_summary(
-    total: &mut BillingSafetyNetSummary,
-    next: BillingSafetyNetSummary,
-) {
+fn add_safety_net_summary(total: &mut BillingSafetyNetSummary, next: BillingSafetyNetSummary) {
     total.subjects_checked += next.subjects_checked;
     total.corrections_issued += next.corrections_issued;
     total.findings_recorded += next.findings_recorded;
@@ -916,15 +920,8 @@ pub async fn reconcile_pass_for_meter(
         });
 
         if let Some(correction) = &decision.correction {
-            match apply_correction(
-                state,
-                &conn,
-                totals,
-                period,
-                provider_quantity,
-                correction,
-            )
-            .await
+            match apply_correction(state, &conn, totals, period, provider_quantity, correction)
+                .await
             {
                 Ok(inserted_findings) => {
                     summary.corrections_issued += 1;
@@ -932,13 +929,9 @@ pub async fn reconcile_pass_for_meter(
                 }
                 Err(err) => {
                     summary.provider_rejects += 1;
-                    summary.findings_recorded += record_provider_reject_finding(
-                        &conn,
-                        totals,
-                        period,
-                        &err.to_string(),
-                    )
-                    .await?;
+                    summary.findings_recorded +=
+                        record_provider_reject_finding(&conn, totals, period, &err.to_string())
+                            .await?;
                 }
             }
         }
@@ -1061,25 +1054,12 @@ where
             } else {
                 "late usage over-bill"
             };
-            // `metering::provider::types::AdjustmentNote.app_id` is still
-            // `Option<uuid::Uuid>` (out of scope for this change). Decode the
-            // id's own base62 body back to the uuid it encodes via the shared
-            // typed-id codec rather than widen that field: `totals.app_id` was
-            // validated by `AppId::parse` when this row was read, so the
-            // decode below cannot fail. This is a one-way adapter at a single
-            // declared boundary, not a general conversion — remove it the day
-            // `AdjustmentNote.app_id` becomes `Option<AppId>`.
-            let legacy_app_id = zeroship_core::typed_id::parse_with_prefix(
-                totals.app_id.as_str(),
-                zeroship_core::typed_id::APP_PREFIX,
-            )
-            .expect("totals.app_id is a validated AppId; its base62 body always decodes");
             invoicer
                 .adjustment_note(
                     &SubjectRef(totals.organization_id.to_string()),
                     &AdjustmentNote {
                         period,
-                        app_id: Some(legacy_app_id),
+                        app_id: Some(totals.app_id.clone()),
                         meter: totals.meter.clone(),
                         quantity_delta: correction.quantity_delta,
                         correction_seq: correction.correction_seq,
@@ -1162,7 +1142,10 @@ where
     let mut history = Vec::with_capacity(rows.len());
     for row in &rows {
         let value: serde_json::Value = row.get("our_value");
-        let Some(seq) = value.get("correction_seq").and_then(serde_json::Value::as_u64) else {
+        let Some(seq) = value
+            .get("correction_seq")
+            .and_then(serde_json::Value::as_u64)
+        else {
             continue;
         };
         let Some(quantity) = value
@@ -1210,7 +1193,10 @@ where
         }),
         Some(format!(
             "provider_reject:{}:{}:{}:{}",
-            totals.app_id.as_str(), period.start, totals.meter, reason
+            totals.app_id.as_str(),
+            period.start,
+            totals.meter,
+            reason
         )),
     )
     .await
@@ -1229,8 +1215,9 @@ async fn record_safety_net_finding<C>(
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let dedup_key = dedup_key
-        .unwrap_or_else(|| safety_net_finding_dedup_key(kind.as_db_kind(), entity_id, &our_value, &provider_value));
+    let dedup_key = dedup_key.unwrap_or_else(|| {
+        safety_net_finding_dedup_key(kind.as_db_kind(), entity_id, &our_value, &provider_value)
+    });
     let id = zeroship_core::typed_id::new_reconcile_finding_id();
     let inserted = conn
         .query(
@@ -1277,7 +1264,11 @@ fn safety_net_finding_dedup_key(
 /// key built one way must always compare equal to itself built the same way
 /// again, or the same subject's history goes invisible.
 fn correction_entity_id(app_id: &AppId, meter: &str, period: BillingPeriod) -> String {
-    format!("billing-correction:{}:{meter}:{}", app_id.as_str(), period.start)
+    format!(
+        "billing-correction:{}:{meter}:{}",
+        app_id.as_str(),
+        period.start
+    )
 }
 
 fn correction_dedup_key(
@@ -1520,8 +1511,10 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     // immutability trigger fires only on a finalized parent), so we delete the orphans
     // here: drop the Stripe item (adopting an un-ref'd-but-possibly-posted item via
     // its deterministic metadata key first), then the provider-ref, then the line.
-    let fresh_keys: std::collections::HashSet<(AppId, i16)> =
-        lines.iter().map(|l| (l.app_id.clone(), l.segment_no)).collect();
+    let fresh_keys: std::collections::HashSet<(AppId, i16)> = lines
+        .iter()
+        .map(|l| (l.app_id.clone(), l.segment_no))
+        .collect();
     let orphans: Vec<(AppId, i16)> = line_exists
         .union(&posted)
         .cloned()
@@ -1545,8 +1538,12 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         } else {
             // line-only intent (no confirmed ref): it may STILL have been posted
             // (crash between POST and ref-insert), so look it up by its key.
-            let orphan_key =
-                invoice_item_idempotency_key(organization_id, orphan_app, period_start, *orphan_seg);
+            let orphan_key = invoice_item_idempotency_key(
+                organization_id,
+                orphan_app,
+                period_start,
+                *orphan_seg,
+            );
             stripe
                 .find_invoice_item_by_key(&customer, &orphan_key)
                 .await
@@ -1665,8 +1662,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         // snapshot/idempotency derive from (so the Stripe line, our `invoice_lines`
         // snapshot, and the read-API all agree). DESCRIPTIVE ONLY — `line.amount`
         // (the authoritative `ChargeBreakdown.total_cents`) is what bills.
-        let (enriched_desc, item_metadata) =
-            build_invoice_item_enrichment(line, period_start);
+        let (enriched_desc, item_metadata) = build_invoice_item_enrichment(line, period_start);
 
         // Not adopted ⇒ POST it. Within 24h the deterministic Idempotency-Key
         // makes this replay-safe; past 24h the line intent + the metadata lookup
@@ -1729,7 +1725,7 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         None => {
             let invoice_key = invoice_idempotency_key(organization_id, period_start);
             let id = stripe
-                .create_invoice(&customer, &organization_id.to_string(), &invoice_key)
+                .create_invoice(&customer, organization_id, &invoice_key)
                 .await
                 .map_err(|e| RegistryError::Database(format!("create_invoice: {e}")))?;
             // Persist the draft id BEFORE finalize. A crash here (post-create,
@@ -1805,7 +1801,11 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     // schema change — `tax_cents` already exists.
     let tx = conn.transaction().await?;
     let credit = crate::credit::consume_at_finalize(
-        &tx, organization_id, &invoice_id, amount_i64, BILLING_CURRENCY,
+        &tx,
+        organization_id,
+        &invoice_id,
+        amount_i64,
+        BILLING_CURRENCY,
     )
     .await?;
     let credit_i64 = credit.applied_cents;
@@ -1909,7 +1909,9 @@ pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>
         // of truth (MAJOR-4) and the single segment's plan on the no-change path. A
         // missing/poison plan is skipped, not fatal.
         let plan_id = lookup_plan_id_on(conn, app_id).await?;
-        let Some(current_plan_id) = plan_id else { continue };
+        let Some(current_plan_id) = plan_id else {
+            continue;
+        };
         if crate::plan_catalog::get_on(conn, &current_plan_id)
             .await?
             .is_none()
@@ -2160,8 +2162,7 @@ fn build_invoice_item_enrichment(
     // here (it priced successfully), but be defensive: on the impossible overflow,
     // fall back to an empty list (the gross CU is still shown) rather than abort —
     // enrichment must never block the authoritative charge.
-    let per_metric = crate::pricing::per_metric_usage_cu(&line.usage, &weights)
-        .unwrap_or_default();
+    let per_metric = crate::pricing::per_metric_usage_cu(&line.usage, &weights).unwrap_or_default();
 
     let description = crate::pricing::enriched_description(
         &line.desc,
@@ -2172,19 +2173,32 @@ fn build_invoice_item_enrichment(
 
     let mut metadata: Vec<(String, String)> = vec![
         ("compute_units".to_string(), line.total_units.to_string()),
-        ("billable_units".to_string(), line.billable_units.to_string()),
-        ("included_units".to_string(), line.included_units.to_string()),
+        (
+            "billable_units".to_string(),
+            line.billable_units.to_string(),
+        ),
+        (
+            "included_units".to_string(),
+            line.included_units.to_string(),
+        ),
         (
             "fx_pico_cents_per_unit".to_string(),
             line.fx_pico_cents_per_unit.to_string(),
         ),
-        ("base_fee_cents".to_string(), line.base_fee_cents.to_string()),
+        (
+            "base_fee_cents".to_string(),
+            line.base_fee_cents.to_string(),
+        ),
         ("period".to_string(), month_label(period_start)),
         ("segment".to_string(), line.segment_label.clone()),
     ];
     let (blobs, truncated) = crate::pricing::pack_usage_blobs(&per_metric);
     for (i, blob) in blobs.into_iter().enumerate() {
-        let key = if i == 0 { "usage".to_string() } else { format!("usage_{}", i + 1) };
+        let key = if i == 0 {
+            "usage".to_string()
+        } else {
+            format!("usage_{}", i + 1)
+        };
         metadata.push((key, blob));
     }
     if truncated {
@@ -2269,7 +2283,10 @@ pub(crate) async fn lookup_plan_id_on<C: compio_postgres::GenericClient + Sync>(
     app_id: &AppId,
 ) -> Result<Option<String>, RegistryError> {
     let rows = conn
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
+        .query(
+            "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
         .await?;
     Ok(rows.first().map(|r| r.get::<_, String>("plan_id")))
 }
@@ -2290,24 +2307,56 @@ mod tests {
     #[test]
     fn previous_period_is_prior_calendar_month() {
         // Mid-June 2026 → previous period starts 2026-05-01 UTC.
-        let mid_june = Utc.with_ymd_and_hms(2026, 6, 13, 12, 0, 0).unwrap().timestamp();
+        let mid_june = Utc
+            .with_ymd_and_hms(2026, 6, 13, 12, 0, 0)
+            .unwrap()
+            .timestamp();
         let ps = previous_period_start_unix(mid_june);
-        assert_eq!(ps, Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap().timestamp());
+        assert_eq!(
+            ps,
+            Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
     }
 
     #[test]
     fn previous_period_wraps_january_to_december() {
-        let mid_jan = Utc.with_ymd_and_hms(2026, 1, 15, 0, 0, 0).unwrap().timestamp();
+        let mid_jan = Utc
+            .with_ymd_and_hms(2026, 1, 15, 0, 0, 0)
+            .unwrap()
+            .timestamp();
         let ps = previous_period_start_unix(mid_jan);
-        assert_eq!(ps, Utc.with_ymd_and_hms(2025, 12, 1, 0, 0, 0).unwrap().timestamp());
+        assert_eq!(
+            ps,
+            Utc.with_ymd_and_hms(2025, 12, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
     }
 
     #[test]
     fn period_end_is_next_month_start() {
-        let may = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap().timestamp();
-        assert_eq!(period_end_unix(may), Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap().timestamp());
-        let dec = Utc.with_ymd_and_hms(2026, 12, 1, 0, 0, 0).unwrap().timestamp();
-        assert_eq!(period_end_unix(dec), Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap().timestamp());
+        let may = Utc
+            .with_ymd_and_hms(2026, 5, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            period_end_unix(may),
+            Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
+        let dec = Utc
+            .with_ymd_and_hms(2026, 12, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            period_end_unix(dec),
+            Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0)
+                .unwrap()
+                .timestamp()
+        );
     }
 
     #[test]
@@ -2345,7 +2394,10 @@ mod tests {
 
     #[test]
     fn month_label_formats_year_month() {
-        let may = Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap().timestamp();
+        let may = Utc
+            .with_ymd_and_hms(2026, 5, 1, 0, 0, 0)
+            .unwrap()
+            .timestamp();
         assert_eq!(month_label(may), "2026-05");
     }
 
@@ -2541,7 +2593,10 @@ mod tests {
 
     impl RecordedItem {
         fn meta(&self, key: &str) -> Option<&str> {
-            self.metadata.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+            self.metadata
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
         }
     }
 
@@ -2552,7 +2607,11 @@ mod tests {
     }
 
     impl StripeApi for RecordingStripe {
-        async fn create_customer(&self, _email: &str, _organization_id: &str) -> Result<String, StripeError> {
+        async fn create_customer(
+            &self,
+            _email: &str,
+            _organization_id: &str,
+        ) -> Result<String, StripeError> {
             Ok("cus_fake".to_string())
         }
         async fn create_checkout_setup_session(
@@ -2695,7 +2754,9 @@ mod tests {
         let organization = "org_00000000000000000000aa000";
         let app = AppId::mint();
         let period = previous_period_start_unix(
-            Utc.with_ymd_and_hms(2026, 6, 13, 0, 0, 0).unwrap().timestamp(),
+            Utc.with_ymd_and_hms(2026, 6, 13, 0, 0, 0)
+                .unwrap()
+                .timestamp(),
         );
 
         // CU pricing: weight 1 CU/request, FX = 1 cent/CU ⇒ 750 requests = 750c.
@@ -2706,7 +2767,13 @@ mod tests {
             spend_limit_default_cents: 0,
         };
         let mut weights = MetricWeights::new();
-        weights.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
+        weights.insert(
+            "requests".to_string(),
+            MetricWeight {
+                units_per_op: 1,
+                per_units: 1,
+            },
+        );
         let mut usage = std::collections::HashMap::new();
         usage.insert("requests".to_string(), 750i64);
         let breakdown = charge_cents(&price, &usage, &weights).expect("charge");
@@ -2753,7 +2820,10 @@ mod tests {
             breakdown.total_cents,
             "usd",
             &enriched_desc,
-            Period { start: period, end: period_end_unix(period) },
+            Period {
+                start: period,
+                end: period_end_unix(period),
+            },
             &item_key,
             &item_key,
             &metadata,
@@ -2761,17 +2831,26 @@ mod tests {
         .await
         .unwrap();
         let invoice_key = invoice_idempotency_key(organization, period);
-        let draft = fake.create_invoice("cus_fake", organization, &invoice_key).await.unwrap();
+        let draft = fake
+            .create_invoice("cus_fake", organization, &invoice_key)
+            .await
+            .unwrap();
         fake.finalize_invoice(&draft).await.unwrap();
 
         let items = fake.items.borrow();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].amount, 750, "the per-app amount equals charge_cents total");
+        assert_eq!(
+            items[0].amount, 750,
+            "the per-app amount equals charge_cents total"
+        );
         assert_eq!(
             items[0].idempotency_key,
             format!("billitem:{organization}:{}:{period}:0", app.as_str())
         );
-        assert_eq!(fake.invoices.borrow()[0].1, format!("billrun:{organization}:{period}"));
+        assert_eq!(
+            fake.invoices.borrow()[0].1,
+            format!("billrun:{organization}:{period}")
+        );
 
         // Enrichment: the description carries the CU, the metadata the full
         // derivation — and NONE of it changed the authoritative amount above.

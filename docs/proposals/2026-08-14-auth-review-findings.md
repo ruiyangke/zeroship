@@ -321,13 +321,12 @@ silently tolerated.
 
 ## 10. Six of nine security headers were asserted nowhere - FIXED (`317b95f74`)
 
-`headers::apply` sets nine headers and reasons about all of them in its doc
-comment. Only `referrer-policy`, `x-frame-options` and the CSP were checked
-against a live response, each as a side-condition of a test about something
-else. HSTS, `nosniff`, `permissions-policy`, COOP, CORP and the `no-store`
-default were asserted nowhere: deleting any one of them broke no test.
-`framing_config_test.rs` is not that check either - it reads the Caddy config
-FILES and never sends a request.
+The response checks now cover HSTS, content-type sniffing, referrer policy,
+permissions policy, cross-origin policies, cache control and framing headers.
+`security_headers_test.rs` drives framed and unframed HTTP routes; unit tests
+inside `headers.rs` exercise the header writer directly. The Caddy source-text
+assertions and exported test-only framing accessor have been retired. Service
+response coverage does not verify the deployed reverse proxy's behavior.
 
 The new test caught a wrong assumption on its first run, which is the best thing
 it could have done. It was written asserting `X-Frame-Options: DENY` on

@@ -52,9 +52,7 @@ pub fn control_service_issuer() -> Result<ServiceIssuer, AssertionError> {
 pub fn control_replay_store(
     control_pg: Arc<compio_postgres::Client>,
 ) -> Arc<dyn ReplayStore + Send + Sync> {
-    Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(
-        control_pg,
-    ))
+    Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(control_pg))
 }
 
 /// Refuse a caller that has not proved WHICH SERVICE it is, or that holds no
@@ -104,8 +102,7 @@ pub(crate) async fn check_service_auth(
                 web::HttpResponse::ServiceUnavailable()
                     .json(&serde_json::json!({"error":"service unavailable"}))
             } else {
-                web::HttpResponse::Unauthorized()
-                    .json(&serde_json::json!({"error":"unauthorized"}))
+                web::HttpResponse::Unauthorized().json(&serde_json::json!({"error":"unauthorized"}))
             })
         }
     }
@@ -157,20 +154,8 @@ async fn verify_service_caller(
 /// issuer naming a role". Every one of those takes the role path, which refuses
 /// the malformed ones itself; there is no arm here that admits anything.
 fn presented_instance_issuer(authorization: Option<&str>) -> Option<ServiceIssuer> {
-    use base64::Engine as _;
-
-    let assertion = zeroship_core::auth::extract_bearer(authorization?)?;
-    let mut parts = assertion.split('.');
-    let (_header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
-    if signature.is_empty() || parts.next().is_some() {
-        return None;
-    }
-    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .ok()?;
-    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
-    let issuer = ServiceIssuer::parse(claims.get("iss")?.as_str()?).ok()?;
-    issuer.instance().is_some().then_some(issuer)
+    zeroship_core::service_assertion::presented_issuer(authorization)
+        .filter(|issuer| issuer.instance().is_some())
 }
 
 /// Verify an assertion minted by an enrolled worker INSTANCE.
@@ -272,10 +257,7 @@ async fn verify_worker_instance(
 /// the four processes that hold that file; adding a fifth holder is how a
 /// narrow need for one route becomes a grant on all of them, which is what
 /// happened when the erasure preflight briefly landed here.
-fn check_auth(
-    req: &web::HttpRequest,
-    state: &AppState,
-) -> Option<web::HttpResponse> {
+fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
     let header = req
         .headers()
         .get("authorization")
@@ -287,7 +269,10 @@ fn check_auth(
         // GET to /internal/* could leak decrypted secrets to the network.
         Some(key)
             if !state.control_key.is_empty()
-                && zeroship_core::auth::constant_time_eq(key, state.control_key.expose_secret()) =>
+                && zeroship_core::auth::constant_time_eq(
+                    key,
+                    state.control_key.expose_secret(),
+                ) =>
         {
             None
         }
@@ -368,14 +353,11 @@ pub async fn get_app_env(
     // user principal. It presents its own ed25519 assertion under the full
     // profile; a shared bearer no longer opens this door, which matters most
     // here because the response body is the app's DECRYPTED environment.
-    if let Some(resp) =
-        check_service_auth(&req, &state, endpoints::CONTROL_APP_ENV).await
-    {
+    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP_ENV).await {
         return resp;
     }
     let Ok(id) = AppId::parse(&app_id) else {
-        return web::HttpResponse::BadRequest()
-            .json(&serde_json::json!({"error": "bad app_id"}));
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({"error": "bad app_id"}));
     };
     match state.env_store.merged_env_for_worker(&id).await {
         Ok(value) => web::HttpResponse::Ok().json(&value),
@@ -384,6 +366,35 @@ pub async fn get_app_env(
         }
         Err(e) => {
             tracing::error!(app_id = %id.as_str(), error = %e, "control-internal: env fetch error");
+            web::HttpResponse::InternalServerError()
+                .json(&serde_json::json!({"error":"internal error"}))
+        }
+    }
+}
+
+/// Host-only project key delivery. The app's project comes from control's
+/// registry, and the key never enters the app environment response.
+pub async fn get_app_data_key(
+    req: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    app_id: Path<String>,
+) -> web::HttpResponse {
+    if let Some(response) = check_service_auth(&req, &state, endpoints::CONTROL_APP_DATA_KEY).await
+    {
+        return response;
+    }
+    let Ok(id) = AppId::parse(&app_id) else {
+        return web::HttpResponse::BadRequest().json(&serde_json::json!({"error":"bad app_id"}));
+    };
+    match crate::project_keys::for_app(&state.registry, state.env_store.cipher(), &id).await {
+        Ok(key) => web::HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .json(&key),
+        Err(crate::project_keys::KeyError::AppNotFound) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+        }
+        Err(crate::project_keys::KeyError::Storage(error)) => {
+            tracing::error!(app_id = %id.as_str(), %error, "control-internal: project key delivery failed");
             web::HttpResponse::InternalServerError()
                 .json(&serde_json::json!({"error":"internal error"}))
         }
@@ -414,18 +425,13 @@ pub async fn enrol_worker_instance(
     state: State<Arc<AppState>>,
     body: web::types::Json<crate::worker_enrolment::WorkerEnrolmentRequest>,
 ) -> web::HttpResponse {
-    if let Some(resp) =
-        check_service_auth(&req, &state, endpoints::CONTROL_WORKER_ENROL).await
-    {
+    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_WORKER_ENROL).await {
         return resp;
     }
     crate::worker_enrolment::enrol(&state, req.peer_addr(), body.into_inner()).await
 }
 
-pub async fn get_versions(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
+pub async fn get_versions(req: web::HttpRequest, state: State<Arc<AppState>>) -> web::HttpResponse {
     // Internal endpoint, no user authz: workers authenticate with the
     // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {
@@ -458,18 +464,16 @@ pub async fn get_app_version(
     match state.registry.get_versions().await {
         Ok(versions) => match versions.get(&uid) {
             Some(info) => web::HttpResponse::Ok().json(info),
-            None => web::HttpResponse::NotFound()
-                .json(&serde_json::json!({"error":"app not found"})),
+            None => {
+                web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
+            }
         },
         Err(e) => web::HttpResponse::InternalServerError()
             .json(&serde_json::json!({"error": e.to_string()})),
     }
 }
 
-pub async fn get_routes(
-    req: web::HttpRequest,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
+pub async fn get_routes(req: web::HttpRequest, state: State<Arc<AppState>>) -> web::HttpResponse {
     // Internal endpoint, no user authz: gateways authenticate with the
     // control-key shared secret and there is no user principal.
     if let Some(resp) = check_auth(&req, &state) {

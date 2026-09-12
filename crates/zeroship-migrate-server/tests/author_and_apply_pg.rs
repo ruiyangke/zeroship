@@ -28,9 +28,9 @@
 //! zeroship-runtime's V8. Everything downstream of the envelope is the SAME native
 //! apply path as Stage 1.
 //!
-//! GATED behind a test database (a DSN on :5440; set `PG_TEST_URL`): skips
-//! cleanly when unset, so DB-free CI stays green. The V8-authoring assertions run
-//! UNCONDITIONALLY (they need no DB) so authoring itself is proven even without PG.
+//! PostgreSQL apply requires the test overlay or `PG_TEST_URL`; missing
+//! configuration or connectivity fails the test. V8 authoring is also tested
+//! independently of the database.
 
 use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{
@@ -153,8 +153,8 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
         // deliberately NOT a JS-reachable global — Rust stamps provenance).
         {
             let global = scope.get_current_context().global(scope);
-            let k = v8::String::new(scope, "__zsMigrationName")
-                .ok_or("alloc __zsMigrationName key")?;
+            let k =
+                v8::String::new(scope, "__zsMigrationName").ok_or("alloc __zsMigrationName key")?;
             let v = v8::String::new(scope, name).ok_or("alloc __zsMigrationName value")?;
             global.set(scope, k.into(), v.into());
         }
@@ -236,8 +236,15 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
     (c, effective)
 }
 
-fn pg_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+/// The live `PostgreSQL` this target applies its migrations to.
+///
+/// # Panics
+///
+/// When neither `PG_TEST_URL` nor the test overlay names one, with the
+/// provisioning command. It used to announce a skip, so a run against no
+/// database reported the same green as one that had applied real DDL.
+fn pg_url() -> String {
+    zeroship_core::config::test_database_url()
 }
 
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
@@ -262,14 +269,10 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 /// Resolve the authored envelope's `createTable` ops through the confined
 /// table-shape policy (the platform's create-table policy) before lowering —
 /// the same normalisation Stage 1 uses.
-fn resolved_envelope_json(
-    raw: &str,
-    effective: &EffectivePolicy,
-    default_schema: &str,
-) -> String {
+fn resolved_envelope_json(raw: &str, effective: &EffectivePolicy, default_schema: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("authored IR parses as MigrationIr");
-    let resolved = resolve_create_table_policy(&ir, effective, default_schema)
-        .expect("authored IR resolves");
+    let resolved =
+        resolve_create_table_policy(&ir, effective, default_schema).expect("authored IR resolves");
     serde_json::to_string(&resolved).expect("resolved authored IR serializes")
 }
 
@@ -321,16 +324,11 @@ fn sample_ts_authors_ir_version_1_envelope_in_v8() {
 }
 
 /// The full native loop: author in V8 → v1 envelope → published-engine lower+apply
-/// over the compio seam → live PG. Gated on a test database (see `PG_TEST_URL`).
+/// over the compio seam -> live PG. It REQUIRES a test database and fails
+/// without one; see `pg_url`.
 #[compio::test]
 async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
-    let Some(url) = pg_url() else {
-        zeroship_test_support::skip(
-            "skipping Phase F Stage 2 apply: no test database (set PG_TEST_URL \
-             to a DSN on :5440 to run)"
-        );
-        return;
-    };
+    let url = pg_url();
 
     // (1) AUTHOR the envelope in zeroship-runtime's V8 (the whole point of Stage 2).
     let authored = author_v1_envelope(SAMPLE_MIGRATION_TS, "create_notes_and_add_tag");
@@ -355,8 +353,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
 
     // (5) PostgresBackend over the compio adapter + MigrationEngine.
     let engine = MigrationEngine::new(VENDORS);
-    let guard_cfg =
-        GuardConfig::from_policy(effective.clone(), POSTGRES);
+    let guard_cfg = GuardConfig::from_policy(effective.clone(), POSTGRES, &cfg.project_schema);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -403,9 +400,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = read_journal(&session, &cfg)
-        .await
-        .expect("journal re-read");
+    let applied2 = read_journal(&session, &cfg).await.expect("journal re-read");
     assert_eq!(
         applied2.len(),
         migrations.len(),

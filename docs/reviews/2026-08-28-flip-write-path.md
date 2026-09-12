@@ -1,7 +1,9 @@
 # The masking flip's WRITE path: a specification
 
-Status: design only. No code changed. Written against the tree at
-`.worktrees/dbbind-impl`, HEAD `0e785d5fc`.
+Status: historical design review, written against `.worktrees/dbbind-impl`,
+HEAD `0e785d5fc`. The projection and descriptor notes below have been corrected
+for the implemented ORM. Other design sketches retain their original context;
+use the [DB reference](../reference/db.md) for the current contract.
 
 Input: the BLOCKING note in
 `docs/proposals/2026-08-26-sc6-ceiling-read-contract.md:336-406`, which records
@@ -30,7 +32,7 @@ Stated first, so nothing below reads as more settled than it is.
   and I cannot tell which is current. Section 4.6 below assumes the struct is
   authoritative because it is the thing that compiles.
 - **Whether the `*Many` verbs are permanently count-only.** `dispatch_update_many`
-  (`crates/zeroship-plugin-db/src/crud/mod.rs:1166`), `dispatch_delete_many`
+  (`crates/zeroship-data-v8/src/crud/mod.rs`), `dispatch_delete_many`
   (`:1491`), `dispatch_purge_many` (`:1586`) and `dispatch_restore_many` (`:1675`)
   all funnel their `RETURNING *` rows into `row_count_as_f64` and return a number.
   My outbound design leans on that. If a future verb returns those rows, the
@@ -67,7 +69,7 @@ is the number my design pays; see section 5.
 ### 1.2 "`strip_encryption_markers` retains it (`encryption_pass.rs:502-505`)"
 
 `strip_encryption_markers` is `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-plugin-db/src/crud/encryption_pass.rs:501`). It is not on the
+(`crates/zeroship-data-v8/src/protection/encryption_pass.rs`). It is not on the
 production path, and it strips `__zsbin__` markers from a **write** document
 before binding, not from a returned row. The note cites it as an outbound
 retainer; it is neither outbound nor live.
@@ -75,7 +77,7 @@ retainer; it is neither outbound nor live.
 **The conclusion survives anyway, through a different and worse route.** Nothing
 on the production read path removes an unknown key from a returned row. The only
 key removal is `mask_pass::wrap_row_on_read`, which removes exactly
-`format!("{col}_masked")` (`crates/zeroship-plugin-db/src/crud/mask_pass.rs:469`,
+`format!("{col}_masked")` (`crates/zeroship-data-v8/src/protection/mask_pass.rs`,
 `:480-482`). So `<col>_raw` survives to `mapResultDoc`
 (`sdks/db/src/utils.ts:28-33`) for the reason the note gives, just not via the
 function it names.
@@ -90,7 +92,7 @@ let should_decrypt = masked_kind == "none"
     || obj.contains_key(&sibling_key);
 if !should_decrypt { continue; }
 ```
-`crates/zeroship-plugin-db/src/crud/encryption_pass.rs:295-301`
+`crates/zeroship-data-v8/src/protection/encryption_pass.rs`
 
 Post-flip that key is absent, so for an encrypted+masked field the decrypt stage
 is skipped entirely and `<col>_raw` reaches JS as **base64 ciphertext**. For a
@@ -100,10 +102,10 @@ missing string.
 ### 1.3 "The SQLite introspector drops all mask metadata with no `else`"
 
 True as written, and irrelevant on the production path: `parse_mask_sentinels`
-(`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:2201-2202`) and its only
+(`crates/zeroship-data-v8/src/backend/sqlite/mod.rs`) and its only
 caller, the `SchemaIntrospect for SqliteBackend` impl (`:804-806`, call at
 `:917`), are both `#[cfg(any(test, feature = "test-helpers"))]`. The dev tier does
-not run it. `crates/zeroship-plugin-db/src/descriptor.rs:30-32` states this in the
+not run it. `crates/zeroship-data-v8/src/descriptor.rs` states this in the
 tree's own words: "On SQLite it was never live at all".
 
 **The same defect IS production on Postgres, and the note does not mention it.**
@@ -154,7 +156,7 @@ function every read uses:
 | restoreOne | `:1619` | `:1658` |
 | upsert | `:1955` | `:2010` |
 
-`read_pipeline::apply` (`crates/zeroship-plugin-db/src/crud/read_pipeline.rs:54-100`)
+`read_pipeline::apply` (`crates/zeroship-data-v8/src/crud/read_pipeline.rs`)
 resolves the descriptor itself at `:72-75` and runs normalize / decrypt / mask-wrap
 / unmask in a fixed order. **The write path is already inside the read pipeline.**
 A stage added there covers all seven verbs at one site.
@@ -240,36 +242,21 @@ the decoded row, as the last stage of `read_pipeline::apply`.**
 
 New in `crates/zeroship-schema/src/query.rs`, beside `read_column_for`:
 
-```rust
-/// Every column name a decoded row may carry across the JS boundary.
-///
-/// The seven system fields, every declared field's LOGICAL name, and the
-/// closed set of synthetic result columns the read builders emit. A
-/// physical column that is not one of those - a mask sibling, a raw
-/// column, an auxiliary shadow-table key - is not on this surface and is
-/// removed before the row is serialised.
-pub fn read_surface_columns(schema_hint: &Value) -> BTreeSet<String>
-```
+`read_surface_columns` in the
+[SQL compiler](../../crates/zeroship-data-orm/src/sql/compile.rs) admits declared
+readable fields and the known synthetic result columns in
+`SYNTHETIC_RESULT_COLUMNS`. Generated columns enter through their field
+declarations, just like other columns. Internal storage columns do not gain
+visibility from their names.
 
-Membership, exactly:
-
-1. the seven names in `SYSTEM_FIELD_NAMES` (`query.rs:723-731`);
-2. every key of `schema_hint` that is not `is_schema_metadata_key`
-   (`query.rs:676-678`, i.e. not `_meta` / `_indexes`);
-3. a **closed literal set** of synthetic result columns: `_distance`
-   (`query.rs:5007`), `_distance_m` (`:5074`), `__created` (`:6020`).
-
-Point 3 is a closed list, **not** "anything starting with `_`". That is
-deliberate: `scope_schema`'s `Only` arm currently retains `key.starts_with('_')`
-(`read_pipeline.rs:116`), and section 4.2 gives the raw column a `_`-prefixed
-name, so a blanket underscore allowance would re-admit exactly the column this
-whole exercise removes. If a new synthetic column is added, it is added here, and
-forgetting to means the column is dropped - a visible failure, not a leak.
+The synthetic set is explicit: accepting every underscore-prefixed result would
+also admit internal storage names. A new computed result must declare its alias
+in that set.
 
 #### Where it is applied
 
 As the **final** stage of `read_pipeline::apply`
-(`crates/zeroship-plugin-db/src/crud/read_pipeline.rs:54-100`), after the unmask
+(`crates/zeroship-data-v8/src/crud/read_pipeline.rs`), after the unmask
 overrides at `:89-97`:
 
 ```
@@ -310,41 +297,31 @@ already aliases the physical column back to the logical name
 (`query.rs:4901-4906`, `format!("{read} AS {col}")`), so its single result key is
 already on the `Declared` surface.
 
-#### Why not an explicit `RETURNING` column list
+#### Returning declared fields
 
-Three reasons, in order of weight.
+The earlier argument against an explicit `RETURNING` list assumed generated
+columns could be absent from the descriptor. That premise no longer holds.
+Assigned columns are declared fields, and there is no extra field-name set to
+union into a projection.
 
-1. **It does not close the hole it appears to close.** The rows also feed
-   `emit_for_rows` (`crates/zeroship-plugin-db/src/exec.rs:481-550`), which builds
-   the broker tuple from `m.keys()` at `:520-524`. On a deployed Postgres app the
-   authoritative event source is not that function at all - it is the WAL consumer
-   (`emit_for_rows` returns early when the consumer is running, `:501-505`), and
-   `wal_consumer::tuple_to_map` (`:635`) zips **every physical column** out of
-   pgoutput with no schema in sight. An explicit `RETURNING` list makes the SQL
-   narrower and leaves the replication stream exactly as wide. A row-surface
-   predicate can be applied to both.
-2. **The write path must return system columns the descriptor also declares, and
-   "project only declared fields" is therefore ambiguous.** The brief flags this
-   and it is real: `id` is minted SDK-side and read back out of the `RETURNING`
-   row (`crud/system_fields_pass.rs:32`), `version` and `updated_at` are
-   auto-bumped in SQL (`query.rs:5920-5925`), and `deleted_at` is what
-   soft-delete writes. All seven are in `SYSTEM_FIELD_NAMES` and none is
-   necessarily a descriptor key. The surface therefore unions the two sets rather
-   than choosing between them - which a projection list would also have to do, at
-   twelve sites, with twelve chances to disagree.
-3. **`BuiltQuery` cannot carry the answer.** It is `{ sql, params }`
-   (`query.rs:76-80`) and there is no constructor - all 19 sites hand-roll the
-   struct literal (`:2942, 3150, 3495, 3589, 4009, 4162, 4230, 4256, 4298, 4449,
-   4487, 4529, 4561, 4845, 4920, 5015, 5084, 5944, 6027`). A projection list
-   threaded through it is 19 edits and a permanent obligation on every future
-   builder.
+`build_returning_expr` in the
+[SQL compiler](../../crates/zeroship-data-orm/src/sql/compile.rs) uses
+`implicit_read_projection_parts` to return declared readable fields through
+their storage mappings.
+[Assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
+and [SQL column roles](../../crates/zeroship-data-orm/src/sql/lifecycle.rs) determine
+write behavior from metadata, independently of the column's name.
+
+A SQL projection alone does not constrain a replication stream. CDC event
+projection remains a separate responsibility; narrowing `RETURNING` is not
+proof that a subscriber sees only permitted fields.
 
 #### The count-only verbs and the broker
 
 The five `*Many` verbs never hand rows to JS, so stage 5 does not reach them and
 does not need to. What does reach a creator from those verbs is the broker's
 `changed_columns` list, which `message_to_json` serialises verbatim
-(`crates/zeroship-plugin-db/src/broker.rs:939-946`). Post-flip that list names
+(`crates/zeroship-data-v8/src/broker.rs`). Post-flip that list names
 `ssn_raw` to the subscriber. The values do not escape: `message_to_json` does not
 include `new_tuple`.
 
@@ -420,30 +397,12 @@ What this buys, at zero call sites:
 Every one of those already calls `validate_field_name`, today, before the flip.
 The inbound half needs **no new parameter, no new check, and no new call site.**
 
-**On the `&Value` versus `Option<&Value>` question the brief asks.** The read path
-made absence unrepresentable by taking `&Value`
-(`validate_read_identifier:936`, rationale at `:928-935`). The same move on the
-write side means threading `schema_hint` into `build_where` (`:5240`),
-`build_where_with_dialect` (`:5244`), `build_where_with_dialect_inner` (`:5253`)
-and `build_field_condition_with_dialect` (`:5323`), whose 15 production call sites
-are `query.rs:3117, 3486, 3992, 4221, 4247, 4282, 4426, 4475, 4512, 4549, 4646,
-4909, 5003, 5070` plus `backend/sqlite/mod.rs:1822`. Reaching those requires
-adding `schema_hint` to about twelve write-builder signatures that do not take one
-(`build_update_one_with_system_fields:3974`, `build_update_many_with_system_fields:4203`,
-`build_delete_many:4235`, `build_delete_one_with_dialect:4269`, the four
-soft-delete/restore builders at `:4410 :4459 :4496 :4533`,
-`build_conflict_probe_with_dialect:2882`, `build_count_with_soft_delete:3473`,
-`build_upsert_with_dialect:5823`) plus their delegating wrappers.
-
-I verified that every plugin-db caller of those builders already holds the
-descriptor entry - each is inside a `collection_schema(...).and_then(|schema| ...)`
-closure or has resolved it earlier (`crud/mod.rs:785, 1220, 1456, 1510, 1551,
-1596, 1639, 1695, 1768, 1838, 1927`). **So the change is mechanical and would
-work.** It is roughly 16 signatures and 18 call sites, and it is not materially
-smaller than the naive fix. I am not specifying it, because naming the column
-`__zs_raw__ssn` achieves a strictly stronger property for zero edits: a fence can
-be added to a surface someone forgets to fence, whereas a name no validator
-accepts is refused by surfaces nobody has written yet.
+**The descriptor is now required by the write compiler.** Mutation builders and
+filter compilation in the
+[SQL compiler](../../crates/zeroship-data-orm/src/sql/compile.rs) take
+`schema_hint: &Value`. They resolve fields and storage through that descriptor.
+Missing schema metadata does not permit an unrestricted projection. The earlier
+signature-change proposal is implemented, rather than an outstanding task.
 
 **`ReservedName::Suffix("_raw")` is still added** (`query.rs:766`), for exactly the
 reason the query-by-plaintext review gives for `_lookup`
@@ -473,7 +432,7 @@ The three candidate answers and their failure modes:
 **Decision: none of the three. Lower the predicate's column, and downgrade to
 coarse-grained when the lowering is not sound.**
 
-`normalise_filter` (`crates/zeroship-plugin-db/src/read_set.rs:220`) gains
+`normalise_filter` (`crates/zeroship-data-v8/src/read_set.rs`) gains
 `schema_hint: &Value` and, per conjunct:
 
 - if `read_column_for(key, schema_hint) != key` - the field is masked - and the
@@ -522,7 +481,7 @@ Specification, per storage shape:
 | field shape | `.index()` | `.unique()` |
 | --- | --- | --- |
 | mask-only (`.mask()`, no `.encrypted()`) | raw column | **raw column** - plaintext, equality is real |
-| deterministic-encrypted + masked | raw column | raw column - ciphertext equality holds (`crates/zeroship-plugin-db/src/encryption/aead.rs:92-112`, synthetic nonce `HMAC-SHA256(k_siv, aad \|\| plaintext)[..12]`) |
+| deterministic-encrypted + masked | raw column | raw column - ciphertext equality holds (`crates/zeroship-data-v8/src/encryption/aead.rs`, synthetic nonce `HMAC-SHA256(k_siv, aad \|\| plaintext)[..12]`) |
 | randomised-encrypted + masked | raw column (useless but harmless) | **refused at declare time**, as today (`types.ts:1153-1160`). It becomes supportable only when a keyed lookup column exists; that is item 1's design (`docs/reviews/2026-08-27-query-by-plaintext.md:666-688`), not this one. |
 | `.mask({kind:"none"})` | own column | own column - no sibling exists (`mask_sibling_column_for_field:2155-2158` returns `None`) |
 
@@ -554,7 +513,7 @@ blocking note conflates.
 - **SQLite.** The function and its caller are both `#[cfg(any(test, feature =
   "test-helpers"))]` (`backend/sqlite/mod.rs:2201`, `:804`). The descriptor is the
   data plane's sole schema authority
-  (`crates/zeroship-plugin-db/src/descriptor.rs:1-32`), and that module records
+  (`crates/zeroship-data-v8/src/descriptor.rs`), and that module records
   that on SQLite it always has been. So the code is a test-only reimplementation
   of a fact the descriptor states. Fixing its missing `else` would preserve a
   second source of truth for the mask sibling's name, which is exactly the
@@ -574,7 +533,7 @@ blocking note conflates.
 ### 4.6 The AAD, and what the flip actually costs in encrypted data
 
 `canonical_aad(collection, column, row_pk_bytes)`
-(`crates/zeroship-plugin-db/src/encryption/aad.rs:75-99`) length-prefixes the
+(`crates/zeroship-data-v8/src/encryption/aad.rs`) length-prefixes the
 column name into the AEAD tag at `:97`. The encryption pass passes the **logical
 field name** (`crud/encryption_pass.rs:200`, `:337`; pinned by
 `crud/write_pipeline.rs:734`, `canonical_aad(collection, "ssn", Some(id))`).
@@ -614,22 +573,22 @@ argument the query-by-plaintext review makes about `lookupColumn`
 | # | site | what |
 | --- | --- | --- |
 | 1 | `crates/zeroship-schema/src/query.rs` (new fn) | `read_surface_columns` |
-| 2 | `crates/zeroship-plugin-db/src/crud/read_pipeline.rs:14-100` | `RowSurface`, stage 5 |
-| 3 | `crates/zeroship-plugin-db/src/crud/mod.rs:1790-1798` | aggregate passes `Projected` |
+| 2 | `crates/zeroship-data-v8/src/crud/read_pipeline.rs` | `RowSurface`, stage 5 |
+| 3 | `crates/zeroship-data-v8/src/crud/mod.rs` | aggregate passes `Projected` |
 | 4 | `crates/zeroship-schema/src/query.rs:4610` (+2 wrappers `:4578`, `:4592`) | aggregate builder returns its aliases |
-| 5 | `crates/zeroship-plugin-db/src/exec.rs:425-440` | `RawRows` newtype minted here |
-| 6 | `crates/zeroship-plugin-db/src/crud/mod.rs` x5 | `row_count_as_f64` takes `RawRows` (`:1409, 1529, 1612, 1714` + CAS at `:1313`) |
-| 7 | `crates/zeroship-plugin-db/src/broker.rs:944` | `changed_columns` mapped to logical names |
-| 8 | `crates/zeroship-plugin-db/src/broker.rs:986-999` | delete `ws_frame_for_change` |
-| 9 | `crates/zeroship-plugin-db/src/read_set.rs:220` + 3 callers (`crud/mod.rs:603, 1751, 1916`) | predicate lowering |
+| 5 | `crates/zeroship-data-v8/src/exec.rs` | `RawRows` newtype minted here |
+| 6 | `crates/zeroship-data-v8/src/crud/mod.rs` x5 | `row_count_as_f64` takes `RawRows` (`:1409, 1529, 1612, 1714` + CAS at `:1313`) |
+| 7 | `crates/zeroship-data-v8/src/broker.rs` | `changed_columns` mapped to logical names |
+| 8 | `crates/zeroship-data-v8/src/broker.rs` | delete `ws_frame_for_change` |
+| 9 | `crates/zeroship-data-v8/src/read_set.rs` + 3 callers (`crud/mod.rs:603, 1751, 1916`) | predicate lowering |
 | 10 | `crates/zeroship-migrate-core/src/render/gen_types.rs:284-318` | raw column named `__zs_raw__<field>`, capped |
 | 11 | `crates/zeroship-schema/src/query.rs:2151-2161` + its 5 emitter callers (`:1282, 1708, 1994, 2217, 2253`) | emit both physical names, capped |
 | 12 | `crates/zeroship-schema/src/query.rs:1949-1967` | indexes on the raw column |
 | 13 | `crates/zeroship-schema/src/query.rs:766` | `Suffix("_raw")`, anti-collision only |
 | 14 | `crates/zeroship-schema/src/diff.rs:671, 716` | PG introspector reads `storage`, warns on fall-through |
-| 15 | `crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:804-846, 2201-2248` | deleted |
-| 16 | `crates/zeroship-plugin-db/src/crud/mask_pass.rs:150, 469`; `encryption_pass.rs:295` | read `storage`, not `format!("{col}_masked")` |
-| 17 | `crates/zeroship-plugin-db/src/crud/unmask.rs:466, 509, 567, 604` | read the raw column, not the logical name (see section 6.3) |
+| 15 | `crates/zeroship-data-v8/src/backend/sqlite/mod.rs, 2201-2248` | deleted |
+| 16 | `crates/zeroship-data-v8/src/protection/mask_pass.rs, 469`; `encryption_pass.rs:295` | read `storage`, not `format!("{col}_masked")` |
+| 17 | `crates/zeroship-data-v8/src/protection/unmask.rs, 509, 567, 604` | read the raw column, not the logical name (see section 6.3) |
 | 18 | `crates/zeroship-migrate-core/src/render/gen_types.rs:157-169` | comment corrected per section 4.6 |
 
 **About 40 edits across 9 files, of which 6 are one-line and 15 are deletions or
@@ -943,9 +902,9 @@ this specification is not flip work. It is work the flip made visible.
 Each of these fails before the change and passes after. None is a mutation of a
 test's own fixture.
 
-1. `insert` on a mask-only field returns a document whose key set is exactly
-   `SYSTEM_FIELD_NAMES` union the declared fields. Asserted on the key set, not on
-   the absence of one name, so a differently-named raw column cannot pass it.
+1. `insert` on a mask-only field returns exactly the declared readable fields.
+   Assert the complete key set so an internal column cannot escape under an
+   unexpected name.
 2. The same, for all seven row-returning write verbs, table-driven from the list
    in section 2.1, with an arm count that fails if a verb is added and not listed.
 3. A filter, `select`, `orderBy`, `$group.by`, `$match`, conflict-probe key and

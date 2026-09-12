@@ -79,10 +79,10 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // Each carries its own consumers to re-plumb, and each needs its design written
 // before it is built.
 //
-// EVERY CLAIM ABOVE ABOUT WHAT CANNOT BE WRITTEN IS RE-MEASURED, not asserted:
-// `tests/organization_authority_gate.sh` applies this corpus to an empty
-// database and drives each refusal, each paired control, and the collations
-// below, requiring PostgreSQL to name the exact constraint it refused on.
+// `crates/zeroship-migrate-node/tests/platform_corpus/organization_authority.rs`
+// applies the corpus to owned PostgreSQL databases and exercises these
+// constraints, accepted controls, privileges and collations through the Rust
+// driver. Run it with `cargo xtask test migrations`.
 //
 // EACH NEW TABLE IS ALSO REGISTERED IN policies/platform-table-owners.json, and
 // that file is not optional bookkeeping: the applier refuses fail-closed on any

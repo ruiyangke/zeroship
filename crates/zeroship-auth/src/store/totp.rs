@@ -18,9 +18,8 @@
 //!     recovery-code redeem at login.
 
 use compio_postgres::Client;
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
-use crate::entity_ids;
 use crate::error::{AuthError, Result};
 
 /// A stored TOTP credential row. The secret is the still-ENCRYPTED BYTEA blob;
@@ -42,7 +41,7 @@ pub struct BackupCode {
 
 fn row_to_credential(row: &compio_postgres::Row) -> Result<TotpCredential> {
     Ok(TotpCredential {
-        user_id: entity_ids::user_id(row, "user_id")?,
+        user_id: crate::user_id::from_row(row, "user_id", "totp credential")?,
         encrypted_secret: row.get::<_, Vec<u8>>("encrypted_secret"),
         confirmed_at: row.try_get("confirmed_at").ok(),
     })

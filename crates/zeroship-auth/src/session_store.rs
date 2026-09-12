@@ -5,8 +5,8 @@
 //!
 //! No credential is issued except from a validating read of a session row, and
 //! that read is the same statement that enforces liveness, expiry, the
-//! session's grant status and the person's credential epoch. There are exactly
-//! three such statements here, and each returns a [`ValidatedSession`]:
+//! session's grant status and the person's credential epoch. Each validating
+//! operation returns a [`ValidatedSession`]:
 //!
 //! - [`create`] - `INSERT ... SELECT` over `zeroship.users` joined to
 //!   `zeroship.grants`. The row it writes is the row it returns, so the first
@@ -19,8 +19,8 @@
 //!
 //! [`ValidatedSession`] has private fields and no public constructor, so a mint
 //! path that skips the read does not compile rather than failing a check
-//! nothing reaches. `tests/mint_reads_row_gate.sh` refuses a constructor added
-//! outside this file, including a test-only one reachable from a non-test path.
+//! nothing reaches. Store integration tests exercise the validating operations
+//! against `PostgreSQL`, including accepted controls alongside refused mints.
 //!
 //! # The refresh family is ONE ROW
 //!
@@ -58,11 +58,11 @@ use chrono::{DateTime, Utc};
 use compio_postgres::{GenericClient, Row};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use zeroship_core::user_id::UserId;
 use zeroship_core::auth::hmac_sha256;
 use zeroship_core::crypto;
 use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
 use zeroship_core::typed_id;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -772,7 +772,7 @@ pub async fn peek(
             };
             return Ok(Some(PeekedSession {
                 session_id: row.get("id"),
-                person_id: crate::entity_ids::user_id(row, "person_id")?,
+                person_id: crate::user_id::from_row(row, "person_id", "session peek")?,
                 client_id: row.try_get("client_id").ok().flatten(),
                 slot,
                 hash: hash.hash,
@@ -818,11 +818,10 @@ pub async fn lock_and_read(
 
 /// The validating read that rotates the secret and slides the idle window.
 ///
-/// One `UPDATE ... RETURNING` enforces liveness (`revoked_at IS NULL`), both
-/// expiries, the grant's `subject_status`, the person's lifecycle columns and
-/// the credential epoch. Delete any one of those predicates and a credential
-/// becomes mintable that must not be; the arms in
-/// `crates/zeroship-auth/tests/session_object_test.rs` bind that.
+/// The validating update enforces session liveness, expiry, grant status,
+/// person lifecycle and the credential epoch. The store integration tests in
+/// `crates/zeroship-auth/tests/store/sessions.rs` exercise successful rotation
+/// and refusal after eligibility changes against the migrated schema.
 ///
 /// # Errors
 ///
@@ -1130,7 +1129,7 @@ fn row_to_session_with_grant(
 ) -> Result<SessionRow> {
     Ok(SessionRow {
         id: row.get("id"),
-        person_id: crate::entity_ids::user_id(row, "person_id")?,
+        person_id: crate::user_id::from_row(row, "person_id", "session row")?,
         audience_kind: row.get("audience_kind"),
         client_id: row.try_get("client_id").ok().flatten(),
         grant_id: row.get("grant_id"),
@@ -1152,59 +1151,4 @@ fn row_to_session_with_grant(
         secret_hash: row.try_get("secret_hash").ok().flatten(),
         prev_secret_hash: row.try_get("prev_secret_hash").ok().flatten(),
     })
-}
-
-#[cfg(test)]
-mod predicate_tests {
-    use super::*;
-
-    /// Every liveness predicate MINT-READS-ROW claims is enforced by the
-    /// statement has to be IN the statement. This is a spelling check and says
-    /// nothing about behaviour - `session_object_test.rs` is what binds that -
-    /// but it fails immediately if a predicate is deleted from one statement
-    /// and left in its sibling, which is how the three drift apart.
-    #[test]
-    fn every_validating_statement_carries_the_same_liveness_predicates() {
-        for (name, sql) in [("rotate", ROTATE_SESSION_SQL), ("replay", CONSUME_IDEM_SQL)] {
-            for predicate in [
-                "s.revoked_at IS NULL",
-                "s.idle_expires_at > NOW()",
-                "s.absolute_expires_at > NOW()",
-                "s.credential_epoch = u.credential_version",
-                "g.subject_status = 'active'",
-                "u.disabled_at IS NULL",
-                "u.anonymized_at IS NULL",
-                "u.deletion_requested_at IS NULL",
-                "u.deletion_scheduled_for IS NULL",
-            ] {
-                assert!(
-                    sql.contains(predicate),
-                    "{name} statement is missing the {predicate:?} predicate"
-                );
-            }
-        }
-        for predicate in [
-            "u.disabled_at IS NULL",
-            "u.anonymized_at IS NULL",
-            "u.deletion_requested_at IS NULL",
-            "u.deletion_scheduled_for IS NULL",
-            "g.subject_status = 'active'",
-        ] {
-            assert!(
-                CREATE_SESSION_SQL.contains(predicate),
-                "create statement is missing the {predicate:?} predicate"
-            );
-        }
-    }
-
-    /// The audience arms upsert against DIFFERENT partial indexes. Swapping
-    /// them compiles and then fails at run time on a conflict target that does
-    /// not exist, which is a failure a long way from its cause.
-    #[test]
-    fn each_audience_arm_names_its_own_partial_conflict_target() {
-        assert!(GRANT_UPSERT_PLATFORM_SQL
-            .contains("ON CONFLICT (person_id) WHERE audience_kind = 'platform'"));
-        assert!(GRANT_UPSERT_APP_SQL
-            .contains("ON CONFLICT (person_id, client_id) WHERE audience_kind = 'app'"));
-    }
 }

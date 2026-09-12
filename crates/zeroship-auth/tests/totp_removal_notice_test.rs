@@ -44,7 +44,6 @@ use std::sync::Arc;
 
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_core::user_id::UserId;
 use zeroship_mailer::{Email, Mailer};
 
 use common::{test_auth_config, CapturingMailer};
@@ -66,7 +65,7 @@ struct Fixture {
     cfg: Arc<AuthConfig>,
     pg: Arc<compio_postgres::Client>,
     mailer: Arc<CapturingMailer>,
-    user_id: UserId,
+    user_id: zeroship_core::UserId,
     email: String,
     session_id: Uuid,
 }
@@ -74,10 +73,7 @@ struct Fixture {
 impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn boot(label: &str) -> Self {
-        let db_url = zeroship_core::config::test_database_url_opt().expect(
-            "a test database is required for totp_removal_notice_test \
-             (set PG_TEST_URL or run tests/provision_test_backends.sh)",
-        );
+        let db_url = crate::common::test_database_url();
         let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("connect pg");
@@ -99,7 +95,7 @@ impl Fixture {
         let session = sessions::create(
             &pg,
             &CreateSession {
-                user_id: &user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".to_owned()],
                 acr: None,
@@ -218,9 +214,7 @@ impl Fixture {
 
     #[allow(clippy::future_not_send)]
     async fn cleanup(self) {
-        for sql in [
-            "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
-        ] {
+        for sql in ["DELETE FROM zeroship.rate_limits WHERE bucket_key = $1"] {
             let _ = self
                 .pg
                 .execute(sql, &[&format!("totp:verify:{}", self.user_id.as_str())])
@@ -279,11 +273,22 @@ async fn disable_notifies_the_account_holder_and_revokes_nothing() {
 
     let (status, body) = fx.post("disable", None, Some(FIXTURE_PASSWORD)).await;
 
-    assert_eq!(status, 200, "password re-auth must disable 2FA, got {status} {body}");
-    assert!(!fx.is_enabled().await, "2FA must be off after a successful disable");
+    assert_eq!(
+        status, 200,
+        "password re-auth must disable 2FA, got {status} {body}"
+    );
+    assert!(
+        !fx.is_enabled().await,
+        "2FA must be off after a successful disable"
+    );
 
     let sent = fx.mailer.sent();
-    assert_eq!(sent.len(), 1, "exactly one removal notice, got {}", sent.len());
+    assert_eq!(
+        sent.len(),
+        1,
+        "exactly one removal notice, got {}",
+        sent.len()
+    );
     assert_is_removal_notice(&sent[0], &fx.email);
 
     assert!(
@@ -307,7 +312,10 @@ async fn refused_disable_sends_no_notice() {
 
     let (status, body) = fx.post("disable", None, None).await;
 
-    assert_eq!(status, 401, "a cookie-only disable must be refused, got {status} {body}");
+    assert_eq!(
+        status, 401,
+        "a cookie-only disable must be refused, got {status} {body}"
+    );
     assert!(fx.is_enabled().await, "a refused disable leaves 2FA armed");
     assert!(
         fx.mailer.sent().is_empty(),
@@ -332,7 +340,10 @@ async fn enroll_over_a_confirmed_credential_notifies() {
 
     let (status, body) = fx.post("enroll", None, Some(FIXTURE_PASSWORD)).await;
 
-    assert_eq!(status, 200, "password re-auth must be accepted, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "password re-auth must be accepted, got {status} {body}"
+    );
     assert!(
         !fx.is_enabled().await,
         "re-enrollment resets the credential to pending, so 2FA is off"
@@ -361,7 +372,10 @@ async fn first_enrollment_sends_no_notice() {
 
     let (status, body) = fx.post("enroll", None, None).await;
 
-    assert_eq!(status, 200, "a first enrollment needs no re-auth, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "a first enrollment needs no re-auth, got {status} {body}"
+    );
     assert!(
         fx.mailer.sent().is_empty(),
         "a first enrollment removes nothing and must send no notice"

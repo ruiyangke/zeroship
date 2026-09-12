@@ -1,6 +1,6 @@
 //! The public OP metadata documents must reach the wire cacheable.
 //!
-//! JWKS and discovery are the only two responses in this service that are
+//! JWKS and discovery are public responses in this service that are
 //! deliberately NOT `no-store`. They are also served through the same
 //! `SecurityHeaders` middleware as every private page, and that middleware runs
 //! AFTER the handler - so it is the one component able to silently undo their
@@ -10,74 +10,24 @@
 
 use std::sync::Arc;
 
-use compio_postgres::{connect, NoTls};
-use ntex::web;
-use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::Issuer;
-use zeroship_auth::server;
 
-use crate::common;
-use common::test_auth_config;
+use crate::common::{auth_server::AuthServer, database::Database};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
-/// Boot the real route table behind the real security-headers middleware and
-/// return its base URL, or `None` when no live database is configured.
-///
-/// The skip is ANNOUNCED, not silent - `zeroship_test_support::skip` writes the
-/// marker straight to the stderr handle, which the harness does not capture, and
-/// `tests/run_auth_suite.sh` counts any marker outside its allowlist as a
-/// failure. So the blind spot a bare `return` would create is closed by the
-/// suite, not by panicking here. Panicking instead would take
-/// `cargo test --workspace` red on every machine without Postgres, which is the
-/// state this repo just finished getting out of, and this target has no
-/// `required-features` gate to keep it out of that run.
-async fn boot() -> Option<(web::test::TestServer, cyper::Client)> {
-    let db_url = zeroship_core::config::test_database_url_opt()?;
-
-    let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
-    compio::runtime::spawn(async move {
-        if let Err(err) = pg_connection.run().await {
-            eprintln!("[metadata_cache_headers_test] pg connection error: {err}");
-        }
-    })
-    .detach();
-    let db = Arc::new(pg_client);
-
-    let signing = common::op_signing_key();
+async fn boot(database: &Database) -> AuthServer {
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[18; 32]);
     let issuer = Arc::new(
         Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer"),
     );
-    common::publish_op_key_once(&issuer, &db)
-        .await
-        .expect("publish active OP signing key");
-
-    let cfg = Arc::new(test_auth_config(&db_url));
-    let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 2);
-
-    let srv = web::test::server(move || {
-        let cfg = cfg.clone();
-        let db = db.clone();
-        let issuer = issuer.clone();
-        let refresh_pool = refresh_pool.clone();
-        async move {
-            web::App::new()
-                .state(cfg)
-                .state(db)
-                .state(issuer)
-                .state(refresh_pool)
-                .middleware(SecurityHeaders::default())
-                .configure(server::configure(true, false))
-        }
-    })
-    .await;
-
-    Some((srv, cyper::Client::new()))
+    AuthServer::with_issuer(database, issuer).await
 }
 
-async fn cache_control(srv: &web::test::TestServer, http: &cyper::Client, path: &str) -> String {
-    let resp = http
-        .get(srv.url(path))
+async fn cache_control(server: &AuthServer, path: &str) -> String {
+    let resp = server
+        .http
+        .get(format!("{}{path}", server.auth_base))
         .expect("build request")
         .send()
         .await
@@ -97,48 +47,54 @@ async fn cache_control(srv: &web::test::TestServer, http: &cyper::Client, path: 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn jwks_reaches_the_wire_cacheable() {
-    let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let value = cache_control(&srv, &http, "/oauth2/.well-known/jwks.json").await;
-    assert!(
-        value.contains("max-age=300") && value.starts_with("public"),
-        "JWKS must keep its handler-set cacheability, got {value:?}"
-    );
-    assert!(
-        !value.contains("no-store"),
-        "JWKS must not be clobbered to no-store, got {value:?}"
-    );
-    drop(srv);
-}
-
-/// Discovery is fetched by every RP at startup and is pure configuration.
-/// All four mounted spellings share one handler, so all four must agree.
-#[ntex::test]
-#[allow(clippy::future_not_send)]
-async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
-    let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    for path in [
-        "/oauth2/.well-known/openid-configuration",
-        "/oauth2/.well-known/oauth-authorization-server",
-        "/.well-known/openid-configuration/oauth2",
-        "/.well-known/oauth-authorization-server/oauth2",
-    ] {
-        let value = cache_control(&srv, &http, path).await;
+    Database::run(async |database| {
+        let server = boot(database).await;
+        let value = cache_control(&server, "/oauth2/.well-known/jwks.json").await;
         assert!(
-            value.contains("max-age=300") && value.starts_with("public"),
-            "{path} must keep its handler-set cacheability, got {value:?}"
+            value
+                .split(',')
+                .map(str::trim)
+                .any(|part| part == "max-age=300")
+                && value.split(',').map(str::trim).any(|part| part == "public"),
+            "JWKS must keep its handler-set cacheability, got {value:?}"
         );
         assert!(
             !value.contains("no-store"),
-            "{path} must not be clobbered to no-store, got {value:?}"
+            "JWKS must not be clobbered to no-store, got {value:?}"
         );
-    }
-    drop(srv);
+    })
+    .await;
+}
+
+/// Discovery is fetched by every RP at startup and is pure configuration.
+/// Every mounted spelling must preserve its cache policy.
+#[ntex::test]
+#[allow(clippy::future_not_send)]
+async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
+    Database::run(async |database| {
+        let server = boot(database).await;
+        for path in [
+            "/oauth2/.well-known/openid-configuration",
+            "/oauth2/.well-known/oauth-authorization-server",
+            "/.well-known/openid-configuration/oauth2",
+            "/.well-known/oauth-authorization-server/oauth2",
+        ] {
+            let value = cache_control(&server, path).await;
+            assert!(
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .any(|part| part == "max-age=300")
+                    && value.split(',').map(str::trim).any(|part| part == "public"),
+                "{path} must keep its handler-set cacheability, got {value:?}"
+            );
+            assert!(
+                !value.contains("no-store"),
+                "{path} must not be clobbered to no-store, got {value:?}"
+            );
+        }
+    })
+    .await;
 }
 
 /// The fail-closed half of the same change: a route that sets no
@@ -148,26 +104,26 @@ async fn discovery_reaches_the_wire_cacheable_on_every_mounted_path() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn routes_without_an_explicit_value_still_default_to_no_store() {
-    let Some((srv, http)) = boot().await else {
-        zeroship_test_support::skip("[metadata_cache_headers] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let resp = http
-        .get(srv.url("/static/style.css"))
-        .expect("build request")
-        .send()
-        .await
-        .expect("GET /static/style.css");
-    assert_eq!(resp.status().as_u16(), 200);
-    let value = resp
-        .headers()
-        .get("cache-control")
-        .expect("style.css must still receive the default cache-control")
-        .to_str()
-        .expect("cache-control is ASCII");
-    assert_eq!(
-        value, "no-store",
-        "a handler that sets no cache-control must keep the fail-closed default"
-    );
-    drop(srv);
+    Database::run(async |database| {
+        let server = boot(database).await;
+        let resp = server
+            .http
+            .get(format!("{}/static/style.css", server.auth_base))
+            .expect("build request")
+            .send()
+            .await
+            .expect("GET /static/style.css");
+        assert_eq!(resp.status().as_u16(), 200);
+        let value = resp
+            .headers()
+            .get("cache-control")
+            .expect("style.css must still receive the default cache-control")
+            .to_str()
+            .expect("cache-control is ASCII");
+        assert_eq!(
+            value, "no-store",
+            "a handler that sets no cache-control must keep the fail-closed default"
+        );
+    })
+    .await;
 }

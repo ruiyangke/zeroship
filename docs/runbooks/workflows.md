@@ -44,49 +44,32 @@ refused, schedule fan-out is skipped, and scheduler dispatch no longer advances
 queued, sleeping, waiting, or compensating runs for that app. Existing journal
 rows are left in place.
 
-## Scheduler Tier
+## Current scheduler placement
 
-Run a separate workflow scheduler process for timer authority:
+Control currently hosts timer dispatch, acknowledgement registration, inflight
+recovery and journal reconciliation in
+`crates/zeroship-control/src/cron/workflow_engine.rs`. It also runs workflow
+schedules, signal fan-out and retention sweeps. Recovery includes startup and
+periodic reconciliation against app journals.
 
-```bash
-zeroship-workflow-scheduler \
-  --db "$DATABASE_URL" \
-  --schema zeroship \
-  --gateway-url "$GATEWAY_URL" \
-  --control-apply-url "$CONTROL_APPLY_URL" \
-  --tick-secs 1 \
-  --reaper-interval-secs 30
-```
+`zeroship-workflow-scheduler` is an unfinished standalone host. Its executable
+supports configuration checks but refuses runtime startup because dispatch and
+acknowledgement processing still live in Control. It is not a deployable
+replacement for the Control loops. The implementation is explicit in
+`crates/zeroship-workflow-scheduler/src/main.rs`.
 
-The scheduler does NOT provision its own tables. `zeroship.workflow_scheduler_timers`
-and `zeroship.workflow_scheduler_inflight` come from
-`db/migrations-ts/20260811000100_workflow_scheduler_store.ts`, like every other
-platform table; the scheduler only verifies they exist and refuses to start
-otherwise, naming that migration. It used to create them, which no least-privilege
-deployment can do: the first statement was `CREATE SCHEMA IF NOT EXISTS`, and
-Postgres checks database-level CREATE before the existence short-circuit, so it
-failed with SQLSTATE 42501 even when the schema was already there.
+The current timer tables, `zeroship.workflow_scheduler_timers` and
+`zeroship.workflow_scheduler_inflight`, are created by
+`db/migrations-ts/20260811000100_workflow_scheduler_store.ts`. Runtime scheduler
+code verifies their presence rather than creating them. Workers commit journal
+progress separately from Control's timer acknowledgements; recovery repairs
+that gap.
 
-On process start it performs one cutover/recovery
-reconcile from non-terminal workflow runs with `wake_at` set, then switches to
-the register model:
-
-- `start()` registers a due-now timer after the run row commits.
-- schedule sweeps create runs and register each new fire.
-- direct signals and broadcast fan-out write the mailbox, set `wake_at = now()`,
-  and register the wake.
-- apply commits ack terminal runs or register the next wake.
-
-The startup reconcile is not a polling loop. In steady state, the scheduler does
-not scan `zeroship.workflow_runs` for due work. Lost dispatch/apply/register acks
-are recovered by the inflight reaper, which reads only
-`zeroship.workflow_scheduler_inflight` rows whose deadline has elapsed and re-dispatches
-those runs through the normal claim path.
-
-Control still owns the workflow schedules, signal fan-out, blob reference GC,
-blob orphan GC, and workflow retention sweeps. These sweeps are independent from
-the retired control-side due-run scan; do not enable the control scan while the
-scheduler tier is authoritative.
+The finalized [workflow server design](../proposals/2026-09-11-workflow-server.md)
+replaces this arrangement with a dedicated workflow server, polling workers and
+atomic journal/frontier updates. It also specifies shared local execution. The
+replacement is not implemented yet; these operational instructions describe the
+current Control-hosted implementation.
 
 ## Dispatch Pause
 

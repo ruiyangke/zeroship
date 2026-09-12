@@ -39,7 +39,7 @@ jobs:
           tests/commit_msg_gate.sh --range "$range"
 
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -100,10 +100,9 @@ jobs:
       - run: cargo check --workspace
       # The same configuration, as a gate: it audits cargo's artifact stream
       # against `cargo metadata` so a scheduling abort cannot read as a clean
-      # tree, and it asserts that `test-helpers` really resolved OFF for the
-      # five members that declare it. The line above reads only an exit code and
-      # has no opinion on feature resolution, which is the axis the defect lived
-      # on. Twenty seconds; no services, no database.
+      # tree, and it rejects test-only feature declarations across the workspace.
+      # The line above reads only an exit code; this gate also checks which
+      # artifacts Cargo emitted and how their features are declared.
       - name: shipped configuration compiles
         run: tests/shipped_config_gate.sh
       # The same shipped-vs-test feature split, one member down, read off the
@@ -163,19 +162,50 @@ jobs:
       # PROVISION BEFORE TESTING, and this step is what makes the deletion of
       # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
       #
-      # `cargo test --workspace` below runs `compio-postgres` and `compio-redis`.
-      # Until now this job ran them with no servers at all: they returned early
-      # and cargo counted every one as a pass, so 42 Postgres tests and 14 Redis
-      # tests reported green in a job that had neither backend. Those targets now
-      # FAIL when nothing answers, so the backends have to be here.
+      # The PostgreSQL suites still require the shared provisioner. Redis
+      # driver and KV tests start their own servers through Testcontainers.
+      #
+      # `zeroship-mailer` is the same shape and is why the SMTP sink is in that
+      # script's set: its plaintext-transport test is not feature-gated, so
+      # `--workspace` builds and runs it here, and it fails without a sink.
       #
       # The SAME script a developer runs, not a `services:` block that would be a
-      # second definition of the same two servers. `services:` also cannot pass
-      # `-c wal_level=logical`, which is why plugin-db-live-gate below uses an
-      # explicit `docker run`; going through compose keeps this job on the
-      # definition the compose file already carries.
-      - name: Provision the required test backends (postgres, redis)
+      # second definition of the same servers. `services:` also cannot pass
+      # `-c wal_level=logical`. The native data job configures its owned
+      # testcontainers separately; this job uses the compose definition.
+      - name: Provision the shared test backends (postgres, smtp sink)
         run: bash tests/provision_test_backends.sh
+      - name: Install snapshot clients matching the test server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
+      - name: Install the extensions required by ordinary database tests
+        run: |
+          set -euo pipefail
+          pg_container="$(docker ps --filter label=com.docker.compose.service=postgres --format '{{.ID}}')"
+          test -n "$pg_container"
+          docker exec "$pg_container" bash -c \
+            'apt-get update && apt-get install -y --no-install-recommends postgresql-16-pgvector postgresql-16-postgis-3'
+          docker exec "$pg_container" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 \
+            -c 'CREATE EXTENSION IF NOT EXISTS vector' \
+            -c 'CREATE EXTENSION IF NOT EXISTS postgis'
+      # The provisioner stands the servers up and writes the overlay; it does
+      # not apply the platform corpus, and says so in its own "what it does not
+      # provision" header. That was survivable while a target without a migrated
+      # database announced a skip. It is not survivable now: those targets
+      # REFUSE, so an unmigrated server takes this job red rather than green
+      # over tests that never ran. The corpus is a prerequisite of the suite,
+      # so it is provisioned like one.
+      #
+      # The DSN is the provisioner's own default (`PG_DSN` there, from PG_HOST /
+      # PG_PORT / PG_USER / PG_PASS / PG_DB). If those defaults move, this moves
+      # with them - which is why the applier is named rather than open-coded.
+      - name: Apply the platform corpus to the provisioned database
+        run: |
+          set -o pipefail
+          ZEROSHIP_MIGRATE_DSN='postgres://postgres:zeroship@127.0.0.1:5440/zeroship' \
+            bash deploy/ops/db-migrate.sh
       # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
       # target and never builds or runs the ones after it. Those targets do not
       # report as failed, they report as nothing at all, so one known-failing
@@ -183,114 +213,21 @@ jobs:
       # unchanged either way - the job still fails if anything fails - but
       # without this the run only tells you about the first thing that broke.
       #
-      # Tee'd into a log so the skip census at the end of this job can read it.
-      # `set -o pipefail` is load-bearing: GitHub's default shell is `bash -e`
-      # WITHOUT pipefail, so `cargo test | tee` would report tee's status, which
-      # is 0 whenever tee could write - and every failing test in the workspace
-      # would sail through as a pass. The billing gate hit this exact trap and
-      # solved it with PIPESTATUS; pipefail is the same fix in one line.
+      # THE `| tee` THAT STOOD ON THIS LINE AND FIVE OTHERS IS GONE. It wrote a
+      # combined log for the skip census at the end of this job to read; the
+      # census was deleted and nothing else ever read the file, so what was left
+      # was a pipeline whose only remaining effect was to put a second command
+      # between cargo and its exit status.
+      #
+      # `set -o pipefail` stays on every one of those steps, because the reason
+      # it was added outlives the pipe: GitHub's default shell is `bash -e`
+      # WITHOUT pipefail, so the moment anyone pipes cargo into anything the
+      # status reported is the LAST command's - 0 whenever it could write - and
+      # every failing test in the workspace sails through as a pass. The billing
+      # gate hit that trap and solved it with PIPESTATUS.
       - run: |
           set -o pipefail
-          cargo test --workspace --no-fail-fast 2>&1 | tee -a "$RUNNER_TEMP/rust-tests.log"
-      # --no-fail-fast fixes the STOPPING; this fixes the COUNTING. Nothing
-      # anywhere records how many test targets there are supposed to be, so a
-      # suite that quietly stops being built - a new `required-features` gate, a
-      # dropped `[[test]]`, a crate removed from the workspace - produces a
-      # smaller run, and a smaller run is indistinguishable from a smaller
-      # project. Count the built test executables and fail if the number falls.
-      #
-      # Deliberately a floor, not an equality: adding targets needs no edit,
-      # removing one needs a deliberate edit here. That asymmetry is the point -
-      # losing coverage should cost a reviewed change, gaining it should be free.
-      # It catches disappearance, not substitution.
-      # A comment that cites a design doc is often the only pointer to where a
-      # contract or a decision is written down. When the doc moves or is never
-      # committed, the citation keeps its form and loses its value: it still
-      # reads as "justified elsewhere", so it stops the reader looking, and
-      # nothing anywhere notices. One sweep found 23 such citations at once.
-      #
-      # Excluded by directory, not by matched text: `wpt` is upstream WPT,
-      # fetched on demand and kept pristine, whose doc paths are relative to
-      # that project rather than ours; `dist`, `node_modules` and `target` hold
-      # generated output, where a stale citation is a stale build, not a
-      # mistake anyone can fix in place. Filtering the matched path instead of
-      # the containing file silently lets all four through, since none of those
-      # directory names appear in the cited path.
-      # The pattern is ANCHORED (-P, negative lookbehind) and that is load-bearing.
-      # Unanchored, it matches a doc path sitting INSIDE a longer path: a GitHub
-      # URL, an absolute filesystem path, a vendored copy. This check shipped
-      # unanchored and was green because the two doc paths it pulled out of
-      # GitHub URLs happened to name local files. It would have failed the first
-      # time anyone linked to a doc in another repository, which is the ordinary
-      # reason to write a URL rather than a relative path.
-      #
-      # The `found` floor is the other half. This step counts what is MISSING and
-      # passes at zero, so an extraction that yields nothing passes too - a broken
-      # pattern, a wrong directory list, or a file the tool declines to read all
-      # report a clean tree. Counting what was checked is what tells those apart
-      # from a tree that is genuinely clean.
-      - name: Doc citations resolve
-        run: |
-          ROOTS="crates sdks libs tests db examples"
-          # The corpus check, and it carries more weight than the count below.
-          #
-          # A count floor cannot see a DROPPED DIRECTORY. Measured distribution:
-          # crates 33, sdks 6, tests 3, examples 1, libs 0, db 0. Rename `sdks/`
-          # and 6 citations vanish, leaving ~31 - above any floor loose enough to
-          # survive ordinary comment edits. One whole tree skipped, gate green.
-          # `libs/` and `db/` yield zero legitimately, which is why the per-root
-          # assertion has to be EXISTENCE and not "yielded at least one": a
-          # directory with no citations is normal, a directory that is not there
-          # is a scan that silently stopped covering it.
-          #
-          # This is also why the `2>/dev/null` below is safe now and was not
-          # before: it swallows grep's "No such file or directory", so a renamed
-          # root used to produce a smaller result and no signal at all.
-          for r in $ROOTS; do
-            if [ ! -d "$r" ]; then
-              echo "::error::doc-citation scan lists $r/, which does not exist - the scan silently stopped covering it"
-              exit 1
-            fi
-          done
-          missing=0
-          found=0
-          # The citation scanner and its self-test are excluded for the same
-          # reason the scanner excludes them from its own sweep: both spell out
-          # paths that deliberately do not exist - examples in one, a planted
-          # probe in the other - so scanning them reports a tool describing a
-          # path as a file citing one. The self-test's doc-side probe
-          # (`docs/reference/zz-…-probe.md`) is exactly such a path, and it
-          # failed this step the moment it was added.
-          for p in $(grep -rhoP '(?<![A-Za-z0-9_/.-])(?:\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
-              --include='*.rs' --include='*.ts' --include='*.js' --include='*.tsx' \
-              --include='*.toml' --include='*.sh' \
-              --exclude-dir=wpt --exclude-dir=dist \
-              --exclude-dir=node_modules --exclude-dir=target \
-              --exclude=source_citation_gate.sh \
-              --exclude=source_citation_selftest.sh \
-              $ROOTS 2>/dev/null \
-            | sed 's|^\(\.\./\)*||' | sort -u); do
-            found=$((found + 1))
-            if [ ! -f "$p" ]; then
-              echo "::error::comment cites $p, which does not exist"
-              missing=$((missing + 1))
-            fi
-          done
-          # Print the coverage on SUCCESS, not only inside a failure message. A
-          # number nobody sees until the gate already failed is a number that
-          # cannot warn anyone; this is the channel where a false green differs
-          # from a true one.
-          echo "doc citations checked: $found across $ROOTS, unresolvable: $missing"
-          # With the per-root check above carrying the corpus, this is back to
-          # being the degenerate-case guard it was always meant to be: it only
-          # has to separate "clean tree" from "the extraction returned nothing".
-          # Left loose on purpose - the count moves with any ordinary comment
-          # edit, so a tight floor here buys churn rather than coverage.
-          if [ "$found" -lt 20 ]; then
-            echo "::error::only $found doc citations found (expected ~37); the extraction returned nothing usable, so a clean result would mean nothing"
-            exit 1
-          fi
-          [ "$missing" -eq 0 ]
+          cargo test --workspace --no-fail-fast
       # The step above resolves citations that name a FILE. This one resolves
       # citations that name an ITEM, which nothing checked until now: no job ran
       # `cargo doc`, so a rustdoc link pointing at a deleted or renamed symbol
@@ -324,47 +261,6 @@ jobs:
         run: tests/lib/dev_ready_selftest.sh
       - name: Doc links resolve
         run: tests/run_doc_gate.sh
-      # The source-path half of the citation checks above, in BOTH directions.
-      # The step above resolves comments naming a `docs/**.md` file. This one
-      # resolves every citation that NAMES A SOURCE FILE, whether it was written
-      # in source or in a doc - they rot identically and are read the same way,
-      # as "the justification is over there", so a citation pointing at a file
-      # that moved stops the reader looking and nothing notices. One sweep of
-      # the source side found 82; the doc side, unguarded until 2026-08-10,
-      # opened at 116 unresolvable of 943.
-      #
-      # The doc half deliberately does not cover pre-ship proposals, plans,
-      # ADRs, review reports, `archive/`, or any dated `YYYY-MM-DD-*.md` record.
-      # Those name a file they intend to create or one that existed at a past
-      # HEAD; requiring them to resolve would forbid designing before building
-      # and would turn a record of the past into a lie about the present. The
-      # script's header carries the full reasoning and the measurements.
-      #
-      # The script carries its own resolution rules and the reasons each exists;
-      # they were measured against this tree rather than assumed, and getting any
-      # of them wrong produces a confident wrong answer rather than an obvious
-      # one. It also prints the corpus size on success, not only inside a failure
-      # message, because a count nobody sees until the gate has already failed
-      # cannot warn anyone.
-      #
-      # Note when this fires: every citation it has ever caught named a REAL file
-      # at a wrong address - stale, crate-relative, or reaching into the vendored
-      # engine - not an invented one. The first question is "where did this move
-      # to", not "does this exist". Deleting the citation is almost always the
-      # wrong repair.
-      - name: Source citations resolve
-        run: tests/source_citation_gate.sh
-      # And the control for the step above, for the same reason the
-      # measurement-integrity self-test exists: that gate passes at zero
-      # unresolvable citations, which is also what a gate that has quietly
-      # stopped matching reports. A drifted pattern, a renamed root, a file grep
-      # declines to read - all of them look exactly like a clean tree. This
-      # plants a citation at a path that does not exist and asserts the gate
-      # both NAMES it and exits non-zero, then asserts removing it returns the
-      # gate to green. A gate that always fails is as useless as one that
-      # always passes.
-      - name: Source-citation gate self-test
-        run: tests/source_citation_selftest.sh
       # SEC-8. The private registry must not allow open self-registration or
       # $authenticated publish, and its compose port must stay loopback-bound.
       #
@@ -400,165 +296,18 @@ jobs:
       # this repo has been burned by twice.
       - name: Shipped deploy instructions match the CLI
         run: tests/deploy_instructions_gate.sh
-      # These two existed and ran in NO workflow until 2026-08-11. Both were
-      # written BECAUSE a specific drift happened - AGENTS.md advertised `build`
-      # and `inspect` for months after both were removed; the two [[inject]]
-      # ceilings disagreed about system-column defaults and every first insert
-      # failed - and a gate that only runs when someone remembers is not much of
-      # a gate. Measured before wiring: 33ms and 24ms, pure text, no services.
-      #
-      # Both proven load-bearing by MY OWN mutation rather than assumed:
-      #   adding a `"teleport" =>` dispatch arm makes the index gate name it
-      #     ("main.rs dispatches (8) ... AGENTS.md indexes (7) ... teleport")
-      #   flipping created_at's `nullable = false` to `true` in ONE ceiling makes
-      #     the mirror gate print the drifted line from both sides
-      # The mirror-gate mutation is worth a note: my FIRST attempt edited the
-      # word `created_at` where it appears in a COMMENT, the gate stayed green,
-      # and for a moment that looked like the gate being hollow. The extractor
-      # only compares `{ name = ... }` entries, so the mutation never reached
-      # the compared region. A mutation that does not apply and a check that
-      # does not fire print the same thing.
-      - name: AGENTS.md crate index names the commands the CLI has
-        run: tests/cli_command_index_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
-      # The organization ownership model, in three gates. Each runs its own
-      # extractors against a positive and a one-variable control FIRST and
-      # refuses if they disagree, because every one of the three is an ABSENCE
-      # check over a corpus and an absence check that cannot read its corpus is
-      # the cleanest green there is - the ownership gate found exactly that in
-      # itself on its first run, a `grep --include` placed after `--` where grep
-      # reads it as a filename.
-      - name: An app reaches its owner only through its project
-        run: tests/organization_ownership_path_gate.sh --self-test
-      - name: One ownership path, and no cached authority
-        run: tests/organization_ownership_path_gate.sh
-      - name: Route and lock extractors discriminate
-        run: tests/organization_route_authorization_gate.sh --self-test
-      - name: Every mutating organization route is guarded and locks first
-        run: tests/organization_route_authorization_gate.sh
-      - name: The role ladder and the Cedar bands name the same ranks
-        run: tests/organization_policy_ladder_gate.sh
-      # The Cedar schema is the only thing that makes a typo'd action id
-      # visible, and strict validation only rules on the ids the POLICIES
-      # quote. This compares the schema against the Rust vocabulary and against
-      # build_context directly, which is where the ids no band names live -
-      # `migrations:approve` among them. Both gaps it catches surface at runtime
-      # as a 500 raised before audit_decision, so nothing is written down.
-      - name: The schema, the action enum and the request context agree
-        run: tests/cedar_schema_vocabulary_gate.sh
-      # A `curl -H` whose next word is the URL sends the URL as a header and
-      # then has no URL, which most harnesses read as an empty response rather
-      # than as a malformed call. Green on this tree; it was never wired.
-      - name: Every curl -H in a harness is followed by a header
-        run: tests/curl_header_flag_gate.sh
-      # Account erasure has to stay REACHABLE: a users foreign key that blocks
-      # the delete, or an auth statement naming a table zeroship_auth holds no
-      # grant on, both surface only when a real due user is reaped under the
-      # real role - which no unit test does, because they all connect as
-      # postgres.
-      - name: A due user can actually be erased
-        run: tests/user_erasure_reachability_gate.sh
-      # A control-plane fixture assembled an AuthConfig in Rust and set every
-      # secret except the refresh keyring, so its token exchange answered
-      # "refresh hash key is not configured" and the one end-to-end proof that
-      # a `zeroship login` token authorizes a control endpoint was red. Auth's
-      # own boot refuses without those files; a fixture that builds the config
-      # by hand skips that refusal. Self-test first: a fixture scan that
-      # matches nothing and a tree with no unfenced fixtures print the same
-      # thing.
-      - name: Session keyring fixture gate self-test
-        run: tests/session_keyring_fixture_gate.sh --self-test
-      - name: Auth fixtures that drive a token exchange configure a keyring
-        run: tests/session_keyring_fixture_gate.sh
-      # tests/lib/skip_census.sh counts skips by one token, so a test that
-      # skips WITHOUT printing it is invisible to the census whose whole job is
-      # to stop a suite quietly covering less than it claims. 49 lines across
-      # ten files were in that state on 2026-08-19; the self-test runs first
-      # because a gate that reports zero offenders and a gate whose detector
-      # matches nothing print the same thing.
-      #
-      # AND ON THE REAL TREE IT WAS THE SECOND ONE. Measured 2026-08-20: 8 rows
-      # found, 0 removed by the marker filter, all 8 removed by an ALLOW list of
-      # bare path prefixes, so the run examined nothing and printed the clean
-      # line anyway. The gate now prints found/excused/unruled, refuses a zero
-      # pre-filter, fails an ALLOW entry that matches nothing, and matches the
-      # excused SHAPE rather than the whole file - a marker-less skip injected
-      # into a WPT runner was excused before that change and is named after it.
-      - name: Skip-marker gate self-test
-        run: tests/skip_marker_gate.sh --self-test
-      - name: No test skips in a string the census cannot see
-        run: tests/skip_marker_gate.sh
-      # A `//` comment in dispatch.rs said the transparent WebSocket proxy was
-      # wired in a `proxy::` helper. That name existed in exactly one place in
-      # the repo: the comment claiming it. It sat 760 lines from the function
-      # that returns 501 and says the proxy does not exist, so the file
-      # contradicted itself and the false half read first.
-      #
-      # Nothing could see it. A `//` comment is not a doc comment, so neither
-      # rustdoc's intra-doc gate (tests/run_doc_gate.sh above) nor the citation
-      # gates look at it. Text-only, runs no gateway.
-      #
-      # The gate watched that ONE identifier, so after the fix it examined zero
-      # names and reported the same green it reports on a clean file. Measured
-      # 2026-08-20 while it said "0 mention(s), 0 definition(s) -- no phantom":
-      # three more comment-only names were live in that file, one of them nine
-      # lines from the fix. Arm 1 now checks every backticked name the file
-      # cites. Self-test first, because a detector that matches nothing and a
-      # file with no phantoms print the same thing.
+      - name: The app-id sweep's frontier does not go backwards
+        run: tests/app_id_frontier_gate.sh
+      - name: Every write that could resurrect a deleted app carries its fence
+        run: tests/deleted_app_write_fence_gate.sh
       - name: WS stub gate self-test
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
         run: tests/ws_subscription_stub_gate.sh
-      - name: Deleted database full-text search stays deleted
-        run: tests/db_fts_deletion_gate.sh
-      # The same shape as the WS stub above, one layer up: a comment ASSERTING
-      # that two crates stay in agreement, with nothing enforcing it. Found ten
-      # times in the data plane and migration engine; two were fixed in the week
-      # this gate landed (`cross_codec_parity`, `raw_column_parity`), and one of
-      # those had cited a guard that needed `--features test-helpers` plus a live
-      # PostgreSQL and could not have caught the divergence that had already
-      # shipped. The gate is a ratchet over a ledger of every such claim, not a
-      # semantic judge. Self-test first: an extractor that matches nothing and a
-      # tree whose every claim is ledgered print the same thing.
-      - name: Sync claim gate self-test
-        run: tests/sync_claim_gate.sh --self-test
-      - name: Every cross-crate agreement claim is on the ledger
-        run: tests/sync_claim_gate.sh
-      # Decision 4 of docs/proposals/2026-08-31-data-crate-shape.md - "no SQL and
-      # no dialect knowledge in the engine" - had NOTHING enforcing it, while
-      # decision 5 beside it had tests/vendor_embedding_gate.sh. The asymmetry
-      # showed: the decision's own statement inventory was wrong in both
-      # directions, billing five cfg-gated statement families in auth/bootstrap.rs
-      # as production while omitting the three always-compiled PL/pgSQL builders
-      # beside them, and undercounting backend_handle.rs by one. Operator
-      # decision 2026-09-04 was to keep the property and mechanise it. Shrink-only
-      # baseline: additions refused, removals accepted with a note. Self-test
-      # first, because a detector that matches nothing and an engine holding no
-      # new SQL print the same thing.
-      - name: Decision four gate self-test
-        run: tests/decision_four_gate.sh --self-test
-      - name: No new production SQL statement text in the data engine
-        run: tests/decision_four_gate.sh
-      # DECISION 5's GATE HAD NEVER RUN HERE. It was written on 2026-09-01, it
-      # is named in the comment above as the thing decision 4 lacked, and the
-      # only occurrence of its filename in this workflow was that comment - so
-      # for three days the gate that refuses a vendor type in a non-vendor crate
-      # was enforced by whoever remembered to run it. That is the same failure
-      # the meta-gate below exists for, one level up: a gate nobody invokes and
-      # a clean tree produce identical CI output.
-      #
-      # Self-test first, and it is not ceremony. The gate SKIPS modules that are
-      # test-gated at their declaration, and a file it declines to rule on
-      # prints nothing at all - so a wrong skip predicate is invisible from the
-      # gate's own output. It was wrong until 2026-09-04: a comment quoting
-      # `#[cfg(test)]` above a `mod x;` read as a gate and removed two files
-      # from the scan. tests/lib/module_gating.sh now holds the one definition,
-      # and these two steps are where its controls run.
-      - name: Vendor embedding gate self-test
-        run: tests/vendor_embedding_gate.sh --self-test
-      - name: No non-vendor crate embeds a vendor type
-        run: tests/vendor_embedding_gate.sh
+      - name: Data architecture and database posture
+        run: cargo xtask test data-architecture
       # THE STEP ABOVE WAS THE VISIBLE HALF OF A LARGER MISS. Measuring "which
       # gates does this workflow actually run" on 2026-09-04 found TWELVE of the
       # 37 gates in tests/ wired nowhere - a third of them - and not one of the
@@ -582,29 +331,12 @@ jobs:
         run: tests/cargo_package_spec_gate.sh --self-test
       - name: Every cargo -p spec in the repo names a real package
         run: tests/cargo_package_spec_gate.sh
-      - name: The data crates cannot reach a driver or the V8 runtime
-        run: tests/data_crate_closure_gate.sh
-      - name: No feature routes onto a dev-only dependency
-        run: tests/dev_dep_feature_route_gate.sh
-      # TWO STEPS, and the split is the point. The bare run passes at zero bad
-      # citations, which is also what an extractor that stopped matching prints;
-      # its arm floors catch a collapse to nothing but cannot see ONE capability
-      # going missing inside a population that is mostly something else. Measured
-      # 2026-09-04: deleting the line-number group from the extractor removes
-      # every line check the gate performs and takes its AGENTS.md arm from 77 to
-      # 76 - green at floor 30. The self-test plants a citation one line past
-      # end-of-file and requires a refusal, with the eof citation beside it as the
-      # control, so the capability is bound rather than counted.
-      - name: Doc citation gate self-test
-        run: tests/doc_citation_gate.sh --self-test
-      - name: Every path and line a document cites exists
-        run: tests/doc_citation_gate.sh
+      - name: KV storage remains independent of the V8 binding
+        run: cargo test -p zeroship-kv --test architecture
+      - name: Repository dependency and feature contracts
+        run: cargo xtask test repository
       - name: The napi addon's declared and exported functions agree
         run: tests/napi_export_parity_gate.sh
-      - name: No cfg pair whose two arms declare the identical item
-        run: tests/noop_cfg_pair_gate.sh
-      - name: Compose ships a finite max_slot_wal_keep_size
-        run: tests/compose_db_posture_gate.sh
       - name: No platform column is stored beside its own hash
         run: tests/secret_beside_its_hash_gate.sh
       # Arm 2 of this one was RED on main the whole time it was unwired:
@@ -615,52 +347,6 @@ jobs:
       # stays UNREAD.
       - name: Test-only env names are declared, and every declared one is read
         run: tests/test_only_env_gate.sh
-      # THE META-GATE. `ws_subscription_stub_gate.sh`, run earlier in this job,
-      # is one of four gates found vacuous on
-      # 2026-08-20 - an arm watching a single identifier the fix had deleted,
-      # examining 0 names and printing green. THIS SAID "the step above" until
-      # 2026-09-04, and by then two later gates had been inserted between the
-      # referent and the sentence, so it named decision_four_gate.sh - a gate
-      # that did not exist on 2026-08-20. A positional reference in a file
-      # people insert steps into decays on its own. The other three were skip_marker
-      # (8 hits, 8 excused, 0 ruled on), deploy_scripts' argv scan (1 pre-filter
-      # row, on the one service the filter excludes) and compose_secret_strength
-      # (rule set regexed out of another file's message; the message improved).
-      # Every one of them printed what a clean tree prints.
-      #
-      # So each gate now declares, per arm, how many items that arm ruled on
-      # and a floor that number must clear. The floors live in the gates, beside
-      # the code that produces the number; this step checks the PROPERTY - that
-      # every gate participates - and holds no table of expected counts, because
-      # such a table is the census that goes stale, which is the failure mode
-      # four OTHER gates hit the same week when two new crates landed.
-      #
-      # STATIC by design. The per-arm floors are enforced at the point of
-      # measurement by tests/lib/gate_arms.sh, in each gate's own CI step above
-      # and below, which is where the diagnosis is. This reads text: no docker,
-      # no database, no cargo. It was a 959-line Rust crate until 2026-08-21,
-      # which is a lot of workspace member to read shell scripts with.
-      - name: Every gate declares how much each of its arms examined
-        run: tests/gate_arm_census.sh tests
-      # THE OTHER META-GATE, and the one that would have caught the
-      # vendor_embedding miss. `gate_arm_census.sh` above asks whether every
-      # gate declares arms; `ci_invocable_gate.sh` below asks whether what this
-      # workflow NAMES can execute. Neither asks whether every gate is named at
-      # all - a gate absent from this file contributes nothing to
-      # ci_invocable's count and so nothing for it to miss. That question had
-      # gone unasked since the first gate landed, and the answer on 2026-09-04
-      # was twelve.
-      #
-      # SELF-TEST FIRST, and here it is the whole gate. The miss it exists for
-      # was a filename present in this file and present only in a COMMENT, so a
-      # predicate built on "does the name appear" reports that gate as wired
-      # and the gate is decorative. The self-test drives nine one-variable
-      # cases through the same extractor the real run uses - a run: step and
-      # the same line commented out, a command in a `run: |` block and the same
-      # line behind a `#`, a path run and the same path passed to grep.
-      #
-      # It rules on itself, which is the point: this step is what stops the
-      # next gate from being enforced by whoever remembers.
       - name: CI wiring gate self-test
         run: tests/ci_wiring_gate.sh --self-test
       - name: Every gate is run by a workflow, or allowlisted with a reason
@@ -755,37 +441,6 @@ jobs:
       # neither is in a suite anyone watches. Text-only: no binary, no docker.
       - name: dev secret provisioning check can actually pass
         run: tests/dev_secrets_gate.sh
-      # The harness creates the database and passes the DSN in; a test that
-      # makes its own decides its own isolation invisibly and cannot run
-      # against a database anybody else is connected to. Four files issue
-      # CREATE DATABASE and each is ruled on in the script, with the reason;
-      # a ruling that no longer matches anything fails this too, because an
-      # exemption nobody removed is how the next one gets waved through.
-      # Text-only: no build, no database.
-      - name: test code does not create its own databases
-        run: tests/tests_do_not_create_databases_gate.sh
-      # AGENTS.md's "zero tokio in the stack" invariant has never been checked by
-      # anything. It is two claims: no manifest we own declares tokio (true, and
-      # briefly false in b72fee096, caught by a human reading the diff), and the
-      # transitive edge through cyper -> hyper exists and is accepted. The gate
-      # bans the first and PINS the second, so it is green today and goes red on
-      # movement in either direction - including the edge being REMOVED, which is
-      # what investigate/cyper-tokio-removal is for and which must take the
-      # AGENTS.md paragraph with it. Runs cargo metadata and cargo tree only:
-      # both resolve from the manifests and the lockfile, so nothing is
-      # compiled. This step sits in the rust job for the toolchain, not a build.
-      - name: zero-tokio invariant
-        run: tests/zero_tokio_gate.sh
-      # AGENTS.md's "privilege follows the PROCESS, not the function" applied to
-      # the one attribute the worker holds that creator code can reach:
-      # PostgreSQL REPLICATION. The grant lives in db/migrations-ts, the boot
-      # check that demands it lives in the worker, and the statements that need
-      # it live in plugin-db - three files that must agree, and did not have to.
-      # The gate joins them and is self-inverting, so it refuses both a premature
-      # deletion of the reaper and a grant left behind after the CDC relay takes
-      # the streaming path. Runs cargo tree and greps; nothing is compiled.
-      - name: worker replication privilege coupling
-        run: tests/worker_replication_privilege_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
@@ -803,7 +458,6 @@ jobs:
       # THE FIRST THREE ARE ATTACHED TO THE SUBJECT: each sources the shipping
       # library rather than restating it, so breaking the library breaks the
       # test. Proven by my own one-line mutations, restored after each:
-      #   skip_census.sh:105   count forced to 0     ->  17/0 becomes 8 passed, 9 failed
       #   e2e_stack.sh:85      SKIPPED stops rising  ->   9/0 becomes 9 checks, 1 failed
       #   binary_freshness.sh:104  `if false; then`  ->  12/0 becomes 7 passed, 5 failed
       #   scratch_db.sh:69     fixed name, no token  ->  20/0 becomes 17 passed, 3 failed
@@ -839,7 +493,6 @@ jobs:
         run: |
           set -e
           tests/lib_binary_freshness_selftest.sh
-          tests/lib_skip_census_selftest.sh
           tests/lib_scratch_db_selftest.sh
           tests/lib_suite_db_selftest.sh
           tests/lib_sweep_db_selftest.sh
@@ -847,16 +500,6 @@ jobs:
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
           tests/lib_gate_arms_selftest.sh
-      # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
-      # sharing a helper. The next day two of them were wired into CI by bare
-      # path, where a non-executable file is exit 126 - so those steps could not
-      # run an assertion from the moment they were gated. Restored in ac3bfd2cf.
-      # This checks the narrow invariant that actually broke: if CI runs a script
-      # as a COMMAND, it must be executable. Sourced files are outside it by
-      # construction, which matters because five tests/lib/*.sh are correctly
-      # non-executable and a blanket rule would demand the wrong thing on them.
-      - name: Scripts CI invokes by bare path are executable
-        run: tests/ci_invocable_gate.sh
       # THE CONFIGURATION-NAME CONTRACT. Nothing invoked the checker binary in
       # any workflow until now: `cargo test --workspace` above ran the crate's
       # unit and fixture tests, but the four subcommands that inspect the REAL
@@ -957,38 +600,11 @@ jobs:
           # comment came to say "64 assertions, floor 63" while the script's own
           # floor was 107. One copy, next to the code that reads it.
           bash tests/test_target_census_gate.sh "$RUNNER_TEMP/targets.json"
-      # `cargo test --workspace` SKIPS any target whose `required-features` are
-      # not enabled, and skips it silently - the target is never built, so it
-      # contributes no test count and no failure. plugin-db puts three suites
-      # behind `test-helpers`, which is why none of them have ever run here.
-      #
-      # Only the SQLite one is listed: it needs no server and runs in seconds,
-      # so it is real coverage this job was missing. This comment carried an
-      # exact test count until 2026-09-07, when deleting one test made it wrong
-      # and nothing re-measured it; the count is not asserted anywhere, so it
-      # was a maintenance obligation with no gate behind it. Its
-      # two siblings (`integration`, `native_transaction`) need a live
-      # PostgreSQL that this job does not provision, and they belong with the
-      # other live-database gates rather than here.
+      # Data tests own PostgreSQL containers and run without optional features.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
-      # The ENGINE tier's own suite. `cargo test --workspace` above does reach
-      # it - it is an ordinary member - but that step is the one #146 records as
-      # currently unbuildable, and a crate whose 290 tests run only through a
-      # step that cannot start is a crate whose tests do not run. Named
-      # explicitly for the same reason the sqlite suite above is: a package
-      # named here fails loudly, a package reached only by a wildcard fails
-      # silently.
-      #
-      # No feature flag: `zeroship-data-engine`'s default build compiles its
-      # whole `#[cfg(test)]` surface. Its `live-db-tests` arms need a server and
-      # belong with the other live gates, not here.
-      - run: |
-          set -o pipefail
-          cargo test -p zeroship-data-engine 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p zeroship-data-v8 --lib tests::sqlite::
+          cargo test -p zeroship-data-orm
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
       # `CompioPgSession` unit test. Without a database the PG proofs skip
@@ -1005,8 +621,7 @@ jobs:
       # db/released_migrations.tsv. No CI job holds it.
       - run: |
           set -o pipefail
-          cargo test -p zeroship-migrate-server 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p zeroship-migrate-server
       # compio-postgres' `tls` feature has never been compiled by any workflow,
       # let alone run: `tls` appeared ZERO times in .github/ until this step.
       # The default feature set is empty, so `cargo test --workspace` above
@@ -1023,8 +638,7 @@ jobs:
       # `verify-full` gets.
       - run: |
           set -o pipefail
-          cargo test -p compio-postgres --features tls 2>&1 \
-            | tee -a "$RUNNER_TEMP/rust-tests.log"
+          cargo test -p compio-postgres --features tls
       # The live half: the four servers `tls_live_setup.sh` stands up, and the
       # 22 checks that read `pg_stat_ssl` to find out what transport the SERVER
       # thinks it is serving. `--features live-tls-tests` is what builds the
@@ -1039,7 +653,7 @@ jobs:
       - run: |
           set -o pipefail
           cargo test -p compio-postgres --features tls,live-tls-tests --test tls_live \
-            -- --test-threads=1 2>&1 | tee -a "$RUNNER_TEMP/rust-tests.log"
+            -- --test-threads=1
       - name: Tear down the TLS test servers
         if: always()
         run: bash libs/compio-postgres/tests/tls_live_setup.sh --down
@@ -1055,116 +669,14 @@ jobs:
       # and enumerates - which is why it sits after the teardown.
       - name: Every declared compio-postgres suite test compiles somewhere
         run: tests/compio_postgres_test_visibility_gate.sh
-      # Every test above that returned early because its backend was absent is
-      # inside the "N passed" totals and inside this job's green tick. Nothing
-      # said so until this step: Rust cannot mark a test ignored at RUNTIME, so
-      # the harness has already committed to counting it by the time the body
-      # discovers the variable is unset.
-      #
-      # This job provisions NO backend at all, so a census here is expected to be
-      # non-zero - the 7 PG-gated proofs in the platform-migrate step above all
-      # skip, because nothing here starts a Postgres and so `PG_TEST_URL` and
-      # the test overlay are both empty. This used to name
-      # ZERO_MIGRATE_TEST_PG_URL as the cause and count 9; 3d03b876e collapsed
-      # that name away and it now has no reader anywhere in the tree, and 9 was
-      # the crate-wide total (7 here plus one each in smoke_apply_pg.rs and
-      # author_and_apply_pg.rs, which run under `cargo test --workspace`).
-      # It REPORTS and does not fail, on purpose. Failing a job that
-      # deliberately stands up no services would make the only honest outcome a
-      # red tick, and the fix people would reach for is deleting the check.
-      # Whether CI should provision any of these is an operator decision; this
-      # step exists so that decision is made against a number instead of a
-      # silence.
-      #
-      # `if: always()` so the census still prints when a test above failed. A
-      # skip and a failure are different problems and the run should surface
-      # both, not let the first one seen hide the other.
-      - name: Skip census (tests that ran but exercised nothing)
-        if: always()
-        run: |
-          . tests/lib/skip_census.sh
-          census_rc=0
-          zs_skip_census "$RUNNER_TEMP/rust-tests.log" || census_rc=$?
-          # `|| true` tolerates a SKIP COUNT, which is this step's whole point.
-          # It must not tolerate a REFUSAL: status 2 means the log every cargo
-          # step above tees to is missing or empty, so this step measured
-          # nothing and the notice below would be a claim made out of no
-          # evidence. That is the exact false green this arm exists to remove.
-          if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-            echo "::error title=Skip census could not run::$RUNNER_TEMP/rust-tests.log is missing or empty; no census was taken over this job."
-            exit 1
-          fi
-          if [ "${ZS_SKIP_COUNT:-0}" -gt 0 ]; then
-            echo "::notice title=Skipped live-backend tests::${ZS_SKIP_COUNT} test(s) passed without exercising anything; see the Skip census step."
-          fi
-      # The gate's own self-test: fixtures only, no build, seconds. It runs
-      # BEFORE the gate so that a gate which has stopped discriminating is
-      # reported as such rather than as a clean workspace.
-      - name: Clippy gate self-test
-        run: tests/clippy_gate_selftest.sh
-      # This step used to be a bare
-      #
-      #   cargo clippy --workspace --all-targets --features <the two live-db ones>
-      #
-      # and it went red on main, unnoticed, twice in a week. The reason was
-      # structural rather than anybody's carelessness: the per-crate `cargo test`
-      # runs people do locally never invoke clippy, so this job was the only
-      # thing that did, and its result is one tick among many.
-      #
-      # Worse, the SECOND break showed the one-liner cannot be trusted even when
-      # someone is looking. A deny-level lint in crates/core aborted the run
-      # before crates/auth and crates/control were ever scheduled, so the output
-      # said nothing about them - and "said nothing" is exactly what a clean
-      # crate looks like. A run reporting no auth errors had not found auth
-      # clean; it had never reached auth.
-      #
-      # tests/clippy_gate.sh runs the same invocation and then AUDITS cargo's
-      # `--message-format=json` stream against `cargo metadata`, so every
-      # workspace package and every in-scope target has to show up as linted for
-      # the step to pass. It also refuses, distinguishably, when a gitignored
-      # build input is missing - which is why the `pnpm build` and WPT steps
-      # earlier in this job are load-bearing for it.
-      #
-      # The `--features <the two live-db ones>` above became `--all-features` on
-      # 2026-08-20, because "every in-scope target" was scoped BY that list. The
-      # workspace declares 28 features; the list named 2, and the 18 it left off
-      # gated 10 declared targets that arm 3 did not count as unlinted - it
-      # filtered them out of its own expectation. One of them,
-      # zeroship-migrate-adapter's `platform_migrate`, held eleven deny-level
-      # `clippy::await_holding_lock` errors throughout. A fourth arm now checks
-      # the resolution itself against the manifests and names any feature that
-      # did not come out enabled.
-      #
-      # The invocation, including the feature selection and the deliberate
-      # absence of `-D warnings`, lives in the script and nowhere else, so a
-      # developer running it locally and this step cannot lint different things.
-      # The reasoning for both is in the script header.
-      - name: Clippy, with proof every crate was linted
-        run: tests/clippy_gate.sh
-      # The last two of the twelve gates that were wired nowhere. Both drive
-      # cargo rather than reading text, so they sit at the end of this job where
-      # the target directory is warm from everything above: measured locally at
-      # 21 re-emitted compilation units for the first and four small
-      # feature-split checks for the second, against a cold cost of a full
-      # crate build each.
-      - name: No item is reachable at a visibility its signature cannot honour
-        run: tests/private_interface_gate.sh
-      - name: The data-core contract is invariant across the feature split
-        run: tests/contract_feature_invariance_gate.sh
+      # Cargo propagates lint and compilation failures using workspace lint levels.
+      - name: Clippy across workspace targets and features
+        run: cargo clippy --workspace --all-targets --all-features
 
-  # The live-database gate. zeroship-control and zeroship-migrate-server between them
-  # hold 45 test targets that dial a real Postgres and panic on connect without
-  # one - the billing money path (which additionally drives the advisory-locked
-  # fleet-wide cron sweeps), plus deploy, oauth, device, token, admin, bootstrap,
-  # registry and workflow suites. They carry
-  # `required-features = ["live-db-tests"]`, so the `rust` job above skips them;
-  # this job provisions the database and is what actually runs them.
-  #
-  # The set it runs is the set that is gated, by construction: the script issues
-  # `cargo test -p <crate> --features live-db-tests`, which runs every target in
-  # the crate whose required-features are satisfied. There is no name list, so
-  # nothing can be gated out of the default build and land in neither job - which
-  # is exactly how fifteen non-billing control suites went unrun before.
+  # Required control-plane and migration-service database verification. The suite
+  # provisions a migrated PostgreSQL database and runs ordinary crate tests,
+  # including billing, deployment, identity, registry and workflow behavior.
+  # These targets require no opt-in feature.
   #
   # The job name is kept because branch protection references it.
   #
@@ -1183,9 +695,10 @@ jobs:
   # role has no search_path either) - the same shape as a `services:` container.
   # Same command, same server, one variable apart:
   #   no overlay    exit 2,  0 `test result:` lines, 0 tests
-  #   overlay       exit 0, 26 `test result:` lines,
-  #                 "AUTH SUITE: 641 tests passed, 0 unexpected skips,
-  #                  1 allowlisted (floor 604)"
+  #   overlay       exit 0, 26 `test result:` lines, and an "AUTH SUITE: ...
+  #                 tests passed" line clearing its floor
+  # (that line carried a skip census and an allowlist count when this was
+  # measured; both are deleted, and the script no longer prints either)
   # THE NUMBERS ARE auth-gate's. billing-gate was NOT run: it additionally needs
   # a Redpanda this machine had no free port for, and its 748-test suite plus a
   # cold zeroship-control build did not fit the session. Its overlay hurdle is
@@ -1218,14 +731,6 @@ jobs:
   # "PostgreSQL never came up on localhost:<port>". Loud, but from a different
   # mechanism than the one the harness advertises.
   #
-  # `redis:` is a real service and not a stub because the overlay names Redis
-  # too (`worker.kv_url`), and the provisioner probes it. Neither of these two
-  # suites reads `ZS_TEST_REDIS_URL` or `test_kv_url()` today - the sole call
-  # site is crates/worker/src/handler.rs:3497, in a crate neither gate builds -
-  # so this is here to keep the generated topology TRUE rather than to serve a
-  # test. An overlay naming a Redis that does not exist is a false statement in
-  # the one document the whole workspace reads for its test coordinates.
-  #
   # POSTGRES_DB: zeroship for the same reason, and it is the same kind of
   # claim - truth in the overlay, not a test that needs it. compose sets it, so
   # the overlay's DSN names `zeroship`; without it the DSN names a database that
@@ -1251,15 +756,16 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      redis:
-        image: redis:7-alpine
+      # No billing test sends mail. The sink is here because the overlay writer
+      # below waits on EVERY backend before describing any of them, and because
+      # the provisioner describes the workspace's test backends as a SET - a job
+      # that adopts the set adopts all of it. Per-job subsets would be a second,
+      # hand-maintained statement of which tests need what.
+      smtp:
+        image: axllent/mailpit:latest
         ports:
-          - 6390:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+          - 1025:1025
+          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -1313,11 +819,12 @@ jobs:
         env:
           REDPANDA_BROKERS: 127.0.0.1:19092
 
-  # The auth tests resolve their database from AUTH_DB_URL and return early when
-  # it is unset, which cargo reports as a pass. `cargo test --workspace` above
-  # therefore proves nothing about them. tests/run_auth_suite.sh provisions an
-  # isolated database, runs the suite against it, and fails if any test reports
-  # that it skipped, so a missing database cannot masquerade as a pass.
+  # The auth tests used to resolve their database from AUTH_DB_URL and return
+  # early when it was unset, which cargo reports as a pass. `cargo test
+  # --workspace` above therefore proved nothing about them.
+  # tests/run_auth_suite.sh provisions an isolated database and runs the suite
+  # against it; the tests themselves refuse a run with no database, so a missing
+  # one cannot masquerade as a pass in either vector.
   #
   # It could not masquerade as anything, because it did not run: see the long
   # comment on billing-gate for the absent-overlay defect both jobs had and for
@@ -1338,15 +845,20 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      redis:
-        image: redis:7-alpine
+      # The plaintext SMTP sink zeroship-mailer's transport test dials. This job
+      # runs `cargo test -p zeroship-mailer` as a whole package (the binary list
+      # in run_auth_suite.sh), and that test FAILS without a sink rather than
+      # skipping, so the sink is a service of this job like the two above.
+      #
+      # NO `--health-cmd`, and that is not an omission: the provisioner step
+      # below waits on this port itself with a bounded probe and fails naming the
+      # address, which is the same readiness contract with one fewer guess about
+      # what the image ships to probe with.
+      smtp:
+        image: axllent/mailpit:latest
         ports:
-          - 6390:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+          - 1025:1025
+          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -1372,7 +884,7 @@ jobs:
       #   error: couldn't read .../sdks/db/dist/internal.js
       #   error: couldn't read .../sdks/bootstrap/dist/runtime-entry.js
       #   error: could not compile `zeroship-runtime` (lib) due to 3 previous errors
-      # billing-gate and plugin-db-live-gate already carry this block for the
+      # billing-gate and data-tests already carry this block for the
       # same reason; auth-gate reaches the same crate by a different route (the
       # migrate binary rather than the crate under test) and was missed.
       - uses: actions/setup-node@v4
@@ -1389,41 +901,15 @@ jobs:
       - name: Run the auth live-database gate
         run: tests/run_auth_suite.sh
 
-  # The live-Postgres gate for zeroship-plugin-db: 111 tests that ran in NO job
-  # at all until 2026-08-12. The `rust` job skips the target for want of
-  # `test-helpers` and defers it to "the other live-database gates", but
-  # billing-gate runs control and migrated by name and this crate declares no
-  # `live-db-tests` feature, so the binary fell between the two. What that cost
-  # is not hypothetical: `b2_ref_creates_foreign_key` asserted the FK default
-  # the project decided AGAINST and sat red unnoticed (fixed a182cc22a).
-  #
-  # Postgres is an explicit `docker run`, NOT a `services:` entry, and that is
-  # forced rather than stylistic: `-c wal_level=logical` is a command argument
-  # and GitHub service containers accept none. Same reason golden-path and
-  # dev-vs-deployed launch theirs this way.
-  #
-  # WITHOUT that flag TEN TESTS SKIP AND STILL COUNT AS PASSED. Measured on
-  # two servers differing in nothing else, both printing the IDENTICAL
-  # `103 passed; 0 failed; 8 ignored` and both clearing the floor:
-  #     logical  -> exit 0, census  1 allowlisted /  0 not
-  #     replica  -> exit 1, census 11 total       / 10 not allowlisted
-  # The census is the ONLY thing that tells them apart, which is why the script
-  # treats it as a failure rather than a report.
-  #
-  # The figures above read 12/11 until 2026-08-18. Re-measured that day on the
-  # full target against two servers differing only in wal_level: 11 markers on
-  # `replica` (10 wal-worded, 1 postgis) against 1 on `logical`, and
-  # `pg_has_logical_wal` has exactly 10 call sites. Ten is what the tree does
-  # today; the old number was copied into three files and re-run in none.
-  plugin-db-live-gate:
-    runs-on: ubuntu-latest
+  # Native data tests own their PostgreSQL fixture and real CDC relay process.
+  data-tests:
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Same reason as the `rust` job: run_plugin_db_live_suite.sh builds
-      # zeroship-plugin-db, which depends on zeroship-runtime, which
-      # `include_str!`s three gitignored SDK dist files a fresh checkout lacks.
+      - uses: taiki-e/install-action@nextest
+      # Build the SDK modules embedded by the V8 runtime.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -1431,50 +917,23 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
-      # pgvector because two tests build vector columns, and the extension has
-      # to be CREATED in the target database, not merely available: a fresh
-      # database with it available still fails `type "vector" does not exist`.
-      - name: Start Postgres (pgvector, logical WAL)
+      - name: Install snapshot clients matching the test server
         run: |
-          docker run -d --name plugin-db-pg -p 5441:5432 \
-            -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=zeroship \
-            -e POSTGRES_DB=zeroship \
-            pgvector/pgvector:pg16 -c wal_level=logical
-          for i in $(seq 1 40); do
-            if docker exec plugin-db-pg pg_isready -U postgres; then
-              docker exec plugin-db-pg psql -U postgres -d zeroship \
-                -v ON_ERROR_STOP=1 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
-              exit 0
-            fi
-            sleep 3
-          done
-          echo "postgres failed to become ready" >&2; docker logs plugin-db-pg; exit 1
-      - name: Run the plugin-db live-database gate
-        run: tests/run_plugin_db_live_suite.sh
-        env:
-          PG_TEST_URL: postgres://postgres:zeroship@127.0.0.1:5441/zeroship
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-16
+          echo '/usr/lib/postgresql/16/bin' >> "$GITHUB_PATH"
+      - name: Run native data tests with owned PostgreSQL
+        run: cargo xtask test data
+      - name: Upload native test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-test-results
+          path: target/nextest/data/junit.xml
 
-  # The live-Postgres gate for zeroship-worker: seven tests that drive
-  # `workflow_advance_unsigned` end to end and whose claim path joins
-  # `zeroship.apps` / `plans` / `app_deploys`.
-  #
-  # WHY IT IS ITS OWN JOB. Those seven were UNGATED until 2026-08-28 and nothing
-  # provisioned a migrated database for them, so the `rust` job above - which
-  # runs `tests/provision_test_backends.sh` and gets a live but EMPTY `zeroship`
-  # - failed all seven on `relation "zeroship.plans" does not exist`. That is a
-  # void run presented as seven regressions, and `zeroship-control` hit the
-  # identical shape on 2026-08-20. The fix is the same pair: the tests moved
-  # behind `--features live-db-tests` (so `cargo test --workspace` above is
-  # honest about what it ruled on) and this job runs them against a database the
-  # suite script creates and migrates itself.
-  #
-  # NOT folded into auth-gate, which already owns a migrated database. Two
-  # reasons, and the second is the binding one: auth-gate builds no crate that
-  # depends on zeroship-runtime, so adding zeroship-worker would pull V8 into a
-  # job that does not otherwise need it; and auth-gate's AUTH_MIN_PASSED floor
-  # is a sum over every binary it runs, so adding ~114 passes to it means
-  # re-measuring that floor against the whole auth suite - a number this crate's
-  # change has no way to establish.
+  # Required worker database verification. Workflow advancement reads the platform
+  # schema, so the suite creates and migrates its database before ordinary tests.
+  # This job builds the worker's V8 dependencies independently of auth-gate.
   #
   # THE SCRIPT DOES NOT SKIP. Without an overlay, a server, or the `zero-migrate`
   # CLI it exits 2 naming the fix and never reaches `cargo test`, so this job
@@ -1495,20 +954,12 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # NOT used by any test here - the worker's live tests build their kernel
-      # with `kv_url: None`. It is here because the overlay writer below waits
-      # on BOTH backends before describing either (`--check` skips the
-      # `docker compose up`, and nothing else), so a job without Redis cannot
-      # get a file written and the suite then refuses for want of one.
-      redis:
-        image: redis:7-alpine
+      # The shared provisioner also checks the SMTP sink used by mailer tests.
+      smtp:
+        image: axllent/mailpit:latest
         ports:
-          - 6390:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+          - 1025:1025
+          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -1519,7 +970,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Twice load-bearing, same as billing-gate / auth-gate / plugin-db-live-gate:
+      # Twice load-bearing, same as billing-gate / auth-gate / data-tests:
       # zeroship-worker depends on zeroship-runtime, which `include_str!`s three
       # gitignored SDK dist files, AND deploy/ops/db-migrate.sh is a Node program
       # that the suite script shells out to.
@@ -1678,13 +1129,8 @@ jobs:
 
   # The creator path, end to end, and until now nothing in CI touched it.
   #
-  # MEASURED 2026-08-10: `tests/` holds 61 shell harnesses. Exactly 7 are named
-  # by this file. Of the 40 `e2e_*.sh` + `golden_path.sh` harnesses, ZERO ran in
-  # CI - so every scenario in docs/pilot/e2e-scenarios.md, all four
-  # dev-vs-deployed harnesses, and every seam fix landed against them were
-  # ungated. (Careful re-deriving that number: run_billing_suite.sh contains the
-  # literal string `tests/e2e_durable_workflows.sh` at line 142, inside a comment
-  # explaining a --test-threads=1 rationale. It is not a call.)
+  # Creator deployment needs both crate tests and a real app served through
+  # the gateway. The example packages own their local and deployed checks.
   #
   # This job closes the first and largest of them. tests/golden_path.sh walks
   # `pnpm build` -> .zship -> provision -> gateway serve -> RPC round-trip ->
@@ -1750,9 +1196,9 @@ jobs:
   #   chunking or timeouts is under load.
   #
   #   which arm ran, IF SOMEONE CHANGES IT. That is the one thing this file no
-  #   longer has to be trusted about: the bypass arm announces itself with the
-  #   repo's ZEROSHIP-TEST-SKIPPED marker and the census step below turns that
-  #   announcement into a red tick.
+  #   longer has to be trusted about: the harness prints a `step 3 arm:` line
+  #   naming the arm it took, and the step below requires the DEPLOY arm's line
+  #   to be in the log.
   golden-path:
     runs-on: ubuntu-latest
     # A bound, because one of the seven local runs taken while wiring this up
@@ -1839,7 +1285,7 @@ jobs:
       # drives, and the dev runtime `pnpm dev` spawns in steps 6, 7 and 9.
       - name: Build the release binaries the harness starts
         run: |
-          cargo build --release -p zeroship-control -p zeroship-worker \
+          cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
             -p zeroship-gateway -p zeroship-cli --bins
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
@@ -1892,41 +1338,37 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # THE ARM IS ENFORCED, not merely printed. golden_path.sh's bypass arm
-      # announces itself with the repo's ZEROSHIP-TEST-SKIPPED marker - the same
-      # token `zeroship_test_support::skip` writes and `tests/lib/skip_census.sh`
-      # counts - and this step turns that announcement into a red tick. So a
-      # future edit that puts CI back on the arm which does not run `zeroship
-      # deploy` fails here instead of printing the same green as a covered run.
+      # THE ARM IS ENFORCED, not merely printed, and this step is what enforces
+      # it. A run on the bypass arm does not exercise `zeroship deploy` at all -
+      # the app is written straight into the registry and blob store - so it must
+      # not be able to report as one that did.
       #
-      # The allowlist is EMPTY on purpose: this harness starts every backend it
-      # needs, so it has no legitimate reason to announce a skip at all. An empty
-      # allowlist is handled explicitly by zs_skip_census (an empty ERE would
-      # otherwise match every line and tolerate everything).
+      # IT ASSERTS THE POSITIVE, AND THAT IS A DELIBERATE CHANGE OF SHAPE. This
+      # used to count the skip marker the bypass arm announced, which made "the
+      # covered arm ran" indistinguishable from "the harness produced no output
+      # at all" unless the census also refused on an empty log. The skip protocol
+      # is deleted workspace-wide, and grepping for the arm the job REQUIRES is
+      # both simpler and stronger: a missing log, a truncated log and the wrong
+      # arm all fail, because none of them contain the line.
+      #
+      # The string comes from golden_path.sh's own summary block, which prints
+      # one `step 3 arm:` line unconditionally on every run, naming the arm it
+      # took. -F, because the line contains no regex metacharacters worth
+      # interpreting and a `--` in a pattern is an argument-parsing hazard.
       #
       # `if: always()` because the harness is red at HEAD by design; a step
       # without it would never run.
-      - name: Golden path skip census (the deploy arm must not have been bypassed)
+      - name: Golden path deploy arm (the deploy CLI must have been exercised)
         if: always()
         run: |
-          . tests/lib/skip_census.sh
-          census_rc=0
-          zs_skip_census "$RUNNER_TEMP/golden-path.log" || census_rc=$?
-          # Both non-zero statuses are red here, but they are DIFFERENT reds and
-          # the message has to say which. 2 means the log is missing or empty -
-          # the harness never wrote one, so nothing is known about whether the
-          # deploy arm ran. Printing "the golden path announced a skipped arm"
-          # for that would send the reader to look for an announcement that was
-          # never made.
-          if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-            echo "FAIL: the skip census refused $RUNNER_TEMP/golden-path.log - it is missing" >&2
-            echo "      or empty, so the harness produced no evidence about the deploy arm." >&2
-            exit 1
-          fi
-          if [ "$census_rc" -ne 0 ]; then
-            echo "FAIL: the golden path announced a skipped arm. The line above names it." >&2
-            echo "      A run that did not exercise \`zeroship deploy\` must not report as" >&2
-            echo "      one that did; that is the whole reason the arm is an argument." >&2
+          if ! grep -qF 'step 3 arm: --provision=deploy' "$RUNNER_TEMP/golden-path.log"; then
+            echo "FAIL: $RUNNER_TEMP/golden-path.log does not report the deploy arm." >&2
+            echo "      Either the harness took --provision=dev-provision, which does NOT" >&2
+            echo "      run \`zeroship deploy\`, or it produced no summary at all. Both are" >&2
+            echo "      runs that say nothing about the deploy CLI. The arm this job gates" >&2
+            echo "      is passed explicitly in the step above; check that first." >&2
+            grep -F 'step 3 arm:' "$RUNNER_TEMP/golden-path.log" >&2 || \
+              echo "      (no 'step 3 arm:' line in the log at all)" >&2
             exit 1
           fi
       # The .zship artifact contract, run over whatever the step above just
@@ -2004,13 +1446,12 @@ jobs:
   #          the step that now does. That is a stale harness, tracked as #262 -
   #          NOT a dev-vs-deployed disagreement, and it must not be read as one.
   #
-  #   storage    GREEN when idle, RED under host load, deterministically.
-  #   workflows  same, with three different timing failures. Both are documented
-  #              at the point where their steps would otherwise sit, below.
+  # Storage now runs through example-owned Vitest suites with explicit plans.
+  # Workflow exclusions are documented beside their omitted step below.
   #
   # Wiring auth or login would mean weakening an assertion to match; they go
   # green by FIXING the divergence. db goes green by teaching the harness the
-  # new dev-migration contract. storage and workflows go green by sizing their
+  # new dev-migration contract. Workflows go green by sizing their
   # CPU and readiness budgets for a loaded host.
   #
   # WHY LOAD IS A WIRING CRITERION AT ALL, and not fussiness: a GitHub-hosted
@@ -2065,15 +1506,15 @@ jobs:
       - name: Install harness prerequisites
         run: sudo apt-get update && sudo apt-get install -y lsof
       # Postgres as an explicit `docker run`, NOT a `services:` entry, and the
-      # container NAME is the reason: stream/kv/storage/workflows create and drop
+      # container NAME is the reason: stream harnesses create and drop
       # their own dedicated database through `docker exec "$PG_CONTAINER" psql`
       # (default `compose-postgres-1`, matching the dev compose stack). GitHub
       # generates the name of a `services:` container, so `docker exec` by name
       # cannot reach it. Same reasoning as golden-path and billing-gate.
       #
       # errors and env do NOT use this one - they call stack_pg_up, which starts
-      # its OWN postgres:16 container on its own port per harness. That is why
-      # they need docker but not this step.
+      # its OWN postgres:16 container on its own port per harness. The native
+      # KV, storage, and workflow tests use Testcontainers.
       - name: Start Postgres
         run: |
           docker run -d --name compose-postgres-1 -p 5440:5432 \
@@ -2091,12 +1532,11 @@ jobs:
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
-      # dev-provision (from -p zeroship-control --bins) is what stream/kv/storage/
-      # workflows deploy with; `-p zeroship-cli` produces the binary `pnpm dev` runs
-      # as the dev tier on every one of the six.
+      # dev-provision (from -p zeroship-control --bins) serves the stream
+      # harness; `-p zeroship-cli` produces the binary used by local examples.
       - name: Build the release binaries the harnesses start
         run: |
-          cargo build --release -p zeroship-control -p zeroship-worker \
+          cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
             -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
       # Account-status and spend-state both deploy the migration-first metering
       # probe. Build its ignored .zship and refresh its tracked IR together.
@@ -2141,16 +1581,31 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      - name: env.kv (redb dev vs Redis deployed)
-        run: |
-          set -o pipefail
-          tests/e2e_dev_vs_deployed_kv.sh 2>&1 | tee "$RUNNER_TEMP/dvd-kv.log"
-        env:
-          ZS_FRESHNESS_STRICT: 1
-          PG_CONTAINER: compose-postgres-1
-          PG_USER: postgres
+      - name: Install the example test browser
+        run: pnpm --dir examples/kv-dashboard exec playwright install --with-deps chromium
+      - name: KV dashboard (RPC and browser on redb and Redis)
+        run: pnpm --dir examples/kv-dashboard test
+      - name: Retain KV fixture failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kv-deployment-logs
+          path: examples/kv-dashboard/tests/.artifacts/**
+          if-no-files-found: ignore
+      - name: Storage crates and examples
+        run: cargo xtask test storage
+      - name: Retain storage fixture failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-deployment-logs
+          include-hidden-files: true
+          path: |
+            examples/storage-probe/tests/.artifacts/**
+            examples/storage-gallery/tests/.artifacts/**
+          if-no-files-found: ignore
       # env.auth. This harness existed and ran in NO workflow until 2026-08-12.
-      # Unlike storage and workflows below, whose exclusions are measured and
+      # Unlike workflows below, whose exclusion is measured and
       # written down, nothing recorded a reason for this one - so it was an
       # omission, not a decision.
       #
@@ -2174,37 +1629,21 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # env.db and login. Both were classified before auth was, and both were
-      # deliberately LEFT unwired for one stated reason: their counts had only
-      # ever been measured on an idle machine, and storage and workflows (below)
-      # are two standing cases of a harness that is stable idle and not stable
-      # contended. That objection is now discharged by measurement rather than
-      # by argument.
-      #
-      # MEASURED 2026-08-12, the condition a CI runner actually imposes: db and
-      # login run CONCURRENTLY WITH EACH OTHER (four services each, and their
-      # port bands do not overlap - db 93xx/3021/5021/5487, login 94xx/3092/
-      # 5092/5460) plus 8 extra busy loops on a 16-core box. TWO such rounds:
-      #     db     121 passed, 1 failed  (floor 121)  exit 0, both rounds
-      #     login   30 passed, 1 failed  (floor 30)   exit 0, both rounds
-      # and the divergent row SET was identical across both rounds on each.
-      #
-      # The load did change something, and it is the thing the design predicted:
-      # db diverged on all FIVE rows both loaded rounds - including txBranch and
-      # txOrphan, which are the two carried on db's TOLERATED list precisely
-      # because they are timing-dependent (idle rounds have gone 5, 5 and 3).
-      # A fixed COUNT would therefore have been wrong in one direction or the
-      # other here, and the idle 3-run would have reported STALE EXPECTATION.
-      # That is why these two are wireable only now that they compare identities
-      # with a tolerated list, and not before.
-      - name: env.db (SQLite dev vs Postgres deployed)
+      - name: Database examples (Vitest, SQLite files, PostgreSQL, and Chromium)
         run: |
-          set -o pipefail
-          tests/e2e_dev_vs_deployed_db.sh 2>&1 | tee "$RUNNER_TEMP/dvd-db.log"
-        env:
-          ZS_FRESHNESS_STRICT: 1
-          PG_CONTAINER: compose-postgres-1
-          PG_USER: postgres
+          pnpm --dir examples/db-e2e test
+          pnpm --dir examples/db-todos test
+          pnpm --dir examples/db-hitcounter test
+      - name: Retain database fixture failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-example-logs
+          path: |
+            examples/db-e2e/tests/.artifacts/**
+            examples/db-todos/tests/.artifacts/**
+            examples/db-hitcounter/tests/.artifacts/**
+          if-no-files-found: ignore
       - name: Login (dev auth provider vs deployed OP)
         run: |
           set -o pipefail
@@ -2213,98 +1652,6 @@ jobs:
           ZS_FRESHNESS_STRICT: 1
           PG_CONTAINER: compose-postgres-1
           PG_USER: postgres
-      # tests/e2e_dev_vs_deployed_storage.sh IS NOT WIRED HERE, and the reason is
-      # a measurement rather than a suspicion. It carries a floor of 53 and scores
-      # 54/0 on an idle machine - but its deployed 1 MiB chunked streamGet dies on
-      # the worker's per-request CPU budget as soon as the host is contended:
-      #
-      #   idle machine     6 runs, 6 green   (54 passed, 0 failed)
-      #   12 busy cores    2 runs, 2 RED     (48 passed, 6 failed), every time
-      #                    `streamGet {"message":"CPU time limit exceeded"}`
-      #
-      # Same signature both times, so this is a deterministic sensitivity to host
-      # load, not a random flake. A GitHub-hosted runner is 2-4 shared vCPUs, so
-      # wiring it would produce a red that is about the runner rather than about
-      # the product - and the honest fix is neither a retry (this repo's stance:
-      # a flaky step is a defect to diagnose) nor a lowered floor.
-      #
-      # RE-MEASURED 2026-08-12 and the finding is sharper than "a 1 MiB read
-      # costs too much" (task #364). Reproduced at 48/6 under 12 busy loops, and
-      # THREE probes touch the same 1 MiB object in that same run:
-      #   probe.streamPut           1 MiB written in 16 x 64 KiB chunks  PASSES
-      #   probe.streamThenBuffered  1 MiB read buffered + checksummed    PASSES
-      #   probe.streamGet           1 MiB read CHUNKED + checksummed     FAILS
-      # Same bytes, proven by the identical checksum. streamThenBuffered runs
-      # checksumOf() over the whole megabyte, so it does the same JS byte-loop
-      # arithmetic - the differing variable is the `await reader.read()` loop,
-      # not the volume and not the checksum. So this is a question about the
-      # chunked READ path specifically. A creator draining a 1 MiB object
-      # chunked on a busy node gets a 500. Wire it once that is settled.
-      #
-      # Three follow-ups, same day, so nobody re-runs them.
-      #
-      # (1) It REPRODUCES on freshly built worker/gateway/cli binaries (48/6
-      # again), so the earlier measurement was not an artefact of a stale build.
-      #
-      # (2) NEITHER HALF EXCEEDS THE BUDGET ALONE - the sum does. Removing ONLY
-      # the `updateChecksum` call from streamGet's drain loop, same 1 MiB, same
-      # 12 busy loops, gives `53 passed, 1 failed` with ZERO "CPU time limit
-      # exceeded", and the one failure is the checksum-mismatch assertion that
-      # mutation must move. So chunk delivery on its own fits, and the spine
-      # measures the checksum at ~30 ms on its own. Do not read this as "chunked
-      # delivery is too expensive" and go optimise it in isolation.
-      #
-      # (3) What the three arms bound, taking the spine's ~30 ms checksum (which
-      # was measured on a DIFFERENT vehicle, so this is inference, not a reading):
-      # chunked delivery is over ~20 ms, buffered `get` is under ~20 ms, and the
-      # 50 ms free-tier budget fits either one plus the checksum but not the
-      # chunked pair. That is the shape any fix has to move.
-      # tests/e2e_dev_vs_deployed_workflows.sh IS NOT WIRED HERE either, for the
-      # same measured reason as storage and with a messier signature:
-      #
-      #   idle machine     3 runs, 3 green   (44 passed, 0 failed)
-      #   12 busy cores    3 runs, 3 RED, and a DIFFERENT failure each time -
-      #                    "dev server never answered" (the runtime missed the
-      #                    25 x 2s readiness window), then `sleep` answering
-      #                    `internal error` with the diff going red behind it,
-      #                    then "platform migrations failed" before anything ran
-      #
-      # Three modes, one cause: every one is a timing budget, and under contention
-      # a different one loses first. That is worse for CI than storage's single
-      # deterministic failure, because each mode reads like a different product
-      # bug. Not wired until the budgets are sized for a loaded host.
-      #
-      # RE-MEASURED 2026-08-12 and the RATE has moved a lot, though the verdict
-      # has not. FOUR rounds under the same 12 busy loops that reproduce
-      # storage's red on this box (so the load is real, not a weaker harness):
-      #     3 rounds GREEN, 44 passed / 0 failed, exit 0
-      #     1 round  RED,   36 passed / 8 failed, exit 1
-      # So "3/3 red" no longer reproduces; it is roughly 1 in 4 now. Several
-      # timing fixes landed in between and I have NOT attributed the change to
-      # any of them.
-      #
-      # The surviving red is a FIFTH mode, none of the three above: the deployed
-      # `wf.start` refuses with
-      #     START-REFUSED {"message":"request timed out","name":"Error"}
-      # and every one of the 8 failures in that round is downstream of that one
-      # refused start.
-      #
-      # THAT IS THE DEPLOYED APP'S 5s WALL BUDGET, not a client timeout. I first
-      # wrote "the @zeroship/rpc client timeout" here off the first grep hit
-      # (sdks/rpc/src/transport.ts carries the same string) and that was wrong:
-      # the harness calls with `curl -m 20`, so the TS client is not on this
-      # path at all, and the value arrived as a RESPONSE BODY. The server-side
-      # emitter is crates/worker/src/handler.rs (`make_error_msg(504, "request
-      # timed out")`), and examples/workflow-probe/src/index.ts already explains
-      # the cause in a comment written during an earlier investigation: dev
-      # (`zeroship serve`) leaves the per-request wall clock unbounded
-      # (crates/runtime/src/core/serve.rs, `wall_timeout: None`) while a
-      # deployed app inherits FREE_TIER_RUNTIME_LIMITS - 5s wall, 50ms CPU.
-      #
-      # So this is the SAME family as the storage red above: a free-tier budget
-      # sized on an idle host, crossed under contention, and invisible in dev
-      # because dev does not enforce that budget at all. Worth knowing before
-      # anyone treats the two as separate problems.
       # Asserts ABSOLUTELY on the deployed body, not only relatively: production
       # shipped Error.stack to anonymous callers for weeks while the auth harness
       # stayed green, because dev leaked the same stack and the diff was empty.
@@ -2373,30 +1720,18 @@ jobs:
         run: |
           set -o pipefail
           tests/e2e_worker_enrolment.sh 2>&1 | tee "$RUNNER_TEMP/dvd-enrolment.log"
-      # The probe that CONFIRMED #199 by execution, and until now it ran in NO
-      # workflow: `grep -rn e2e_gateway_workflow_advance_authz .github/`
-      # returned nothing while the same search for golden_path.sh returned
-      # ci.yml. So the single finding in this review with executed evidence of a
-      # live authorization gap was ungated - whoever FIXES it would have been
-      # told by nothing, and a widening would have been told by nothing either.
-      #
-      # IT IS RED AT HEAD, AND THAT IS WHY IT CARRIES A CLASSIFIER RATHER THAN
-      # `continue-on-error`. #199's gap is real and unfixed, so a raw wiring
-      # would paint this job permanently red and hide the next real regression
-      # inside a failure everyone learns to skip. The script's own two-sided
-      # block (414b8476c) exits 0 only when the documented, bounded gap is the
-      # ONLY failure; it exits 1 on anything new AND on the gap disappearing
-      # while AUTHZ_EXPECTED_FAILURES still names it.
-      #
-      # BOUNDED, and the probe measures the bounds itself rather than asserting
-      # them: phase 2 shows the shipped worker refusing the unsigned advance
-      # (HTTP 403, run stays queued) and phase 3 shows the dotless Host that
-      # bypasses the gate is not routable through Caddy. Reaching the gap needs
-      # BOTH the worker flag ON and direct gateway access.
-      - name: Gateway workflow-advance authorization (#199 - red at HEAD, classified)
-        run: |
-          set -o pipefail
-          tests/e2e_gateway_workflow_advance_authz.sh 2>&1 | tee "$RUNNER_TEMP/dvd-wfadvz.log"
+      - name: Workflow crates and examples
+        run: cargo xtask test workflow
+      - name: Workflow test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: workflow-test-logs
+          include-hidden-files: true
+          path: |
+            target/workflow-tests/**
+            examples/workflow-probe/tests/.artifacts/**
+            examples/workflows-order/tests/.artifacts/**
       # examples/ are workspace packages (pnpm-workspace.yaml lists `examples/*`)
       # but root `pnpm build` is `pnpm -r --filter './sdks/*' ...`, so it does
       # NOT build them. Without this step the harness below reaches its own
@@ -2591,7 +1926,7 @@ jobs:
       # that binary its env.db has no table.
       - name: Build the release binaries the harness starts
         run: |
-          cargo build --release -p zeroship-control -p zeroship-worker \
+          cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-data-cdc-server \
             -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
       # The harness refuses to start without a built probe and says so; building
       # it here rather than letting that refusal read as a CI misconfiguration.

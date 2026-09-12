@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `title: DefaultableColumn` is not satisfied
+ --> tests/ui/default_required_column.rs:3:10
+  |
+3 | #[derive(Insertable)]
+  |          ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `DefaultableColumn` is not implemented for `title`
+ --> tests/ui/default_required_column.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `DefaultableColumn`
+ --> tests/ui/default_required_column.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | `counter`
+  | `nickname`
+  | `payload`
+  | `score`
+  = help: see issue #48214
+  = note: this error originates in the derive macro `Insertable` which comes from the expansion of the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)

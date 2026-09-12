@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 
 use crate::entities::cedar_string;
 
@@ -82,7 +82,7 @@ impl Resource {
     ///
     /// [`Resource::App`] passes unconditionally, and that is NOT the catch-all
     /// arm returning: an [`AppId`] is reachable only through `mint` or `parse`,
-    /// so `app_<base62>` is the only text it can hold and the alphabet is closed
+    /// so `app_<base36>` is the only text it can hold and the alphabet is closed
     /// at construction instead of here. It is written as its own arm rather than
     /// folded in with the two `String` ids so that the difference is visible -
     /// and so the next id to gain a type moves an arm rather than deleting a
@@ -117,7 +117,7 @@ pub fn is_valid_resource_id(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{is_valid_resource_id, Resource};
-    use zeroship_core::app_id::AppId;
+    use zeroship_id::AppId;
 
     const HOSTILE: &str = "x\"; permit (principal, action, resource);";
 

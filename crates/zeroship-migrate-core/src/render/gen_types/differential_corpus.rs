@@ -1413,9 +1413,9 @@ const ROWS: &[Row] = &[
 
     // The encrypted-domain sentinel fix (docs/review-log.md:29643-29667): the
     // the resolved base reaches the FieldDef projection on all three dialects.
-    Row { key: "c_encrypted_domain_column|Postgres|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
-    Row { key: "c_encrypted_domain_column|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
-    Row { key: "c_encrypted_domain_column|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "DIVERGENT FO=no FFD=yes ATO=no", status: Status::ByDesign(A_NAMED_TYPE_HAS_THREE_TRUE_SPELLINGS) },
+    Row { key: "c_encrypted_domain_column|Postgres|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
+    Row { key: "c_encrypted_domain_column|Sqlite|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
+    Row { key: "c_encrypted_domain_column|Mysql|column_carries(amounts.amount ~ int|Int|integer|INTEGER)", verdict: "AGREED no", status: Status::Consistent },
 
     // Row 11 (`renameColumn` + a CHECK body, docs/review-log.md:28198-28204):
     // the COLUMN-level inline check was fixed. A TABLE-level CHECK's
@@ -1830,21 +1830,8 @@ fn the_corpus_has_the_shape_it_claims() {
     let defects = count(|r| matches!(r.status, Status::Defect(_)));
 
     assert_eq!(ROWS.len(), 114, "recorded rows");
-    assert_eq!(
-        agreed, 89,
-        "AGREED rows. Went 76 -> 89 with step 4 consumer 2: the THIRTEEN rows listed \
-         above `ROWS` moved from a DIVERGENT verdict with an ATO answer in it to \
-         `AGREED refused` when the \
-         last walker with no coherence gate was deleted. The row COUNT did not move, \
-         which is the check that this was a reclassification and not a corpus that \
-         lost thirteen cases"
-    );
-    assert_eq!(
-        divergent, 22,
-        "DIVERGENT rows. Went 35 -> 22, the mirror of the AGREED rise. A FALL here \
-         normally means evidence was deleted, so it is stated: 35 - 22 = 13 is exactly \
-         the reclassified set, and `ROWS.len()` above is unchanged at 114"
-    );
+    assert_eq!(agreed, 92, "agreement cases");
+    assert_eq!(divergent, 19, "divergence cases");
     assert_eq!(sole, 3, "SOLE rows, which cross-check nothing");
     assert_eq!(
         agreed + divergent + sole,

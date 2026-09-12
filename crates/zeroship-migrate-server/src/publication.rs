@@ -2,7 +2,7 @@
 
 use compio_postgres::Client;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 
 /// A failure to reconcile an app publication after its schema migration.
 ///
@@ -24,7 +24,6 @@ const fn creator_table_query() -> &'static str {
       WHERE n.nspname = $1
         AND c.relkind IN ('r', 'p')
         AND NOT c.relispartition
-        AND c.relname NOT LIKE '\\_\\_zeroship\\_%' ESCAPE '\\'
       ORDER BY c.relname"
 }
 
@@ -46,32 +45,31 @@ fn publication_membership_sql(
         .join(", ");
 
     match (exists, members.is_empty()) {
-        (false, true) => format!("CREATE PUBLICATION {publication}"),
-        (false, false) => format!("CREATE PUBLICATION {publication} FOR TABLE {members}"),
-        (true, false) => format!("ALTER PUBLICATION {publication} SET TABLE {members}"),
-        // PostgreSQL has no empty SET TABLE form. When the final creator table
-        // is dropped, PostgreSQL removes that table's publication membership,
-        // so an existing publication already has the desired empty set.
-        (true, true) => String::new(),
+        (false, true) => {
+            format!("CREATE PUBLICATION {publication} WITH (publish_via_partition_root = true)")
+        }
+        (false, false) => format!(
+            "CREATE PUBLICATION {publication} FOR TABLE {members} \
+             WITH (publish_via_partition_root = true)"
+        ),
+        (true, false) => format!(
+            "ALTER PUBLICATION {publication} SET (publish_via_partition_root = true); \
+             ALTER PUBLICATION {publication} SET TABLE {members}"
+        ),
+        // PostgreSQL has no empty SET TABLE form. Recreate the publication
+        // inside this transaction to clear every stale member.
+        (true, true) => format!(
+            "DROP PUBLICATION {publication}; \
+             CREATE PUBLICATION {publication} WITH (publish_via_partition_root = true)"
+        ),
     }
 }
 
-/// Reconcile an app's publication to exactly its creator-owned tables.
+/// Reconcile an app's publication to its top-level tables.
 ///
 /// This runs on the privileged migration connection after a successful apply.
-/// It excludes the entire reserved `__zeroship_` namespace, so current and
-/// future platform journals cannot enter the worker-visible WAL feed.
-///
-/// # Two identities, two derivations, one argument
-///
-/// This function spends its input on BOTH of the app id's meanings: the
-/// publication is TENANT-keyed (a change-stream subject, not a namespace) and
-/// the catalog filter is SCHEMA-keyed (`pg_namespace.nspname`). It used to take
-/// one `&str` and hand the same bytes to both, under a comment at its apply-path
-/// caller flagging the ambiguity as unresolved. It now takes the tenant and asks
-/// [`app_derivation`] for each derived name separately, so the day the two stop
-/// being the same string this reads correctly instead of silently naming one of
-/// them twice.
+/// Membership is scoped only by the app schema. Table names do not alter CDC
+/// visibility; partition children remain represented by their top-level table.
 pub async fn reconcile_app_publication(
     client: &Client,
     app: &AppId,
@@ -129,44 +127,182 @@ async fn reconcile_in_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use compio_postgres::NoTls;
+    use uuid::Uuid;
 
     #[test]
-    fn catalog_query_selects_only_top_level_creator_tables() {
+    fn catalog_query_includes_every_top_level_table_in_the_app_schema() {
         let sql = creator_table_query();
         assert!(sql.contains("c.relkind IN ('r', 'p')"));
         assert!(sql.contains("NOT c.relispartition"));
-        assert!(sql.contains("NOT LIKE '\\_\\_zeroship\\_%' ESCAPE '\\'"));
+        assert!(!sql.contains("LIKE"));
         assert!(sql.contains("ORDER BY c.relname"));
     }
 
     #[test]
     fn publication_ddl_names_each_creator_table_explicitly() {
         let tables = ["notes".to_string(), "odd\"name".to_string()];
-        let sql = publication_membership_sql(
-            "__zs_pub_deadbeef",
-            "app-one",
-            &tables,
-            false,
-        );
+        let sql = publication_membership_sql("__zs_pub_deadbeef", "app-one", &tables, false);
         assert_eq!(
             sql,
-            "CREATE PUBLICATION \"__zs_pub_deadbeef\" FOR TABLE \"app-one\".\"notes\", \"app-one\".\"odd\"\"name\""
+            "CREATE PUBLICATION \"__zs_pub_deadbeef\" FOR TABLE \"app-one\".\"notes\", \"app-one\".\"odd\"\"name\" WITH (publish_via_partition_root = true)"
         );
         assert!(!sql.contains("FOR TABLES IN SCHEMA"));
 
-        let alter = publication_membership_sql(
-            "__zs_pub_deadbeef",
-            "app-one",
-            &tables,
-            true,
-        );
+        let alter = publication_membership_sql("__zs_pub_deadbeef", "app-one", &tables, true);
         assert_eq!(
             alter,
-            "ALTER PUBLICATION \"__zs_pub_deadbeef\" SET TABLE \"app-one\".\"notes\", \"app-one\".\"odd\"\"name\""
+            "ALTER PUBLICATION \"__zs_pub_deadbeef\" SET (publish_via_partition_root = true); ALTER PUBLICATION \"__zs_pub_deadbeef\" SET TABLE \"app-one\".\"notes\", \"app-one\".\"odd\"\"name\""
         );
         assert_eq!(
             publication_membership_sql("__zs_pub_deadbeef", "app-one", &[], true),
-            ""
+            "DROP PUBLICATION \"__zs_pub_deadbeef\"; CREATE PUBLICATION \"__zs_pub_deadbeef\" WITH (publish_via_partition_root = true)"
         );
+    }
+
+    #[compio::test]
+    async fn reconciliation_publishes_prefixed_tables_but_not_partition_children() {
+        let (client, connection) =
+            compio_postgres::connect(&zeroship_core::config::test_database_url(), NoTls)
+                .await
+                .expect("connect to the migrate-server test database");
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+
+        let app = AppId::mint();
+        let schema = app_derivation::schema_name(&app);
+        let schema_q = quote_ident(&schema);
+        let publication = app_derivation::publication_name(&app);
+        let publication_q = quote_ident(&publication);
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_q};
+                 CREATE TABLE {schema_q}.notes (id bigint PRIMARY KEY);
+                 CREATE TABLE {schema_q}.__zeroship_journal (id bigint PRIMARY KEY);
+                 CREATE TABLE {schema_q}.events (id bigint, bucket integer) PARTITION BY LIST (bucket);
+                 CREATE TABLE {schema_q}.events_default PARTITION OF {schema_q}.events DEFAULT;
+                 CREATE VIEW {schema_q}.note_ids AS SELECT id FROM {schema_q}.notes;"
+            ))
+            .await
+            .expect("create publication fixtures");
+
+        reconcile_app_publication(&client, &app)
+            .await
+            .expect("reconcile app publication");
+        let initial_tables = client
+            .query_text_params(
+                "SELECT c.relname
+                   FROM pg_publication_rel AS pr
+                   JOIN pg_publication AS p ON p.oid = pr.prpubid
+                   JOIN pg_class AS c ON c.oid = pr.prrelid
+                   JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                  WHERE p.pubname = $1 AND n.nspname = $2
+                  ORDER BY c.relname",
+                &[&publication, &schema],
+            )
+            .await
+            .expect("read publication membership")
+            .iter()
+            .map(|row| row.get::<_, String>("relname"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            initial_tables,
+            ["__zeroship_journal", "events", "notes"],
+            "publication membership must follow schema and relation kind only"
+        );
+        let publishes_via_root = client
+            .query_one_scalar::<bool, _>(
+                "SELECT pubviaroot FROM pg_publication WHERE pubname = $1",
+                &[&publication],
+            )
+            .await
+            .expect("read publication partition behavior");
+        assert!(
+            publishes_via_root,
+            "partition writes must be emitted under the declared root collection"
+        );
+
+        client
+            .batch_execute(&format!(
+                "CREATE TABLE {schema_q}.__zeroship_late (id bigint PRIMARY KEY)"
+            ))
+            .await
+            .expect("create a table after publication creation");
+        reconcile_app_publication(&client, &app)
+            .await
+            .expect("reconcile existing app publication");
+        let reconciled_tables = client
+            .query_text_params(
+                "SELECT c.relname
+                   FROM pg_publication_rel AS pr
+                   JOIN pg_publication AS p ON p.oid = pr.prpubid
+                   JOIN pg_class AS c ON c.oid = pr.prrelid
+                   JOIN pg_namespace AS n ON n.oid = c.relnamespace
+                  WHERE p.pubname = $1 AND n.nspname = $2
+                  ORDER BY c.relname",
+                &[&publication, &schema],
+            )
+            .await
+            .expect("read reconciled publication membership")
+            .iter()
+            .map(|row| row.get::<_, String>("relname"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            reconciled_tables,
+            ["__zeroship_journal", "__zeroship_late", "events", "notes"],
+            "reconciliation must update an existing publication without filtering prefixes"
+        );
+
+        let sibling = Uuid::new_v4().to_string();
+        let sibling_q = quote_ident(&sibling);
+        client
+            .batch_execute(&format!(
+                "DROP VIEW {schema_q}.note_ids;
+                 DROP TABLE {schema_q}.notes, {schema_q}.__zeroship_journal,
+                            {schema_q}.__zeroship_late, {schema_q}.events CASCADE;
+                 CREATE SCHEMA {sibling_q};
+                 CREATE TABLE {sibling_q}.stale_member (id bigint PRIMARY KEY);
+                 ALTER PUBLICATION {publication_q} ADD TABLE {sibling_q}.stale_member;
+                 ALTER PUBLICATION {publication_q} SET (publish_via_partition_root = false);"
+            ))
+            .await
+            .expect("seed stale publication membership");
+        reconcile_app_publication(&client, &app)
+            .await
+            .expect("reconcile an empty creator schema");
+        let empty_membership = client
+            .query_text_params(
+                "SELECT 1 FROM pg_publication_rel AS pr
+                   JOIN pg_publication AS p ON p.oid = pr.prpubid
+                  WHERE p.pubname = $1",
+                &[&publication],
+            )
+            .await
+            .expect("read empty publication membership");
+        assert!(
+            empty_membership.is_empty(),
+            "an empty creator schema must clear stale publication members"
+        );
+        let publishes_via_root = client
+            .query_one_scalar::<bool, _>(
+                "SELECT pubviaroot FROM pg_publication WHERE pubname = $1",
+                &[&publication],
+            )
+            .await
+            .expect("read reconciled partition behavior");
+        assert!(publishes_via_root);
+
+        client
+            .batch_execute(&format!(
+                "DROP PUBLICATION {publication_q};
+                 DROP SCHEMA {schema_q} CASCADE;
+                 DROP SCHEMA {sibling_q} CASCADE;"
+            ))
+            .await
+            .expect("remove publication fixtures");
     }
 }

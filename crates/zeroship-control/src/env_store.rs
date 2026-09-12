@@ -111,33 +111,15 @@ fn app_secret_aad(app_id: &AppId, key_name: &str) -> Vec<u8> {
 
 pub struct EnvStore {
     registry: Registry,
-    /// Primary key used for ALL encrypts. Always tried first on decrypt.
-    primary_key: [u8; 32],
-    /// Previous keys. Tried in order on decrypt failure. Empty in
-    /// steady state; populated during a rotation grace period so
-    /// secrets encrypted with an older key remain readable while we
-    /// re-encrypt them in the background.
-    previous_keys: Vec<[u8; 32]>,
+    cipher: crate::secret_cipher::SecretCipher,
 }
 
 impl std::fmt::Debug for EnvStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never leak the derived keys via Debug.
-        f.debug_struct("EnvStore")
-            .field("primary_key", &"<redacted 32B>")
-            .field("previous_keys", &format!("<{} redacted>", self.previous_keys.len()))
-            .finish()
+        f.debug_struct("EnvStore").finish_non_exhaustive()
     }
 }
 
-impl Drop for EnvStore {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.primary_key);
-        for k in &mut self.previous_keys {
-            zeroize::Zeroize::zeroize(k);
-        }
-    }
-}
 
 /// Take the app row's lock and refuse if the app has been deleted.
 ///
@@ -196,16 +178,14 @@ impl EnvStore {
         if master_key.is_empty() {
             return Err(EnvError::MasterKeyRequired);
         }
-        let previous_keys = previous_master_keys
-            .iter()
-            .filter(|s| !s.is_empty())
-            .map(|s| crypto::derive_key(s))
-            .collect();
         Ok(Self {
             registry,
-            primary_key: crypto::derive_key(master_key),
-            previous_keys,
+            cipher: crate::secret_cipher::SecretCipher::new(master_key, previous_master_keys),
         })
+    }
+
+    pub(crate) fn cipher(&self) -> &crate::secret_cipher::SecretCipher {
+        &self.cipher
     }
 
     /// Test-only access to the raw ciphertext bytes stored at rest —
@@ -356,7 +336,7 @@ impl EnvStore {
             return Err(EnvError::TooLarge(value.len()));
         }
         let aad = app_secret_aad(app_id, key);
-        let ct = crypto::encrypt(&self.primary_key, &aad, value.as_bytes())?;
+        let ct = crypto::encrypt(&self.cipher.primary, &aad, value.as_bytes())?;
         let mut conn = self
             .registry
             .conn()
@@ -448,9 +428,9 @@ impl EnvStore {
         // Decrypt path tries primary key first, then any previous
         // keys (rotation grace). Building the keys vec once outside
         // the loop avoids repeated allocs.
-        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.previous_keys.len());
-        keys.push(self.primary_key);
-        keys.extend_from_slice(&self.previous_keys);
+        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.cipher.previous.len());
+        keys.push(self.cipher.primary);
+        keys.extend_from_slice(&self.cipher.previous);
 
         for r in rows.iter() {
             let k: String = r.get("key_name");
@@ -605,9 +585,9 @@ impl EnvStore {
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
-        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.previous_keys.len());
-        keys.push(self.primary_key);
-        keys.extend_from_slice(&self.previous_keys);
+        let mut keys: Vec<[u8; 32]> = Vec::with_capacity(1 + self.cipher.previous.len());
+        keys.push(self.cipher.primary);
+        keys.extend_from_slice(&self.cipher.previous);
 
         let mut secrets = serde_json::Map::new();
         for r in secret_rows.iter() {
@@ -652,9 +632,9 @@ impl EnvStore {
             .map_err(|e| EnvError::Db(e.to_string()))?;
 
         // Wrap in Zeroizing — the underlying Vec<u8> is zeroized on drop.
-        let mut all_keys_buf: Vec<u8> = Vec::with_capacity(32 * (1 + self.previous_keys.len()));
-        all_keys_buf.extend_from_slice(&self.primary_key);
-        for k in &self.previous_keys {
+        let mut all_keys_buf: Vec<u8> = Vec::with_capacity(32 * (1 + self.cipher.previous.len()));
+        all_keys_buf.extend_from_slice(&self.cipher.primary);
+        for k in &self.cipher.previous {
             all_keys_buf.extend_from_slice(k);
         }
         let _all_keys_zeroize = Zeroizing::new(all_keys_buf.clone());
@@ -667,7 +647,7 @@ impl EnvStore {
             })
             .collect();
 
-        let primary_only: [[u8; 32]; 1] = [self.primary_key];
+        let primary_only: [[u8; 32]; 1] = [self.cipher.primary];
         let mut count = 0;
         for r in rows.iter() {
             let k: String = r.get("key_name");
@@ -682,7 +662,7 @@ impl EnvStore {
 
             // Otherwise: decrypt under any known key, re-encrypt with primary.
             let plain = Zeroizing::new(crypto::decrypt_with_keys(&all_keys, &aad, &ct)?);
-            let new_ct = crypto::encrypt(&self.primary_key, &aad, &plain)?;
+            let new_ct = crypto::encrypt(&self.cipher.primary, &aad, &plain)?;
             conn.execute(
                 "UPDATE zeroship.app_secrets SET ciphertext = $1, updated_at = NOW()
                  WHERE app_id = $2 AND key_name = $3",

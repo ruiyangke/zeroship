@@ -17,11 +17,11 @@
 #[allow(unused_imports)]
 use crate::common;
 use common::test_url;
-use compio_postgres::{Config, Pool, PoolConfig, PooledClient};
+use compio_postgres::{Config, Pool, PoolConfig, PoolConnection};
 use std::time::Duration;
 
 /// The backend serving this lease, which identifies the physical connection.
-async fn backend_pid(lease: &PooledClient<'_>) -> i32 {
+async fn backend_pid(lease: &PoolConnection) -> i32 {
     lease
         .query_one_scalar("SELECT pg_backend_pid()::int4", &[])
         .await
@@ -50,10 +50,10 @@ async fn max_lifetime_rotates_without_a_housekeeper() {
     })
     .await;
 
-    let first = backend_pid(&pool.get().await.expect("first checkout")).await;
+    let first = backend_pid(&pool.acquire().await.expect("first checkout")).await;
 
     // Well inside the lifetime: the same physical connection comes back.
-    let reused = backend_pid(&pool.get().await.expect("second checkout")).await;
+    let reused = backend_pid(&pool.acquire().await.expect("second checkout")).await;
     assert_eq!(
         reused, first,
         "the pool opened a new connection while the first was still young, so \
@@ -62,7 +62,7 @@ async fn max_lifetime_rotates_without_a_housekeeper() {
 
     compio::time::sleep(Duration::from_millis(900)).await;
 
-    let after = backend_pid(&pool.get().await.expect("checkout after expiry")).await;
+    let after = backend_pid(&pool.acquire().await.expect("checkout after expiry")).await;
     assert_ne!(
         after, first,
         "a connection past max_lifetime was handed out again; expiry is \
@@ -85,7 +85,7 @@ async fn idle_timeout_does_nothing_without_a_housekeeper() {
     })
     .await;
 
-    let first = backend_pid(&pool.get().await.expect("first checkout")).await;
+    let first = backend_pid(&pool.acquire().await.expect("first checkout")).await;
     assert_eq!(pool.idle_count(), 1, "the connection returned to the pool");
 
     compio::time::sleep(Duration::from_millis(900)).await;
@@ -95,7 +95,7 @@ async fn idle_timeout_does_nothing_without_a_housekeeper() {
         1,
         "an idle connection was evicted with no housekeeper running"
     );
-    let after = backend_pid(&pool.get().await.expect("checkout after idling")).await;
+    let after = backend_pid(&pool.acquire().await.expect("checkout after idling")).await;
     assert_eq!(
         after, first,
         "the pool replaced an idle connection without a housekeeper; if this \

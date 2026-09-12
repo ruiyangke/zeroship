@@ -281,6 +281,7 @@ async fn rolling_back_a_function_replace_on_postgres() {
                 &GuardConfig::from_policy(
                     support::operator_charter(&cfg.project_schema),
                     zeroship_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
                 ),
             )
             .as_ref(),

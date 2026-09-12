@@ -5,12 +5,45 @@
  * `export default { schema: { ... } }`.
  */
 
-import type { PlatformAssignment } from "./generated/confined-system-shape.generated";
-
-export type { PlatformAssignment, PlatformAssignmentEvent } from "./generated/confined-system-shape.generated";
+export interface ColumnAssignment {
+  readonly by: "now" | "typedId" | "actor" | "identity" | `increment(${number})`;
+  readonly on: "insert" | "write" | "delete";
+}
 
 /** Generic plain object type used throughout the SDK. */
 export type PlainObject = Record<string, unknown>;
+
+/** A JSON column can hold an object, array, or scalar at its root. */
+export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
+
+declare const decimalBrand: unique symbol;
+export type Decimal = string & { readonly [decimalBrand]: "Decimal" };
+
+const DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const MAX_DECIMAL_INPUT_DIGITS = 4096;
+const MAX_DECIMAL_EXPONENT = 4096;
+
+export function decimal(value: string): Decimal {
+  if (value.length > MAX_DECIMAL_INPUT_DIGITS) {
+    throw new TypeError("decimal value must be a bounded JSON decimal string");
+  }
+  const exponent = /[eE]([+-]?\d+)$/.exec(value)?.[1];
+  const fraction = /\.(\d+)/.exec(value)?.[1] ?? "";
+  const digits = value.replace(/^-/, "").split(/[eE]/, 1)[0].replace(".", "");
+  const exponentValue = exponent === undefined ? 0 : Number(exponent);
+  const scale = fraction.length - exponentValue;
+  if (
+    !DECIMAL_PATTERN.test(value) ||
+    digits.length > MAX_DECIMAL_INPUT_DIGITS ||
+    !Number.isSafeInteger(exponentValue) ||
+    Math.abs(exponentValue) > MAX_DECIMAL_EXPONENT ||
+    scale > MAX_DECIMAL_INPUT_DIGITS ||
+    (scale < 0 && digits.length - scale > MAX_DECIMAL_INPUT_DIGITS)
+  ) {
+    throw new TypeError("decimal value must be a bounded JSON decimal string");
+  }
+  return value as Decimal;
+}
 
 /** PostgreSQL transaction isolation levels. */
 /**
@@ -37,11 +70,11 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
  * declared field appears, with the masked-value wrapper around it.
  */
 export type InferFieldDef<T> =
-  T extends TypeBuilder<infer U, any, infer M, any, any>
+  T extends TypeBuilder<infer U, any, infer M, any, any, any>
     ? M extends MaskKind
       ? M extends "none"
         ? U
-        : U extends string | number | Uint8Array
+        : U extends string | number | bigint | Uint8Array
           ? MaskedValue<U>
           : U
       : U
@@ -98,7 +131,10 @@ type IsSchemaDict<S> =
       // Otherwise it's already an inferred shape (top-level union
       // variant) and we return S unchanged.
       true extends {
-        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any, any, any, any> ? true : false;
+        [K in keyof S]-?: NonNullable<S[K]> extends {
+          readonly _type: unknown;
+          toFieldDef(): Readonly<FieldDef>;
+        } ? true : false;
       }[keyof S]
       ? true
       : false
@@ -132,107 +168,60 @@ export type InferSchema<S> = S extends infer T
 export type InferInsertSchema<S> = S extends infer T
   ? IsSchemaDict<T> extends true
     ? {
-        [K in InsertRequiredKeys<T>]: InferFieldDef<T[K]>;
+        [K in Exclude<InsertRequiredKeys<T>, AssignedKeys<T>>]: InferFieldDef<T[K]>;
       } & {
-        [K in InsertOptionalKeys<T>]?: InferFieldDef<T[K]>;
+        [K in Exclude<InsertOptionalKeys<T>, AssignedKeys<T>>]?: InferFieldDef<T[K]>;
       }
     : T
   : never;
 
-/**
- * platform-managed system fields injected into every
- * `Row<S>`. Mirrors `SYSTEM_FIELD_NAMES` on the Rust side
- * (`crates/zeroship-schema/src/query.rs`). Creator schemas cannot declare
- * fields with these names — the SDK-side reservation in
- * `@zeroship/bootstrap/install-schema` and the migration policy enforce the
- * fence before runtime CRUD can address a collection.
- *
- * Wire types (PR 3 — canonical typed_id + ISO-8601-friendly shape;
- * PR 1 stub of `number` for `id` is widened here in lockstep with
- * the Rust `dispatch_insert` auto-mint pass):
- * - `id` — `string` typed_id (`<prefix>_<22 base62 chars>`); the
- *   `dispatch_insert` path on the Rust side mints fresh ids via
- *   `zeroship_core::typed_id::generate(prefix)` when the inbound
- *   row omits one. Pre-P7 collections that still store integer ids
- *   migrate via PR 6's one-time ALTER pass; until then the SDK's
- *   `Collection._loadById` accepts either shape on the wire but
- *   exposes `string` on `Row<S>`.
- * - `created_at` / `updated_at` — Unix-ms `number`. The wire widens
- *   to ISO 8601 strings in a later PR (P7.5 / P8); the current shape
- *   stays a number to avoid a Date-parse cost on every read.
- * - `created_by` / `updated_by` — nullable actor typed_id string,
- *   `null` for system-initiated writes (migrations, background
- *   jobs). PR 3 wires the auto-populate from the per-request
- *   user context (`RuntimeState::per_request_user`).
- * - `version` — monotonic integer; starts at 1, bumped by 1 on every
- *   UPDATE. PR 4 wires the bump + optimistic-concurrency CAS.
- * - `deleted_at` — nullable timestamp `number`; `null` for live rows.
- *   PR 5 wires `delete()` to set this field and `find()` to
- *   auto-filter `deleted_at IS NULL`.
- *
- * The fields are appended after the user's schema so chain methods
- * on the inferred row see the user shape first (matches the source
- * order: every creator table gets the system fields as
- * platform-injected, not creator-declared).
- */
-export type SystemFields = {
-  id: string;
-  created_at: number;
-  updated_at: number;
-  created_by: string | null;
-  updated_by: string | null;
-  version: number;
-  deleted_at: number | null;
-};
+/** The persisted fields declared by the collection schema. */
+export type Row<S> = InferSchema<S>;
 
-/**
- * The persisted row type: user fields + 7 platform-managed system
- * fields (`id`, `created_at`, `updated_at`, `created_by`, `updated_by`,
- * `version`, `deleted_at`). Extends `InferSchema` so required user
- * fields remain required; system fields are always present at read
- * time (auto-populated by the platform).
- *
- * `id` is a typed_id string
- * (`<prefix>_<base62(uuidv7)>`) and the system fields are exposed in
- * snake_case only.
- */
-export type Row<S> = InferSchema<S> & SystemFields;
+export type IdValue = string | number | bigint;
+/** The identity type declared by the collection schema. */
+export type RowId<S> = "id" extends keyof Row<S>
+  ? unknown extends Row<S>["id"] ? IdValue : Extract<Row<S>["id"], IdValue>
+  : IdValue;
 
-/** Input type accepted by `insert()` / `upsert()` — required fields
- * stay required, auto-populated system fields are excluded so the
- * platform mints them (PR 3). */
-export type RowInput<S> = InferInsertSchema<S> & {
-  id?: never;
-  created_at?: never;
-  updated_at?: never;
-  created_by?: never;
-  updated_by?: never;
-  version?: never;
-  deleted_at?: never;
+export type AssignedKeys<S> = {
+  [K in keyof S]: S[K] extends { readonly _assigned: true } ? K : never
+}[keyof S];
+
+/** Generated fields are read-only inputs. */
+export type RowInput<S> = InferInsertSchema<S> & { [K in AssignedKeys<S>]?: never };
+
+export type UpsertOptions<S> = {
+  conflictFields: Exclude<string & keyof Row<S>, AssignedKeys<S>>[];
 };
 
 // ---------------------------------------------------------------------------
 // Filter types — typed query operators per field type
 // ---------------------------------------------------------------------------
 
-/** Comparison operators available on any field type. */
-type ComparisonOps<T> = {
+type EqualityOps<T> = {
   $eq?: T;
   $ne?: T | null;
-  $gt?: T;
-  $gte?: T;
-  $lt?: T;
-  $lte?: T;
   $in?: T[];
   $nin?: T[];
   $exists?: boolean;
 };
 
-/** Equality operators allowed on deterministic-encrypted fields. */
-type EqualityOnlyOps<T> = {
-  $eq?: T;
-  $in?: T[];
+type OrderingOps<T> = {
+  $gt?: T;
+  $gte?: T;
+  $lt?: T;
+  $lte?: T;
 };
+
+type FilterKind = "text" | "ordered" | "equality" | "exact" | "json" | "search";
+type InferredFilterKind<T> = NonNullable<T> extends Decimal
+  ? "exact"
+  : NonNullable<T> extends string
+  ? "text"
+  : NonNullable<T> extends number | bigint
+    ? "ordered"
+    : "equality";
 
 /** String-specific operators. */
 type StringOps = {
@@ -244,65 +233,164 @@ type StringOps = {
  * Filter value for an ordinary field — either a direct value, null, or
  * operator object.
  *
- * `$like` / `$ilike` are real backend operators: plugin-db's query builder
+ * `$like` / `$ilike` are real backend operators: the ORM query builder
  * validates them and lowers them to SQL predicates.
  */
-type PlainFilterValue<T> =
-  T | null |
-  (NonNullable<T> extends string ? ComparisonOps<NonNullable<T>> & StringOps :
-   NonNullable<T> extends number ? ComparisonOps<NonNullable<T>> :
-   NonNullable<T> extends boolean ? ComparisonOps<NonNullable<T>> :
-   ComparisonOps<NonNullable<T>>);
+type PlainFilterValue<T, K extends FilterKind = InferredFilterKind<T>> =
+  K extends "search"
+    ? never
+    : (K extends "json" ? null : T | null) | (
+      EqualityOps<NonNullable<T>> &
+      (K extends "text"
+        ? OrderingOps<NonNullable<T>> & StringOps
+        : K extends "ordered"
+          ? OrderingOps<NonNullable<T>>
+          : object)
+    );
 
-/** Filter value for a deterministic-encrypted field — equality only. */
-type DeterministicEncryptedFilterValue<T> =
-  T | null | EqualityOnlyOps<NonNullable<T>>;
 
 /**
  * Filter legality derived from the schema field builder itself.
  *
  * This keeps the type layer aligned with the runtime fence in
  * `validateEncryptedFieldsInFilter`:
- * - randomised-encrypted fields are un-filterable
- * - deterministic-encrypted fields accept only bare equality / `$eq` / `$in`
+ * - encrypted fields cannot be filtered
  * - plain fields keep the normal operator surface
  */
 type FilterValueForFieldBuilder<F> =
-  F extends TypeBuilder<infer U, any, any, infer E, any>
-    ? E extends "randomised"
+  F extends {
+    readonly _type: unknown;
+    readonly _encryption: true | undefined;
+    readonly _filterKind: FilterKind;
+  }
+    ? true extends F["_encryption"]
       ? never
-      : E extends "deterministic"
-        ? DeterministicEncryptedFilterValue<NonNullable<U>>
-        : PlainFilterValue<NonNullable<U>>
+      : PlainFilterValue<NonNullable<F["_type"]>, F["_filterKind"]>
     : never;
 
-type FilterValueForKey<S, K extends keyof Row<S>> =
-  IsSchemaDict<S> extends true
-    ? K extends keyof S
-      ? FilterValueForFieldBuilder<NonNullable<S[K]>>
-      : PlainFilterValue<NonNullable<Row<S>[K]>>
-    : PlainFilterValue<NonNullable<Row<S>[K]>>;
+type FieldFilters<S> = IsSchemaDict<S> extends true
+  ? { [K in keyof S]?: FilterValueForFieldBuilder<NonNullable<S[K]>> }
+  : { [K in keyof Row<S>]?: PlainFilterValue<NonNullable<Row<S>[K]>> };
 
 /** Typed filter for a document — each field accepts its value type or operators.
  *  Field values use `NonNullable<Row<S>[K]>` so `undefined` is rejected at the
  *  type layer; pass `null` to match SQL NULL explicitly. */
-export type Filter<S> = {
-  [K in keyof Row<S>]?: FilterValueForKey<S, K>
-} & {
+export type Filter<S> = FieldFilters<S> & {
   $and?: Filter<S>[];
   $or?: Filter<S>[];
   $not?: Filter<S>;
 };
+
+type SortableBuilder<F> = F extends {
+  readonly _encryption: infer E;
+  readonly _mask: infer M;
+  readonly _filterKind: infer K;
+}
+  ? true extends E
+    ? false
+    : M extends Exclude<MaskKind, "none">
+      ? true
+      : K extends "text" | "ordered"
+        ? true
+        : false
+  : false;
+
+type DistinctBuilder<F> = F extends {
+  readonly _encryption: infer E;
+  readonly _filterKind: infer K;
+}
+  ? true extends E
+    ? false
+    : K extends "json" | "search" | "exact"
+      ? false
+      : true
+  : false;
+
+/** Fields with the same order on every supported database. */
+export type SortableField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: SortableBuilder<NonNullable<S[K]>> extends true ? K : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends
+          | string
+          | number
+          | bigint
+          | MaskedValue<string | number | bigint | Uint8Array>
+          ? K
+          : never;
+      }[keyof Row<S>] | "id");
+
+/** Fields with portable database equality for grouping and deduplication. */
+export type DistinctField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: DistinctBuilder<NonNullable<S[K]>> extends true ? K : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends
+          | string
+          | number
+          | bigint
+          | boolean
+          | Uint8Array
+          | MaskedValue<string | number | bigint | Uint8Array>
+          ? K
+          : never;
+      }[keyof Row<S>] | "id");
+
+type SearchField<S, Shape> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: NonNullable<S[K]> extends {
+        readonly _filterKind: "search";
+        readonly _type: infer T;
+      }
+        ? T extends Shape ? K : never
+        : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends Shape ? K : never;
+      }[keyof Row<S>]);
+
+/** Fields accepted as vector-search inputs. */
+export type VectorField<S> = SearchField<S, readonly number[]>;
+/** Fields accepted as within-radius spatial-search inputs. */
+export type GeoField<S> = SearchField<S, { lat: number; lng: number }>;
+
+type AtLeastOne<T> = {
+  [K in keyof T]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
+}[keyof T];
+
+export type SortSpec<S> = [SortableField<S>] extends [never]
+  ? never
+  : AtLeastOne<Record<SortableField<S>, 1 | -1>>;
+export type SortInput<S> = SortSpec<S> | SortableField<S> | `-${SortableField<S>}`;
+
+/** Fields exposed by a typed projection. */
+export type SelectableField<S> = string & keyof Row<S>;
+export type SelectSpec<S> = string extends SelectableField<S>
+  ? Record<string, number | boolean>
+  : [SelectableField<S>] extends [never]
+    ? never
+    : AtLeastOne<Record<SelectableField<S>, 1 | true>>;
+export type SelectInput<S> = string extends SelectableField<S>
+  ? string | readonly string[] | Record<string, number | boolean>
+  : SelectableField<S> | readonly SelectableField<S>[] | SelectSpec<S>;
 
 // ---------------------------------------------------------------------------
 // Update expression types — typed operators per field type
 // ---------------------------------------------------------------------------
 
 /** Numeric update operators. */
-type NumericUpdateOps = {
-  $inc?: number;
-  $dec?: number;
-  $mul?: number;
+type NumericUpdateOps<T extends number | bigint | Decimal> = {
+  $inc?: T;
+  $dec?: T;
+  $mul?: T;
 };
 
 /** Array update operators. */
@@ -315,21 +403,23 @@ type ArrayUpdateOps<T> = {
 /** Update value for a single field — direct value or typed operator. */
 type UpdateFieldValue<T> =
   T |
-  (NonNullable<T> extends number ? NumericUpdateOps : never) |
+  (NonNullable<T> extends number | bigint | Decimal ? NumericUpdateOps<NonNullable<T>> : never) |
   (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
+
+type UpdateKeys<S> = Exclude<keyof InferSchema<S>, AssignedKeys<S> | "id">;
 
 /** Typed update expression — per-field operators. */
 export type UpdateExpression<S> = {
-  [K in keyof InferSchema<S>]?: UpdateFieldValue<InferSchema<S>[K]>
+  [K in UpdateKeys<S>]?: UpdateFieldValue<InferSchema<S>[K]>
 } & {
-  // Mongoose top-level operators (SDK translates to per-field)
-  $set?: Partial<InferSchema<S>>;
-  $inc?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
-  $dec?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
-  $mul?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends number ? number : never };
-  $push?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
-  $pull?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
-  $addToSet?: { [K in keyof InferSchema<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  // Document operators share the ORM's assignment grammar.
+  $set?: Partial<Pick<InferSchema<S>, UpdateKeys<S>>>;
+  $inc?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $dec?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $mul?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $push?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $pull?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
+  $addToSet?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
 };
 
 // ---------------------------------------------------------------------------
@@ -378,7 +468,7 @@ export type InferRowInput<C> =
 
 /** Branded `Id<N>` for a Collection — `Id<"users">` for `Collection<_, "users">`. */
 export type InferId<C> =
-  C extends import("./collection").Collection<any, infer N extends string> ? Id<N> :
+  C extends import("./collection").Collection<infer S, infer N extends string> ? Id<N, RowId<S>> :
   never;
 
 /**
@@ -387,7 +477,24 @@ export type InferId<C> =
  * (eager-load the full target row). Future shapes — column narrowing,
  * relation-level filters — slot in as `{ columns: K[] } | { where: Filter }`.
  */
-export type WithSpec = Record<string, true>;
+export type RelationField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: [ExtractRefTarget<NonNullable<S[K]>>] extends [never] ? never : K;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: [ExtractRefTarget<NonNullable<Row<S>[K]>>] extends [never]
+          ? never
+          : K;
+      }[keyof Row<S>]);
+
+export type WithSpec<S = PlainObject> = [RelationField<S>] extends [never]
+  ? never
+  : AtLeastOne<Record<RelationField<S>, true>>;
+
+export type ExactWithSpec<S, W extends WithSpec<S>> = W &
+  Record<Exclude<keyof W, RelationField<S>>, never>;
 
 /**
  * Extract the target table name (e.g. `"users"`) from whatever shape the
@@ -406,9 +513,11 @@ export type ExtractRefTarget<X> =
     ? U extends Id<infer T>
       ? T
       : never
-    : X extends { type: "ref"; refTarget: infer T extends string }
+    : X extends Id<infer T, any>
       ? T
-      : never;
+      : X extends { type: "ref"; refTarget: infer T extends string }
+        ? T
+        : never;
 
 /**
  * Unwrap whatever shape an `AllSchemas[name]` slot holds into the raw
@@ -428,11 +537,8 @@ export type UnwrapSchemaForRelation<T> =
 
 /**
  * Resolve the target table's `Row<...>` given the field type at `S[K]`
- * and the parent db's schema map. Falls back to `PlainObject` when the
- * target name can't be matched against any declared collection — that
- * preserves the v1 behaviour for unknown targets without breaking
- * compilation. Tightens to the real `Row<TargetSchema>` whenever
- * `installSchema`'s schema map carries the target name (the common case).
+ * and the parent database's schema map. Standalone models without that map
+ * use `PlainObject`; installed schemas resolve the declared target row.
  */
 export type ResolveTargetRow<X, AllSchemas> =
   ExtractRefTarget<X> extends infer Target
@@ -451,10 +557,9 @@ export type ResolveTargetRow<X, AllSchemas> =
  * threading it through `Collection<S, N, AllSchemas>` lets us look up each key's
  * `t.ref(target)` and resolve `target` to the target collection's `Row`.
  * The default `Record<string, unknown>` keeps direct `Collection`/`Query`
- * users (e.g. `model("users", ...)`) compiling — they degrade to
- * `PlainObject` per relation, exactly the v1 behaviour.
+ * users (e.g. `model("users", ...)`) compiling with `PlainObject` relations.
  */
-export type WithRelations<S, W extends WithSpec, AllSchemas = Record<string, unknown>> = {
+export type WithRelations<S, W extends WithSpec<S>, AllSchemas = Record<string, unknown>> = {
   [K in keyof W & keyof S]: ResolveTargetRow<S[K], AllSchemas> | null;
 };
 
@@ -471,24 +576,6 @@ export function err<T>(error: Error): Result<T> {
 /** Primitive field type names supported by the SDK. */
 export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json" | "calendarDate";
 
-/**
- * column-encryption mode. Picks both the nonce-derivation
- * strategy and the AAD shape (Camp A, resolved 2026-05-24):
- *
- * - `randomised` — per-write fresh nonce; AAD binds `(collection,
- *   column, row_pk)`. Two encrypts of the same plaintext produce
- *   different ciphertext (fail-safe default). The SDK refuses ANY
- *   filter on a randomised column at the boundary because no
- *   equality-on-ciphertext lookup can match.
- * - `deterministic` — synthetic nonce HMAC-derived from the plaintext;
- *   AAD binds `(collection, column)` only. Same plaintext under the
- *   same column produces identical ciphertext, enabling B-tree
- *   equality lookups. The SDK refuses range / regex / LIKE on
- *   deterministic columns (only `$eq`/`$in`). Inherits the standard
- *   deterministic-mode leak — equality across rows is observable to
- *   anyone with column read access.
- */
-export type EncryptionMode = "randomised" | "deterministic";
 
 /**
  * built-in mask transform applied at write time to compute the value
@@ -509,7 +596,7 @@ export type EncryptionMode = "randomised" | "deterministic";
  *
  * No raw user-defined JS functions for masking — they would let an
  * AI-generated `mask: v => v` defeat the purpose. Adding a new
- * mask kind is a platform PR, not creator config.
+ * mask kind requires a platform release.
  */
 export type MaskKind =
   | "full"
@@ -522,9 +609,7 @@ export type MaskKind =
   | "none";
 
 /**
- * sensitivity classification used by the unmask
- * authorization (PR 4) and audit (PR 4) machinery. Mirrors
- * `crate::diff::Classification` on the Rust side.
+ * Sensitivity classification used for unmask authorization and auditing.
  *
  * - `public`   — usernames, display names, public profile data.
  * - `pii`      — full name, email, address, phone, IP, date of birth.
@@ -534,11 +619,10 @@ export type MaskKind =
  *                "sensitive PI").
  * - `phi`      — health records, medical IDs, diagnosis (HIPAA scope).
  * - `pci`      — card numbers, CVV, magnetic stripe (PCI-DSS scope).
- * - `internal` — platform-internal metadata, system-field overrides.
+ * - `internal` — application-internal metadata.
  *
- * The six names are also reserved as column names by
- * `crates/zeroship-schema/src/query.rs::validate_field_name` so creator
- * schemas cannot accidentally collide with the taxonomy.
+ * These names are reserved as columns by the ORM identifier policy so creator
+ * schemas cannot collide with the taxonomy.
  */
 export type Classification =
   | "public"
@@ -553,7 +637,6 @@ export type Classification =
  *
  * - `kind`            — required. The mask transform; see {@link MaskKind}.
  * - `classification`  — optional. Defaults to `"pii"` when omitted.
- *                       Drives unmask authorization (PR 4).
  */
 export interface MaskOpts {
   kind: MaskKind;
@@ -592,19 +675,14 @@ export interface MaskedValueRepr {
   sentinel: "__zsmask__";
 }
 
-/**
- * opaque actor descriptor passed to
- * `MaskedValue.unmask({ actor? })`. PR 4 will wire the round-trip
- * through the unmask RPC; today the type stays minimal (any plain
- * object) so PR 5 (`defineMaskPolicy`) can land the concrete shape.
- */
+/** Actor descriptor passed to unmask authorization. */
 export type Actor = Record<string, unknown>;
 
 /**
  * masked-value wrapper, now a NATIVE v8_class.
  *
  * `MaskedValue` instances are minted Rust-side by the row serializer's
- * rehydration pass (`crates/zeroship-plugin-db/src/v8_classes/masked_value.rs`)
+ * rehydration pass (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`)
  * when a masked column flows back across the V8 boundary. The SDK no
  * longer constructs them — this is a TYPE-ONLY `declare class` that
  * describes the native instance's shape. There is no JS runtime body;
@@ -628,7 +706,7 @@ export type Actor = Record<string, unknown>;
  * interpolation all yield the masked string, so `console.log(user)`
  * never leaks plaintext.
  */
-export declare class MaskedValue<T extends string | number | Uint8Array = string> {
+export declare class MaskedValue<T extends string | number | bigint | Uint8Array = string> {
   /** @internal Phantom for the plaintext type. Erased at runtime. */
   readonly _plaintext: T;
 
@@ -663,9 +741,7 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
    * authorization: one denied column rejects the whole fan-out with
    * `BULK_UNMASK_PARTIAL_UNAUTHORIZED`.
    *
-   * For `wraps = bytes` the plaintext arrives base64-encoded (caller
-   * decodes with `Uint8Array.from(atob(pt), c => c.charCodeAt(0))`); for
-   * `wraps = number` it arrives as a stringified f64.
+   * Binary plaintext arrives as Uint8Array; numeric plaintext arrives as a number.
    */
   unmask(opts?: { actor?: Actor; reason?: string }): Promise<T>;
   unmask(
@@ -693,40 +769,18 @@ export declare class MaskedValue<T extends string | number | Uint8Array = string
 /**
  * options accepted by `t.encrypted(opts?)`.
  *
- * - `mode` — defaults to `"randomised"` (fail-safe).
- * - `keyId` — selects the per-platform root key (env var
- *   `ZEROSHIP_COLUMN_KEY_<KEYID>`). Defaults to `"default"`.
- * - `wraps` — the inner primitive type, ONE OF `t.string()` /
- *   `t.number()` / `t.bytes()` (the `bytes` wrap accepts base64-encoded
- *   string at the JS layer). Defaults to `t.string()`. Other types
- *   throw synchronously with `ENCRYPTED_WRAPS_UNSUPPORTED`.
+ * The host supplies the project encryption key; schemas contain no key selector.
  */
-export interface EncryptedFieldOpts<Mode extends EncryptionMode = EncryptionMode> {
-  /** Encryption mode. Defaults to `"randomised"`. */
-  mode?: Mode;
-  /** Key id selecting the per-platform root. Defaults to `"default"`. */
-  keyId?: string;
+export interface EncryptedFieldOpts {
   /**
    * Inner type the encrypted value wraps. Only string / number / bytes
    * are supported. Passing any other `TypeBuilder` throws with code
-   * `ENCRYPTED_WRAPS_UNSUPPORTED` at schema-definition time.
+   * `ENCRYPTED_TYPE_UNSUPPORTED` at schema-definition time.
    */
-  wraps?: TypeBuilder<any, any, any, any, any>;
+  of?: TypeBuilder<any, any, any, any, any>;
 }
 /** Definition for an array field with a declared item type. */
 export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
-/**
- * All supported type names. Includes "array", "ref" (B2 typed FK),
- * "object" (D2 nested validators), "calendarDate" (D3 — `YYYY-MM-DD`),
- * "literal" (C2 discriminator constant), and "union" (C2 discriminated
- * union document shape — proposal §C2).
- *
- * adds `"id"` (typed_id PK candidate) and `"actor"`
- * (session.actor_id source for `created_by` / `updated_by` style
- * columns). These shapes feed the PR 2 CREATE TABLE rewrite that
- * injects the seven platform system fields; PR 1 ships the builders
- * + wire discriminators only.
- */
 /**
  * Column names that reach the runtime descriptor but that nobody authors.
  *
@@ -751,7 +805,7 @@ export type ArrayTypeDef = { type: "array"; items: PrimitiveTypeName };
  */
 export type DescriptorOnlyTypeName = "int" | "integer" | "bigInt" | "float" | "timestamp";
 
-export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id" | "actor";
+export type TypeName = PrimitiveTypeName | DescriptorOnlyTypeName | "array" | "ref" | "object" | "literal" | "union" | "vector" | "geoPoint" | "bytes" | "id";
 
 /**
  * distance metric for `t.vector(...)` fields. The three
@@ -786,6 +840,8 @@ export type FkAction = "restrict" | "cascade" | "set null" | "no action";
  * Options accepted by `t.ref()` to control FK behaviour at the DB layer.
  */
 export interface RefOptions {
+  /** Target column. Required when authoring a foreign key through a manual schema. */
+  column?: string;
   /** ON DELETE policy. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
   /** ON UPDATE policy. Omitted means SQL/Postgres `NO ACTION`. */
@@ -799,43 +855,9 @@ export interface RefOptions {
   deferrable?: boolean;
 }
 
-/**
- * Cross-table typed ID (B2). Stored as a TEXT typed_id (`<prefix>_<22
- * base62 chars>`) at the DB layer but brand-tagged at the type layer
- * so `Id<"users">` and `Id<"posts">` are mutually incompatible — typos
- * like `db.posts.get({ authorId: postId })` (where `postId` is
- * `Id<"posts">`) become compile errors.
- *
- * Modelled after Convex's `Id<TableName>` brand
- * ([docs.convex.dev/database/document-ids]). The brand is a phantom
- * property typed but never assigned at runtime; the runtime value is
- * just a string, so JSON serialisation is unchanged.
- *
- * widened from `number & { __zeroshipTable }` to
- * `string & { __zeroshipTable }` in lockstep with the Rust-side
- * `id TEXT PRIMARY KEY` DDL and the `dispatch_insert` auto-mint pass
- * (which calls `zeroship_core::typed_id::generate(prefix)`). FK
- * columns also cascade to TEXT (`def_to_pg_type` for `Some("ref")`),
- * so a brand-typed `authorId: Id<"users">` round-trips faithfully.
- */
-export type Id<T extends string> = string & {
+/** Collection identity brand; the underlying value follows the declared ID type. */
+export type Id<T extends string, V extends IdValue = string> = V & {
   readonly __zeroshipTable: T;
-};
-
-/**
- * A physical database object a single field owns beyond its own columns.
- *
- * Tagged by `kind` so a consumer never has to guess from a name's shape which sort of
- * object it is looking at - the failure mode `FieldStorage` exists to remove.
- */
-export type AuxiliaryObject = {
-  kind: "sqliteVec0Table";
-  /** The `vec0` virtual table's name. */
-  name: string;
-  /** The column the base table and the virtual table are joined on. */
-  joinOn: string;
-  /** The after-insert, after-delete and after-update trigger names, in that order. */
-  triggers: string[];
 };
 
 /**
@@ -880,8 +902,6 @@ export interface FieldStorage {
   rawSortable?: boolean;
   /** May a creator-facing projection return `rawColumn`? See `rawFilterable`. */
   rawProjectable?: boolean;
-  /** Physical objects this field owns beyond its columns. Omitted when there are none. */
-  auxiliary?: AuxiliaryObject[];
 }
 
 /** Internal representation of a fully-specified field definition used by validate and collection. */
@@ -892,35 +912,16 @@ export interface FieldDef {
   unique?: boolean;
   index?: boolean;
   default?: FieldDefaultValue | (() => FieldDefaultValue);
-  /**
-   * Who computes this field's value, and when. Present iff the PLATFORM owns
-   * the value; absent for every field the caller owns.
-   *
-   * **The slot is the override policy, and that is the whole point of having
-   * two slots.** `assign` means the platform computes the value and a
-   * caller-supplied one is not accepted. `default` means a fallback the caller
-   * OVERRIDES by supplying anything. They are not two spellings of the same
-   * idea and a field may carry both: `version` is `assign = increment(1)` with
-   * a DDL `DEFAULT 1`, because the generator is the normal path and the DDL
-   * default is the backstop for writes that never reach the runtime (migration
-   * DML, CDC backfill, raw SQL).
-   *
-   * Everything else a consumer might want here is DERIVED from the presence of
-   * this property and is deliberately not stored beside it - "not required of
-   * the caller", "the client must not materialise a value", "a caller-supplied
-   * value is refused" all follow from it, and `immutable` follows from
-   * `on === "insert"`. A second property restating any of them would be a
-   * second source of truth for one fact.
-   *
-   * Populated from the operator charter
-   * (`policies/confined-system-shape.inject.toml`) rather than from the
-   * creator-authored descriptor, which is why it can be trusted: the descriptor
-   * is client-declared and a creator who hand-edits it can make it say
-   * anything.
-   */
-  assign?: PlatformAssignment;
+  /** Generator and lifecycle event supplied by the runtime descriptor. */
+  assign?: ColumnAssignment;
+  primaryKey?: boolean;
+  softDelete?: boolean;
+  concurrency?: boolean;
+  writable?: boolean;
   min?: number;
   max?: number;
+  precision?: number;
+  scale?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
   /**
@@ -938,6 +939,7 @@ export interface FieldDef {
    * every migration-declared foreign key — see `collection/relations.ts`.
    */
   refTarget?: string;
+  refColumn?: string;
   /** ON DELETE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
   /** ON UPDATE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
@@ -1005,27 +1007,8 @@ export interface FieldDef {
    * ivfflat index and the operator for ORDER BY at search time.
    */
   vectorMetric?: VectorMetric;
-  /**
-   * column-encryption metadata. Present iff the SDK
-   * declared the column with `t.encrypted({ mode, keyId, wraps })`.
-   * The DDL emitter renders BYTEA / BLOB regardless of `wraps`; the
-   * `wraps` field survives so the validator walks the right
-   * type-checker before the encrypt pass swaps bytes in.
-   *
-   * - `mode` — `"randomised"` (default, fail-safe) or `"deterministic"`
-   *   (enables B-tree equality lookups; carries the standard
-   *   deterministic-mode leak).
-   * - `keyId` — selects the per-platform root key. Defaults to
-   *   `"default"`.
-   * - `wraps` — the inner primitive (`"string"` | `"number"` | `"bytes"`).
-   *   Other types are refused at schema-definition time with code
-   *   `ENCRYPTED_WRAPS_UNSUPPORTED`.
-   */
-  encrypted?: {
-    mode: EncryptionMode;
-    keyId: string;
-    wraps: "string" | "number" | "bytes";
-  };
+  /** Whether the field uses encrypted storage; `type` describes its plaintext. */
+  encrypted?: boolean;
   /**
    * column-mask metadata. Present iff the SDK declared
    * the column with `.mask({ kind, classification? })`, OR the column
@@ -1051,44 +1034,9 @@ export interface FieldDef {
     kind: MaskKind;
     classification: Classification;
   };
-  /**
-   * typed_id prefix discriminator for `t.id(prefix?)`.
-   * Present iff `type === "id"`. The SDK auto-mint pass (PR 3) will
-   * use this prefix to call `typed_id::new(prefix)` when the row is
-   * inserted without an explicit id. Absent / undefined means the
-   * collection name is used as the prefix (PR 3 deferred decision).
-   *
-   * Wire-format note: this is what makes `t.id("post")` distinguishable
-   * from `t.string()` at the runtime DDL emitter (PR 2) and the
-   * INSERT auto-populate pass (PR 3). The bare `type: "id"` discriminator
-   * is sufficient for the auto-mint candidate detection.
-   */
+  /** Prefix used when this field declares a typedId assignment. */
   idPrefix?: string;
-  /**
-   * explicit nullability for `t.actor()` columns. Set
-   * to `true` by `.nullable()` (Q-SF-I in the proposal: explicit
-   * preferred). The default for `t.actor()` is nullable because
-   * system-initiated writes (migrations, background jobs) have no
-   * actor. Present iff `type === "actor"`.
-   */
-  actorNullable?: boolean;
-  /**
-   * timestamp auto-population modifier set by
-   * `.auto_now()` / `.auto_now_on_update()` on a `t.timestamp()` field.
-   *
-   * - `"now"` — DEFAULT NOW() at INSERT. Used for `created_at`-style
-   *   columns. Emitted as `TIMESTAMPTZ NOT NULL DEFAULT NOW()` on PG
-   *   (PR 2).
-   * - `"now_on_update"` — DEFAULT NOW() at INSERT AND bumped to NOW()
-   *   by every UPDATE (the UPDATE builder appends
-   *   `<col> = NOW()` to the SET clause — PR 4). Used for
-   *   `updated_at`-style columns.
-   *
-   * Present iff a chain method set it; absent on bare `t.timestamp()`.
-   * The chain method refuses any non-timestamp type at SDK time so
-   * the discriminator stays well-formed in the generated descriptor.
-   */
-  timestampAuto?: "now" | "now_on_update";
+
   /**
    * **Where this field physically lives** (runtime descriptor v2). See
    * [`FieldStorage`].
@@ -1124,22 +1072,23 @@ const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
  *   `undefined` for unmasked columns. Surfaces through
  *   `InferFieldDef` so `Row<S>` wraps masked fields in
  *   `MaskedValue<T>` at the type level.
- * - `E` — encryption filter brand: `undefined` for plain fields,
- *   `"randomised"` for un-filterable encrypted fields, or
- *   `"deterministic"` for equality-only encrypted fields. Used by
- *   `Filter<S>` so the type layer matches the runtime fence.
+ * - `E` — `true` for encrypted fields, `undefined` for plain fields.
+ *   `Filter<S>` excludes encrypted values.
  *
  * `t.string().required().min(3).max(50)` → `TypeBuilder<string, true>`
- * `t.encrypted()` → `TypeBuilder<string, false, "full", "randomised", false>`
+ * `t.encrypted()` → `TypeBuilder<string, false, "full", true, false>`
  * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
  * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
+type AssignmentBrand<T> = Pick<T, Extract<keyof T, "_assigned">>;
+
 export class TypeBuilder<
   T = unknown,
   R extends boolean = false,
   M extends MaskKind | undefined = undefined,
-  E extends EncryptionMode | undefined = undefined,
+  E extends true | undefined = undefined,
   D extends boolean = false,
+  F extends FilterKind = FilterKind,
 > {
   /** @internal Type-level brand — do not access at runtime. */
   declare readonly _type: T;
@@ -1151,6 +1100,8 @@ export class TypeBuilder<
   declare readonly _encryption: E;
   /** @internal Type-level brand for `.default()`-backed insert optionality. */
   declare readonly _hasDefault: D;
+  /** @internal Type-level brand for portable filter operators. */
+  declare readonly _filterKind: F;
 
   readonly [TYPE_BUILDER_BRAND] = true;
 
@@ -1169,31 +1120,37 @@ export class TypeBuilder<
     this._def = { ...def };
   }
 
+  /** Attach generated-column metadata after the value-type builder chain. */
+  assigned(assign: ColumnAssignment): this & { readonly _assigned: true } {
+    this._def.assign = assign;
+    this._def.writable = false;
+    return this as this & { readonly _assigned: true };
+  }
+
+  primaryKey(): this {
+    this._def.primaryKey = true;
+    return this;
+  }
+
   /** Returns a frozen copy of the field definition. */
   toFieldDef(): Readonly<FieldDef> {
     return Object.freeze({ ...this._def });
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E, D> {
+  required(): TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E, D>;
+    return this as unknown as TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** Adds a unique index constraint to the field. */
   unique(): this {
-    // randomised + unique is incoherent: randomised mode
-    // produces a fresh nonce per write, so the ciphertext for the
-    // same plaintext differs across rows, which defeats any
-    // ciphertext-equality uniqueness constraint. Deterministic mode
-    // CAN enforce uniqueness because identical plaintexts produce
-    // identical ciphertexts under the same (collection, column).
-    if (this._def.encrypted !== undefined && this._def.encrypted.mode === "randomised") {
+    if (this._def.encrypted === true) {
       throw Object.assign(
         new Error(
-          "t.encrypted({ mode: 'randomised' }).unique(): unique enforcement requires equality on ciphertext, which randomised mode cannot provide. Switch to { mode: 'deterministic' } or drop .unique().",
+          "t.encrypted().unique(): encrypted fields cannot enforce uniqueness.",
         ),
-        { code: "UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED" as const },
+        { code: "UNIQUE_ENCRYPTED_UNSUPPORTED" as const },
       );
     }
     this._def.unique = true;
@@ -1207,9 +1164,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this> {
     this._def.default = val;
-    return this as unknown as TypeBuilder<T, R, M, E, true>;
+    return this as unknown as TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1227,9 +1184,9 @@ export class TypeBuilder<
   /** Restricts the field to a fixed set of allowed values. */
   enum<const Values extends readonly (T & (string | number))[]>(
     ...values: Values
-  ): TypeBuilder<Values[number], R, M, E, D> {
+  ): TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this> {
     this._def.enum = [...values];
-    return this as unknown as TypeBuilder<Values[number], R, M, E, D>;
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** For strings: a RegExp the value must match. */
@@ -1261,7 +1218,7 @@ export class TypeBuilder<
    *
    * ```ts
    * const fields = {
-   *   ssn:      t.encrypted({ mode: "randomised" }),           // → default mask = "full" + "pii"
+   *   ssn:      t.encrypted(),           // → default mask = "full" + "pii"
    *   card_pan: t.encrypted().mask({ kind: "last4" }),         // → MaskedValue<string>
    *   email:    t.string().mask({ kind: "email" }),            // → MaskedValue<string>
    *   notes:    t.string().mask({ kind: "full", classification: "internal" }),
@@ -1275,7 +1232,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1318,11 +1275,7 @@ export class TypeBuilder<
         { code: "MASK_INVALID_CLASSIFICATION" as const },
       );
     }
-    // `t.ref()` columns must not carry a mask — see Q-P5-I in the
-    // sensitive-field-masking proposal. The FK column is an integer
-    // typed id; masking it would defeat the JOIN integrity check
-    // and the sibling column would itself participate in the FK
-    // semantics (incoherent).
+    // Reference columns must remain visible to foreign-key joins.
     if (this._def.type === "ref") {
       throw Object.assign(
         new Error(
@@ -1346,41 +1299,16 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E, D>;
+    return this as unknown as TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this>;
   }
 
-  /**
-   * mark the field as nullable. Today this is meaningful
-   * only on `t.actor()` (matches Q-SF-I in the proposal: explicit
-   * `.nullable()` preferred over implicit). Calling `.nullable()` on
-   * any other type sets the `actorNullable` discriminator only when
-   * `type === "actor"`; on other types it's a no-op so existing
-   * chain ergonomics aren't disturbed (PR 1 foundation only — wider
-   * nullability semantics are out of scope).
-   *
-   * The TS type-side effect (unwrapping non-nullable to nullable) is
-   * deferred to a later PR — PR 1 only ships the wire-format discriminator
-   * so PR 2's CREATE TABLE can emit `NULL` vs `NOT NULL` correctly.
-   */
-  nullable(): this {
-    if (this._def.type === "actor") {
-      this._def.actorNullable = true;
-    }
-    return this;
+  /** Allow null in the field's value type. */
+  nullable(): TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this> {
+    return this as TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this>;
   }
 
-  /**
-   * mark a `t.timestamp()` field as auto-populated to
-   * `NOW()` at INSERT. PR 2 emits the DDL as `DEFAULT NOW()`; the
-   * INSERT auto-populate pass (PR 3) lets the DB DEFAULT fire when
-   * the caller omits the column.
-   *
-   * Refused on non-timestamp types with code `AUTO_NOW_ON_NON_TIMESTAMP`
-   * so misuses fail loudly at schema-definition time rather than
-   * silently producing wrong DDL. The validator looks at the underlying
-   * `type === "date"` because `t.timestamp()` aliases to date today.
-   */
-  auto_now(): this {
+  /** Assign the database timestamp on insert. */
+  auto_now(): this & { readonly _assigned: true } {
     if (this._def.type !== "date") {
       throw Object.assign(
         new Error(
@@ -1389,21 +1317,11 @@ export class TypeBuilder<
         { code: "AUTO_NOW_ON_NON_TIMESTAMP" as const },
       );
     }
-    this._def.timestampAuto = "now";
-    return this;
+    return this.assigned({ by: "now", on: "insert" });
   }
 
-  /**
-   * mark a `t.timestamp()` field as auto-populated to
-   * `NOW()` at INSERT AND bumped to `NOW()` by every UPDATE. PR 2
-   * emits the column as `DEFAULT NOW()`; PR 4 wires the UPDATE
-   * builder to append `<col> = NOW()` to every SET clause.
-   *
-   * Refused on non-timestamp types with code `AUTO_NOW_ON_NON_TIMESTAMP`
-   * (shares the code with `.auto_now()` since the misuse class is
-   * identical).
-   */
-  auto_now_on_update(): this {
+  /** Assign the database timestamp on insert and subsequent writes. */
+  auto_now_on_update(): this & { readonly _assigned: true } {
     if (this._def.type !== "date") {
       throw Object.assign(
         new Error(
@@ -1412,8 +1330,7 @@ export class TypeBuilder<
         { code: "AUTO_NOW_ON_NON_TIMESTAMP" as const },
       );
     }
-    this._def.timestampAuto = "now_on_update";
-    return this;
+    return this.assigned({ by: "now", on: "write" });
   }
 }
 
@@ -1430,30 +1347,50 @@ export class TypeBuilder<
  */
 export const t = {
   /** Creates a string field definition. */
-  string(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "string" });
+  string(): TypeBuilder<string, false, undefined, undefined, false, "text"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "string" });
   },
   /** Creates a number field definition. */
-  number(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "number" });
+  number(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "number" });
+  },
+  /** Creates a fixed precision decimal represented as exact text. */
+  numeric(opts: { precision?: number; scale?: number } = {}): TypeBuilder<Decimal, false, undefined, undefined, false, "exact"> {
+    const precision = opts.precision ?? 38;
+    const scale = opts.scale ?? 9;
+    if (!Number.isSafeInteger(precision) || precision < 1 || precision > 1000) {
+      throw new TypeError("t.numeric precision is outside the portable range");
+    }
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > precision) {
+      throw new TypeError("t.numeric scale must be between zero and precision");
+    }
+    return new TypeBuilder<Decimal, false, undefined, undefined, false, "exact">({
+      type: "number",
+      precision,
+      scale,
+    });
+  },
+  /** Creates an integer field with exact bigint input and output beyond the safe number range. */
+  bigInt(): TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered">({ type: "bigInt" });
   },
   /** Creates a boolean field definition. */
-  boolean(): TypeBuilder<boolean> {
-    return new TypeBuilder<boolean>({ type: "boolean" });
+  boolean(): TypeBuilder<boolean, false, undefined, undefined, false, "equality"> {
+    return new TypeBuilder<boolean, false, undefined, undefined, false, "equality">({ type: "boolean" });
   },
   /**
    * Creates a timestamp field — `TIMESTAMPTZ` in Postgres, Unix-ms
    * `number` at the JS layer. Accepts `Date`, ISO string, or `number`
-   * on input (the SDK normalises in `validate`). Reads come back as
+   * on input (the shared ORM normalizes using the descriptor). Reads come back as
    * `number` (millisecond epoch). For wall-clock dates without a
    * time-of-day component, use {@link calendarDate} instead.
    */
-  timestamp(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "date" });
+  timestamp(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "date" });
   },
-  /** Creates a JSON/object field definition for arbitrary nested data. */
-  json(): TypeBuilder<Record<string, unknown>> {
-    return new TypeBuilder<Record<string, unknown>>({ type: "json" });
+  /** Creates a JSON field definition for objects, arrays, and scalars. */
+  json(): TypeBuilder<JsonValue, false, undefined, undefined, false, "json"> {
+    return new TypeBuilder<JsonValue, false, undefined, undefined, false, "json">({ type: "json" });
   },
   /**
    * Creates an array field definition. Pass the item type builder as the argument:
@@ -1467,7 +1404,7 @@ export const t = {
    * malformed `FieldDef`s (e.g. dropping `refTarget` so `validateRefTargets`
    * could not visit array items).
    */
-  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[]> {
+  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[], false, undefined, undefined, false, "json"> {
     if (!(items instanceof TypeBuilder)) {
       throw Object.assign(
         new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
@@ -1490,34 +1427,20 @@ export const t = {
       );
     }
     const itemType = itemDef.type as PrimitiveTypeName;
-    return new TypeBuilder<U[]>({ type: "array", items: itemType });
+    return new TypeBuilder<U[], false, undefined, undefined, false, "json">({ type: "array", items: itemType });
   },
-  /**
-   * Creates a foreign-key field referencing `table` (B2). At the type
-   * level produces `TypeBuilder<Id<T>>` so consumers get a brand-typed
-   * `Id<"users">` rather than a bare `number`. At the DB level it
-   * materialises a `FOREIGN KEY (<column>) REFERENCES "<schema>"."<table>"(id)`
-   * constraint. When action policy is omitted, Postgres defaults to
-   * `NO ACTION` and the renderer omits the clause.
-   *
-   * `opts.onDelete` / `opts.onUpdate` override the policy, e.g.:
-   * ```ts
-   * { authorId: t.ref("users", { onDelete: "cascade" }) }
-   * ```
-   *
-   * `opts.deferrable: true` emits `DEFERRABLE INITIALLY DEFERRED` so
-   * circular references can be inserted in any order within one tx.
-   */
-  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
+  /** Declare a branded reference, optionally naming its target column and FK actions. */
+  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>, false, undefined, undefined, false, "text"> {
     if (typeof table !== "string" || table.length === 0) {
       throw Object.assign(
         new Error("t.ref(table) requires a non-empty table name"),
         { code: "REF_EMPTY_TABLE" as const },
       );
     }
-    return new TypeBuilder<Id<T>>({
+    return new TypeBuilder<Id<T>, false, undefined, undefined, false, "text">({
       type: "ref",
       refTarget: table,
+      ...(opts?.column !== undefined ? { refColumn: opts.column } : {}),
       ...(opts?.onDelete !== undefined ? { onDelete: opts.onDelete } : {}),
       ...(opts?.onUpdate !== undefined ? { onUpdate: opts.onUpdate } : {}),
       ...(opts?.deferrable !== undefined ? { deferrable: opts.deferrable } : {}),
@@ -1543,7 +1466,7 @@ export const t = {
    * `string | undefined` — the same rules as the top-level schema apply
    * recursively (`required()` keeps a key required, otherwise optional).
    */
-  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
+  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>, false, undefined, undefined, false, "json"> {
     if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
       throw Object.assign(
         new Error("t.object(shape) requires a record of nested type builders"),
@@ -1560,7 +1483,7 @@ export const t = {
       }
       nested[key] = { ...val.toFieldDef() };
     }
-    return new TypeBuilder<InferSchema<S>>({ type: "object", shape: nested });
+    return new TypeBuilder<InferSchema<S>, false, undefined, undefined, false, "json">({ type: "object", shape: nested });
   },
   /**
    * vector embedding field. Stored as pgvector's
@@ -1584,7 +1507,7 @@ export const t = {
    * back as the same shape. Use `collection.search({ vector, k })` for
    * nearest-neighbour queries.
    */
-  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[]> {
+  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[], false, undefined, undefined, false, "search"> {
     if (typeof dims !== "number" || !Number.isInteger(dims) || dims < 1 || dims > 16000) {
       throw Object.assign(
         new Error(
@@ -1602,7 +1525,7 @@ export const t = {
         { code: "VECTOR_INVALID_METRIC" as const },
       );
     }
-    return new TypeBuilder<number[]>({
+    return new TypeBuilder<number[], false, undefined, undefined, false, "search">({
       type: "vector",
       vectorDims: dims,
       vectorMetric: metric,
@@ -1610,8 +1533,8 @@ export const t = {
   },
   /**
    * geographic point field (WGS84, EPSG:4326). Stored as
-   * PostGIS's `geography(POINT, 4326)` column on PG; on SQLite (P4 PR 5)
-   * a `BLOB` packed `(lat, lng)` × `f64` = 16 bytes.
+   * PostGIS's `geography(POINT, 4326)` column on PostgreSQL and as a packed
+   * coordinate pair on SQLite.
    *
    * ```ts
    * const fields = {
@@ -1628,8 +1551,8 @@ export const t = {
    * the database; the runtime probes `pg_extension WHERE extname='postgis'`
    * and surfaces a typed `POSTGIS_EXTENSION_MISSING` error when absent.
    */
-  geoPoint(): TypeBuilder<{ lat: number; lng: number }> {
-    return new TypeBuilder<{ lat: number; lng: number }>({ type: "geoPoint" });
+  geoPoint(): TypeBuilder<{ lat: number; lng: number }, false, undefined, undefined, false, "search"> {
+    return new TypeBuilder<{ lat: number; lng: number }, false, undefined, undefined, false, "search">({ type: "geoPoint" });
   },
   /**
    * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and
@@ -1641,132 +1564,65 @@ export const t = {
    * birthday: t.calendarDate(),
    * ```
    */
-  calendarDate(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "calendarDate" });
+  calendarDate(): TypeBuilder<string, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "ordered">({ type: "calendarDate" });
+  },
+  /** Native binary column, also usable as an encrypted field's wrap. */
+  bytes(): TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality"> {
+    return new TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality">({ type: "bytes" });
   },
   /**
-   * raw binary column, and the `wraps` argument of
-   * `t.encrypted({ wraps: t.bytes() })`.
-   *
-   * At the JS layer the field is exchanged as a base64-encoded string;
-   * at the DB layer it becomes a BYTEA (Postgres) / BLOB (SQLite)
-   * column holding the RAW BYTES that string encodes. One encode on
-   * the way in, one decode on the way out: `plugin-db`'s
-   * `crud::bytes_pass` decodes the wire string before the bind and
-   * `crud::read_pipeline` re-encodes what the column returns.
-   *
-   * A bare `t.bytes()` outside `t.encrypted({ wraps: ... })` is
-   * supported. This doc used to say bytes columns outside an encrypted wrap
-   * "aren't yet supported in plugin-db"; both were false by the time
-   * anyone read them - what was actually missing was the write-side
-   * decode, so the column accepted the value and stored the ASCII of
-   * the base64.
-   */
-  bytes(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "bytes" });
-  },
-  /**
-   * transparent column encryption. Wraps a string /
-   * number / bytes field with AEAD encryption at the storage boundary.
+   * Encrypt string, number or byte values with a fresh random nonce per write.
+   * The ciphertext is bound to its collection, column and row identity.
+   * Encrypted fields cannot be filtered, sorted, or unique.
+   * A full mask is applied by default; `.mask({ kind: "none" })` opts out.
    *
    * ```ts
    * const fields = {
-   *   ssn:        t.encrypted({ mode: "randomised" }).required(),
-   *   apiKey:     t.encrypted({ mode: "deterministic" }).unique(),
-   *   payload:    t.encrypted({ wraps: t.bytes() }),
-   *   amount:     t.encrypted({ wraps: t.number() }),
+   *   ssn: t.encrypted().required(),
+   *   payload: t.encrypted({ of: t.bytes() }),
+   *   amount: t.encrypted({ of: t.number() }),
    * };
    * ```
-   *
-   * Modes:
-   * - `"randomised"` (default) — per-write fresh nonce; AAD binds
-   *   `(collection, column, row_pk)`. Two encrypts of the same plaintext
-   *   produce DIFFERENT ciphertext. Defeats the ciphertext-oracle
-   *   attack on rows with shared columns. ALL filtering on the column
-   *   is refused at the SDK boundary
-   *   (`RANDOMISED_ENCRYPTED_FIELD_NOT_FILTERABLE`).
-   * - `"deterministic"` — synthetic nonce HMAC-derived from plaintext;
-   *   AAD binds `(collection, column)` only. Same plaintext → same
-   *   ciphertext, enabling B-tree equality lookups. Only equality
-   *   + `$in` filters are accepted; range / regex / LIKE are refused
-   *   with `DETERMINISTIC_ENCRYPTED_OP_NOT_SUPPORTED`.
-   *
-   * Constraints:
-   * - `wraps` must be `t.string()` / `t.number()` / `t.bytes()`. Other
-   *   types throw with `ENCRYPTED_WRAPS_UNSUPPORTED`.
-   * - The combination `mode: "randomised"` + `.unique()` is refused at
-   *   schema-definition time with `UNIQUE_ENCRYPTED_RANDOMISED_UNSUPPORTED`
-   *   (randomised mode can't enforce uniqueness without equality).
-   * - Applying `t.encrypted()` to a `t.ref()` field is refused with
-   *   `ENCRYPTED_ON_REF_UNSUPPORTED` — FK columns must remain unencrypted
-   *   so the JOIN integrity check works.
    */
   encrypted<
-    // `W` captures the `opts.wraps` builder so `T` (below) can be INFERRED
-    // from it instead of defaulting to `string` regardless of what was
-    // passed. Before this, `t.encrypted({ wraps: t.number() })` still
-    // produced a `TypeBuilder<string, ...>` unless the caller manually
-    // wrote `t.encrypted<number>({ wraps: t.number() })` - so `Filter<S>`
-    // typed the field's `$eq`/`$in` values as `string`, rejecting the
-    // number values `wraps: t.number()` was declared to accept. Ticket
-    // #267 surfaced this via `filter-encryption-types.test.ts`'s
-    // `amountDet: t.encrypted({ mode: "deterministic", wraps: t.number()
-    // })` filter assertion, which had never been typechecked.
-    W extends TypeBuilder<string | number | Uint8Array, any, any, any, any> | undefined = undefined,
-    Mode extends EncryptionMode = "randomised",
-    T extends string | number | Uint8Array =
-      W extends TypeBuilder<infer WT extends string | number | Uint8Array, any, any, any, any>
+    // Infer the plaintext type from the wrapped builder.
+    W extends TypeBuilder<string | number | bigint | Uint8Array, any, any, any, any> | undefined = undefined,
+    T extends string | number | bigint | Uint8Array =
+      W extends TypeBuilder<infer WT extends string | number | bigint | Uint8Array, any, any, any, any>
         ? WT
         : string,
   >(
-    opts?: Omit<EncryptedFieldOpts<Mode>, "wraps"> & { wraps?: W },
-  ): TypeBuilder<T, false, "full", Mode, false> {
-    const wrapsBuilder = opts?.wraps;
-    let wrapsKind: "string" | "number" | "bytes" = "string";
-    if (wrapsBuilder !== undefined) {
-      if (!(wrapsBuilder instanceof TypeBuilder)) {
+    opts?: Omit<EncryptedFieldOpts, "of"> & { of?: W },
+  ): TypeBuilder<T, false, "full", true, false> {
+    const innerBuilder = opts?.of;
+    let plaintextType: "string" | "number" | "bytes" = "string";
+    let precision: number | undefined;
+    let scale: number | undefined;
+    if (innerBuilder !== undefined) {
+      if (!(innerBuilder instanceof TypeBuilder)) {
         throw Object.assign(
-          new Error("t.encrypted({ wraps }): wraps must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
-          { code: "ENCRYPTED_WRAPS_UNSUPPORTED" as const },
+          new Error("t.encrypted({ of }): of must be a TypeBuilder (t.string() / t.number() / t.bytes())"),
+          { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
         );
       }
-      const def = wrapsBuilder.toFieldDef();
-      if (def.type === "string") wrapsKind = "string";
-      else if (def.type === "number") wrapsKind = "number";
-      else if (def.type === "bytes") wrapsKind = "bytes";
+      const def = innerBuilder.toFieldDef();
+      if (def.type === "string") plaintextType = "string";
+      else if (def.type === "number") {
+        plaintextType = "number";
+        precision = def.precision;
+        scale = def.scale;
+      } else if (def.type === "bytes") plaintextType = "bytes";
       else {
         throw Object.assign(
           new Error(
-            `t.encrypted({ wraps }): only string / number / bytes are supported, got "${def.type}"`,
+            `t.encrypted({ of }): only string / number / bytes are supported, got "${def.type}"`,
           ),
-          { code: "ENCRYPTED_WRAPS_UNSUPPORTED" as const },
+          { code: "ENCRYPTED_TYPE_UNSUPPORTED" as const },
         );
       }
     }
-    const mode = (opts?.mode ?? "randomised") as Mode;
-    if (mode !== "randomised" && mode !== "deterministic") {
-      throw Object.assign(
-        new Error(
-          `t.encrypted({ mode }): must be "randomised" or "deterministic", got "${String(mode)}"`,
-        ),
-        { code: "ENCRYPTED_INVALID_MODE" as const },
-      );
-    }
-    const keyId = opts?.keyId ?? "default";
-    if (typeof keyId !== "string" || keyId.length === 0 || !/^[A-Za-z0-9_]+$/.test(keyId)) {
-      throw Object.assign(
-        new Error(
-          `t.encrypted({ keyId }): keyId must be a [A-Za-z0-9_]+ token, got "${String(keyId)}"`,
-        ),
-        { code: "ENCRYPTED_INVALID_KEY_ID" as const },
-      );
-    }
-    // The DB column TYPE is BYTEA — the encryption pass + DDL emitter
-    // (`field_to_column` in plugin-db) ignore the `type` field when
-    // `encrypted` is present. We still carry the wrapped primitive's
-    // type so validators see the right user-facing shape (e.g.
-    // `validate.ts` rejects `123` for a wraps=string column).
-    //
+    // `type` describes the plaintext; `encrypted` selects binary storage.
     // fail-safe default-mask rule (§3 of the
     // sensitive-field-masking proposal): every `t.encrypted()` column
     // gets `mask: { kind: "full", classification: "pii" }` at
@@ -1775,9 +1631,10 @@ export const t = {
     // `.mask({ kind: "none" })` opt-out. Chaining `.mask({...})`
     // after `t.encrypted()` overwrites this default via the
     // builder's `.mask` method (assigns `_def.mask` unconditionally).
-    return new TypeBuilder<T, false, "full", Mode>({
-      type: wrapsKind === "bytes" ? "bytes" : wrapsKind === "number" ? "number" : "string",
-      encrypted: { mode, keyId, wraps: wrapsKind },
+    return new TypeBuilder<T, false, "full", true>({
+      type: plaintextType,
+      ...(precision === undefined ? {} : { precision, scale }),
+      encrypted: true,
       mask: { kind: "full", classification: "pii" },
     });
   },
@@ -1858,25 +1715,7 @@ export const t = {
    * }
    * ```
    */
-  /**
-   * typed_id field. At the JS layer the field is exchanged
-   * as a string carrying the UUIDv7 + base62 + optional entity prefix
-   * (e.g. `"post_01HXYZ..."`). At the DB layer it's a TEXT column.
-   *
-   * The optional `prefix` argument names the entity tag the SDK
-   * auto-mint pass (PR 3) will pass to `typed_id::new(prefix)` on
-   * inserts that omit `id`. Omitting `prefix` defers the choice to
-   * PR 3 (default-to-collection-name).
-   *
-   * Wire shape: `{ type: "id", idPrefix?: string }`. The `type: "id"`
-   * discriminator is the signal the PR 3 auto-populate pass uses to
-   * find the auto-mint candidate without keying on the literal name
-   * `"id"` — so a model could in principle have a non-`id`-named
-   * primary key (though §2.1 of the proposal pins the seven names).
-   *
-   * PR 1 ships the builder + wire discriminator only. Auto-mint
-   * behaviour lands in PR 3; CREATE TABLE emission lands in PR 2.
-   */
+  /** A textual identifier type; generation requires a typedId assignment. */
   id(prefix?: string): TypeBuilder<string> {
     if (prefix !== undefined) {
       if (typeof prefix !== "string" || prefix.length === 0) {
@@ -1909,30 +1748,11 @@ export const t = {
     if (prefix !== undefined) def.idPrefix = prefix;
     return new TypeBuilder<string>(def);
   },
-  /**
-   * actor field. Stores a typed_id at the DB layer
-   * (TEXT) sourced from the current request's `SessionMinter.actor_id`
-   * (P3). Used for `created_by` / `updated_by` system fields, and
-   * available to creators who want their own actor-tracking columns
-   * (e.g. `last_edited_by`).
-   *
-   * Nullable by convention (matches Q-SF-I in the proposal: explicit
-   * `.nullable()` is the canonical declaration form, but the default
-   * is nullable because system-initiated writes have no actor). The
-   * default is captured by `actorNullable = true` so the wire shape
-   * is unambiguous regardless of whether `.nullable()` was chained.
-   *
-   * PR 1 ships the builder + wire discriminator only. PR 3 wires the
-   * INSERT auto-populate from `SessionMinter.actor_id`; PR 4 wires
-   * the UPDATE-time bump.
-   */
-  actor(): TypeBuilder<string | null> {
-    // Default-nullable: written explicitly so the wire shape is
-    // unambiguous. `.nullable()` is a no-op (already true) for the
-    // explicit form callers may prefer.
-    return new TypeBuilder<string | null>({ type: "actor", actorNullable: true });
+  /** Assign the request actor on insert, or null for anonymous writes. */
+  actor(): TypeBuilder<string | null> & { readonly _assigned: true } {
+    return new TypeBuilder<string | null>({ type: "string" }).assigned({ by: "actor", on: "insert" });
   },
-  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
+  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>, false, undefined, undefined, false, "json"> {
     if (variants.length < 2) {
       throw Object.assign(
         new Error(
@@ -1973,7 +1793,7 @@ export const t = {
     // key that is `t.literal()` in EVERY variant AND has distinct
     // literal values across variants.
     const discriminator = detectDiscriminator(normalized);
-    return new TypeBuilder<InferUnion<V>>({
+    return new TypeBuilder<InferUnion<V>, false, undefined, undefined, false, "json">({
       type: "union",
       variants: normalized,
       discriminator,
@@ -2081,7 +1901,7 @@ export type InferUnion<V extends readonly TypeBuilder<any, any, any, any, any>[]
  *   at module-init time so the app fails fast.
  * - `lenient` — log violations but allow the push (warning only).
  * - `off`     — skip validation entirely (equivalent of Convex's
- *   `schemaValidation: false`); intended for legacy/imported data.
+ *   `schemaValidation: false`); intended for externally managed data.
  */
 export type Strictness = "strict" | "lenient" | "off";
 
@@ -2090,11 +1910,9 @@ export interface SchemaOptions {
   softDelete: boolean;
   strictness: Strictness;
   /**
-   * D4 — optimistic concurrency. When `true` the collection auto-injects
-   * an `INTEGER NOT NULL DEFAULT 1` `version` column at DDL time and
-   * `updateOne`/`updateMany` honour a `{ version: N }` filter clause for
-   * compare-and-swap updates (mismatch returns an
-   * `OPTIMISTIC_CONCURRENCY` error).
+   * Enables the migration generator that emits a descriptor-declared
+   * concurrency column. Runtime compare-and-swap behavior follows the
+   * field carrying `concurrency: true`, including when that field is renamed.
    */
   versioning: boolean;
 }
@@ -2148,13 +1966,7 @@ export class SchemaBuilder<S> {
   get indexes(): readonly NamedIndexSpec[] { return this._indexes; }
 
   /**
-   * Declare a named, multi-column index. Order matters — filters whose
-   * keys form a prefix of `fields` are considered covered by the index.
-   * The SDK passes the declaration to the native side, which materialises
-   * a `CREATE INDEX CONCURRENTLY IF NOT EXISTS "<table>__<name>"` per
-   * declared index. Auto-generated columns (`id`, `created_at`,
-   * `updated_at`, `created_by`, `updated_by`, `deleted_at`, `version`)
-   * are also accepted alongside user fields.
+   * Declare an ordered index over fields present in this schema.
    *
    * Throws `Error` with `code = "SCHEMA_INVALID"` at definition time if:
    *  - `name` is empty or already declared on this schema, or
@@ -2218,43 +2030,17 @@ export class SchemaBuilder<S> {
     this._indexes.push(spec);
   }
 
-  /**
-   * The set of field names this schema accepts in `.index(...)`. Includes
-   * user-declared fields plus the auto-generated system columns the
-   * collection always carries. With the SDK's snake_case system-field
-   * contract, these names match the underlying columns 1:1.
-   */
   private _knownFieldNames(): Set<string> {
-    const out = new Set<string>([
-      "id",
-      "created_at",
-      "updated_at",
-      "created_by",
-      "updated_by",
-      "version",
-      "deleted_at",
-    ]);
-    const f = this.fields;
-    if (f !== null && typeof f === "object") {
-      for (const k of Object.keys(f as Record<string, unknown>)) out.add(k);
-    }
-    return out;
+    return new Set(Object.keys(this.fields ?? {}));
   }
 
-  /** Enable soft delete — deleteOne/deleteMany set `deleted_at` instead of removing rows. */
+  /** Enable the descriptor's soft-delete lifecycle. */
   softDelete(): this {
     this._options.softDelete = true;
     return this;
   }
 
-  /**
-   * D4 — enable optimistic concurrency. Auto-injects a `version` column
-   * (INTEGER NOT NULL DEFAULT 1) at DDL time. Update calls that include
-   * `{ version: N }` in the filter become compare-and-swap: rows are
-   * updated and `version` is incremented only when the stored version
-   * matches N. A mismatch returns
-   * `{ data: null, error: { code: "OPTIMISTIC_CONCURRENCY" } }`.
-   */
+  /** Enable compare-and-swap using the declared concurrency field. */
   withVersioning(): this {
     this._options.versioning = true;
     return this;

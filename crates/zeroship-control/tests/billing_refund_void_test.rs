@@ -34,8 +34,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, Utc};
-use ntex::http::StatusCode;
-use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
@@ -344,19 +342,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
         .await
         .expect("insert organization");
     organization_id
-}
-
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Refund Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
 }
 
 async fn ensure_organization_billing(state: &AppState, organization: &str) {
@@ -802,7 +787,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 
     // CREDIT refund of $20 → a refund_to_credit grant, NO Stripe call (refund_count
     // unchanged), balance += $20.
-    let bal_before = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
+    let bal_before = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .expect("balance");
     let r2 = refund::issue_refund(
@@ -819,7 +804,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     };
     assert_eq!(stripe.refund_count(), 1, "credit refund must NOT call Stripe (no charge reversal)");
 
-    let bal_after = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
+    let bal_after = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .expect("balance");
     assert_eq!(bal_after - bal_before, 2000, "a $20 refund_to_credit grant was appended");
@@ -1007,27 +992,6 @@ async fn tax_split_refund_returns_proportional_tax() {
 // (e) Operator-only 403 + idempotency 409 via the REAL endpoint + authz guard.
 // ===========================================================================
 
-struct Caller {
-    token: String,
-}
-impl Caller {
-    fn bearer(&self) -> String {
-        format!("Bearer {}", self.token)
-    }
-}
-
-/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
-///
-/// It used to take an optional platform role and seed a `platform_admin_roles`
-/// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary organization.
-async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
-    let _ = state;
-    Caller {
-        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
-    }
-}
-
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so per-app narrowing now comes from Cedar app membership
 // rather than from the caller-supplied wrapper policy a PAT used to carry.
@@ -1069,7 +1033,7 @@ async fn void_reversal_conserves_credit_balance() {
     let inv_a = active_invoice_id(&fx.state, organization, period).await.expect("invoice A");
     assert_eq!(invoice_money(&fx.state, &inv_a).await, ("finalized".into(), 600, 600, 0));
 
-    let bal_after_consume = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
+    let bal_after_consume = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .expect("bal");
     assert_eq!(bal_after_consume, 400, "balance after consume = $10 − $6 = $4");
@@ -1088,7 +1052,7 @@ async fn void_reversal_conserves_credit_balance() {
     assert_eq!(invoice_money(&fx.state, &reissued).await, ("finalized".into(), 600, 600, 0));
 
     // BALANCE CONSERVED: still $4 (void restored +$6, reissue re-drew $6). Never $-2.
-    let bal_final = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
+    let bal_final = zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd")
         .await
         .expect("bal");
     assert_eq!(bal_final, 400, "void_reversal conserves balance: still $4, never the $-2 double-consume");
@@ -1480,7 +1444,7 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
     let mut conn = new_conn(&url).await;
     let tx = conn.transaction().await.expect("tx");
     let claim = refund::claim_refund_locked(
-        &tx, &organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, None,
+        &tx, organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, None,
         &key(&inv, "lock-claim"),
     )
     .await
@@ -1710,7 +1674,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     let inv_a = active_invoice_id(&fx.state, organization, period).await.expect("invoice A");
     assert_eq!(invoice_money(&fx.state, &inv_a).await, ("finalized".into(), 600, 600, 0));
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
         400, "balance after consume = $4",
     );
 
@@ -1756,7 +1720,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     // Now the invoice is void, reversal applied (balance back to $10), no reissue yet.
     assert_eq!(invoice_money(&fx.state, &inv_a).await.0, "void");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
         1000, "balance restored to $10 after the void_reversal (no reissue yet)",
     );
 
@@ -1787,7 +1751,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
 
     // BALANCE CONSERVED: reissue re-drew $6 → back to $4. Never $-2, never $10.
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
         400, "re-drive converges: balance back to $4, conserved",
     );
 
@@ -1797,7 +1761,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         .expect("third invocation converges");
     assert_eq!(again.reissued_invoice_id.as_deref(), Some(reissued.as_str()), "third drive is a stable no-op");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("bal"),
         400, "balance still $4 after a third drive",
     );
 
@@ -2324,7 +2288,7 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     {
         let tx = conn.transaction().await.expect("tx");
         let claim = refund::claim_refund_locked(
-            &tx, &organization, &inv, 1000, 1000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+            &tx, organization, &inv, 1000, 1000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
         )
         .await
         .expect("claim");
@@ -2339,7 +2303,7 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     {
         let tx = conn.transaction().await.expect("tx2");
         let conflict = refund::claim_refund_locked(
-            &tx, &organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+            &tx, organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
         )
         .await
         .expect("conflict claim");

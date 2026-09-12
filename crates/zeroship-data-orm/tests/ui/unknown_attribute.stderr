@@ -1,0 +1,5 @@
+error: unsupported ORM field attribute for this derive
+ --> tests/ui/unknown_attribute.rs:6:11
+  |
+6 |     #[orm(colum = "title")]
+  |           ^^^^^

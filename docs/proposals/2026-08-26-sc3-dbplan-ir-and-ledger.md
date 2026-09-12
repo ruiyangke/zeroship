@@ -1,15 +1,15 @@
 # SC-3: the `DbPlan` IR and its source ledger
 
 **Status.** PARTIAL, and specifically **BUILT-UNWIRED.** The IR is
-`crates/zeroship-data-query-builder` - 6,282 lines, zero dependencies, carrying
+`crates/zeroship-data-sql` - 6,282 lines, zero dependencies, carrying
 the shared normative core plus the read, write and search families and a
 PostgreSQL renderer
-(`crates/zeroship-data-query-builder/src/render/postgres.rs`).
+(`crates/zeroship-data-orm/src/sql/render/postgres.rs`).
 **No shipped binary links it.**
-`zeroship-plugin-db` declares it under `[dev-dependencies]` only, and
-`grep -rn data_query_builder crates/zeroship-plugin-db/src/` returns zero hits.
+`zeroship-data-v8` declares it under `[dev-dependencies]` only, and
+`grep -rn data_query_builder crates/zeroship-data-v8/src/` returns zero hits.
 The runtime still executes SQL built by string concatenation in
-`crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**;
+`crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**; (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `grep -rn source_symbol tests/ crates/` is empty.
 
 Live defects cited by number (L11, L12, L16, L29, L31) live in
@@ -27,7 +27,7 @@ ledger that counts what is left.
 
 ### The scope
 
-Measured at HEAD `a3706db6f`: `crates/zeroship-schema/src/query.rs` is 14,309
+Measured at HEAD `a3706db6f`: `crates/zeroship-schema/src/query.rs` is 14,309 (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 lines and exposes **87** `pub` / `pub(crate)` function items at any indentation.
 They do not share a destination, and that is what makes the port tractable:
 
@@ -56,7 +56,7 @@ fences *column* names (`_`, `__zs_`, `__zeroship_`, `sqlite_`, the `_masked`
 suffix, the six classification names). Moving one without the other is the more
 dangerous half of a bulk move, because the survivor makes the namespace look
 defended. Both move together, each with its own gate arm and its own vectors.
-The IR's `crates/zeroship-data-query-builder/src/ident.rs` already states both,
+The IR's `crates/zeroship-data-orm/src/sql/ident.rs` already states both,
 as `PLATFORM_RESERVED_COLLECTION_PREFIXES` plus `BACKEND_CATALOG_RESERVATIONS`
 on the table side and `COLUMN_RESERVATIONS` on the column side; when the port
 lands, one of the two copies is deleted rather than both maintained.
@@ -76,14 +76,14 @@ lands, one of the two copies is deleted rather than both maintained.
 - **search**: vector and spatial, **and only those two.** Full-text search was
   deleted (L11); the IR must not carry a family for a feature that no longer
   exists. Both surviving kinds read declared schema **inside** the concrete
-  backends (`crates/zeroship-data-postgres/src/postgres.rs`,
-  `crates/zeroship-data-sqlite/src/{vector.rs,spatial.rs}`), which is why they
+  backends (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`,
+  `crates/zeroship-data-orm/src/backend/sqlite/{vector.rs,spatial.rs}`), which is why they
   cannot be ported as a wrapper;
 - **unmask reads**, which carry an authorization decision rather than producing
   it;
 - **effects**: the publication a committed mutation owes the broker. A bare rows
   result cannot express it, and committed-change publication already differs by
-  backend today (`emit_for_rows`, `crates/zeroship-data-engine/src/exec.rs`).
+  backend today (`emit_for_rows`, `crates/zeroship-data-orm/src/exec.rs`).
 
 Per-family node spelling is each family's own to fix. The **expression
 sub-grammar** underneath them is not: filters, projections, ordering keys and
@@ -331,7 +331,7 @@ single one of them would be found by testing the others:
 3. **encrypted columns** bind it into the AEAD tag via `canonical_aad`, so
    without it the ciphertext is undecryptable;
 4. **change events** correlate on it - `emit_for_rows` reads `row["id"]` with an
-   `_id` fallback (`crates/zeroship-data-engine/src/exec.rs`), so a projection that
+   `_id` fallback (`crates/zeroship-data-orm/src/exec.rs`), so a projection that
    dropped the PK emits an event with no key and a subscriber that cannot match
    it to anything.
 
@@ -422,7 +422,7 @@ not portable to the other.
 A relation plan cannot be handed to the live-query path as it stands, and the
 failure is silent rather than loud - the subscription simply never fires.
 
-`crates/zeroship-data-core/src/read_set.rs` contains the string `relation`
+`crates/zeroship-data-orm/src/cdc/read_set.rs` contains the string `relation`
 **once**, in a comment, and is otherwise entirely relation-unaware. Two
 consequences:
 
@@ -587,12 +587,12 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
 - An unsupported capability surfaces as a typed error from the concrete backend,
   with no dialect match above the neutral backend boundary. **That arm must first
   assert the boundary file exists.** `backend/api.rs` does not exist -
-  `crates/zeroship-plugin-db/src/backend/` holds `mod.rs` and `cancel.rs` only -
+  `crates/zeroship-data-v8/src/backend/` holds `mod.rs` and `cancel.rs` only -
   and neither does the `DbBackend` trait the parent document lists among the
   neutral types to introduce (`grep -rn "trait DbBackend" crates/` is empty). A
   negative grep scoped to a path that was never created matches nothing and
   reports success.
-- `zeroship-schema` is removed from `zeroship-plugin-db`'s manifest **only** when
+- `zeroship-schema` is removed from `zeroship-data-v8`'s manifest **only** when
   `unported` is zero and the identifier-fence pair has landed in the IR with its
   own arm.
 
@@ -612,7 +612,7 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
   would drag a live PostgreSQL driver into a crate whose whole claim is that it
   builds and tests without a database, a runtime or an isolate. The identifier
   fences are re-stated in the IR's own
-  `crates/zeroship-data-query-builder/src/ident.rs`, not wrapped, and the
+  `crates/zeroship-data-orm/src/sql/ident.rs`, not wrapped, and the
   duplication is temporary by contract: when the port lands, one of the two
   copies is deleted.
 - **A ledger's instrument must see all of its source.** A count taken by a
@@ -654,10 +654,10 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
 ## Open
 
 1. **Wire the IR into the shipped path, or delete it.** BUILDABLE. Today
-   `zeroship-data-query-builder` is a `[dev-dependencies]` entry of
-   `zeroship-plugin-db` and no shipped module references it, so the crate's
+   `zeroship-data-sql` is a `[dev-dependencies]` entry of
+   `zeroship-data-v8` and no shipped module references it, so the crate's
    6,282 lines are exercised only by its own tests and by
-   `crates/zeroship-plugin-db/tests/search_ir_live.rs`. Three register items are
+   `crates/zeroship-data-v8/tests/search_ir_live.rs`. Three register items are
    closed **on paper** by pointing at it and are not closed in the tree: L31
    (`updateMany`'s unbounded second branch, which `RowLimit` makes
    unrepresentable), L16's prepare-once half (a stable plan shape is the
@@ -665,8 +665,8 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
    reservation on the wrong identifier role, which the IR fences on both). The
    first family to wire is `search`, whose IR lowering already exists and whose
    two production call sites are
-   `crates/zeroship-data-postgres/src/postgres.rs` and
-   `crates/zeroship-data-sqlite/src/{vector.rs,spatial.rs}`. Estimate: 8 hours
+   `crates/zeroship-data-orm/src/backend/postgres/implementation.rs` and
+   `crates/zeroship-data-orm/src/backend/sqlite/{vector.rs,spatial.rs}`. Estimate: 8 hours
    for the search family end to end, on the basis that the lowering is written,
    the live test target exists, and the change is a dependency move plus two call
    sites; not measured for the other families.
@@ -680,10 +680,10 @@ migration side, or `deleted-with-<feature>`. `status` is `ported` or `unported`.
    against a column no migration creates. Delete the variant and its two
    constructors; the `Prefix("__zs_")` column fence already keeps the raw column
    unnameable. Estimate: 4 hours, on the basis that it touches
-   `crates/zeroship-data-query-builder/src/{projection.rs,ident.rs}` plus its
+   `crates/zeroship-data-sql/src/{projection.rs,ident.rs}` plus its
    `render/postgres.rs` and their tests, in a crate with no external callers.
 3. **There is no SQLite renderer.** BUILDABLE.
-   `crates/zeroship-data-query-builder/src/render/` holds `mod.rs` and
+   `crates/zeroship-data-sql/src/render/` holds `mod.rs` and
    `postgres.rs` only, so the acceptance arm "every plan family has parity
    fixtures producing equivalent resolved results on both backends" cannot pass
    and the "set of nodes SQLite refuses" contract has no producer. Not estimated:
@@ -731,7 +731,7 @@ already taken and abandoned:
 - **Do not re-adopt "render the same plan twice and assert the SQL matches" as
   the determinism arm.** It was specified that way, and it is probabilistic
   rather than discriminating;
-  `crates/zeroship-data-query-builder/src/render/mod.rs` records the
+  `crates/zeroship-data-orm/src/sql/render/mod.rs` records the
   supersession in the code.
 - **Do not re-open full-text search as a plan family.** It was deleted (L11)
   because it had no producer anywhere in the tree.
@@ -739,5 +739,5 @@ already taken and abandoned:
   the obvious dependency and was refused: it declares `compio-postgres`, which
   would put a live PostgreSQL driver inside a crate whose value is needing none.
   The fences are re-stated in
-  `crates/zeroship-data-query-builder/src/ident.rs` instead, and the
+  `crates/zeroship-data-orm/src/sql/ident.rs` instead, and the
   duplication is retired by the port rather than maintained.

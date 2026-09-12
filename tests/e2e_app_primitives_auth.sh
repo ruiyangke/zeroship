@@ -2,7 +2,7 @@
 # ============================================================================
 # e2e_app_primitives_auth.sh — close G3/ISS-54: exercise env.auth through the
 # REAL multi-node edge (worker → V8 → AuthPlugin), the last untested primitive.
-# Sibling of e2e_app_primitives_kv_storage.sh (env.kv/env.storage GREEN) and
+# Related suites: examples/storage-gallery/tests/ (env.storage) and
 # e2e_app_primitives.sh (env.db GREEN, Stage 5c).
 #
 # The identity injection (the crux):
@@ -25,7 +25,7 @@
 #      (control needs a DB for app CRUD + deploy).
 #   2. Throwaway Redis (auth-notes scopes notes in env.kv → Redis backend).
 #   3. control + worker + gateway with generated keys; the worker gets
-#      ZEROSHIP_WORKER_KV_URL.
+#      ZEROSHIP_WORKER_KV_CONFIG.
 #   4. Mint an admin platform bearer OFFLINE (a one-key JWKS served on the
 #      harness's own ed25519 key, named as control's trusted issuer), exactly
 #      as the sibling harnesses do.
@@ -226,7 +226,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "=== Stage 2: boot secured stack (worker with ZEROSHIP_WORKER_KV_URL) ==="
+echo "=== Stage 2: boot secured stack (worker with ZEROSHIP_WORKER_KV_CONFIG) ==="
 KVURL="redis://127.0.0.1:$REDIS_PORT"
 
 openssl genpkey -algorithm ed25519 -out "$WORK/signing-key.pem" 2>/dev/null
@@ -249,10 +249,14 @@ PIDS+=($!)
 for i in $(seq 1 30); do curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && break; sleep 1; done
 curl -sf "http://localhost:$ZEROSHIP_CONTROL_PORT/readyz" >/dev/null 2>&1 && pass "control healthy" || { fail "control unhealthy"; tail -20 "$WORK/control.log"; exit 1; }
 
-# worker: env.kv <- ZEROSHIP_WORKER_KV_URL (Redis), env.auth <- AuthPlugin (always registered).
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
+# worker: env.kv <- ZEROSHIP_WORKER_KV_CONFIG (Redis), env.auth <- AuthPlugin (always registered).
 # The generated worker key authenticates /dispatch and signs ZeroShip-User,
 # exactly matching the gateway-to-worker trust contract.
-ZEROSHIP_WORKER_KV_URL="$KVURL" \
+ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"${KVURL#redis://}\"" \
 "$BIN/zeroship-worker" --port $ZEROSHIP_WORKER_PORT --threads 2 \
   --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" --poll-interval 2 > "$WORK/worker.log" 2>&1 &

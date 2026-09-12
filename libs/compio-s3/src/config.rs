@@ -137,7 +137,7 @@ pub struct S3Config {
     pub checksum: ChecksumMode,
     /// SSE mode.
     pub sse: SseMode,
-    /// Cap on aggregated `plugin-storage` list entries.
+    /// Cap on aggregated `zeroship-storage` list entries.
     pub max_list_entries: usize,
     /// Timeouts.
     pub timeouts: S3Timeouts,

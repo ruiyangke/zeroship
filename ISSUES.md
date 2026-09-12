@@ -123,7 +123,7 @@ epic below.
 ### ISS-72 · env.storage multipart: in-flight parts overlap a slow producer (FIXED — select pipeline)
 **Status:** FIXED (`design/s3-object-storage`) · **Effort:** M · **Tier:** T3 · Surfaced by the fable S3 review (HIGH-2)
 
-The parallel multipart loop in `S3::put_stream` (`crates/zeroship-plugin-storage/src/backend/s3.rs`) was
+The parallel multipart loop in `S3::put_stream` (`crates/zeroship-storage/src/backend/s3.rs`) was
 restructured from a gate-only-drain loop into a **select-based bounded-concurrency overlap
 pipeline**: one task drives the producer (`body.next_chunk()`) and the in-flight `UploadPart`
 `FuturesUnordered` CONCURRENTLY via `futures::select!`, so a PUT completing *while the next chunk
@@ -139,8 +139,8 @@ slowness: `CompleteMultipartUpload`/`AbortMultipartUpload` now REUSE the upload 
 pooled `cyper::Client` (`complete_multipart_on` / `abort_multipart_on` in `crates/compio-s3`), so
 finalization no longer opens a cold connection after a long upload. The per-part scaled timeout
 (`S3Timeouts::send_for_body`) is kept as defense-in-depth against a genuinely *stalled* part.
-**Regression test:** `run_s3_slow_producer_overlap` in `crates/zeroship-plugin-storage/tests/backend_parity.rs`
-(MinIO-gated) drives `put_stream` with a real inter-chunk-delayed producer spanning several parts
+**Regression test:** `run_s3_slow_producer_overlap` in `crates/zeroship-storage/tests/backend_parity.rs`
+(Testcontainers-owned MinIO) drives `put_stream` with a real inter-chunk-delayed producer spanning several parts
 and asserts a byte-exact round-trip + finalized object. NB: this test proves the new loop COMPLETES
 correctly under a slow producer; it cannot be made to *fail* on the old loop against **local** MinIO,
 because local parts complete in milliseconds whenever polled, so a fast part is never starved across
@@ -192,8 +192,9 @@ to create schemas to create one.
    `zeroship-{auth,authn,authz,mailer}` plus seven named `zeroship-gateway` binaries;
    `tests/run_billing_suite.sh` runs `zeroship-{control,migrated,migrate-adapter,metering,stream}`.
    So the one class of machine that can see the failure is also the class that never runs the
-   target. Note the `eprintln!` skip is invisible to `tests/lib/skip_census.sh`, which keys on the
-   `ZEROSHIP-TEST-SKIPPED:` sentinel these tests do not emit.
+   target. This used to add that the `eprintln!` skip was invisible to a marker census; that census
+   and the marker are deleted, so the observation is now simply that an `eprintln!` and a return
+   are invisible to everything, which is the point.
 
 **Reproduction, and the control.** Verified by EXECUTION on main, not inferred from the diff. On a
 detached worktree at `2935fc34a` (`git worktree add --detach <path> main`, plus the three
@@ -213,8 +214,9 @@ applies to every package in neither suite.
 
 **Fix direction.** Two halves, and the second is the one that matters.
 - *The tests:* have the setup create the per-app schema through whatever the control plane uses, or
-  point the tests at an app the harness provisioned; alternatively emit the
-  `ZEROSHIP-TEST-SKIPPED:` sentinel so the census counts them rather than `eprintln!`.
+  point the tests at an app the harness provisioned. The third option this listed - emit the skip
+  sentinel so a census counts them - is no longer available and would be refused if it were: an
+  absent backend fails the test now, naming what was missing and the command that provisions it.
 - *The gate:* `zeroship-worker` (and any other package in neither suite) needs to be in one. A test
   that is green only because nothing runs it is the failure mode both suites were written to stop —
   `tests/run_auth_suite.sh`'s own header says a suite that passes because it never ran is worse
@@ -238,20 +240,20 @@ shipped in v1 — nothing deferred.
   immutable manifests with conditional PUT; `delete_app_manifests` paginated purge; gateway
   disk-cache refill streams `get_blob_to_file` into a `create_new` temp + no-clobber publish.
   Control's legacy `BundleStore`/VFS deleted; control writes S3 deploy artifacts.
-- **PR3 — `plugin-storage::S3` + `env.storage` streaming through V8:** `Backend` gains
+- **PR3 — `zeroship-storage::S3` + `env.storage` streaming through V8:** `Backend` gains
   `put_stream`/`get_stream`; S3 `put_stream` → multipart (bounded by 8 MiB part size);
   LocalFs gains object/metadata-sidecar layout. Native `putStream`/`getStream`/`readChunk`/
   `cancelStream` wired through the runtime's `response_forwarder` + `StreamWriter` bridges;
   `@zeroship/storage` SDK grows streaming `put`/`getStream`.
-- **PR4 — E2E + parity + docs (this PR):** `tests/e2e_s3_storage.sh` (MinIO) proves the whole
+- **PR4 — E2E + parity + docs (this PR):** `examples/storage-gallery/tests/` (MinIO) proves the whole
   edge — control writes deploy blobs to S3, gateway→worker dispatch reads the bundle FROM S3,
-  and a 20 MiB (> part size) multipart `env.storage` streaming round-trip is byte-compared
-  (18/18 green). Backend-parity (LocalFs vs S3, buffered + streaming + large multipart) wired
-  in. Worker `--storage-root` replaced by `--storage-url` (bare path/`file://` → LocalFs;
+  and multipart `env.storage` streaming checksums are compared. Backend-parity
+  (LocalFs vs S3, buffered + streaming + large multipart) is wired in.
+  Worker `--storage-root` replaced by `--storage-url` (bare path/`file://` → LocalFs;
   `s3://` → S3); `StoragePlugin::new` deleted. **Runtime fix:** the upload streaming
   `response_forwarder` learned pause/resume backpressure on the buffer high/low-water marks,
   so a > buffer-cap streaming upload no longer overflows (regression test in
-  `plugin-storage/tests/e2e_streaming.rs`). Docs: `blob-store.md`, `plugin-system.md`,
+  `crates/zeroship-storage-v8/tests/e2e_streaming.rs`). Docs: `blob-store.md`, `plugin-system.md`,
   docker-compose runbook (MinIO/R2), design doc marked shipped.
 
 ### ISS-33 · No platform backups / disaster recovery
@@ -425,8 +427,8 @@ Issues surfaced while exercising the framework end-to-end. Detail + ledger:
 
 ### ISS-53 · `tests/e2e_platform.sh` is broken against current code
 **Status:** superseded (2026-06-11) · **Effort:** S–M · **Tier:** T2 (test infra)
-> Superseded by the new `tests/e2e_app_primitives.sh` + `e2e_app_primitives_kv_storage.sh`, which start
-> the current stack correctly (`--dev-insecure`, real flags, clean ephemeral PG/Redis). The stale
+> Coverage moved to `tests/e2e_app_primitives.sh`, `examples/storage-gallery/tests/`,
+> and `examples/kv-dashboard/tests/`. The stale
 > `e2e_platform.sh` can be deleted or rewritten to match; not blocking now.
 
 The platform's own multi-node E2E harness has rotted and silently can't start the stack:
@@ -457,10 +459,10 @@ example** (G2), **`env.auth` has zero example** so the gateway `ZeroShip-User`�
 **Fix:** a gateway-E2E harness (`e2e_app_primitives.sh`) deploying a real built example through
 control→gateway→worker + asserting the primitives over the edge, plus `storage-gallery` /
 `auth-notes` examples + a kv runner.
-**Update (2026-06-11) — largely CLOSED.** `tests/e2e_app_primitives.sh` (+ `e2e_app_primitives_kv_storage.sh`)
-now drive real apps over the multi-node edge. After ISS-63 + ISS-66, **env.db, env.kv, and env.storage
-all work end-to-end over the worker `/dispatch`** (db-todos / kv-dashboard / the new storage-gallery —
-20/20 + Stage-5c GREEN). Created the missing storage example (G2) + kv runner (G4). Remaining: env.auth
+**Update (2026-06-11) — largely CLOSED.** The primitive suites proved **env.db, env.kv, and env.storage
+end-to-end over worker dispatch**. Current coverage lives in `tests/e2e_app_primitives.sh`,
+`examples/storage-gallery/tests/`, and `examples/kv-dashboard/tests/`.
+Created the missing storage example and KV runner. Remaining: env.auth
 E2E (G3) and the gateway-auth path (ISS-64, by decision uses Hydra not a bypass).
 
 ### ISS-55 · `"use server"` named exports don't dispatch under `zeroship serve`

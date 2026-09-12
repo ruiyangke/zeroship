@@ -20,7 +20,6 @@
 // mod.rs` holds the same requirement for the Rust side.
 
 import type { Client } from "pg";
-import { MYSQL_URL_ENV, PG_URL_ENV, requireLiveDb } from "./live-db.js";
 
 /** The DSN of the PostgreSQL the gated suites run against. Required. */
 export const PG_URL_ENV = "ZERO_MIGRATE_TEST_PG_URL";

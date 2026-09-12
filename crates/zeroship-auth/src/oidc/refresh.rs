@@ -24,8 +24,8 @@ use base64::Engine as _;
 use compio_postgres::{Client, GenericClient, Pool, PoolConfig, Transaction};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
-use zeroship_core::user_id::UserId;
 use zeroship_core::auth::validate_client_secret;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
 use crate::config::AuthConfig;
@@ -238,7 +238,7 @@ pub(super) struct EstablishedSession {
 /// The audience and the subject are today's, unchanged. The first-party CLI
 /// client is the PLATFORM audience and its subject is the person's own id,
 /// because the `zeroship.token_revocations` marker a kill writes is looked up
-/// by control under (`zeroship-cli`, the printed principal id): a platform family storing
+/// by control under (`zeroship-cli`, principal id): a platform family storing
 /// a pairwise subject would revoke a subject nothing ever presents. Every other
 /// client is an APP audience with the pairwise subject over its sector.
 /// The grant a token exchange is establishing a session for.
@@ -279,10 +279,9 @@ pub(super) async fn establish_session(
         OAuthError::server_error("session issuance unavailable")
     })?;
 
-    let user_id_string = user_id.as_str().to_string();
     let (audience, subject) =
         if device_token::platform_cli_policy_selected(db, &client.client_id).await? {
-            (Audience::Platform, user_id_string.clone())
+            (Audience::Platform, user_id.as_str().to_owned())
         } else {
             (
                 Audience::App {
@@ -362,7 +361,7 @@ pub(super) async fn exchange_refresh_token(
             tracing::error!(error = %err, "refresh: dedicated database pool checkout failed");
             OAuthError::server_error("refresh database unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "refresh: dedicated database session checkout failed");
         OAuthError::server_error("refresh database unavailable")
     })?;
@@ -721,7 +720,7 @@ async fn revoke_inner(
             tracing::error!(error = %err, "revoke: dedicated database pool checkout failed");
             OAuthError::server_error("revoke unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "revoke: dedicated database session checkout failed");
         OAuthError::server_error("revoke unavailable")
     })?;
@@ -783,7 +782,7 @@ pub async fn revoke_person_sessions(
         .await
         .map_err(|err| format!("refresh user revoke pool checkout ({reason}): {err}"))?;
     let mut conn = pool
-        .get()
+        .acquire()
         .await
         .map_err(|err| format!("refresh user revoke session checkout ({reason}): {err}"))?;
     let tx = conn
@@ -807,7 +806,11 @@ pub async fn revoke_person_sessions(
             return Err(err);
         }
     }
-    tracing::info!(user_id = user_id.as_str(), reason, "sessions revoked for user");
+    tracing::info!(
+        user_id = user_id.as_str(),
+        reason,
+        "sessions revoked for user"
+    );
     Ok(())
 }
 
@@ -843,7 +846,7 @@ async fn revoke_sessions_for_subject(
             tracing::error!(error = %err, "access-token revoke: dedicated database pool checkout failed");
             OAuthError::server_error("revoke unavailable")
         })?;
-    let mut conn = pool.get().await.map_err(|err| {
+    let mut conn = pool.acquire().await.map_err(|err| {
         tracing::error!(error = %err, "access-token revoke: dedicated database session checkout failed");
         OAuthError::server_error("revoke unavailable")
     })?;
@@ -905,10 +908,12 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
     let mut person_ids = Vec::new();
     let mut session_ids = Vec::new();
     for row in rows {
-        person_ids.push(crate::entity_ids::user_id(&row, "person_id").map_err(|err| {
-            tracing::error!(error = %err, "access-token revoke: session row decode failed");
-            OAuthError::server_error("revoke unavailable")
-        })?);
+        let person_id = crate::user_id::from_row(&row, "person_id", "session person_id is invalid")
+            .map_err(|err| {
+                tracing::error!(error = %err, "access-token revoke: person_id decode failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+        person_ids.push(person_id);
         session_ids.push(row.get::<_, String>("id"));
     }
     person_ids.sort();
@@ -917,14 +922,16 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
     session_ids.dedup();
 
     for person_id in person_ids {
-        lock_refresh_user_xact(db, &person_id).await.map_err(|err| {
-            tracing::error!(
-                error = %err,
-                user_id = person_id.as_str(),
-                "access-token revoke: user lock failed"
-            );
-            OAuthError::server_error("revoke unavailable")
-        })?;
+        lock_refresh_user_xact(db, &person_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    user_id = person_id.as_str(),
+                    "access-token revoke: user lock failed"
+                );
+                OAuthError::server_error("revoke unavailable")
+            })?;
     }
     for session_id in &session_ids {
         lock_refresh_family_xact(db, session_id)
@@ -973,7 +980,7 @@ pub async fn sweep_sessions(refresh_pool: &RefreshSessionPool) -> Result<(u64, u
         .await
         .map_err(|err| format!("session sweep pool checkout: {err}"))?;
     let conn = pool
-        .get()
+        .acquire()
         .await
         .map_err(|err| format!("session sweep session checkout: {err}"))?;
     session_store::sweep(&*conn, SESSION_RETENTION_DAYS).await

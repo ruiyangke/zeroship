@@ -16,11 +16,9 @@
 //! housekeeper; every subsequent touch on that thread reuses it.
 //!
 //! Each per-request DB operation [`checkout`]s this thread's `Rc<Pool>`
-//! and then `.get()`s a [`PooledClient`](compio_postgres::PooledClient) from it for exactly ONE
-//! operation, releasing the connection on drop — so no single shared
-//! connection serializes gateway DB work, which was the whole point of
-//! the pool migration. Hold the `PooledClient` only across the single DB
-//! call; the `Rc<Pool>` it borrows must stay in scope alongside it.
+//! and then acquires a [`PoolConnection`](compio_postgres::PoolConnection).
+//! The lease owns its pool handle and returns the connection on drop. Hold it
+//! for the database operation so outbound HTTP work does not reserve capacity.
 //!
 //! Unlike a leak-to-`'static` design, the `Rc<Pool>` shape reclaims a
 //! race-loser pool cleanly: on a single compio worker thread, two
@@ -110,12 +108,12 @@ fn install_pool(dsn: String, pool: Rc<Pool>) -> Rc<Pool> {
 /// Get (or lazily build) this thread's pool and return an `Rc<Pool>`
 /// clone to check a connection out of.
 ///
-/// Callers bind the returned `Rc<Pool>` and then `pool.get().await?` for
-/// one operation; the resulting [`PooledClient`](compio_postgres::PooledClient)
-/// returns its connection to the pool on drop. Hold the `PooledClient`
+/// Callers bind the returned `Rc<Pool>` and then `pool.acquire().await?` for
+/// one operation; the resulting [`PoolConnection`](compio_postgres::PoolConnection)
+/// returns its connection to the pool on drop. Hold the `PoolConnection`
 /// only across the single DB call, never across an outbound HTTP request,
-/// and keep the `Rc<Pool>` in scope for as long as the `PooledClient`
-/// borrows it.
+/// because the lease reserves capacity until it is dropped. The lease owns
+/// its pool handle and can outlive the handle used to acquire it.
 ///
 /// The `Rc<Pool>` shape (no leak-to-`'static`) is what makes the lifecycle
 /// safe: a race-loser pool drops cleanly, and the pool's housekeeper

@@ -1,12 +1,9 @@
-//! DW-07 durable-workflows M1 keystone e2e.
-//!
-//! This test is driven by `tests/e2e_durable_workflows.sh`. It expects that
-//! script to boot a migrated disposable Postgres on :5440, deploy a real
-//! workflow .zship, and keep real gateway + worker processes running.
+//! Durable workflow acceptance against an owned Testcontainers database and
+//! real control, gateway, worker, and CDC relay processes.
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
-use crate::common;
+use crate::{common, workflow_fleet};
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -18,10 +15,11 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use compio_postgres::{connect, NoTls};
 use compio_postgres::types::ToSql;
+use compio_postgres::{connect, NoTls};
 use futures::channel::oneshot;
 use futures::lock::Mutex as AsyncMutex;
+use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_core::app_id::AppId;
@@ -29,21 +27,21 @@ use zeroship_control::cron::workflow_blob_gc;
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, WorkflowEngineConfig,
 };
-use zeroship_control::cron::workflow_signal_fanout::{self, FanoutSweepConfig};
 use zeroship_control::cron::workflow_schedules::{self, ScheduleSweepConfig};
-use serial_test::serial;
+use zeroship_control::cron::workflow_signal_fanout::{self, FanoutSweepConfig};
 use zeroship_control::registry::RegistryError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_plugin_workflow::advance::{
+use zeroship_workflow::advance::{
     WorkflowAdvanceNackKind, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::engine::MAX_LIVE_DESCENDANTS_FIELD;
-use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+use zeroship_workflow::engine::MAX_LIVE_DESCENDANTS_FIELD;
+use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
-const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
+const TEST_MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const POLL_TIMEOUT: Duration = Duration::from_secs(180);
 const WORKFLOW_NAME: &str = "KeystoneWorkflow";
 const SIGNAL_WORKFLOW_NAME: &str = "SignalWorkflow";
 const TOPIC_SIGNAL_WORKFLOW_NAME: &str = "TopicSignalWorkflow";
@@ -69,22 +67,8 @@ const COMPENSABLE_CARRY_WORKFLOW_NAME: &str = "CompensableCarryWorkflow";
 
 static SCHEDULER_PROVISIONED_DB: OnceLock<AsyncMutex<Option<String>>> = OnceLock::new();
 
-fn enabled() -> bool {
-    zeroship_core::test_env!("ZEROSHIP_DW_E2E").as_deref() == Some("1")
-}
-
-/// `value` is the caller's already-read result for `name` (a `test_env!` read
-/// at the call site) - the read stays at each literal call site so it remains
-/// enumerable; this helper only formats the panic.
-fn required_env(name: &str, value: Option<String>) -> String {
-    value.unwrap_or_else(|| panic!("{name} must be set by e2e harness"))
-}
-
 fn tmpdir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "zs-dw07-{label}-{}",
-        Uuid::new_v4().simple()
-    ));
+    let path = std::env::temp_dir().join(format!("zs-dw07-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
 }
@@ -93,7 +77,6 @@ struct Fixture {
     state: Arc<AppState>,
     pg: TestPg,
     blob_root: PathBuf,
-    cleanup_blob_root: bool,
     deploy_tmp_dir: PathBuf,
     app_id: AppId,
     deploy_id: String,
@@ -123,10 +106,7 @@ impl TestPg {
         sql.replace("zeroship.workflow_runs", &tables.runs)
             .replace("zeroship.workflow_steps", &tables.steps)
             .replace("zeroship.workflow_signals", &tables.signals)
-            .replace(
-                "zeroship.workflow_subscriptions",
-                &tables.subscriptions,
-            )
+            .replace("zeroship.workflow_subscriptions", &tables.subscriptions)
             .replace("zeroship.workflow_blobs", &tables.blobs)
             .replace(
                 "zeroship.workflow_e2e_",
@@ -169,9 +149,6 @@ impl TestPg {
 
 impl Drop for Fixture {
     fn drop(&mut self) {
-        if self.cleanup_blob_root {
-            let _ = std::fs::remove_dir_all(&self.blob_root);
-        }
         let _ = std::fs::remove_dir_all(&self.deploy_tmp_dir);
     }
 }
@@ -198,12 +175,15 @@ async fn provision_scheduler_store_once(db_url: &str, store: &WorkflowSchedulerS
     *provisioned = Some(db_url.to_string());
 }
 
-async fn build_fixture(db_url: &str, gateway_url: &str, app_id: AppId, deploy_id: String) -> Fixture {
-    let (blob_root, cleanup_blob_root) = match zeroship_core::test_env!("ZEROSHIP_DW_E2E_BLOB_ROOT")
-    {
-        Some(root) if !root.trim().is_empty() => (PathBuf::from(root), false),
-        _ => (tmpdir("control-blob"), true),
-    };
+async fn build_fixture(
+    db_url: &str,
+    gateway_url: &str,
+    app_id: Uuid,
+    deploy_id: String,
+    blob_root: &Path,
+) -> Fixture {
+    workflow_engine::reset_inflight_dispatches_for_test();
+    let blob_root = blob_root.to_path_buf();
     let deploy_tmp_dir = tmpdir("deploy");
     let registry = Registry::new(db_url).await.expect("registry");
     common::ensure_builtin_plans(&registry).await;
@@ -226,7 +206,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: AppId, deploy_id
 
     Fixture {
         state: Arc::new(AppState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: workflow_fleet::service_auth("control"),
             registry,
             env_store,
             stripe_store,
@@ -273,7 +253,6 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: AppId, deploy_id
         }),
         pg: test_pg,
         blob_root,
-        cleanup_blob_root,
         deploy_tmp_dir,
         app_id,
         deploy_id,
@@ -313,11 +292,7 @@ impl CrashOnceDispatcher {
 #[async_trait(?Send)]
 impl StepDispatcher for CrashOnceDispatcher {
     async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
-        let release = self
-            .release
-            .lock()
-            .expect("release lock")
-            .take();
+        let release = self.release.lock().expect("release lock").take();
         let Some(release) = release else {
             return self.inner.dispatch(request).await;
         };
@@ -483,147 +458,10 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
     );
 }
 
-// ---------------------------------------------------------------------------
-// The out-of-band side-effect record
-// ---------------------------------------------------------------------------
-//
-// WHAT USED TO BE HERE, and why it is gone. Until 2026-08-27 this file carried
-// a small HTTP server (`start_side_effect_server` + `handle_side_effect_request`
-// + a hand-rolled percent-decoder and `write_http`) bound to 127.0.0.1 on a port
-// the shell harness passed in as `ZEROSHIP_DW_E2E_SIDE_PORT`. The deployed
-// workflow's step bodies `fetch`ed it, and it shelled out to
-// `docker exec … psql -c "<interpolated SQL>"` to append a row.
-//
-// It connected for exactly one reason: `tests/e2e_durable_workflows.sh` launched
-// `zeroship-worker` with `ZEROSHIP_DEV=1`, and the runtime's SSRF gate read that
-// variable straight out of the process environment and skipped ALL host/IP
-// validation when it was set. That was a production hole - a worker inheriting
-// the variable from a unit file had SSRF off for every `fetch` - and it is
-// closed: dev-ness is a stated input, written only by `set_dev_mode`, whose one
-// caller is `zeroship serve`, and the relaxation it grants is loopback only
-// (crates/zeroship-runtime/src/transport/ssrf.rs:45-72, :212-224). A worker
-// states nothing, so it refuses 127.0.0.1, and the fixture cannot reach a
-// harness server at any address a test machine can bind.
-//
-// WHAT REPLACED IT: the step bodies call `env.db` (see the fixture in
-// tests/e2e_durable_workflows.sh). Same three tables, same columns, same
-// assertions below - the WRITER changed from "HTTP -> psql subprocess" to "a
-// native platform primitive", and the transport disappeared rather than moving.
-// The tables moved out of the `zeroship` schema into the app's own schema,
-// because that is the only schema `env.db` addresses; `TestPg::rewrite` maps the
-// names, so the SQL in every accessor below is unchanged.
-
-/// The three side-effect tables, in the app's OWN data schema, plus the runtime
-/// role `env.db` speaks as.
-///
-/// WHY THE APP SCHEMA AND NOT `zeroship`. `env.db.collection("foo")` addresses
-/// exactly one place: `"<app_id>"."foo"`
-/// (`build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling`
-/// in crates/zeroship-schema/src/query.rs). There is no
-/// cross-schema qualifier - an op-level `schema:` naming another schema is
-/// refused - so the tables the step bodies write have to live there. Every
-/// accessor below still spells them `zeroship.workflow_e2e_*`;
-/// [`TestPg::rewrite`] maps that to the app schema, the same trick the workflow
-/// journal tables already use.
-///
-/// WHY THE ROLE AND THE GRANTS. Every autocommit `env.db` statement opens a
-/// transaction and runs `SET LOCAL ROLE "app_<app_id>_role"` first
-/// (crates/zeroship-data-engine/src/auth/bootstrap.rs:200-207,
-/// crates/zeroship-data-engine/src/exec.rs:522-542), so the effective privileges
-/// are that role's, not `zeroship_worker`'s. In production the role, the
-/// membership edge and the grants are all created by `migrated`'s apply
-/// (crates/zeroship-migrate-server/src/apply.rs:1669-1712, :1638-1649). THIS HARNESS
-/// DOES NOT RUN `migrated` - it deploys a `.zship` with `dev-provision` and
-/// nothing else - so the statements below are that apply's runtime half,
-/// reproduced. They are a deliberate mirror, not an invention: keep them in step
-/// with `provision_runtime_app_role` if it changes. Without them the first
-/// `env.db` call fails with `role "app_..._role" does not exist`, which
-/// plugin-db reports as `schema_not_provisioned`
-/// (crates/zeroship-data-core/src/error.rs:216-243).
-///
-/// The explicit column grants are re-issued on every call because this function
-/// drops and recreates the tables.
+/// Reset the external effect oracle, whose schema comes from fixture migrations.
 async fn prepare_side_effect_table(pg: &TestPg) {
-    let app_schema = quote_ident(pg.app_id.as_str());
-    let app_role_name = zeroship_core::database_role::per_app_role_name(pg.app_id.as_str())
-        .expect("workflow fixture app id must produce a valid PostgreSQL role name");
-    let app_role = quote_ident(&app_role_name);
-    // The seven platform system columns, verbatim from the DDL the platform
-    // itself emits for a creator table
-    // (crates/zeroship-schema/src/query.rs:208-219). `id` is TEXT because
-    // plugin-db mints a typed_id string into it when the document omits one
-    // (crates/zeroship-data-engine/src/crud/system_fields_pass.rs:244-249); a uuid
-    // column would reject that. `deleted_at` is not optional either - `find` and
-    // `count` add `AND deleted_at IS NULL` unless asked not to.
-    //
-    // `seq bigserial` is OURS, not the platform's. The accessors order by it.
-    // `id` would very probably work (typed_id is UUIDv7 base62-encoded to a
-    // fixed 22 chars, so lexical order is time order), but that is a property of
-    // the id codec and this test has no business depending on it.
-    const SYSTEM_COLUMNS: &str = "id text PRIMARY KEY, \
-         created_at timestamptz NOT NULL DEFAULT now(), \
-         updated_at timestamptz NOT NULL DEFAULT now(), \
-         created_by text NULL, \
-         updated_by text NULL, \
-         version integer NOT NULL DEFAULT 1, \
-         deleted_at timestamptz NULL, \
-         seq bigserial NOT NULL";
-    pg.batch_execute(&format!(
-        "DO $dw07_role$ BEGIN \
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '__zeroship_app_role_template') THEN \
-                EXECUTE 'CREATE ROLE \"__zeroship_app_role_template\" NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT'; \
-            END IF; \
-            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{app_role_name}') THEN \
-                EXECUTE 'CREATE ROLE {app_role} NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE INHERIT IN ROLE \"__zeroship_app_role_template\"'; \
-            END IF; \
-            IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'zeroship_worker') THEN \
-                GRANT {app_role} TO \"zeroship_worker\"; \
-            END IF; \
-         END $dw07_role$; \
-         CREATE SCHEMA IF NOT EXISTS {app_schema}; \
-         GRANT USAGE ON SCHEMA {app_schema} TO {app_role}; \
-         DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_attempts; \
-         DROP TABLE IF EXISTS zeroship.workflow_e2e_effect_commits; \
-         DROP TABLE IF EXISTS zeroship.workflow_e2e_side_effects; \
-         CREATE TABLE zeroship.workflow_e2e_side_effects ( \
-            {SYSTEM_COLUMNS}, \
-            run_id text NOT NULL, \
-            step_name text NOT NULL \
-         ); \
-         CREATE TABLE zeroship.workflow_e2e_effect_attempts ( \
-            {SYSTEM_COLUMNS}, \
-            run_id text NOT NULL, \
-            step_name text NOT NULL, \
-            idempotency_key text NOT NULL \
-         ); \
-         CREATE TABLE zeroship.workflow_e2e_effect_commits ( \
-            {SYSTEM_COLUMNS}, \
-            run_id text NOT NULL, \
-            step_name text NOT NULL, \
-            idempotency_key text NOT NULL UNIQUE \
-         ); \
-         GRANT \
-            SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name), \
-            INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name), \
-            UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name), \
-            DELETE \
-           ON TABLE {app_schema}.workflow_e2e_side_effects TO {app_role}; \
-         GRANT \
-            SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
-            INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
-            UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
-            DELETE \
-           ON TABLE {app_schema}.workflow_e2e_effect_attempts TO {app_role}; \
-         GRANT \
-            SELECT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
-            INSERT (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
-            UPDATE (id, created_at, updated_at, created_by, updated_by, version, deleted_at, seq, run_id, step_name, idempotency_key), \
-            DELETE \
-           ON TABLE {app_schema}.workflow_e2e_effect_commits TO {app_role}; \
-         GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {app_schema} TO {app_role};",
-    ))
-    .await
-    .expect("prepare side-effect table");
+    pg.batch_execute("TRUNCATE zeroship.workflow_e2e_side_effects, zeroship.workflow_e2e_effect_attempts, zeroship.workflow_e2e_effect_commits RESTART IDENTITY")
+        .await.expect("reset external workflow effects");
 }
 
 /// Double-quote a Postgres identifier. The values this is used on are the
@@ -637,7 +475,7 @@ fn quote_ident(ident: &str) -> String {
 fn config(owner: &str) -> WorkflowEngineConfig {
     WorkflowEngineConfig {
         batch_apps: 4,
-        per_app_fair_limit: 2,
+        per_app_fair_limit: 1,
         max_inflight_per_app: 8,
         max_inflight_dispatch: 8,
         claim_ttl_ms: 1_500,
@@ -726,11 +564,7 @@ fn schedule_config(owner: &str) -> ScheduleSweepConfig {
     }
 }
 
-async fn seed_workflow_run(
-    fx: &Fixture,
-    workflow_name: &str,
-    input: serde_json::Value,
-) -> String {
+async fn seed_workflow_run(fx: &Fixture, workflow_name: &str, input: serde_json::Value) -> String {
     let run_id = zeroship_core::typed_id::new_workflow_run_id();
     let wake_at = Utc::now();
     fx.pg
@@ -757,12 +591,7 @@ async fn seed_workflow_run(
 }
 
 async fn seed_run(fx: &Fixture, label: &str) -> String {
-    seed_workflow_run(
-        fx,
-        WORKFLOW_NAME,
-        serde_json::json!({ "case": label }),
-    )
-    .await
+    seed_workflow_run(fx, WORKFLOW_NAME, serde_json::json!({ "case": label })).await
 }
 
 async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
@@ -791,7 +620,8 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
                 .await
                 .expect("register cancelled workflow timer");
         } else {
-            let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
+            let wake_at =
+                wake_at.expect("active workflow run should have wake_at for test register");
             fx.scheduler_store
                 .register_timer(run_id, &fx.app_id, wake_at)
                 .await
@@ -823,15 +653,13 @@ fn machine_summary() -> String {
     let cpus = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(0);
-    let mem_gib = fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|text| {
-            text.lines().find_map(|line| {
-                let rest = line.strip_prefix("MemTotal:")?;
-                let kib = rest.split_whitespace().next()?.parse::<f64>().ok()?;
-                Some(kib / 1024.0 / 1024.0)
-            })
-        });
+    let mem_gib = fs::read_to_string("/proc/meminfo").ok().and_then(|text| {
+        text.lines().find_map(|line| {
+            let rest = line.strip_prefix("MemTotal:")?;
+            let kib = rest.split_whitespace().next()?.parse::<f64>().ok()?;
+            Some(kib / 1024.0 / 1024.0)
+        })
+    });
     match mem_gib {
         Some(mem_gib) => format!(
             "{} {} logical_cpus={} mem_gib={:.1}",
@@ -868,23 +696,17 @@ async fn bench_counts(fx: &Fixture, run_ids: &[String]) -> (i64, i64) {
 }
 
 #[test]
-#[ignore = "DW-23 load bench: requires tests/e2e_durable_workflows.sh --bench"]
+#[ignore = "DW-23 load bench: requires cargo test -p zeroship-control --test workflow_e2e dw23_workflow_engine_load_bench -- --ignored"]
 fn dw23_workflow_engine_load_bench() {
     let rt = compio::runtime::Runtime::new().expect("compio runtime");
     rt.block_on(async {
-        if !enabled() {
-            zeroship_test_support::skip(
-                "skip: run via tests/e2e_durable_workflows.sh --bench"
-            );
-            return;
-        }
+        let fleet = workflow_fleet::Fleet::start();
 
-        let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
-        let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-        let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
-            .expect("ZEROSHIP_DW_E2E_APP_ID app id");
-        let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
-        let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+        let db_url = fleet.database.url();
+        let gateway_url = fleet.gateway_url.clone();
+        let app_id: Uuid = fleet.app_id;
+        let deploy_id = fleet.deploy_id.clone();
+        let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
         set_dispatch_paused(&fx, false).await;
 
         // The parameters of the ONE recorded run, as literals:
@@ -1127,7 +949,12 @@ async fn seed_compensable_completed_step(
 async fn run_state(
     pg: &TestPg,
     run_id: &str,
-) -> (String, Option<DateTime<Utc>>, Option<String>, Option<String>) {
+) -> (
+    String,
+    Option<DateTime<Utc>>,
+    Option<String>,
+    Option<String>,
+) {
     let rows = pg
         .query(
             "SELECT state, wake_at, claimed_by, dispatch_nonce \
@@ -1161,7 +988,8 @@ async fn wait_for_any_state(
     run_id: &str,
     expected: &[&str],
 ) -> (String, Option<DateTime<Utc>>) {
-    for _ in 0..200 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         let (state, wake_at, _, _) = run_state(&fx.pg, run_id).await;
         if expected.iter().any(|candidate| state == *candidate) {
             return (state, wake_at);
@@ -1172,7 +1000,8 @@ async fn wait_for_any_state(
 }
 
 async fn wait_for_step_count(fx: &Fixture, run_id: &str, expected: usize) {
-    for _ in 0..400 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         if step_rows(fx, run_id).await.len() == expected {
             return;
         }
@@ -1185,7 +1014,8 @@ async fn wait_for_step_count(fx: &Fixture, run_id: &str, expected: usize) {
 }
 
 async fn wait_for_dispatch_count(dispatcher: &CountingDispatcher, expected: usize) {
-    for _ in 0..120 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         if dispatcher.count() == expected {
             return;
         }
@@ -1198,7 +1028,8 @@ async fn wait_for_dispatch_count(dispatcher: &CountingDispatcher, expected: usiz
 }
 
 async fn wait_for_captured_dispatch_count(dispatcher: &CapturingDispatcher, expected: usize) {
-    for _ in 0..400 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         if dispatcher.count() == expected {
             return;
         }
@@ -1230,7 +1061,8 @@ async fn scheduler_counts(fx: &Fixture, run_id: &str) -> (i64, i64) {
 /// task after the journal commit is visible, so tests must observe the settled
 /// state rather than assume synchronous de-registration.
 async fn wait_for_scheduler_counts(fx: &Fixture, run_id: &str, expected: (i64, i64)) {
-    for _ in 0..200 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         if scheduler_counts(fx, run_id).await == expected {
             return;
         }
@@ -1255,7 +1087,8 @@ async fn scheduler_timer_wake_at(fx: &Fixture, run_id: &str) -> Option<DateTime<
 }
 
 async fn wait_for_scheduler_timer(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
-    for _ in 0..120 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         if let Some(wake_at) = scheduler_timer_wake_at(fx, run_id).await {
             return wake_at;
         }
@@ -1305,9 +1138,9 @@ async fn force_claim_lease_elapsed(fx: &Fixture, run_id: &str) {
         .execute(
             "UPDATE zeroship.workflow_runs SET lease_expires = $2 WHERE id = $1",
             &[&run_id, &lease_expires],
-    )
-    .await
-    .expect("force workflow claim lease elapsed");
+        )
+        .await
+        .expect("force workflow claim lease elapsed");
     assert_eq!(updated, 1, "expected one workflow run for {run_id}");
 }
 
@@ -1345,6 +1178,20 @@ fn retryable_scheduler_tick_error(err: &RegistryError) -> bool {
     matches!(err, RegistryError::Database(message) if message.contains("workflow scheduler: db error"))
 }
 
+struct ReportingDispatcher<D>(Arc<D>);
+
+#[async_trait(?Send)]
+impl<D: StepDispatcher + 'static> StepDispatcher for ReportingDispatcher<D> {
+    async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome {
+        let run_id = request.run_id.clone();
+        let outcome = self.0.dispatch(request).await;
+        if !matches!(&outcome, DispatchOutcome::Completed(response) if response.is_ack()) {
+            eprintln!("workflow dispatch for {run_id}: {outcome:?}");
+        }
+        outcome
+    }
+}
+
 async fn workflow_tick<D>(
     fx: &Fixture,
     dispatcher: &Arc<D>,
@@ -1354,12 +1201,21 @@ async fn workflow_tick<D>(
 where
     D: StepDispatcher + 'static,
 {
+    workflow_engine::reap_lapsed_inflight_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::new(ReportingDispatcher(Arc::clone(dispatcher))),
+        cfg.clone(),
+        cfg.max_inflight_dispatch as i64,
+    )
+    .await
+    .unwrap_or_else(|error| panic!("{label} retry sweep failed: {error}"));
     let mut last_error = None;
     for retry in 0..20 {
         match workflow_engine::fire_once(
             &fx.scheduler_store,
             &fx.state,
-            Arc::clone(dispatcher),
+            Arc::new(ReportingDispatcher(Arc::clone(dispatcher))),
             cfg.clone(),
         )
         .await
@@ -1372,9 +1228,7 @@ where
             Err(err) => panic!("{label} tick failed: {err}"),
         }
     }
-    panic!(
-        "{label} tick kept failing with retryable scheduler DB errors; last={last_error:?}"
-    );
+    panic!("{label} tick kept failing with retryable scheduler DB errors; last={last_error:?}");
 }
 
 async fn drive_until_completed<D>(
@@ -1385,12 +1239,22 @@ async fn drive_until_completed<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for attempt in 0..260 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    for attempt in 0.. {
+        if Instant::now() >= deadline {
+            break;
+        }
         workflow_tick(fx, &dispatcher, &cfg, "workflow").await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "completed" {
+            wait_for_scheduler_counts(fx, run_id, (0, 0)).await;
             return;
         }
+        assert!(
+            !matches!(state.as_str(), "failed" | "cancelled" | "stalled"),
+            "workflow reached {state} instead of completing: {}",
+            run_debug(fx, run_id).await,
+        );
         reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
         compio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1495,7 +1359,9 @@ async fn rollout_switch_drill(
         "public signal ingress should be disabled: {public_body}"
     );
     assert!(
-        point_signal["id"].as_str().is_some_and(|id| id.starts_with("sig_")),
+        point_signal["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("sig_")),
         "app-scoped run.signal should still work while public ingress is disabled"
     );
     register_existing_run_timer(fx, &signal_run).await;
@@ -1522,7 +1388,11 @@ async fn drive_until_failed<D>(
 where
     D: StepDispatcher + 'static,
 {
-    for attempt in 0..120 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    for attempt in 0.. {
+        if Instant::now() >= deadline {
+            break;
+        }
         workflow_tick(fx, &dispatcher, &cfg, label).await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "failed" {
@@ -1560,7 +1430,11 @@ async fn drive_until_cancelled<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for attempt in 0..160 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    for attempt in 0.. {
+        if Instant::now() >= deadline {
+            break;
+        }
         workflow_tick(fx, &dispatcher, &cfg, label).await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "cancelled" {
@@ -1590,7 +1464,11 @@ async fn drive_until_sleeping<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for attempt in 0..160 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    for attempt in 0.. {
+        if Instant::now() >= deadline {
+            break;
+        }
         workflow_tick(fx, &dispatcher, &cfg, label).await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "sleeping" {
@@ -1620,7 +1498,11 @@ async fn drive_until_compensating<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for attempt in 0..320 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    for attempt in 0.. {
+        if Instant::now() >= deadline {
+            break;
+        }
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         // Only act on a SETTLED run (no in-flight dispatch). Ticking while a
         // dispatch is in flight, or immediately after the run enters compensating,
@@ -1640,7 +1522,8 @@ async fn drive_until_compensating<D>(
                 );
             }
             workflow_tick(fx, &dispatcher, &cfg, label).await;
-            reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by).await;
+            reap_unclaimed_inflight_retry(fx, &dispatcher, &cfg, run_id, attempt, &claimed_by)
+                .await;
         }
         compio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1658,7 +1541,11 @@ async fn drive_until_waiting<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for attempt in 0..180 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    for attempt in 0.. {
+        if Instant::now() >= deadline {
+            break;
+        }
         workflow_tick(fx, &dispatcher, &cfg, "workflow").await;
         let (state, _, claimed_by, _) = run_state(&fx.pg, run_id).await;
         if state == "waiting" {
@@ -1707,9 +1594,24 @@ async fn assert_expected_steps(fx: &Fixture, run_id: &str) {
     assert_eq!(
         rows,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "sleep".to_string(), "sleep".to_string(), "completed".to_string()),
-            (2, "b".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                1,
+                "sleep".to_string(),
+                "sleep".to_string(),
+                "completed".to_string()
+            ),
+            (
+                2,
+                "b".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ],
         "workflow_steps must contain exactly a, sleep, b once"
     );
@@ -1733,9 +1635,24 @@ async fn assert_signal_success_steps(fx: &Fixture, run_id: &str) {
     assert_eq!(
         rows,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "go".to_string(), "wait_signal".to_string(), "completed".to_string()),
-            (2, "b".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                1,
+                "go".to_string(),
+                "wait_signal".to_string(),
+                "completed".to_string()
+            ),
+            (
+                2,
+                "b".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ],
         "workflow_steps must contain exactly a, go wait, b once"
     );
@@ -1746,9 +1663,24 @@ async fn assert_signal_timeout_steps(fx: &Fixture, run_id: &str) {
     assert_eq!(
         rows,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "go".to_string(), "wait_signal".to_string(), "failed".to_string()),
-            (2, "timeout".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                1,
+                "go".to_string(),
+                "wait_signal".to_string(),
+                "failed".to_string()
+            ),
+            (
+                2,
+                "timeout".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ],
         "workflow_steps must contain exactly a, failed go wait, timeout once"
     );
@@ -1759,14 +1691,24 @@ async fn assert_topic_success_steps(fx: &Fixture, run_id: &str) {
     assert_eq!(
         rows,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
             (
                 1,
                 "topic-go".to_string(),
                 "wait_signal".to_string(),
                 "completed".to_string(),
             ),
-            (2, "b".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                2,
+                "b".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ],
         "topic workflow must contain exactly a, topic wait, b once"
     );
@@ -1777,10 +1719,30 @@ async fn assert_concurrent_steps(fx: &Fixture, run_id: &str) {
     assert_eq!(
         rows,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "b".to_string(), "run".to_string(), "completed".to_string()),
-            (2, "c".to_string(), "run".to_string(), "completed".to_string()),
-            (3, "final".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                1,
+                "b".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                2,
+                "c".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                3,
+                "final".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ],
         "concurrent workflow must checkpoint a, b, c together, then final"
     );
@@ -1848,7 +1810,10 @@ async fn assert_signal_wait_parked(
     assert_eq!(rows.len(), 1, "missing wait step for run {run_id}");
     assert_eq!(rows[0].get::<_, String>("run_state"), "waiting");
     assert_eq!(rows[0].get::<_, String>("step_state"), "running");
-    assert_eq!(rows[0].get::<_, Option<String>>("signal_type").as_deref(), Some("go"));
+    assert_eq!(
+        rows[0].get::<_, Option<String>>("signal_type").as_deref(),
+        Some("go")
+    );
     assert_eq!(
         rows[0].get::<_, Option<i64>>("max_signal_age_ms"),
         max_signal_age_ms
@@ -1989,7 +1954,12 @@ async fn compensation_step_rows(
 async fn run_compensation_status(
     fx: &Fixture,
     run_id: &str,
-) -> (String, Option<String>, Option<String>, Option<serde_json::Value>) {
+) -> (
+    String,
+    Option<String>,
+    Option<String>,
+    Option<serde_json::Value>,
+) {
     let row = fx
         .pg
         .query_one(
@@ -2046,7 +2016,12 @@ async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, Strin
     let updated = fx
         .state
         .registry
-        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest, None)
+        .set_deploy_with_manifest(
+            &fx.app_id,
+            &redeploy_hash,
+            &redeploy_manifest,
+            manifest["runtime_descriptor"]["hash"].as_str(),
+        )
         .await
         .expect("activate redeploy manifest");
     assert!(updated, "redeploy should update app");
@@ -2065,7 +2040,8 @@ async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, Strin
 }
 
 async fn wait_for_active_deploy(fx: &Fixture, expected_hash: &str, expected_deploy_id: &str) {
-    for _ in 0..400 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         let app_hash: Option<String> = fx
             .pg
             .query_one(
@@ -2149,7 +2125,8 @@ async fn child_run_ids(fx: &Fixture, parent_run_id: &str) -> Vec<String> {
 }
 
 async fn wait_for_child_count(fx: &Fixture, parent_run_id: &str, expected: usize) -> Vec<String> {
-    for _ in 0..120 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         let ids = child_run_ids(fx, parent_run_id).await;
         if ids.len() == expected {
             return ids;
@@ -2170,7 +2147,8 @@ async fn wait_for_child_cancel_requested(fx: &Fixture, child_run_id: &str) {
     // tick — a race. Waiting for the reachable parked state makes the single reap
     // tick deterministic (the cooperative-cancel behavior itself is eventual: a
     // running child self-cancels at its next step boundary, a parked one is reaped).
-    for _ in 0..400 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         let row = fx
             .pg
             .query_one(
@@ -2226,7 +2204,8 @@ async fn drive_children_until_sleeping<D>(
 ) where
     D: StepDispatcher + 'static,
 {
-    for _ in 0..600 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         workflow_tick(fx, &dispatcher, &cfg, "child sleep").await;
         let states = child_states(fx, child_run_ids).await;
         assert_eq!(states.len(), child_run_ids.len(), "missing child rows");
@@ -2237,7 +2216,10 @@ async fn drive_children_until_sleeping<D>(
             return;
         }
         if states.iter().any(|(_, state, _, _)| {
-            matches!(state.as_str(), "completed" | "failed" | "cancelled" | "stalled")
+            matches!(
+                state.as_str(),
+                "completed" | "failed" | "cancelled" | "stalled"
+            )
         }) {
             panic!("child reached terminal before sleeping: {states:?}");
         }
@@ -2262,7 +2244,8 @@ async fn drive_children_until_cancelled(
             workflow_step_count(&fx.pg, child_run_id).await,
         ));
     }
-    for _ in 0..600 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         let _claimed = workflow_tick(fx, &dispatcher, &cfg, "child cancel").await;
         let _redispatched = workflow_engine::reap_lapsed_inflight_once(
             &fx.scheduler_store,
@@ -2296,11 +2279,7 @@ async fn drive_children_until_cancelled(
     );
 }
 
-async fn active_child_count_for_deploy(
-    fx: &Fixture,
-    parent_run_id: &str,
-    deploy_id: &str,
-) -> i64 {
+async fn active_child_count_for_deploy(fx: &Fixture, parent_run_id: &str, deploy_id: &str) -> i64 {
     fx.pg
         .query_one(
             "SELECT COUNT(*)::bigint AS n \
@@ -2326,7 +2305,11 @@ async fn assert_child_dedup_keys(fx: &Fixture, parent_run_id: &str, expected: us
         )
         .await
         .expect("load child dedup keys");
-    assert_eq!(rows.len(), expected, "child count for parent {parent_run_id}");
+    assert_eq!(
+        rows.len(),
+        expected,
+        "child count for parent {parent_run_id}"
+    );
     // Children spawned in one startMany frontier can land in the runs table in
     // any order relative to their ordinal (created_at can tie within a dispatch,
     // and the UUIDv7 id is not ordinal-ordered), so compare the SET of
@@ -2352,7 +2335,10 @@ async fn assert_child_dedup_keys(fx: &Fixture, parent_run_id: &str, expected: us
         })
         .collect();
     want.sort();
-    assert_eq!(actual, want, "child dedup/wait keys for parent {parent_run_id}");
+    assert_eq!(
+        actual, want,
+        "child dedup/wait keys for parent {parent_run_id}"
+    );
 }
 
 async fn scheduled_run_for(
@@ -2405,7 +2391,18 @@ async fn post_signal(
     let builder = builder
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.as_str())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                zeroship_workflow::app_scoped_token(
+                    workflow_fleet::CONTROL_KEY,
+                    &app_id.to_string()
+                )
+            ),
+        )
+        .expect("app-scoped workflow authorization")
+        .header("x-zeroship-app-id", app_id.to_string())
         .expect("app id header");
     let response = builder.body(body).send().await.expect("post signal");
     let status = response.status().as_u16();
@@ -2459,7 +2456,18 @@ async fn create_signal_token_at(url: &str, app_id: &AppId, ttl: &str) -> String 
         .expect("token request URL")
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.as_str())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                zeroship_workflow::app_scoped_token(
+                    workflow_fleet::CONTROL_KEY,
+                    &app_id.to_string()
+                )
+            ),
+        )
+        .expect("app-scoped workflow authorization")
+        .header("x-zeroship-app-id", app_id.to_string())
         .expect("app id header")
         .body(body)
         .send()
@@ -2502,9 +2510,9 @@ async fn post_public_signal(
         .expect("post public signal");
     let status = response.status().as_u16();
     let bytes = response.bytes().await.expect("read public signal response");
-    let value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-        serde_json::json!({ "raw": String::from_utf8_lossy(&bytes).to_string() })
-    });
+    let value = serde_json::from_slice(&bytes).unwrap_or_else(
+        |_| serde_json::json!({ "raw": String::from_utf8_lossy(&bytes).to_string() }),
+    );
     (status, value)
 }
 
@@ -2527,7 +2535,18 @@ async fn post_control(
     let builder = builder
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.as_str())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                zeroship_workflow::app_scoped_token(
+                    workflow_fleet::CONTROL_KEY,
+                    &app_id.to_string()
+                )
+            ),
+        )
+        .expect("app-scoped workflow authorization")
+        .header("x-zeroship-app-id", app_id.to_string())
         .expect("app id header");
     let response = builder.body(bytes).send().await.expect("post control");
     let status = response.status().as_u16();
@@ -2561,7 +2580,18 @@ async fn post_control_raw(
         .expect("control request URL")
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.as_str())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                zeroship_workflow::app_scoped_token(
+                    workflow_fleet::CONTROL_KEY,
+                    &app_id.to_string()
+                )
+            ),
+        )
+        .expect("app-scoped workflow authorization")
+        .header("x-zeroship-app-id", app_id.to_string())
         .expect("app id header")
         .body(bytes)
         .send()
@@ -2569,9 +2599,9 @@ async fn post_control_raw(
         .expect("post control");
     let status = response.status().as_u16();
     let body_bytes = response.bytes().await.expect("read control response");
-    let value = serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
-        serde_json::json!({ "raw": String::from_utf8_lossy(&body_bytes).to_string() })
-    });
+    let value = serde_json::from_slice(&body_bytes).unwrap_or_else(
+        |_| serde_json::json!({ "raw": String::from_utf8_lossy(&body_bytes).to_string() }),
+    );
     (status, value)
 }
 
@@ -2599,7 +2629,18 @@ async fn get_output_bytes(
     let mut builder = client
         .get(&url)
         .expect("output request URL")
-        .header("x-zeroship-app-id", app_id.as_str())
+        .header(
+            "authorization",
+            format!(
+                "Bearer {}",
+                zeroship_workflow::app_scoped_token(
+                    workflow_fleet::CONTROL_KEY,
+                    &app_id.to_string()
+                )
+            ),
+        )
+        .expect("app-scoped workflow authorization")
+        .header("x-zeroship-app-id", app_id.to_string())
         .expect("app id header");
     if let Some(range) = range {
         builder = builder.header("range", range).expect("range header");
@@ -2651,7 +2692,13 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
         );
     }
     // (id, state, wake_at, claimed_by, dispatch_nonce)
-    type ChildRow = (String, String, Option<DateTime<Utc>>, Option<String>, Option<String>);
+    type ChildRow = (
+        String,
+        String,
+        Option<DateTime<Utc>>,
+        Option<String>,
+        Option<String>,
+    );
     let child_rows: Vec<ChildRow> = fx
         .pg
         .query(
@@ -2722,53 +2769,20 @@ async fn run_debug(fx: &Fixture, run_id: &str) -> String {
     )
 }
 
-/// This test SIZES the stack it runs on, and the body is a separate `async fn`
-/// reached through that thread, because its future does not fit the stack
-/// libtest hands a test.
-///
-/// MEASURED 2026-08-20 against this file, one variable changed - `RUST_MIN_STACK`,
-/// which is the size libtest's per-test thread gets:
-///
-///     2304 KiB   SIGABRT, "has overflowed its stack"
-///     2560 KiB   test result: ok
-///
-/// Rust's default thread stack is 2 MiB, so the future sat about 400 KiB over it.
-/// The consequence is not a failing test: the process ABORTS and takes every
-/// later test in the binary with it. `cargo test -p zeroship-control --test main`
-/// exited 101 on SIGABRT having reported 14 of 26, and `tests/run_billing_suite.sh`
-/// exited 1 for the same reason. That target is ungated, so `cargo test
-/// --workspace` hit it with no database at all.
-///
-/// BOTH HALVES OF THE SHAPE BELOW MATTER. The overflow happened while `block_on`
-/// placed the future on the stack, which is BEFORE the body's first line - so it
-/// fired on the skip path too, where this test does nothing. `enabled()` is now
-/// checked outside any future, so a run without `ZEROSHIP_DW_E2E` constructs
-/// nothing; the enabled run gets 16 MiB, six times the measured need.
-///
-/// ONE BEHAVIOUR CHANGES, and it is worth knowing: libtest's output capture is
-/// thread-local, so the body's `println!`s now reach the terminal instead of
-/// being buffered and replayed only on failure. `tests/e2e_durable_workflows.sh`
-/// is the only caller that enables this test and it already passes `--nocapture`,
-/// so nothing it prints was being captured anyway.
-///
-/// WHAT THIS DOES NOT FIX: the body is one 2000-line `async fn`, and a named
-/// 16 MiB budget only makes the next 13 MiB of growth affordable rather than
-/// impossible. Splitting it is the real answer and needs a run of
-/// `tests/e2e_durable_workflows.sh` to verify, which this change did not have.
+/// Run the replay scenario on a dedicated thread with room for its future.
+/// Construct the fleet before entering that runtime, and propagate assertion
+/// panics back to libtest.
 #[test]
 #[serial]
 fn durable_workflows_m1_keystone_real_spine() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    let fleet = workflow_fleet::Fleet::start();
 
     let handle = thread::Builder::new()
         .name("dw-keystone".to_owned())
         .stack_size(16 * 1024 * 1024)
-        .spawn(|| {
+        .spawn(move || {
             let rt = compio::runtime::Runtime::new().expect("compio runtime");
-            rt.block_on(keystone_real_spine());
+            rt.block_on(keystone_real_spine(&fleet));
         })
         .expect("spawn the keystone thread");
     // `resume_unwind`, not `expect`: an assertion anywhere in the body has to
@@ -2779,18 +2793,20 @@ fn durable_workflows_m1_keystone_real_spine() {
     }
 }
 
-async fn keystone_real_spine() {
-    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
-    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
-        .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+async fn keystone_real_spine(fleet: &workflow_fleet::Fleet) {
+    let db_url = fleet.database.url();
+    let control_url = fleet.control_url.clone();
+    let gateway_url = fleet.gateway_url.clone();
+    let app_id: Uuid = fleet.app_id;
+    let deploy_id = fleet.deploy_id.clone();
 
-    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
     prepare_side_effect_table(&fx.pg).await;
 
-    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth()));
+    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(
+        gateway_url.clone(),
+        test_control_service_auth(),
+    ));
     rollout_switch_drill(
         &fx,
         &control_url,
@@ -2802,7 +2818,7 @@ async fn keystone_real_spine() {
     let schedule_row = fx
         .pg
         .query_one(
-            "SELECT id, deploy_hash, workflow_name, kind, cron_expr, tz, next_fire_at \
+            "SELECT id, deploy_hash, workflow_name, kind, cron_expr, tz, next_fire_at, created_at \
                FROM zeroship.workflow_schedules \
               WHERE app_id = $1 AND name = 'dw14-scheduled'",
             &[&fx.app_id.as_str()],
@@ -2812,14 +2828,19 @@ async fn keystone_real_spine() {
     let schedule_id: String = schedule_row.get("id");
     assert!(schedule_id.starts_with("sch_"));
     let schedule_deploy_hash: String = schedule_row.get("deploy_hash");
-    assert!(!schedule_deploy_hash.is_empty(), "schedule row carries deploy hash");
+    assert!(
+        !schedule_deploy_hash.is_empty(),
+        "schedule row carries deploy hash"
+    );
     assert_eq!(
         schedule_row.get::<_, String>("workflow_name"),
         SCHEDULED_WORKFLOW_NAME
     );
     assert_eq!(schedule_row.get::<_, String>("kind"), "cron");
     assert_eq!(
-        schedule_row.get::<_, Option<String>>("cron_expr").as_deref(),
+        schedule_row
+            .get::<_, Option<String>>("cron_expr")
+            .as_deref(),
         Some("* * * * *")
     );
     assert_eq!(
@@ -2827,10 +2848,13 @@ async fn keystone_real_spine() {
         Some("UTC")
     );
     let initial_next: DateTime<Utc> = schedule_row.get("next_fire_at");
+    let schedule_created: DateTime<Utc> = schedule_row.get("created_at");
     assert!(
-        initial_next > Utc::now() - ChronoDuration::minutes(1),
-        "initial next fire should be reconciled from deploy time, got {initial_next:?}"
+        initial_next > schedule_created
+            && initial_next <= schedule_created + ChronoDuration::minutes(1),
+        "initial next fire must follow schedule creation at the next cron boundary"
     );
+    assert_eq!(initial_next.timestamp() % 60, 0);
 
     let planned = DateTime::<Utc>::from_timestamp_millis(
         (Utc::now() - ChronoDuration::minutes(3)).timestamp_millis(),
@@ -2870,7 +2894,10 @@ async fn keystone_real_spine() {
     )
     .await;
     let scheduled_output = run_output(&fx, &scheduled_run).await;
-    assert_eq!(scheduled_output["input"], serde_json::json!({"case": "schedule"}));
+    assert_eq!(
+        scheduled_output["input"],
+        serde_json::json!({"case": "schedule"})
+    );
     assert_eq!(scheduled_output["workflowName"], SCHEDULED_WORKFLOW_NAME);
     let output_started = DateTime::parse_from_rfc3339(
         scheduled_output["startedAt"]
@@ -2896,7 +2923,10 @@ async fn keystone_real_spine() {
     )
     .await
     .expect("continue-as-new first tick");
-    assert_eq!(claimed, 1, "continue-as-new first step should dispatch once");
+    assert_eq!(
+        claimed, 1,
+        "continue-as-new first step should dispatch once"
+    );
     wait_for_step_count(&fx, &can_run, 1).await;
     assert_eq!(
         step_rows(&fx, &can_run).await,
@@ -2925,7 +2955,10 @@ async fn keystone_real_spine() {
     let outcomes = can_dispatcher.outcomes();
     match outcomes.last().expect("continue-as-new terminal dispatch") {
         DispatchOutcome::Completed(response) => {
-            assert!(response.is_ack(), "continue-as-new terminal returned nack: {response:?}");
+            assert!(
+                response.is_ack(),
+                "continue-as-new terminal returned nack: {response:?}"
+            );
         }
         other => panic!("continue-as-new terminal returned backpressure: {other:?}"),
     }
@@ -2960,13 +2993,18 @@ async fn keystone_real_spine() {
     assert_eq!(fresh_row.get::<_, String>("deploy_id"), can_redeploy_id);
     assert_eq!(fresh_row.get::<_, String>("state"), "queued");
     assert_eq!(fresh_row.get::<_, i32>("next_ordinal"), 0);
-    assert!(fresh_row.get::<_, Option<String>>("parent_run_id").is_none());
+    assert!(fresh_row
+        .get::<_, Option<String>>("parent_run_id")
+        .is_none());
     assert!(fresh_row.get::<_, Option<String>>("dedup_key").is_none());
     let fresh_input: serde_json::Value = fresh_row.get("input");
     assert_eq!(fresh_input["generation"], serde_json::json!(1));
     assert_eq!(fresh_input["case"], serde_json::json!("can"));
     assert_eq!(fresh_input["previousRunId"], serde_json::json!(can_run));
-    assert_eq!(fresh_input["marker"]["step"], serde_json::json!("before-can"));
+    assert_eq!(
+        fresh_input["marker"]["step"],
+        serde_json::json!("before-can")
+    );
     drive_until_completed(
         &fx,
         Arc::clone(&real_dispatcher),
@@ -2977,8 +3015,14 @@ async fn keystone_real_spine() {
     let fresh_output = run_output(&fx, &fresh_run).await;
     assert_eq!(fresh_output["generation"], serde_json::json!(1));
     assert_eq!(fresh_output["previousRunId"], serde_json::json!(can_run));
-    assert_eq!(fresh_output["marker"]["step"], serde_json::json!("before-can"));
-    assert_eq!(fresh_output["after"]["step"], serde_json::json!("after-can"));
+    assert_eq!(
+        fresh_output["marker"]["step"],
+        serde_json::json!("before-can")
+    );
+    assert_eq!(
+        fresh_output["after"]["step"],
+        serde_json::json!("after-can")
+    );
 
     let carry_run = seed_workflow_run(
         &fx,
@@ -2997,6 +3041,8 @@ async fn keystone_real_spine() {
     .expect("compensable carry first tick");
     assert_eq!(claimed, 1);
     wait_for_step_count(&fx, &carry_run, 1).await;
+    wait_for_captured_dispatch_count(&carry_dispatcher, 1).await;
+    wait_for_scheduler_timer(&fx, &carry_run).await;
     let compensation_state: Option<String> = fx
         .pg
         .query_one(
@@ -3020,12 +3066,16 @@ async fn keystone_real_spine() {
     .await
     .expect("compensable carry reject tick");
     assert_eq!(claimed, 1);
+    wait_for_captured_dispatch_count(&carry_dispatcher, 2).await;
     let outcomes = carry_dispatcher.outcomes();
     let response = match outcomes.last().expect("captured carry response") {
         DispatchOutcome::Completed(response) => response,
         other => panic!("expected carry apply response, got {other:?}"),
     };
-    assert!(response.is_nack(), "carry response should nack: {response:?}");
+    assert!(
+        response.is_nack(),
+        "carry response should nack: {response:?}"
+    );
     assert_eq!(response.nack_kind, Some(WorkflowAdvanceNackKind::Invalid));
     assert!(
         response
@@ -3061,7 +3111,10 @@ async fn keystone_real_spine() {
         .await
         .expect("count carry successors")
         .get("n");
-    assert_eq!(carry_successors, 0, "compensable carry must not create a fresh run");
+    assert_eq!(
+        carry_successors, 0,
+        "compensable carry must not create a fresh run"
+    );
     fx.scheduler_store
         .ack_terminal(&carry_run)
         .await
@@ -3109,7 +3162,8 @@ async fn keystone_real_spine() {
         .expect("count concurrent scheduled runs")
         .get("n");
     if tick_a + tick_b == 0 {
-        for _ in 0..80 {
+        let deadline = Instant::now() + POLL_TIMEOUT;
+        while Instant::now() < deadline {
             if run_count == 1 {
                 break;
             }
@@ -3153,7 +3207,17 @@ async fn keystone_real_spine() {
     .await;
 
     let happy_run = seed_run(&fx, "happy").await;
-    for _ in 0..120 {
+    let happy_started_at: DateTime<Utc> = fx
+        .pg
+        .query_one(
+            "SELECT started_at FROM zeroship.workflow_runs WHERE id = $1",
+            &[&happy_run],
+        )
+        .await
+        .expect("happy run start")
+        .get("started_at");
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         workflow_engine::fire_once(
             &fx.scheduler_store,
             &fx.state,
@@ -3177,8 +3241,8 @@ async fn keystone_real_spine() {
                 );
             };
             assert!(
-                wake_at > Utc::now() - ChronoDuration::milliseconds(25),
-                "sleep wake_at should not be in the past when first parked"
+                wake_at >= happy_started_at + ChronoDuration::seconds(1),
+                "sleep must schedule its wake after the workflow start"
             );
             break;
         }
@@ -3190,8 +3254,13 @@ async fn keystone_real_spine() {
         "{}",
         run_debug(&fx, &happy_run).await
     );
-    drive_until_completed(&fx, Arc::clone(&real_dispatcher), config("dw07-happy"), &happy_run)
-        .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-happy"),
+        &happy_run,
+    )
+    .await;
     assert_expected_steps(&fx, &happy_run).await;
     let happy_counts = side_counts(&fx, &happy_run).await;
     assert_eq!(happy_counts.get("a").copied(), Some(1));
@@ -3211,8 +3280,18 @@ async fn keystone_real_spine() {
     assert_eq!(
         step_rows(&fx, &happy_run).await,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "sleep".to_string(), "sleep".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                1,
+                "sleep".to_string(),
+                "sleep".to_string(),
+                "completed".to_string()
+            ),
         ],
         "restart from b should retain only the prefix before b"
     );
@@ -3257,10 +3336,21 @@ async fn keystone_real_spine() {
     assert_eq!(concurrent_counts.get("b").copied(), Some(1));
     assert_eq!(concurrent_counts.get("c").copied(), Some(1));
     assert_eq!(concurrent_counts.get("final").copied(), Some(1));
-    assert!(
-        concurrent_dispatcher.count() < 4,
-        "3-wide frontier plus final should complete in fewer dispatches than serial a,b,c,final; got {}",
-        concurrent_dispatcher.count()
+    let batches = fx.pg.query(
+        "SELECT array_agg(name ORDER BY ordinal) AS names, min(batch_width) AS min_width, max(batch_width) AS max_width FROM zeroship.workflow_steps WHERE run_id = $1 GROUP BY batch_id ORDER BY min(ordinal)",
+        &[&concurrent_run],
+    ).await.expect("load persisted concurrent batches");
+    let batches: Vec<(Vec<String>, i16, i16)> = batches
+        .iter()
+        .map(|row| (row.get("names"), row.get("min_width"), row.get("max_width")))
+        .collect();
+    assert_eq!(
+        batches,
+        vec![
+            (vec!["a".into(), "b".into(), "c".into()], 3, 3),
+            (vec!["final".into()], 1, 1),
+        ],
+        "concurrent actions must share a checkpoint batch before the final step"
     );
 
     let frontier_run = seed_workflow_run(
@@ -3283,9 +3373,7 @@ async fn keystone_real_spine() {
     .expect("DW19 frontier first tick");
     assert_eq!(claimed, 1);
     let frontier_ack = expect_completed_ack(
-        frontier_dropped_rx
-        .await
-            .expect("DW19 frontier held ack"),
+        frontier_dropped_rx.await.expect("DW19 frontier held ack"),
         "DW19 frontier held dispatch",
     );
     assert_ack_run(&frontier_ack, &frontier_run, "DW19 frontier held dispatch");
@@ -3301,9 +3389,24 @@ async fn keystone_real_spine() {
     assert_eq!(
         step_rows(&fx, &frontier_run).await,
         vec![
-            (0, "a".to_string(), "run".to_string(), "completed".to_string()),
-            (1, "b".to_string(), "run".to_string(), "completed".to_string()),
-            (2, "c".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "a".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                1,
+                "b".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
+            (
+                2,
+                "c".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ],
         "worker apply lands the full concurrent frontier before the ack"
     );
@@ -3499,8 +3602,12 @@ async fn keystone_real_spine() {
     wait_for_child_cancel_requested(&fx, &cw6_child).await;
     let cw6_cfg = config("dw17-cw6-child-cooperative-cancel");
     let claimed = workflow_tick(&fx, &real_dispatcher, &cw6_cfg, "CW6 child cancel").await;
-    assert_eq!(claimed, 1, "CW6 cancel pickup should send one light dispatch");
-    assert_eq!(run_state(&fx.pg, &cw6_child).await.0, "cancelled");
+    assert_eq!(
+        claimed, 1,
+        "CW6 cancel pickup should send one light dispatch"
+    );
+    wait_for_any_state(&fx, &cw6_child, &["cancelled"]).await;
+    wait_for_scheduler_counts(&fx, &cw6_child, (0, 0)).await;
     assert_eq!(
         workflow_step_count(&fx.pg, &cw6_child).await,
         0,
@@ -3515,12 +3622,8 @@ async fn keystone_real_spine() {
         serde_json::json!({"case": "cw7", "value": "over-cap"}),
     )
     .await;
-    let cw7_restore = set_app_plan_runtime_limit(
-        &fx,
-        MAX_LIVE_DESCENDANTS_FIELD,
-        serde_json::json!(0),
-    )
-    .await;
+    let cw7_restore =
+        set_app_plan_runtime_limit(&fx, MAX_LIVE_DESCENDANTS_FIELD, serde_json::json!(0)).await;
     let mut cw7_cfg = config("dw17-cw7-live-cap");
     cw7_cfg.max_live_descendants = 0;
     let cw7_error = drive_until_failed(
@@ -3605,7 +3708,12 @@ async fn keystone_real_spine() {
     );
     assert_eq!(
         step_rows(&fx, &name_divergence_run).await,
-        vec![(0, "expected".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "expected".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "name-divergence proof should preserve the seeded journal row"
     );
     assert_eq!(
@@ -3637,10 +3745,18 @@ async fn keystone_real_spine() {
     assert_ack_run(&pause_ack, &pause_run, "pause first dispatch");
     let before_pause = run_state(&fx.pg, &pause_run).await;
     assert_eq!(before_pause.0, "queued");
-    assert_eq!(before_pause.2, None, "worker apply clears the claim before ack");
+    assert_eq!(
+        before_pause.2, None,
+        "worker apply clears the claim before ack"
+    );
     assert_eq!(
         step_rows(&fx, &pause_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "worker apply lands the checkpoint before the held ack"
     );
     let pause_body = post_control(
@@ -3652,14 +3768,23 @@ async fn keystone_real_spine() {
     )
     .await;
     assert_eq!(pause_body["state"], "paused");
-    assert_eq!(side_counts(&fx, &pause_run).await.get("a").copied(), Some(1));
+    assert_eq!(
+        side_counts(&fx, &pause_run).await.get("a").copied(),
+        Some(1)
+    );
     assert_eq!(
         step_rows(&fx, &pause_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "pause sees the worker-applied checkpoint"
     );
     let _ = pause_release_tx.send(());
-    for _ in 0..100 {
+    let deadline = Instant::now() + POLL_TIMEOUT;
+    while Instant::now() < deadline {
         let (state, _, claimed_by, _) = run_state(&fx.pg, &pause_run).await;
         if state == "paused" && claimed_by.is_none() && step_rows(&fx, &pause_run).await.len() == 1
         {
@@ -3670,7 +3795,12 @@ async fn keystone_real_spine() {
     assert_eq!(run_state(&fx.pg, &pause_run).await.0, "paused");
     assert_eq!(
         step_rows(&fx, &pause_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "pause-mid-dispatch should land a checkpoint exactly once"
     );
     wait_for_scheduler_counts(&fx, &pause_run, (0, 0)).await;
@@ -3689,7 +3819,12 @@ async fn keystone_real_spine() {
     assert_eq!(run_state(&fx.pg, &pause_run).await.0, "paused");
     assert_eq!(
         step_rows(&fx, &pause_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "paused skip must not replay or apply"
     );
     let resume_body = post_control(
@@ -3750,7 +3885,12 @@ async fn keystone_real_spine() {
     assert_eq!(nonce, None);
     assert_eq!(
         step_rows(&fx, &cancel_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "cancel happens after the worker-applied checkpoint in the held-ack window"
     );
     let cancel_counts = side_counts(&fx, &cancel_run).await;
@@ -3779,14 +3919,18 @@ async fn keystone_real_spine() {
     assert_eq!(nonce, None);
     assert_eq!(
         step_rows(&fx, &cancel_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "cancelled terminal-ack dispatch must not replay or apply"
     );
     wait_for_scheduler_counts(&fx, &cancel_run, (0, 0)).await;
 
     let crash_run = seed_run(&fx, "crash").await;
-    let (crash_dispatcher, dropped_rx, release_tx) =
-        CrashOnceDispatcher::new(gateway_url.clone());
+    let (crash_dispatcher, dropped_rx, release_tx) = CrashOnceDispatcher::new(gateway_url.clone());
     let crash_dispatcher = Arc::new(crash_dispatcher);
 
     let claimed = workflow_engine::fire_once(
@@ -3806,10 +3950,18 @@ async fn keystone_real_spine() {
     assert_ack_run(&dropped_ack, &crash_run, "crash first dispatch");
     assert_eq!(
         step_rows(&fx, &crash_run).await,
-        vec![(0, "a".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "a".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "worker applies step a before the held ack is released"
     );
-    assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(1));
+    assert_eq!(
+        side_counts(&fx, &crash_run).await.get("a").copied(),
+        Some(1)
+    );
 
     let pre_takeover = workflow_engine::fire_once(
         &fx.scheduler_store,
@@ -3848,7 +4000,10 @@ async fn keystone_real_spine() {
             "redrive sleep parking must carry wake_at"
         );
     }
-    assert_eq!(side_counts(&fx, &crash_run).await.get("a").copied(), Some(1));
+    assert_eq!(
+        side_counts(&fx, &crash_run).await.get("a").copied(),
+        Some(1)
+    );
     let redrive_rows = step_rows(&fx, &crash_run).await;
     assert_eq!(
         redrive_rows
@@ -3861,7 +4016,12 @@ async fn keystone_real_spine() {
     assert!(
         redrive_rows.len() <= 2
             && redrive_rows.first()
-                == Some(&(0, "a".to_string(), "run".to_string(), "completed".to_string()))
+                == Some(&(
+                    0,
+                    "a".to_string(),
+                    "run".to_string(),
+                    "completed".to_string()
+                ))
             && redrive_rows
                 .get(1)
                 .is_none_or(|row| row.1 == "sleep" && row.2 == "sleep"),
@@ -3880,8 +4040,13 @@ async fn keystone_real_spine() {
         "late held ack must not double-checkpoint a: {late_rows:?}"
     );
 
-    drive_until_completed(&fx, Arc::clone(&real_dispatcher), config("dw07-crash-drive"), &crash_run)
-        .await;
+    drive_until_completed(
+        &fx,
+        Arc::clone(&real_dispatcher),
+        config("dw07-crash-drive"),
+        &crash_run,
+    )
+    .await;
     assert_expected_steps(&fx, &crash_run).await;
     let crash_counts = side_counts(&fx, &crash_run).await;
     assert_eq!(crash_counts.get("a").copied(), Some(1));
@@ -3954,7 +4119,9 @@ async fn keystone_real_spine() {
         .get::<_, Option<String>>("output_hash")
         .expect("committed blob hash");
     assert_eq!(committed_hash, dropped_hash);
-    assert!(blob_step.get::<_, Option<serde_json::Value>>("output").is_none());
+    assert!(blob_step
+        .get::<_, Option<serde_json::Value>>("output")
+        .is_none());
     assert_eq!(
         blob_step
             .get::<_, Option<String>>("output_content_type")
@@ -4064,8 +4231,7 @@ async fn keystone_real_spine() {
         .expect("load guard blob hash")
         .get::<_, Option<String>>("output_hash")
         .expect("guard blob hash");
-    let old_ref = Utc::now()
-        - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 60);
+    let old_ref = Utc::now() - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 60);
     fx.pg
         .execute(
             "UPDATE zeroship.workflow_blobs \
@@ -4255,7 +4421,10 @@ async fn keystone_real_spine() {
         .await
         .expect("load signal wait step");
     let output: serde_json::Value = wait_output.get("output");
-    assert_eq!(output["payload"], serde_json::json!({"ok": true, "source": "e2e"}));
+    assert_eq!(
+        output["payload"],
+        serde_json::json!({"ok": true, "source": "e2e"})
+    );
     assert_eq!(
         wait_output
             .get::<_, Option<String>>("consumed_signal_id")
@@ -4283,7 +4452,10 @@ async fn keystone_real_spine() {
         serde_json::json!({"ok": true, "source": "public-ingress"}),
     )
     .await;
-    assert_eq!(status, 202, "public signal should be accepted: {external_body}");
+    assert_eq!(
+        status, 202,
+        "public signal should be accepted: {external_body}"
+    );
     let external_signal_id = external_body["id"]
         .as_str()
         .expect("public signal id")
@@ -4331,7 +4503,11 @@ async fn keystone_real_spine() {
         serde_json::json!({"ok": true, "source": "replay"}),
     )
     .await;
-    assert_eq!(replay.0, 409, "replayed token should be rejected: {}", replay.1);
+    assert_eq!(
+        replay.0, 409,
+        "replayed token should be rejected: {}",
+        replay.1
+    );
 
     let forged_run = seed_signal_run(&fx, "forged-token", "PT30S", None).await;
     drive_until_waiting(
@@ -4367,7 +4543,8 @@ async fn keystone_real_spine() {
         &expired_run,
     )
     .await;
-    let expired_token = create_run_signal_token(&control_url, &fx.app_id, &expired_run, "PT1S").await;
+    let expired_token =
+        create_run_signal_token(&control_url, fx.app_id, &expired_run, "PT1S").await;
     // Wait past TTL(1s) + timestamp-tolerance(1s) with margin for integer-second
     // rounding: exp = mint_second+1, so the token is only strictly expired once
     // now_second >= mint_second+3. 2.25s lands on the mint_second+2 boundary and
@@ -4463,10 +4640,7 @@ async fn keystone_real_spine() {
         topic_status, 202,
         "topic public signal should create a broadcast: {topic_body}"
     );
-    let broadcast_id = topic_body["id"]
-        .as_str()
-        .expect("broadcast id")
-        .to_string();
+    let broadcast_id = topic_body["id"].as_str().expect("broadcast id").to_string();
     assert!(broadcast_id.starts_with("wbc_"));
 
     let first_fanout = workflow_signal_fanout::tick_with_config(
@@ -4564,7 +4738,11 @@ async fn keystone_real_spine() {
         )
         .await
         .expect("load broadcast deliveries");
-    assert_eq!(delivered_rows.len(), 3, "broadcast should reach all subscribers");
+    assert_eq!(
+        delivered_rows.len(),
+        3,
+        "broadcast should reach all subscribers"
+    );
     for row in &delivered_rows {
         assert_eq!(
             row.get::<_, i64>("n"),
@@ -4630,7 +4808,10 @@ async fn keystone_real_spine() {
     )
     .await
     .expect("early timeout tick");
-    assert_eq!(early_claim, 0, "timeout must not claim before waiting deadline");
+    assert_eq!(
+        early_claim, 0,
+        "timeout must not claim before waiting deadline"
+    );
     assert_eq!(run_state(&fx.pg, &timeout_run).await.0, "waiting");
     let now = Utc::now();
     if timeout_deadline > now {
@@ -4778,11 +4959,13 @@ async fn keystone_real_spine() {
         .get::<_, Option<String>>("manifest_json")
         .expect("manifest json");
     let cascade_redeploy_hash = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+    let cascade_manifest: serde_json::Value =
+        serde_json::from_str(&cascade_manifest_raw).expect("cascade manifest");
     let redeploy = fx.state.registry.set_deploy_with_manifest(
         &fx.app_id,
         &cascade_redeploy_hash,
         &cascade_manifest_raw,
-        None,
+        cascade_manifest["runtime_descriptor"]["hash"].as_str(),
     );
     let cancel = post_control(
         &control_url,
@@ -4827,7 +5010,10 @@ async fn keystone_real_spine() {
         0,
         "no child on the parent deploy pin should remain active after cascade cancel"
     );
-    assert_eq!(run_state(&fx.pg, &cascade_redeploy_parent).await.0, "cancelled");
+    assert_eq!(
+        run_state(&fx.pg, &cascade_redeploy_parent).await.0,
+        "cancelled"
+    );
     for (_, state, claimed_by, deploy_id) in child_states(&fx, &cascade_children).await {
         assert_eq!(state, "cancelled");
         assert_eq!(claimed_by, None);
@@ -4856,7 +5042,12 @@ async fn keystone_real_spine() {
     let updated = fx
         .state
         .registry
-        .set_deploy_with_manifest(&fx.app_id, &redeploy_hash, &redeploy_manifest, None)
+        .set_deploy_with_manifest(
+            &fx.app_id,
+            &redeploy_hash,
+            &redeploy_manifest,
+            manifest_without_schedule["runtime_descriptor"]["hash"].as_str(),
+        )
         .await
         .expect("redeploy without schedule");
     assert!(updated, "redeploy should update app");
@@ -4888,17 +5079,13 @@ async fn keystone_real_spine() {
 #[compio::test]
 #[serial]
 async fn bare_await_body_io_is_rejected() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    let fleet = workflow_fleet::Fleet::start();
 
-    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
-        .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
-    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    let db_url = fleet.database.url();
+    let gateway_url = fleet.gateway_url.clone();
+    let app_id: Uuid = fleet.app_id;
+    let deploy_id = fleet.deploy_id.clone();
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
     prepare_side_effect_table(&fx.pg).await;
     // `prepare_side_effect_table` still runs so the `first` step has somewhere to
     // write if it ever gets that far - it must not. BareAwaitWorkflow's body-level
@@ -4938,18 +5125,14 @@ async fn bare_await_body_io_is_rejected() {
 #[compio::test]
 #[serial]
 async fn scheduler_misfire_lost_register_recovers() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    let fleet = workflow_fleet::Fleet::start();
 
-    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
-        .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let db_url = fleet.database.url();
+    let gateway_url = fleet.gateway_url.clone();
+    let app_id: Uuid = fleet.app_id;
+    let deploy_id = fleet.deploy_id.clone();
 
-    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
     prepare_side_effect_table(&fx.pg).await;
 
     let run_id = seed_workflow_run(
@@ -4961,7 +5144,10 @@ async fn scheduler_misfire_lost_register_recovers() {
     let first_claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth())),
+        Arc::new(GatewayStepDispatcher::new(
+            gateway_url.clone(),
+            test_control_service_auth(),
+        )),
         single_dispatch_config("scheduler-misfire-a"),
     )
     .await
@@ -5008,7 +5194,10 @@ async fn scheduler_misfire_lost_register_recovers() {
     let reaped = workflow_engine::reap_lapsed_inflight_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth())),
+        Arc::new(GatewayStepDispatcher::new(
+            gateway_url.clone(),
+            test_control_service_auth(),
+        )),
         single_dispatch_config("scheduler-misfire-reaper"),
         8,
     )
@@ -5026,7 +5215,10 @@ async fn scheduler_misfire_lost_register_recovers() {
 
     drive_until_completed(
         &fx,
-        Arc::new(GatewayStepDispatcher::new(gateway_url, test_control_service_auth())),
+        Arc::new(GatewayStepDispatcher::new(
+            gateway_url,
+            test_control_service_auth(),
+        )),
         single_dispatch_config("scheduler-misfire-complete"),
         &run_id,
     )
@@ -5043,18 +5235,14 @@ async fn scheduler_misfire_lost_register_recovers() {
 #[compio::test]
 #[serial]
 async fn scheduler_overfire_duplicate_dispatch_noops() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    let fleet = workflow_fleet::Fleet::start();
 
-    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
-        .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let db_url = fleet.database.url();
+    let gateway_url = fleet.gateway_url.clone();
+    let app_id: Uuid = fleet.app_id;
+    let deploy_id = fleet.deploy_id.clone();
 
-    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
     prepare_side_effect_table(&fx.pg).await;
 
     let run_id = seed_workflow_run(
@@ -5099,7 +5287,10 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
     )
     .await
     .expect("overfire duplicate tick");
-    assert_eq!(claimed, 1, "duplicate registered timer should dispatch once");
+    assert_eq!(
+        claimed, 1,
+        "duplicate registered timer should dispatch once"
+    );
     wait_for_dispatch_count(&duplicate_dispatcher, 1).await;
     assert_eq!(
         duplicate_dispatcher.count(),
@@ -5117,7 +5308,10 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
     }
     let _ = release_tx.send(());
     compio::time::sleep(Duration::from_millis(150)).await;
-    let redrive_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth()));
+    let redrive_dispatcher = Arc::new(GatewayStepDispatcher::new(
+        gateway_url.clone(),
+        test_control_service_auth(),
+    ));
     drive_until_completed(
         &fx,
         redrive_dispatcher,
@@ -5128,7 +5322,12 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
 
     assert_eq!(
         step_rows(&fx, &run_id).await,
-        vec![(0, "once".to_string(), "run".to_string(), "completed".to_string())],
+        vec![(
+            0,
+            "once".to_string(),
+            "run".to_string(),
+            "completed".to_string()
+        )],
         "duplicate dispatch must leave one memoized step row"
     );
     assert_eq!(
@@ -5137,7 +5336,10 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
         "duplicate dispatch should replay the worker-applied journal hit without re-entering the action boundary"
     );
     assert_eq!(
-        effect_commit_counts(&fx, &run_id).await.get("once").copied(),
+        effect_commit_counts(&fx, &run_id)
+            .await
+            .get("once")
+            .copied(),
         Some(1),
         "idempotent side effect should commit once despite duplicate dispatch"
     );
@@ -5150,21 +5352,20 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
 #[compio::test]
 #[serial]
 async fn compensation_saga_rollback_real_spine() {
-    if !enabled() {
-        zeroship_test_support::skip("skip: set ZEROSHIP_DW_E2E=1 via tests/e2e_durable_workflows.sh");
-        return;
-    }
+    let fleet = workflow_fleet::Fleet::start();
 
-    let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
-    let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
-    let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
-        .expect("app id uuid");
-    let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
+    let db_url = fleet.database.url();
+    let control_url = fleet.control_url.clone();
+    let gateway_url = fleet.gateway_url.clone();
+    let app_id: Uuid = fleet.app_id;
+    let deploy_id = fleet.deploy_id.clone();
 
-    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
+    let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
     prepare_side_effect_table(&fx.pg).await;
-    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth()));
+    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(
+        gateway_url.clone(),
+        test_control_service_auth(),
+    ));
 
     let failed_run = seed_workflow_run(
         &fx,
@@ -5374,28 +5575,6 @@ async fn compensation_saga_rollback_real_spine() {
     common::drain_pg().await;
 }
 
-/// A control-plane identity for fixtures that drive a STUB gateway.
-///
-/// It MINTS and verifies nobody: the bundle is empty on purpose, because the
-/// stub these tests point at does no verification and a fixture that pretended
-/// otherwise would be asserting against itself. What it does bind is that the
-/// dispatcher can produce a credential at all - an unconfigured `ServiceAuth`
-/// turns every advance into backpressure, so without this the fixtures would
-/// measure the mint failing rather than the workflow advancing.
-fn test_control_service_auth() -> std::sync::Arc<zeroship_core::service_peers::ServiceAuth> {
-    use zeroship_core::service_assertion::{
-        ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
-    };
-    use zeroship_core::service_peers::{
-        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
-    };
-
-    let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
-    let key = ServiceSigningKey::generate();
-    let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new())
-        .expect("control keyring");
-    std::sync::Arc::new(ServiceAuth::new(
-        keyring,
-        std::sync::Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
-    ))
+fn test_control_service_auth() -> Arc<zeroship_core::service_peers::ServiceAuth> {
+    workflow_fleet::service_auth("control")
 }

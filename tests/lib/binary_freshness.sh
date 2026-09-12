@@ -27,7 +27,7 @@
 # Usage:
 #   source "$ROOT/tests/lib/binary_freshness.sh"
 #   zs_check_binary_freshness "$ROOT" "$BIN" \
-#     "crates/plugin-kv/src crates/runtime/src sdks/kv/src" \
+#     "crates/zeroship-kv-v8/src crates/runtime/src sdks/kv/src" \
 #     "zeroship zeroship-worker zeroship-gate zeroship-control dev-provision"
 #
 # Returns 0 when everything is fresh (or only warnings are wanted), 1 when
@@ -69,7 +69,7 @@ zs_check_binary_freshness() {
   # printed exactly what a healthy run prints.
   #
   # That was live. The 2026-08-26 crate-directory rename (crates/plugin-db ->
-  # crates/zeroship-plugin-db, and seven siblings) left e2e_dev_vs_deployed_db.sh
+  # crates/zeroship-data-v8, and seven siblings) left e2e_dev_vs_deployed_db.sh
   # naming eight directories of which only TWO still existed. The guard whose
   # whole job is "did you rebuild after touching plugin-db" had stopped looking
   # at plugin-db, and reported fresh either way.
@@ -99,7 +99,7 @@ zs_check_binary_freshness() {
   fi
 
   # Name the CRATE, not just the file. "worker is older than mod.rs" tells a
-  # reader nothing; "older than crates/plugin-kv" tells them what to rebuild.
+  # reader nothing; "older than crates/zeroship-kv-v8" tells them what to rebuild.
   local rel crate
   rel="${newest_src#"$root"/}"
   crate="$(printf '%s' "$rel" | cut -d/ -f1-2)"
@@ -207,7 +207,7 @@ zs_check_artifact_freshness() {
   # printed exactly what a healthy run prints.
   #
   # That was live. The 2026-08-26 crate-directory rename (crates/plugin-db ->
-  # crates/zeroship-plugin-db, and seven siblings) left e2e_dev_vs_deployed_db.sh
+  # crates/zeroship-data-v8, and seven siblings) left e2e_dev_vs_deployed_db.sh
   # naming eight directories of which only TWO still existed. The guard whose
   # whole job is "did you rebuild after touching plugin-db" had stopped looking
   # at plugin-db, and reported fresh either way.

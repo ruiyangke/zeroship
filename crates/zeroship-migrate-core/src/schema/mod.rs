@@ -1,37 +1,10 @@
-//! # `schema` - the engine's schema-authority core (formerly the `zero-migrate-schema` crate)
+//! Schema DDL, descriptor recovery and change classification for migrations.
 //!
-//! ONE schema implementation, consumed by the migration engine for
-//! write / diff / generate. Dissolved into the engine:
-//! the data-plane query language that used to ride along here - the find and
-//! aggregate builders, the MongoDB-style filter->WHERE translator, the query
-//! limits - had **zero engine callers** and lived here only for a consumer
-//! (plugin-db) that is not in this repo, so it was deleted. The write / diff /
-//! describe layer the engine actually uses became this module tree.
+//! `query` lowers field definitions through registered vendor renderers. `diff`
+//! classifies changes without executing them. Shared sentinel codecs and descriptor
+//! vocabulary are provided by the backend contract crate.
 //!
-//! ## What lives here (the *describe/shape* layer)
-//!
-//! - [`query`] - the DSL->SQL **DDL builders** (CREATE TABLE / index / FK /
-//!   constraints; vector / geoPoint / encrypted-column / mask-sibling;
-//!   policy-injected columns), the neutral field-definition
-//!   lowering ([`query::def_to_column_type_for_dialect`]), the encryption + mask
-//!   sentinel builders, and the identifier/field validators. Vendor type
-//!   canonicalization is reached through
-//!   [`query::SchemaRenderer::canonical_type`].
-//! - `backends` - the schema-renderer view of the one shipping
-//!   [`VendorSet`](zeroship_migrate_backend::registry::VendorSet)
-//!   registry. Implementations live in the PostgreSQL, SQLite, and MySQL backend
-//!   crates; core performs an open
-//!   [`DialectId`](zeroship_migrate_ir::dialect::DialectId) lookup and no enum match
-//!   over them.
-//! - [`diff`] - the **diff classifier** ([`diff::compute_diff`],
-//!   [`diff::ChangeKind`], [`diff::ChangeClass`]) and the schema **metadata
-//!   types** ([`diff::MaskMeta`], [`diff::EncryptionMeta`], [`diff::MaskKind`],
-//!   [`diff::Classification`], [`diff::WrappedType`], ...).
-//! - [`mask_codec`] - the **sentinel CODEC** ([`mask_codec::build_mask_sentinel`]
-//!   / [`mask_codec::parse_mask_sentinel`]).
-//! - [`descriptors`] - the schema-shape **enums** ([`descriptors::VectorMetric`],
-//!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
-//! - [`error`] - leaf error types ([`error::MaskSentinelError`]).
+//! Runtime query planning belongs to `zeroship-data-sql`.
 
 // **Inherited lint posture.** `query.rs` and `diff.rs` were relocated verbatim
 // out of the original data-plane crate; the moved code trips a handful of style

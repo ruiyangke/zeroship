@@ -12,7 +12,7 @@ type ExampleSchema = {
   title: string;
   secret: string;
   embedding: number[];
-  location: string;
+  location: { lat: number; lng: number };
 };
 
 type ExpectNever<T extends never> = T;
@@ -30,6 +30,16 @@ type _TxQueryTracksQuery = ExpectNever<
 >;
 
 async function assertTxSurfaceTypes(tx: TxCollection<ExampleSchema>): Promise<void> {
+  await tx.get("doc_1", {
+    actor: { role: "admin" },
+    unmask: ["secret"],
+    unmaskReason: "support request",
+  });
+  await tx.find({}, {
+    actor: { role: "admin" },
+    unmask: ["secret"],
+    unmaskReason: "support request",
+  });
   await tx.purge("doc_1");
   await tx.purgeMany({});
   await tx.restore("doc_1");

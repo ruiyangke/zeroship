@@ -1,8 +1,6 @@
-use zeroship_core::app_id::AppId;
-use zeroship_plugin_workflow::engine::{
-    workflow_journal_limits_from_plan, WorkflowJournalLimits,
-};
-use zeroship_plugin_workflow::store::pg::WorkflowTables;
+use zeroship_core::AppId;
+use zeroship_workflow::engine::{workflow_journal_limits_from_plan, WorkflowJournalLimits};
+use zeroship_workflow::store::pg::WorkflowTables;
 
 use crate::registry::RegistryError;
 
@@ -26,9 +24,12 @@ where
     C: compio_postgres::GenericClient + Sync,
 {
     let key = format!("workflow-journal:{}", app_id.as_str());
-    conn.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&key])
-        .await
-        .map_err(RegistryError::from)?;
+    conn.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        &[&key],
+    )
+    .await
+    .map_err(RegistryError::from)?;
     Ok(())
 }
 
@@ -42,10 +43,7 @@ where
                FROM {runs}",
         runs = tables.runs
     );
-    let rows = conn
-        .query(&sql, &[])
-        .await
-        .map_err(RegistryError::from)?;
+    let rows = conn.query(&sql, &[]).await.map_err(RegistryError::from)?;
     Ok(rows[0].get("bytes"))
 }
 

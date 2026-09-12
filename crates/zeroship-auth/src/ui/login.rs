@@ -6,6 +6,7 @@ use ntex::web::{HttpRequest, HttpResponse};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
+use zeroship_core::UserId;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
@@ -13,15 +14,13 @@ use crate::csrf;
 use crate::identity::credentials::{verify_password_credentials, CredentialError};
 use crate::identity::totp;
 use crate::oidc::auth_request::AuthRequest;
-use crate::oidc::authorization_code::{
-    prompt_requests_login, return_to_after_prompt_interaction,
-};
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
+use crate::oidc::authorization_code::{prompt_requests_login, return_to_after_prompt_interaction};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
 use crate::store::{sessions, totp as totp_store, users};
 use crate::ui::{LoginPage, PublicErrorMessage, TotpChallengePage};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 
 #[derive(Debug, Deserialize)]
 pub struct LoginQuery {
@@ -135,7 +134,14 @@ pub async fn post(
 ) -> HttpResponse {
     let query = query.into_inner();
     let form = form.into_inner();
-    post_native(req, query.return_to.as_deref(), &form, cfg.as_ref(), db.as_ref()).await
+    post_native(
+        req,
+        query.return_to.as_deref(),
+        &form,
+        cfg.as_ref(),
+        db.as_ref(),
+    )
+    .await
 }
 
 #[allow(clippy::future_not_send, clippy::too_many_lines)]
@@ -173,55 +179,49 @@ async fn post_native(
     }
 
     let ip = crate::headers::client_ip(&req);
-    let verified = match verify_password_credentials(
-        db,
-        &req,
-        &client_id,
-        &ip,
-        &form.email,
-        &form.password,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(CredentialError::RateLimited) => {
-            return render_login_error(
-                &return_to,
-                &client_name,
-                cfg,
-                "too many attempts, try again later",
-                429,
-            );
-        }
-        Err(CredentialError::InvalidCredentials) => {
-            return render_login_error(
-                &return_to,
-                &client_name,
-                cfg,
-                "invalid email or password",
-                401,
-            );
-        }
-        Err(CredentialError::Ineligible) => {
-            return render_login_error(
-                &return_to,
-                &client_name,
-                cfg,
-                PublicErrorMessage::AccountTemporarilyLocked.as_str(),
-                403,
-            );
-        }
-        Err(CredentialError::Internal) => {
-            return render_error(PublicErrorMessage::ContactSupport);
-        }
-    };
+    let verified =
+        match verify_password_credentials(db, &req, &client_id, &ip, &form.email, &form.password)
+            .await
+        {
+            Ok(v) => v,
+            Err(CredentialError::RateLimited) => {
+                return render_login_error(
+                    &return_to,
+                    &client_name,
+                    cfg,
+                    "too many attempts, try again later",
+                    429,
+                );
+            }
+            Err(CredentialError::InvalidCredentials) => {
+                return render_login_error(
+                    &return_to,
+                    &client_name,
+                    cfg,
+                    "invalid email or password",
+                    401,
+                );
+            }
+            Err(CredentialError::Ineligible) => {
+                return render_login_error(
+                    &return_to,
+                    &client_name,
+                    cfg,
+                    PublicErrorMessage::AccountTemporarilyLocked.as_str(),
+                    403,
+                );
+            }
+            Err(CredentialError::Internal) => {
+                return render_error(PublicErrorMessage::ContactSupport);
+            }
+        };
 
     match totp_store::is_enabled(db, &verified.id).await {
         Ok(true) => {
             return render_challenge(
                 cfg,
                 &TotpChallenge::new(
-                    &verified.id,
+                    verified.id.clone(),
                     verified.credential_version,
                     return_to.clone(),
                     FirstFactor::Password,
@@ -273,10 +273,7 @@ pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpR
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
-    resp.header(
-        SET_COOKIE,
-        totp_challenge::set_cookie(&cookie),
-    );
+    resp.header(SET_COOKIE, totp_challenge::set_cookie(&cookie));
     resp.body(body)
 }
 
@@ -289,14 +286,14 @@ pub(crate) fn render_challenge(cfg: &AuthConfig, stash: &TotpChallenge) -> HttpR
 #[allow(clippy::future_not_send, clippy::too_many_arguments)]
 async fn finish_login(
     db: &compio_postgres::Client,
-    user_id: &zeroship_core::user_id::UserId,
+    user_id: &UserId,
     credential_version: i64,
     amr: &[&str],
 ) -> Option<sessions::Session> {
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
-            user_id,
+            user_id: user_id.clone(),
             auth_method: "pwd",
             amr: amr.iter().map(|s| (*s).to_string()).collect(),
             acr: Some("urn:zeroship:pwd"),
@@ -325,7 +322,7 @@ async fn finish_login(
 async fn finish_login_native(
     _cfg: &AuthConfig,
     db: &compio_postgres::Client,
-    user_id: &zeroship_core::user_id::UserId,
+    user_id: &UserId,
     credential_version: i64,
     return_to: &str,
     amr: &[&str],
@@ -337,10 +334,7 @@ async fn finish_login_native(
 
     let return_to = return_to_after_prompt_interaction(return_to, &["login", "select_account"]);
     let mut resp = return_to::see_other(&return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header("cache-control", "no-store");
     if clear_challenge_cookie.is_some() {
         resp.header(SET_COOKIE, totp_challenge::clear_cookie());
@@ -405,9 +399,9 @@ pub async fn post_2fa(
     }
 
     // 2. Decode + verify the factor-1 challenge cookie.
-    let Some(stash) = totp_challenge::parse_cookie(cookie_header)
-        .and_then(|raw| TotpChallenge::decode(&raw, cfg.settings.stash_signing_key.expose_str().as_bytes()))
-    else {
+    let Some(stash) = totp_challenge::parse_cookie(cookie_header).and_then(|raw| {
+        TotpChallenge::decode(&raw, cfg.settings.stash_signing_key.expose_str().as_bytes())
+    }) else {
         return redirect_to_login(&return_to);
     };
     if stash.return_to != return_to {
@@ -416,7 +410,7 @@ pub async fn post_2fa(
 
     // 3. Re-fetch the user; credential_version must still match (a password
     // change / forced logout since factor 1 invalidates this challenge).
-    let user = match users::find_by_id(db.as_ref(), stash.user_id.as_str()).await {
+    let user = match users::find_by_id(db.as_ref(), &stash.user_id).await {
         Ok(Some(u)) => u,
         Ok(None) => return redirect_to_login(&return_to),
         Err(e) => {
@@ -425,11 +419,7 @@ pub async fn post_2fa(
         }
     };
     if user.credential_version != stash.credential_version {
-        return render_2fa_error(
-            &return_to,
-            cfg.as_ref(),
-            "session expired, sign in again",
-        );
+        return render_2fa_error(&return_to, cfg.as_ref(), "session expired, sign in again");
     }
 
     // 4. Rate-limit the verify (per-user).
@@ -513,11 +503,7 @@ pub async fn post_2fa(
             },
         )
         .await;
-        return render_2fa_error(
-            &return_to,
-            cfg.as_ref(),
-            "invalid code",
-        );
+        return render_2fa_error(&return_to, cfg.as_ref(), "invalid code");
     }
 
     audit::emit(
@@ -580,11 +566,7 @@ pub async fn post_2fa(
 }
 
 /// Re-render the 2FA challenge page with an error banner + fresh CSRF cookie.
-fn render_2fa_error(
-    return_to: &str,
-    _cfg: &AuthConfig,
-    err: &str,
-) -> HttpResponse {
+fn render_2fa_error(return_to: &str, _cfg: &AuthConfig, err: &str) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = TotpChallengePage {
         return_to,
@@ -633,11 +615,9 @@ fn render_login_error(
         google_start_href: oauth_start_href("/oauth/google/start", return_to),
         github_start_href: oauth_start_href("/oauth/github/start", return_to),
     };
-    let body = page
-        .render()
-        .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
-    let code = ntex::http::StatusCode::from_u16(status)
-        .unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
+    let body = page.render().unwrap_or_else(|_| format!("<h1>{err}</h1>"));
+    let code =
+        ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
     let mut resp = HttpResponse::build(code);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
@@ -665,8 +645,8 @@ fn render_login_form_native(
     let body = page
         .render()
         .unwrap_or_else(|_| format!("<h1>{}</h1>", err.unwrap_or("sign in")));
-    let code = ntex::http::StatusCode::from_u16(status)
-        .unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
+    let code =
+        ntex::http::StatusCode::from_u16(status).unwrap_or(ntex::http::StatusCode::BAD_REQUEST);
     let mut resp = HttpResponse::build(code);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
@@ -706,7 +686,8 @@ mod tests {
 
     #[test]
     fn login_page_oauth_buttons_gated_by_config() {
-        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        let return_to =
+            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         let page = LoginPage {
             return_to,
             csrf: "xyz",
@@ -794,7 +775,8 @@ mod tests {
 
     #[test]
     fn login_page_hides_section_if_no_oauth() {
-        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        let return_to =
+            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         let page = LoginPage {
             return_to,
             csrf: "xyz",
@@ -815,7 +797,8 @@ mod tests {
 
     #[test]
     fn native_login_page_oauth_buttons_use_return_to() {
-        let return_to = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
+        let return_to =
+            "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb";
         let page = LoginPage {
             return_to,
             csrf: "xyz",

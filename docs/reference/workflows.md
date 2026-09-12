@@ -3,11 +3,63 @@
 `@zeroship/workflows` is the creator-facing SDK for durable workflows. A
 workflow is a named TypeScript class whose `run(trigger, step)` body can pause,
 wait for signals, call child workflows, and survive process restarts because all
-durable progress is recorded in the control-plane journal.
+durable progress is recorded in an app-scoped workflow journal.
 
 The SDK types live in `sdks/workflows/`. The native `env.workflows` binding
 starts and controls runs from app code, and the control client exposes the
 token and topic broadcast helpers used by systems outside the app.
+
+This reference describes the current implementation. The finalized
+[workflow server design](../proposals/2026-09-11-workflow-server.md) replaces
+Control/Gateway workflow dispatch with a dedicated server and polling workers,
+and embeds the shared engine in local development. That refactor is pending;
+the local limitations and provisioning instructions below still apply today.
+
+## Rust integration
+
+`zeroship-workflow` owns the journal engine, claim/apply protocol, PostgreSQL
+store, scoped HTTP client, and local SQLite persistence. It has no V8 dependency.
+`zeroship-workflow-v8` installs `env.workflows` and supplies the V8 executor
+used by the local engine. The control plane uses the Rust engine directly.
+
+A trusted Rust host can use `HttpWorkflowBackend` through `WorkflowBackend`
+to start runs, read status, signal, restart, or change lifecycle state. Construct
+it with `WorkflowClientConfig`, binding the app identity and its scoped token
+once. Individual operations cannot select another app. The control plane still
+authorizes the request; possession of a Rust handle does not bypass it.
+
+`WorkflowBinding` performs the same binding for JavaScript. The host derives
+its app-scoped credential with `app_scoped_token`; the control key stays outside
+V8. Workflow execution remains replay of the deployed JavaScript class.
+
+## Testing
+
+Run `cargo xtask test workflow` after building the workspace SDKs. Rust tests
+own backing services through Testcontainers and include API isolation, journal
+fencing, scheduling, real worker replay, and gateway dispatch authorization.
+Docker is required; unavailable services fail the tests.
+
+The workflow examples own their Vitest and Playwright tests, fixtures, and
+configuration. Run `pnpm test` from `examples/workflow-probe` or
+`examples/workflows-order` to test an example independently. The test runner
+builds the example and platform binaries before starting its services.
+
+## Journal provisioning
+
+Before starting deployed workflows, provision their app journal through the
+migration service:
+
+```http
+POST /v1/apps/{app_id}/workflows/provision
+Authorization: Bearer <creator-access-token>
+```
+
+The caller needs deployment permission for that app. The operation is
+idempotent and creates no creator database tables. Applying creator migrations
+also provisions the journal schema, so apps already using that path need no
+additional request. The control origin routes this endpoint to the migration
+service; control and workers only create journal tables inside the provisioned
+schema. Local workflows create their SQLite journal automatically.
 
 ## Model
 
@@ -396,6 +448,7 @@ interface WorkflowRun<Output = unknown> {
   readonly id: string;
   signal(opts: { type: string; payload?: unknown; idempotencyKey?: string }): Promise<void>;
   status(): Promise<{ state: WorkflowRunState; output?: Output | StepOutputRef; error?: unknown }>;
+  readStepOutput(name: string, occurrence: number): Promise<Uint8Array>;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(opts?: { mode?: "abort" | "compensate" }): Promise<void>;
@@ -612,6 +665,11 @@ const signal = await step.waitForSignal("market-tick", {
 ```
 
 ## Large Outputs
+
+Saved step outputs are read through the app-scoped native workflow backend.
+`run.readStepOutput(name, occurrence)` returns bytes; replay uses that same
+operation for lazy `StepOutputRef` reads. The host keeps the control endpoint
+and credential in Rust. Local development reads the saved SQLite checkpoint.
 
 Small JSON outputs are inlined in the journal. Larger outputs, or outputs with
 an explicit by-reference mode, are stored as workflow blobs and replayed as

@@ -42,7 +42,7 @@ If the routing breaks, apps still work — just slower.
 
 Each plugin has a different distributed story. Let me audit them.
 
-### plugin-kv — **BROKEN for multi-worker**
+### kv-v8 — **BROKEN for multi-worker**
 
 Current state:
 ```rust
@@ -174,7 +174,7 @@ the 30-60 seconds between OAuth redirect and callback. If KV is in-memory
 per worker (current bug), the callback might hit a different worker and
 fail.
 
-**Fix**: this becomes correct automatically once plugin-kv gets a shared
+**Fix**: this becomes correct automatically once kv-v8 gets a shared
 Redis backend. No other changes needed.
 
 ### plugin-payments (future) — **designed for distributed from day one**
@@ -202,7 +202,7 @@ safe, cache, or correctness-breaking.
 | V8 isolates per app | Worker memory | Cache | ✓ fine — rebuild from bundle |
 | DB pool per thread | `plugin-db::DB_POOL` | Connection state | ✓ fine — connects to shared DB |
 | Plugin config | Various thread-locals | Config state | ⚠ needs hot-reload (see below) |
-| KV in-memory store | `plugin-kv::STORE` | **Correctness bug** | ❌ REPLACE with Redis backend |
+| KV in-memory store | `kv-v8::STORE` | **Correctness bug** | ❌ REPLACE with Redis backend |
 | Storage LocalFs root | `plugin-storage::STORAGE_BACKEND` | **Correctness bug for multi-worker** | ❌ use S3/R2 in prod |
 | Per-request state (logs, user, ctx) | `state.logs_by_id` etc. | Ephemeral | ✓ fine — request-scoped |
 | `executing_request_id` | Runtime state | Ephemeral | ✓ fine |
@@ -227,7 +227,7 @@ connection. Cannot survive worker migration. But they're OK because:
 
 If a creator builds a "chat room" where messages must be routed between
 users on different workers, they need a pub/sub backend (Redis pub/sub
-via plugin-kv). We should ship this pattern as an SDK primitive
+via kv-v8). We should ship this pattern as an SDK primitive
 (`@zeroship/realtime`) but it's not in the critical path.
 
 **4. Config hot-reload** — worth its own section.
@@ -264,7 +264,7 @@ pub trait ReconfigurablePlugin: NativePlugin {
 
 For plugin-db: close old pool, open new pool with new URL.
 For plugin-storage: swap the `Arc<dyn Backend>` in the thread-local.
-For plugin-kv: same pattern.
+For kv-v8: same pattern.
 
 In-flight requests keep their current handle (they captured `Arc` at
 call time). New requests see the new config. No downtime.
@@ -450,7 +450,7 @@ to the distributed fleet; no more LocalFs-on-one-worker landmine.
 
 ### Week 2 (part of Tier A)
 
-Replace plugin-kv in-memory with Redis/Dragonfly backend. Same trait
+Replace kv-v8 in-memory with Redis/Dragonfly backend. Same trait
 pattern as storage. Removes the single worst distributed-correctness
 bug in our plugin set.
 
@@ -486,7 +486,7 @@ traffic signals demand.
 
 Tactical list. Each is a separate commit.
 
-1. **plugin-kv Redis backend** (~1 day) — fixes the worst correctness bug.
+1. **kv-v8 Redis backend** (~1 day) — fixes the worst correctness bug.
    New trait `KvBackend`, impls: `InMemory` (current), `Redis` (new).
    Uses a minimal compio-native Redis client (~200 lines).
 
@@ -521,7 +521,7 @@ Tactical list. Each is a separate commit.
 
 | Concern | Status | Fix |
 |---|---|---|
-| plugin-kv in-memory state | **Broken for multi-worker** | Redis/Dragonfly backend (~1 day) |
+| kv-v8 in-memory state | **Broken for multi-worker** | Redis/Dragonfly backend (~1 day) |
 | plugin-storage LocalFs | Dev only | S3/R2 backend (~1 day) |
 | plugin-db connection scaling | Works to ~1K apps | PgBouncer proxy + later sharding |
 | plugin-auth | Already distributed-safe | — |

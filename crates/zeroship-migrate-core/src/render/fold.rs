@@ -1938,11 +1938,7 @@ impl<'a> CatalogFold<'a> {
                         column: column.clone(),
                     });
                 }
-                // Thread the carried facets so the SNAPSHOT for a vector
-                // / masked added column renders the metric opclass / `zero-migrate:mask` sentinel
-                // (this snapshot feeds the `--sql` plan preview + the apply path), and grow
-                // the `<col>_masked` sibling for a masked column so the offline fold matches
-                // the live apply.
+                // Include any protected raw column emitted for the added field.
                 let resolved_ty = resolve_encrypted_inner_domain(ty, named_types);
                 let ty = resolved_ty.as_ref().unwrap_or(ty);
                 let (col, masked_sibling) = add_column_snapshot(
@@ -2114,7 +2110,7 @@ impl<'a> CatalogFold<'a> {
                             return Err(FoldError::CheckCascadeColumnsMissing {
                                 table: table.clone(),
                                 name: c.name.clone(),
-                            })
+                            });
                         }
                         None => constraint_local_columns_contain(&c.definition, column),
                     };
@@ -2997,7 +2993,7 @@ impl<'a> CatalogFold<'a> {
                             name: name.clone(),
                             existing_materialized: existing.materialized,
                             declared_materialized,
-                        })
+                        });
                     }
                     _ => {}
                 }
@@ -3459,7 +3455,7 @@ fn finalize_physical_types(
     }
 }
 
-fn apply_fold_rowid_metadata(
+pub(crate) fn apply_fold_rowid_metadata(
     vendors: VendorSet,
     snap: &mut TableSnapshot,
     dialect: &DialectId,
@@ -3612,18 +3608,9 @@ fn create_table_descriptor(
     }
 }
 
-/// The `ColumnSnapshot`(s) for a single added field - routes ONE field through the
-/// shared resolved snapshot builder (a one-field descriptor) and pulls the matching
-/// column out, so the default / encryption / comment sentinel is built by the shared
-/// kernel, never re-spelled. The table's active policy injection is explicit, but
-/// the one-field descriptor never matches its complete resolved prefix, so no
-/// column is injected or reshaped. Mirrors `IrAuthor::add_column_snapshot_with_sibling`.
-///
-/// Returns the MAIN column plus the hidden `<col>_masked TEXT` sibling the
-/// shared builder injects for a masked column, so the OFFLINE fold snapshot grows the
-/// SAME sibling the live apply path does (otherwise `fold_ops` would phantom-drift
-/// against the introspected live table for a masked added column). A non-masked column
-/// returns `(main, None)`.
+/// Build snapshots for an added field through the shared schema renderer.
+/// Masked fields include the protected raw column so folded and applied storage
+/// agree. Unmasked fields return no companion column.
 #[allow(clippy::too_many_arguments)]
 fn add_column_snapshot(
     vendors: VendorSet,
@@ -4781,7 +4768,7 @@ fn add_constraint_snapshot(
 // CHECK there - it cannot render the SQL `definition` offline); this seam
 // reconstructs, per column, the FieldDescriptor / wire-`FieldDef` the SDK type
 // inference consumes, by RECOVERING facets from the applied migration shape:
-//   - type / vector dims / encrypted (default mode) / ref target / id_prefix /
+//   - type / vector dims / encrypted / ref target / id_prefix /
 //     vector_metric - already on the descriptor `ir_column_to_field` builds from
 //     the op `IrColumn` (the carried fields + the structural ones);
 //   - enum / min / max - LIFTED from the canonical closed-AST CHECK shapes
@@ -5146,10 +5133,8 @@ fn lift_named_enum_membership(
 /// column's inner domain is resolved UPSTREAM of the descriptor, on the `ColType`
 /// itself, by [`crate::render::lower::resolve_encrypted_inner_domain`] - so by the time
 /// a column reaches this lift its `Encrypted { of }` already names a base type and
-/// there is nothing left to lift. That is deliberate: `wraps` is ALSO stamped into the
-/// catalog sentinel by the lower, and patching the descriptor here would have fixed the
-/// runtime's copy while leaving the catalog's saying `string`. Normalising the type
-/// makes both derivations agree by construction rather than by two sites remembering.
+/// there is nothing left to lift. The catalog sentinel and runtime codec both
+/// derive from the descriptor's logical type.
 fn lift_named_domain_base_type(
     field: &mut crate::render::declarative::FieldDescriptor,
     ty: &ColType,
@@ -5185,24 +5170,17 @@ fn lift_named_type_facets(
 
 fn fold_create_column_to_field(
     c: &IrColumn,
-    in_resolved_id_primary_key: bool,
+    in_assigned_primary_key: bool,
 ) -> crate::render::declarative::FieldDescriptor {
     let mut field = ir_column_to_field_resolved_create(c);
-    if in_resolved_id_primary_key && c.id_prefix.is_some() {
+    if in_assigned_primary_key && c.id_prefix.is_some() {
         field.ty = "id".to_string();
         field.required = false;
     }
     field
 }
 
-/// Length of the policy-resolved injected prefix carried by `columns`.
-///
-/// The create-table resolver prepends [`ResolvedInject::columns`] in canonical
-/// sealed-policy order. A legacy ID-prefix declaration may retain `id_prefix` and
-/// a typed reference on the injected `id`; an integer identity may replace that
-/// slot. Those are the same two policy-approved folds accepted by
-/// `resolve_create_table_policy`. Every other facet must match the canonical
-/// injected [`IrColumn`] exactly. A no-inject policy has an empty prefix.
+/// Recognize the injected prefix, including primary-key prefix and identity refinements.
 fn resolved_inject_prefix_len(columns: &[IrColumn], inject: &ResolvedInject) -> usize {
     if columns.len() < inject.columns().len() {
         return 0;
@@ -5214,7 +5192,7 @@ fn resolved_inject_prefix_len(columns: &[IrColumn], inject: &ResolvedInject) -> 
             resolved_injected_column_matches(
                 actual,
                 expected,
-                inject.owns_id_primary_key() && expected.name == "id",
+                inject.owns_primary_key_column(&expected.name),
             )
         });
     if matches {
@@ -5227,12 +5205,12 @@ fn resolved_inject_prefix_len(columns: &[IrColumn], inject: &ResolvedInject) -> 
 fn resolved_injected_column_matches(
     actual: &IrColumn,
     expected: &IrColumn,
-    is_id_primary_key: bool,
+    is_injected_key: bool,
 ) -> bool {
     if actual == expected {
         return true;
     }
-    if actual.name != expected.name || !is_id_primary_key {
+    if actual.name != expected.name || !is_injected_key {
         return false;
     }
     if actual.identity.is_some()
@@ -5434,7 +5412,7 @@ fn token_to_col_type(f: &crate::render::declarative::FieldDescriptor) -> Option<
             // An encrypted column carries the `encrypted` facet PLUS the inner token
             // as `ty`; wrap the inner ColType (the inverse of `col_type_to_token`'s
             // `Encrypted{of}` -> inner token).
-            if f.encrypted.is_some() {
+            if f.encrypted == Some(true) {
                 Some(ColType::Encrypted { of: Box::new(base) })
             } else {
                 Some(base)
@@ -5631,19 +5609,11 @@ pub fn descriptors_to_create_ops(
             // encrypted column is therefore dropped here (recovered downstream); a
             // standalone/non-default mask is carried.
             let mask = standalone_mask_facet(f);
-            // A `ref` field carries its FK target on the `ColType::Ref` brand, which
-            // the shared snapshot builder ALREADY materializes into the derived
-            // `<table>_<column>_fkey` constraint. Only the reference facets the brand
-            // cannot express ride on a second carrier, so a plain `ref` keeps the
-            // brand-only column image the recorder emits and the two artifact sources
-            // stay byte-identical.
-            let references = if f.ty == "ref" {
-                ref_brand_reference_facets(f)
-            } else {
-                f.references
-                    .as_ref()
-                    .map(|table| column_reference_for_field(f, table))
-            };
+            let references = f
+                .references
+                .as_ref()
+                .map(|target| column_reference_for_field(&d.name, f, target))
+                .transpose()?;
             columns.push(IrColumn {
                 name: f.name.clone(),
                 ty,
@@ -5710,44 +5680,27 @@ pub fn descriptors_to_create_ops(
     Ok(ops)
 }
 
-/// The [`ColumnReference`] a declared reference field carries onto its produced
-/// [`IrColumn`]: the target table plus the target column (defaulting to the
-/// historical `id`), the explicit constraint name, and the referential actions.
+/// Preserve the declared foreign-key target and actions on the column.
 fn column_reference_for_field(
+    table: &str,
     f: &crate::render::declarative::FieldDescriptor,
     target: &str,
-) -> ColumnReference {
-    ColumnReference {
+) -> Result<ColumnReference, ProduceError> {
+    let column = f
+        .reference_column
+        .clone()
+        .ok_or_else(|| ProduceError::UnrepresentableFacet {
+            table: table.to_owned(),
+            column: f.name.clone(),
+            facet: "refColumn (required for references)",
+        })?;
+    Ok(ColumnReference {
         table: target.to_string(),
-        column: f
-            .reference_column
-            .clone()
-            .unwrap_or_else(|| "id".to_string()),
+        column,
         on_delete: f.on_delete.as_deref().and_then(parse_ref_action),
         on_update: f.on_update.as_deref().and_then(parse_ref_action),
         name: f.reference_name.clone(),
-    }
-}
-
-/// The reference carrier for a `ref`-branded field, or `None` when the brand
-/// already says everything the field declares.
-///
-/// `ColType::Ref` names the target table but cannot express an explicit target
-/// column, an explicit constraint name, or `ON DELETE`/`ON UPDATE`. Those facets
-/// therefore ride on the column's [`ColumnReference`], which
-/// [`crate::render::lower::ir_column_to_field`] prefers over the brand, so the
-/// foreign key is still declared exactly ONCE. A field that declares none of them
-/// gets no second carrier, keeping the produced column byte-identical to the
-/// brand-only image the recorder emits for the same schema.
-fn ref_brand_reference_facets(
-    f: &crate::render::declarative::FieldDescriptor,
-) -> Option<ColumnReference> {
-    let target = f.references.as_ref()?;
-    let declares_facets = f.reference_column.is_some()
-        || f.reference_name.is_some()
-        || f.on_delete.is_some()
-        || f.on_update.is_some();
-    declares_facets.then(|| column_reference_for_field(f, target))
+    })
 }
 
 /// Map a declared [`IndexDescriptor`](crate::render::declarative::IndexDescriptor)
@@ -5832,7 +5785,7 @@ fn standalone_mask_facet(
     // Suppress the encrypted auto-mask: only when the column is ACTUALLY encrypted and
     // the mask is the exact kernel default. (A plaintext column authored with
     // `.mask({ full, pii })` is a real standalone mask and IS carried.)
-    let is_encrypted = f.encrypted.is_some();
+    let is_encrypted = f.encrypted == Some(true);
     if is_encrypted && kind == "full" && classification == "pii" {
         return None;
     }
@@ -5884,6 +5837,95 @@ fn json_value_to_ir_scalar_default(v: &serde_json::Value) -> crate::model::ir::I
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn declared_key_refinements_agree_across_descriptor_and_ir_paths() {
+        let policy = effective_policy_from_charter_toml(r#"policy_version = 1
+[[inject]]
+scope = "all"
+mandatory = true
+primary_key = ["record_key"]
+author_primary_key = "forbid"
+columns = [
+  { name = "record_key", type = "text", nullable = false, assign = { by = "typedId", on = "insert" } },
+]
+"#).unwrap();
+        for identity in [false, true] {
+            let key = if identity {
+                FieldDescriptor {
+                    name: "record_key".into(),
+                    ty: "bigInt".into(),
+                    required: true,
+                    identity: Some(crate::model::ir::IdentityCol { always: false }),
+                    ..Default::default()
+                }
+            } else {
+                FieldDescriptor {
+                    name: "record_key".into(),
+                    ty: "id".into(),
+                    id_prefix: Some("item".into()),
+                    ..Default::default()
+                }
+            };
+            let authored = descriptor(
+                "entries",
+                vec![
+                    key,
+                    FieldDescriptor {
+                        name: "id".into(),
+                        ty: "string".into(),
+                        ..Default::default()
+                    },
+                ],
+            );
+            let ops = descriptors_to_create_ops(std::slice::from_ref(&authored), SCHEMA, &policy)
+                .unwrap();
+            for dialect in [&POSTGRES, &SQLITE, &MYSQL] {
+                let expected = build_table_snapshot(
+                    crate::test_fixtures::VENDORS,
+                    SCHEMA,
+                    &authored,
+                    dialect,
+                    &policy,
+                )
+                .unwrap();
+                let actual = fold_ops(
+                    crate::test_fixtures::VENDORS,
+                    &ops,
+                    dialect,
+                    SCHEMA,
+                    &policy,
+                )
+                .unwrap();
+                assert_eq!(
+                    actual.tables["entries"], expected,
+                    "{dialect:?}, identity={identity}"
+                );
+                let artifacts = crate::render::gen_types::render_artifacts(
+                    crate::test_fixtures::VENDORS,
+                    &ops,
+                    dialect,
+                    SCHEMA,
+                    &policy,
+                )
+                .unwrap();
+                let runtime: serde_json::Value =
+                    serde_json::from_str(&artifacts.runtime_json).unwrap();
+                let fields =
+                    serde_json::json!({ "entries": runtime["collections"]["entries"]["fields"] });
+                assert_eq!(
+                    fields["entries"]["record_key"]["primaryKey"],
+                    serde_json::json!(true)
+                );
+                assert_eq!(
+                    fields["entries"]["record_key"]["assign"]["by"],
+                    serde_json::json!(if identity { "identity" } else { "typedId" })
+                );
+                assert_eq!(fields["entries"]["id"]["type"], serde_json::json!("string"));
+                assert!(fields["entries"]["id"].get("assign").is_none());
+            }
+        }
+    }
     use super::*;
     use crate::model::expr::Expr;
     use crate::model::ir::{
@@ -6009,17 +6051,17 @@ mod tests {
             .expect("resolved op")
     }
 
-    /// A folded table carries the platform system columns (`id`, timestamps, ...)
+    /// A folded table carries the platform injected columns (`id`, timestamps, ...)
     /// PLUS the user columns - proving the fold routes through the SHARED builder
-    /// (`build_table_snapshot` injects the system fields), not a re-implementation.
+    /// (`build_table_snapshot` adds the declared policy columns), not a re-implementation.
     #[test]
-    fn create_table_injects_system_fields_via_shared_builder() {
+    fn create_table_injects_policy_columns_via_shared_builder() {
         let snap = fold(&[create("users", vec![col("email", ColType::Text, false)])]).unwrap();
         let t = snap.tables.get("users").expect("users table folded");
         let names: Vec<&str> = t.columns.iter().map(|c| c.name.as_str()).collect();
         assert!(
             names.contains(&"id"),
-            "system `id` column injected by the shared builder"
+            "fixture key injected by the shared builder"
         );
         assert!(names.contains(&"email"), "user column present");
         // The `<table>_pkey` PK constraint the shared builder injects.
@@ -6135,7 +6177,7 @@ mandatory = true
 primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
-  { name = "id", type = "text", nullable = false },
+  { name = "id", type = "text", nullable = false, assign = { by = "typedId", on = "insert" } },
 ]
 "#,
         )
@@ -7369,7 +7411,13 @@ columns = [
             default: None,
             unique: None,
             value_format: None,
-            references: None,
+            references: Some(ColumnReference {
+                table: "accounts".into(),
+                column: "id".into(),
+                on_delete: None,
+                on_update: None,
+                name: None,
+            }),
             id_prefix: None,
             collation: None,
             case_sensitive: None,
@@ -9265,7 +9313,13 @@ columns = [
             default: None,
             unique: None,
             value_format: None,
-            references: None,
+            references: Some(ColumnReference {
+                table: "orgs".into(),
+                column: "id".into(),
+                on_delete: None,
+                on_update: None,
+                name: None,
+            }),
             id_prefix: None,
             collation: None,
             case_sensitive: None,
@@ -9285,15 +9339,14 @@ columns = [
     }
 
     #[test]
-    fn recover_encrypted_default_mode_facet() {
-        // An encrypted column is recovered structurally (default mode) - the
-        // ONLY encrypted shape op.* can author (see the encrypted-mode finding test).
+    fn recover_encrypted_facet() {
+        // Recover encryption metadata from the structural encrypted column type.
         let secret = col("secret", encrypted_text(), true);
         let m = defs(&[create("vaults", vec![secret])]);
         let def = field_def(&m, "vaults", "secret");
         assert!(
-            def.get("encrypted").is_some(),
-            "an encrypted column is recovered with the (default-mode) encrypted facet: {def}"
+            def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true),
+            "an encrypted column is recovered with the encrypted facet: {def}"
         );
     }
 
@@ -9420,28 +9473,9 @@ columns = [
         );
     }
 
-    // -- The encrypted-mode finding -------------------------------------------
-    // op.* can author ONLY a DEFAULT-mode encrypted column: `ColType::Encrypted`
-    // carries the inner type ONLY, and the recorder `t.encrypted({ of })` exposes
-    // no mode/keyId/wraps surface. So a non-default-encrypted column is
-    // UNREPRESENTABLE in the IR - fail-closed BY CONSTRUCTION, NOT a silently
-    // wrong-mode sentinel.
-    //
-    // Recovery restores the KERNEL DEFAULTS the SDK's
-    // `t.encrypted()` stamps (`mode:randomised, keyId:default, wraps:<inner>`) PLUS the
-    // fail-safe auto-mask (`full/pii`), so the author->generate->fold chain is byte-
-    // lossless over a default `t.encrypted()` (the round-trip). The fail-closed property
-    // is UNCHANGED: that recovered triple is the ONLY shape op.* can produce - there is
-    // no IR surface for a non-default mode/keyId.
-
     #[test]
-    fn encrypted_via_op_star_is_default_mode_only_fail_closed_by_construction() {
-        // The recorder/IR can build an encrypted column carrying ONLY the inner type.
+    fn encrypted_migration_recovers_wrapped_type_and_default_mask() {
         let enc = encrypted_text();
-        // The descriptor the shared kernel reads back recovers the encrypted facet as
-        // the SDK kernel default (`t.encrypted()` byte-image) + the fail-safe auto-mask
-        // - there is NO mode/keyId/wraps field on `ColType::Encrypted` to make it carry
-        // a NON-default mode, so this is the only representable encrypted shape.
         let field = ir_column_to_field(&IrColumn {
             name: "secret".into(),
             ty: enc,
@@ -9460,12 +9494,8 @@ columns = [
         });
         assert_eq!(
             field.encrypted,
-            Some(
-                serde_json::json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })
-            ),
-            "op.* encrypted recovers the SDK kernel-DEFAULT triple (the `t.encrypted()` \
-             byte-image) — a non-default mode is unrepresentable in ColType::Encrypted, \
-             so the path is fail-closed by construction, never a wrong-mode sentinel"
+            Some(true),
+            "encryption metadata preserves the wrapped plaintext type without a mode"
         );
         assert_eq!(
             field.mask,
@@ -9530,7 +9560,7 @@ indexes = [
         assert_eq!(inject.primary_key(), Some(&["tenant_key".to_string()][..]));
         assert_eq!(inject.indexes().len(), 1);
         assert!(
-            !inject.owns_id_primary_key(),
+            !inject.owns_primary_key_column("id"),
             "an ordinary injected `id` is not the policy-owned primary key"
         );
 
@@ -9681,7 +9711,7 @@ indexes = [
         let inject = ResolvedInject::for_table(&effective, SCHEMA, "entries")
             .expect("custom inject resolves");
         assert!(inject.contains_column("id"));
-        assert!(!inject.owns_id_primary_key());
+        assert!(!inject.owns_primary_key_column("id"));
 
         let prefixed_id = descriptor(
             "entries",
@@ -9745,6 +9775,7 @@ indexes = [
                 name: "owner".into(),
                 ty: "ref".into(),
                 references: Some("orgs".into()),
+                reference_column: Some("id".into()),
                 on_delete: Some("cascade".into()),
                 on_update: Some("restrict".into()),
                 ..Default::default()
@@ -9788,11 +9819,8 @@ indexes = [
         assert_eq!(reference.on_update, Some(RefAction::Restrict));
     }
 
-    /// A `ref` field that declares no reference facets keeps the brand-only column
-    /// image the recorder emits, so the manual and generated artifact sources stay
-    /// byte-identical for the same logical schema.
     #[test]
-    fn producer_leaves_a_plain_ref_column_on_the_brand_alone() {
+    fn producer_rejects_a_reference_without_a_target_column() {
         let d = descriptor(
             "teams",
             vec![FieldDescriptor {
@@ -9802,37 +9830,10 @@ indexes = [
                 ..Default::default()
             }],
         );
-        let ops = descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
-            .unwrap();
-        let Op::CreateTable {
-            columns,
-            constraints,
-            ..
-        } = &ops[0]
-        else {
-            panic!("expected a createTable")
-        };
-        assert!(
-            !constraints
-                .iter()
-                .any(|c| matches!(c.kind, IrConstraintKind::Fk { .. })),
-            "a plain ref emits no table-level foreign key: {constraints:?}"
-        );
-        let owner = columns
-            .iter()
-            .find(|column| column.name == "owner")
-            .expect("the ref column is produced");
-        assert_eq!(
-            owner.ty,
-            ColType::Ref {
-                references: "orgs".into()
-            }
-        );
-        assert!(
-            owner.references.is_none(),
-            "a plain ref carries no second reference carrier: {:?}",
-            owner.references
-        );
+        let error =
+            descriptors_to_create_ops(&[d], "app", &crate::test_fixtures::confined_charter())
+                .expect_err("a reference needs a target column");
+        assert!(error.to_string().contains("refColumn"), "{error}");
     }
 
     #[test]
@@ -9934,7 +9935,7 @@ indexes = [
                 .iter()
                 .map(|column| column.name.as_str())
                 .collect::<Vec<_>>(),
-            "producer emits the resolved confined system-field prefix"
+            "producer emits the resolved confined injected-column prefix"
         );
         assert_eq!(
             primary_key.as_deref(),
@@ -9976,7 +9977,7 @@ mandatory = true
 primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
-  { name = "id",           type = "text",    nullable = false },
+  { name = "id",           type = "text",    nullable = false, assign = { by = "typedId", on = "insert" } },
   { name = "audit_marker", type = "integer", nullable = false, default = "1" },
 ]
 "#,

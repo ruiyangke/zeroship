@@ -21,11 +21,10 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
-use zeroship_core::user_id::UserId;
 use zeroship_auth::store::relay;
 
-async fn pg_or_skip() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -33,14 +32,14 @@ async fn pg_or_skip() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 /// Seed a user, an oauth client + grant, and an active relay-alias identity row
 /// keyed on `(client_id, user)`. Returns `(user_id, client_id, relay_email)`.
-async fn seed_active_alias(db: &Client) -> (UserId, String, String) {
-    let user_id = UserId::mint();
-    let email = format!("autorevoke-{}@zeroship.test", uuid::Uuid::new_v4().simple());
+async fn seed_active_alias(db: &Client) -> (zeroship_core::UserId, String, String) {
+    let user_id = zeroship_core::UserId::mint();
+    let email = format!("autorevoke-{}@zeroship.test", user_id.as_str());
     db.execute(
         "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
          VALUES ($1, $2::citext, $3, NOW())",
@@ -94,7 +93,7 @@ async fn seed_active_alias(db: &Client) -> (UserId, String, String) {
     (user_id, client_id, relay_email)
 }
 
-async fn grant_count(db: &Client, user_id: &UserId, client_id: &str) -> i64 {
+async fn grant_count(db: &Client, user_id: &zeroship_core::UserId, client_id: &str) -> i64 {
     db.query(
         "SELECT COUNT(*)::BIGINT AS n FROM zeroship.oauth_grants \
          WHERE user_id = $1 AND client_id = $2",
@@ -105,7 +104,7 @@ async fn grant_count(db: &Client, user_id: &UserId, client_id: &str) -> i64 {
         .get("n")
 }
 
-async fn cleanup(db: &Client, user_id: &UserId, client_id: &str) {
+async fn cleanup(db: &Client, user_id: &zeroship_core::UserId, client_id: &str) {
     let _ = db
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
@@ -125,7 +124,10 @@ async fn cleanup(db: &Client, user_id: &UserId, client_id: &str) {
         )
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await;
 }
 
@@ -135,10 +137,7 @@ async fn cleanup(db: &Client, user_id: &UserId, client_id: &str) {
 /// never a fake "revoked success").
 #[compio::test]
 async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
-    let Some(db) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db = pg().await;
     let (user_id, client_id, relay_email) = seed_active_alias(&db).await;
 
     // Pre-condition: the alias forwards (active map + live grant present).

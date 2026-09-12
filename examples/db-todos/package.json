@@ -7,11 +7,11 @@
     "migrate": "zeroship-dev-migrate",
     "build": "vite build",
     "deploy": "zeroship deploy",
-    "smoke": "bash scripts/smoke.sh",
+    "smoke": "vitest run --project acceptance tests/database.test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test",
-    "typecheck": "tsc --noEmit"
+    "test:e2e": "vitest run --project acceptance",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json"
   },
   "dependencies": {
     "@tanstack/react-query": "catalog:",
@@ -24,6 +24,7 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "@playwright/test": "1.58.2",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -32,6 +33,11 @@
     "@types/react-dom": "catalog:react18",
     "@zeroship/types": "workspace:*",
     "jsdom": "^29.1.1",
+    "playwright": "1.58.2",
+    "selfsigned": "^5.5.0",
+    "smol-toml": "^1.8.0",
+    "tar": "^7.5.13",
+    "testcontainers": "^12.1.0",
     "typescript": "catalog:",
     "vite": "catalog:",
     "vitest": "^4.1.7",

@@ -1834,60 +1834,44 @@ and Worker constant-time verifies it before serving the endpoint
 
 VERIFIED: the derivation is exactly `HMAC-SHA256(control_key, app_id)`, and the
 raw key must remain in Rust rather than enter V8
-(`crates/zeroship-core/src/auth/mod.rs:157-174`). The workflow plugin sends the derived
-bearer and app ID (`crates/zeroship-plugin-workflow/src/client.rs:124-164`,
-`crates/zeroship-plugin-workflow/src/client.rs:230-258`). Control parses the asserted app
+(`crates/zeroship-core/src/auth/mod.rs`). The workflow client sends the derived
+bearer and app ID (`crates/zeroship-workflow/src/client.rs`). Control parses the asserted app
 ID, derives the expected token, and constant-time compares before the app-scoped
-decision (`crates/zeroship-control/src/workflow_instance_api.rs:326-354`,
-`crates/zeroship-control/src/workflow_instance_api.rs:387-405`). The token has no expiry,
+decision (`crates/zeroship-control/src/workflow_instance_api.rs`). The token has no expiry,
 nonce, or per-app revocation row; rotating `control_key` revokes every derived
 token.
 
-### 5.5 Workflow replay output-read bearer inside V8
+### 5.5 Workflow replay output reads through a native handle
 
 ```text
-+----------------------------------------------------------+
-| Worker Rust holds control_key and signs app-scoped HMAC  |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: Worker Rust injects bearer into V8       |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Runtime bridge JS in creator isolate holds derived bearer|
-| JS sends bearer and app ID when an output ref is read    |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| TRUST BOUNDARY: workflow isolate to Control              |
-+----------------------------------------------------------+
-                             |
-                             v
-+----------------------------------------------------------+
-| Control recomputes HMAC and decides app output read      |
-| Control signs no new credential                          |
-+----------------------------------------------------------+
+Creator workflow: savedOutput.json()
+                   |
+                   v
+App-bound WorkflowRun.readStepOutput(name, occurrence)
+                   |
+          V8 / Rust boundary
+                   |
+                   v
+Rust backend holds endpoint, app ID, and scoped token
+                   |
+          authenticated HTTP
+                   |
+                   v
+Control verifies the token and reads that app's journal
 ```
 
-VERIFIED: Worker derives the app-scoped bearer from raw `control_key` and puts
-the bearer, app ID, and Control URL in the workflow runtime envelope
-(`crates/zeroship-worker/src/handler.rs:490-522`). The live inline workflow bridge inside
-the creator's V8 isolate retains that configuration and sends it when a lazy
-workflow output reference is read (`crates/zeroship-runtime/src/core/init.rs:693-701`,
-`crates/zeroship-runtime/src/core/init.rs:764-780`,
-`crates/zeroship-runtime/src/core/init.rs:1493-1505`). Parallel bootstrap and workflows
-SDK implementations carry the same transport
-(`sdks/bootstrap/src/dispatcher.ts:490-503`,
-`sdks/bootstrap/src/dispatcher.ts:550-569`,
-`sdks/workflows/src/journal.ts:1008-1031`). Control
-extracts the app ID, recomputes the HMAC, and permits only the app-scoped output
-lookup; it signs no response credential
-(`crates/zeroship-control/src/workflow_instance_api.rs:326-405`,
-`crates/zeroship-control/src/workflow_instance_api.rs:1788-1871`).
+The worker's serialized replay envelope contains no output-read credential.
+The runtime and bootstrap readers obtain a run handle from the native
+`env.workflows` binding. Its Rust backend builds the output request using
+the host-bound app identity and token; JavaScript supplies the run and step
+coordinates. Control verifies the token and looks up the output in that app's
+journal. See `crates/zeroship-workflow-v8/src/v8_class.rs`,
+`crates/zeroship-workflow/src/client.rs`, and
+`crates/zeroship-control/src/workflow_instance_api.rs`.
+
+`crates/zeroship-control/tests/workflow_binding.rs` exercises binary output
+reads and rejects another app's run. The SDK journal accepts a host-provided
+reader callback; it does not carry an HTTP credential.
 
 ### 5.6 OIDC broker secret
 
@@ -2530,41 +2514,35 @@ mint examples exceed Control's 24-hour maximum
 The workflows SDK declares `WorkflowRun.createSignalToken`, but its complete
 native run-method inventory and backend trait contain no such operation; the
 separate Control SDK helper is the only concrete client implementation
-(`sdks/workflows/src/index.ts:158-167`,
-`crates/zeroship-plugin-workflow/src/v8_class.rs:448-531`,
-`crates/zeroship-plugin-workflow/src/backend.rs:17-27`,
-`sdks/control/src/index.ts:275-299`). Search method:
-`rg -n 'createSignalToken|create_signal_token' crates/plugin-workflow
-crates/runtime crates/worker sdks/workflows/src sdks/control/src` found the
+(`sdks/workflows/src/index.ts`,
+`crates/zeroship-workflow-v8/src/v8_class.rs`,
+`crates/zeroship-workflow/src/backend.rs`,
+`sdks/control/src/index.ts`). Search method:
+`rg -n 'createSignalToken|create_signal_token' crates/zeroship-workflow
+crates/zeroship-workflow-v8 crates/zeroship-runtime crates/zeroship-worker
+sdks/workflows/src sdks/control/src` found the
 workflows interface and Control helper but no run-object implementation.
 
-The real-stack test helpers also mint and send without the now-required
-app-scoped bearer, although the harness launches Control with a strong nonempty
-key (`crates/zeroship-control/tests/durable_workflows_keystone_e2e.rs:2556-2648`,
-`tests/lib/runtime_secrets.sh:123-141`,
-`tests/e2e_durable_workflows.sh:591-599`). INFERRED: users following the
-reference cannot reach the live ingress contract, the promised run helper is
-unavailable at runtime, and that real-stack success scenario cannot pass the
-mint boundary as configured, so it does not currently prove the intended path.
+The native acceptance helpers in
+`crates/zeroship-control/tests/durable_workflows_keystone_e2e.rs` send the
+app-scoped bearer when minting and posting signals. Their fleet owns its
+service credentials and PostgreSQL instance. Run `cargo xtask test workflow`
+to exercise that boundary.
 
-### 15. MEDIUM: Workflow advance does not authenticate Control to Gateway
+### 15. RESOLVED: Workflow advancement requires service assertions
 
-VERIFIED: Control's scheduler posts a JSON body with only `content-type`; it
-presents no bearer, MAC, signature, nonce, or caller identity
-(`crates/zeroship-control/src/cron/workflow_engine.rs:194-232`). Gateway exposes the path
-on its normal listener, trusts body-supplied run and app IDs after route,
-account, and spend checks, and carries an explicit TODO for signature and nonce
-verification (`crates/zeroship-gateway/src/main.rs:582-586`,
-`crates/zeroship-gateway/src/router/dispatch.rs:99-160`). Gateway adds `worker_key` only
-on the second hop (`crates/zeroship-gateway/src/proxy.rs:239-270`).
+Control's `GatewayStepDispatcher` sends an assertion addressed to Gateway.
+Gateway verifies the Control service identity before looking up the app or
+run, then signs its own assertion for Worker. See
+`crates/zeroship-control/src/cron/workflow_engine.rs`,
+`crates/zeroship-gateway/src/router/dispatch.rs`, and
+`crates/zeroship-gateway/src/proxy.rs`.
 
-Worker's unsigned endpoint verifies that shared key, defaults disabled, and
-cannot be enabled with a non-loopback bind
-(`crates/zeroship-worker/src/handler.rs:525-554`,
-`crates/zeroship-worker/src/main.rs:228-240`). INFERRED: the default constraints reduce
-current reachability, but when the feature is deliberately enabled, the first
-hop still has no cryptographic way to distinguish Control from another caller
-that can reach Gateway.
+Worker's replay endpoint remains disabled by default and restricted to a
+loopback bind when enabled. It requires Gateway's service identity. The native
+acceptance tests in `crates/zeroship-control/tests/workflow_advance_authz.rs`
+exercise rejected credentials, the worker default, wildcard proxy routing,
+and an authorized dispatch that writes a checkpoint.
 
 ### 16. RESOLVED BY DELETION: Migrated loaded the PAT private signing key only to verify
 
@@ -2618,8 +2596,7 @@ endpoints, whose configured default is HTTP
 `crates/zeroship-control/src/config.rs:76-78`). Worker sends both broad `control_key`
 requests and app-scoped HMAC workflow requests to the shipped HTTP Control URL
 (`crates/zeroship-worker/src/sync.rs:565-600`,
-`crates/zeroship-plugin-workflow/src/client.rs:124-164`,
-`crates/zeroship-plugin-workflow/src/client.rs:230-263`,
+`crates/zeroship-workflow/src/client.rs`,
 `deploy/compose/docker-compose.yml:573-584`). Gateway also sends its
 broker-derived OAuth client secret to Auth in form bodies, with an HTTP default
 Auth base (`crates/zeroship-gateway/src/oidc_rp.rs:248-270`,
@@ -2738,10 +2715,14 @@ statement, so the token cannot be spent without cancelling. The session-based
 handler and the by-id `cancel_deletion` store function are DELETED rather than
 kept as a fallback that could never run.
 
-`crates/zeroship-auth/tests/account_deletion_test.rs` drives the real route
-table over HTTP with no cookie, paired with a forged-token control, and
-`tests/user_erasure_reachability_gate.sh` rules on the two route registrations,
-the email link and the absence of a by-id back door.
+`crates/zeroship-auth/tests/account_deletion/http.rs` requests deletion through
+the real route table, follows the rendered email's undo link without a session,
+and checks forged-token and replay refusals. Preflight refusal cases verify
+that the account and session remain active and no undo token or email is issued.
+The store and reaper tests in `crates/zeroship-auth/tests/account_deletion_test.rs`
+also exercise erasure under the real auth database role. Platform foreign-key
+contracts are checked against migrated PostgreSQL in
+`crates/zeroship-migrate-node/tests/platform_corpus/user_erasure.rs`.
 
 ### 24. MEDIUM: OP discards authentication provenance before minting ID tokens
 
@@ -2853,20 +2834,11 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   `crates/zeroship-gateway/src/lib.rs:192-215`). A scoped search for `.signing_key` and
   `.prev_signing_key` under `crates/zeroship-gateway/src` found no `GateState` reads; the
   old private key therefore remains resident unnecessarily.
-- Workflow replay and its app-scoped output-read bearer exist in three copies.
-  The live Worker path invokes the runtime's inline `__zsWorkflowDispatch`
-  (`crates/zeroship-runtime/src/core/init.rs:1493-1505`,
-  `crates/zeroship-runtime/src/core/init.rs:1645`,
-  `crates/zeroship-runtime/src/core/init.rs:2171-2178`). Bootstrap installs a separate
-  global copy that its tests import (`sdks/bootstrap/src/dispatcher.ts:213-216`,
-  `sdks/bootstrap/src/dispatcher.ts:1411-1438`,
-  `sdks/bootstrap/tests/workflow-dispatch-determinism.test.ts:1-22`). A third
-  journal implementation is imported by workflows tests but is not a package
-  export (`sdks/workflows/src/journal.ts:205-221`,
-  `sdks/workflows/src/journal.ts:959-1031`,
-  `sdks/workflows/package.json:13-22`). Search method: full-tree
-  `rg '__zsWorkflowDispatch|from .*journal' crates sdks` found the production
-  invocation only in the runtime copy and source-journal imports only in tests.
+- Workflow replay remains duplicated in the runtime's inline
+  `__zsWorkflowDispatch` (`crates/zeroship-runtime/src/core/init.rs`), the bootstrap
+  dispatcher (`sdks/bootstrap/src/dispatcher.ts`), and the SDK's internal
+  journal module (`sdks/workflows/src/journal.ts`). Their output readers now
+  use a host-bound callback, and the control credential stays in Rust.
 - Auth implements a non-brokered stored `client_secret_post` branch, but
   Control's registration API accepts only Basic or public `none` and both
   automatic client writers hardcode Basic

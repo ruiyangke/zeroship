@@ -143,6 +143,7 @@ for p in $ZEROSHIP_CONTROL_PORT $ZEROSHIP_WORKER_PORT $ZEROSHIP_GATEWAY_PORT \
   lsof -ti :"$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
 done
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" \
   --blob-store "$WORK/blobs" \
   > "$WORK/control.log" 2>&1 &

@@ -2,13 +2,11 @@
 
 import {
   defineMaskPolicy,
-  schema,
-  t,
-  type Db,
   type MaskedValue,
   type Result,
 } from "@zeroship/db";
 import { env } from "zeroship";
+import type {} from "../generated/zeroship/env.db";
 import { action, stream } from "@zeroship/rpc/server";
 
 defineMaskPolicy({
@@ -17,60 +15,8 @@ defineMaskPolicy({
   auto: ["public", "pii", "spi", "phi", "pci", "internal"],
 });
 
-const dbSchema = {
-  workspaces: schema({
-    slug: t.string().required().unique().pattern(/^[a-z0-9-]+$/),
-    name: t.string().required(),
-    tier: t.string().enum("free", "pro", "enterprise").default("free"),
-    region: t.string().required(),
-  }).index("by_tier", ["tier"]),
-
-  users: schema({
-    workspaceId: t.ref("workspaces").required(),
-    handle: t.string().required().unique().pattern(/^[a-z0-9_]+$/),
-    fullName: t.string().required(),
-    email: t.string().required().unique(),
-    contactEmail: t.encrypted({
-      mode: "deterministic",
-      keyId: "db_e2e",
-      wraps: t.string(),
-    }).mask({ kind: "email", classification: "pii" }),
-    ssn: t.encrypted({
-      mode: "randomised",
-      keyId: "db_e2e",
-      wraps: t.string(),
-    }).mask({ kind: "last4", classification: "spi" }),
-    city: t.string().required(),
-  }).index("by_workspace", ["workspaceId"]),
-
-  tasks: schema({
-    workspaceId: t.ref("workspaces").required(),
-    ownerId: t.ref("users").required(),
-    title: t.string().required(),
-    description: t.string().required(),
-    status: t.string().enum("open", "in_progress", "done", "archived").default("open"),
-    priority: t.number().required(),
-    score: t.number().required(),
-    category: t.string().required(),
-    tags: t.array(t.string()),
-  })
-    .index("by_workspace_status", ["workspaceId", "status"])
-    .index("by_workspace_priority", ["workspaceId", "priority"]),
-
-  places: schema({
-    workspaceId: t.ref("workspaces").required(),
-    name: t.string().required(),
-    description: t.string().required(),
-    category: t.string().required(),
-    loc: t.geoPoint().required(),
-    embedding: t.vector(4, { metric: "cosine" }),
-    open: t.boolean().default(true),
-  }).index("by_workspace_category", ["workspaceId", "category"]),
-};
-
-export default { schema: dbSchema };
-
-const db = env.db as Db<typeof dbSchema>;
+// Migrations own the schema; the generated module supplies its TypeScript surface.
+const db = env.db;
 
 type WorkspaceId = typeof db.workspaces.Id;
 type UserId = typeof db.users.Id;

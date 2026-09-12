@@ -28,7 +28,7 @@
 
 use compio_postgres::Client;
 use rand::Rng;
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -248,7 +248,11 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
             Ok(AliasTarget {
                 real_inbox: row.get("real_inbox"),
                 app_client_id: row.get("app_client_id"),
-                global_user_id: crate::entity_ids::user_id(row, "global_user_id")?,
+                global_user_id: crate::user_id::from_row(
+                    row,
+                    "global_user_id",
+                    "relay alias resolve",
+                )?,
             })
         })
         .transpose()
@@ -374,7 +378,8 @@ mod tests {
             let t = gen_token();
             assert_eq!(t.len(), ALIAS_TOKEN_LEN);
             assert!(
-                t.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
+                t.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()),
                 "token must be lowercase base36: {t}"
             );
             // Critically: lowercasing it (the §4.4a normalize-on-read) is a

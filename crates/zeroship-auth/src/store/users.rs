@@ -3,10 +3,9 @@
 use std::cell::Cell;
 
 use compio_postgres::{Client, GenericClient};
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::lock_refresh_user_xact;
-use crate::entity_ids;
 use crate::error::{AuthError, Result};
 use crate::oidc::refresh::revoke_person_sessions_in_transaction;
 
@@ -73,32 +72,21 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
 
 /// Look up a user by their primary key (`zeroship.users.id`).
 ///
-/// The argument is the printed typed id (`usr_<body>`) — the native subject
-/// shape surfaced through consent context. It is a `&str` rather than a
-/// [`UserId`] because the callers that are not already holding one are handing
-/// over an attacker-influenced token subject.
-///
-/// Returns `Ok(None)` if the string is not a well-formed user id OR if no row
-/// matches. Callers handling consent flows treat both as "subject unknown
-/// to us" → fall back to a minimal `id_token` (sub-only, claims omitted).
+/// Returns `Ok(None)` if no row matches.
 ///
 /// # Errors
 ///
-/// Returns `AuthError::Db` on PG failure (a refused id is NOT an error —
-/// it's a `None`, since the subject string is attacker-influenced).
+/// Returns `AuthError::Db` on PG failure.
 pub async fn find_by_id(
     conn: &(impl GenericClient + ?Sized),
-    id: &str,
+    id: &UserId,
 ) -> Result<Option<UserRow>> {
-    let Ok(user_id) = UserId::parse(id) else {
-        return Ok(None);
-    };
     let rows = conn
         .query(
             "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
                     credential_version, locked_until, disabled_at \
              FROM zeroship.users WHERE id = $1",
-            &[&user_id.as_str()],
+            &[&id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("users find_by_id: {e}")))?;
@@ -126,10 +114,6 @@ pub async fn create(
     name: &str,
     password_hash: Option<&str>,
 ) -> Result<UserRow> {
-    // `zeroship.users.id` carries no database default: a SQL-side generator for
-    // a printed `usr_` id would be a second minter beside `UserId::mint`, and one
-    // producer per identifier is what keeps the id answerable. Every insert
-    // supplies the id, so this statement mints it.
     let id = UserId::mint();
     let rows = conn
         .query(
@@ -280,10 +264,9 @@ pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
 /// Returns `AuthError::Db` on PG failure.
 pub async fn record_login_failure_dummy(conn: &Client) -> Result<()> {
     bump_login_failure_roundtrips();
-    // A freshly minted id never collides with a stored `users.id` because this
-    // one is never inserted, so the UPDATE always matches 0 rows. We mirror the
-    // real statement's shape (same table, same SET targets, RETURNING) so PG
-    // plans and executes equivalent work.
+    // A fresh user id is not persisted, so the UPDATE matches no row. We mirror the real
+    // statement's shape (same table, same SET targets, RETURNING) so PG plans
+    // and executes equivalent work.
     let absent = UserId::mint();
     conn.query(
         "UPDATE zeroship.users \
@@ -531,7 +514,7 @@ pub async fn touch_last_login(conn: &Client, id: &UserId) -> Result<()> {
 
 fn row_to_user(row: &compio_postgres::Row) -> Result<UserRow> {
     Ok(UserRow {
-        id: entity_ids::user_id(row, "id")?,
+        id: crate::user_id::from_row(row, "id", "users row")?,
         email: row.get::<_, String>("email"),
         email_verified_at: row.try_get("email_verified_at").ok(),
         name: row.get("name"),
@@ -541,6 +524,17 @@ fn row_to_user(row: &compio_postgres::Row) -> Result<UserRow> {
         locked_until: row.try_get("locked_until").ok(),
         disabled_at: row.try_get("disabled_at").ok(),
     })
+}
+
+#[cfg(test)]
+mod user_id_type_tests {
+    use super::UserRow;
+
+    #[test]
+    fn user_rows_expose_the_canonical_user_id_type() {
+        let project: fn(&UserRow) -> &zeroship_core::UserId = |row| &row.id;
+        let _ = project;
+    }
 }
 
 #[cfg(test)]
@@ -584,6 +578,9 @@ mod tests {
             lockout::backoff_secs(lockout::THRESHOLD + 100),
             Some(lockout::MAX_BACKOFF_SECS)
         );
-        assert_eq!(lockout::backoff_secs(i32::MAX), Some(lockout::MAX_BACKOFF_SECS));
+        assert_eq!(
+            lockout::backoff_secs(i32::MAX),
+            Some(lockout::MAX_BACKOFF_SECS)
+        );
     }
 }

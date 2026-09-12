@@ -31,4 +31,4 @@ Output is JSON: `elapsedSec`, `throughputMiBs`, `storedSize`/`sizeOk`,
 
 Compare `QUEUE_SIZE=1` (sequential, matches our `put_stream`) and `QUEUE_SIZE=4+`
 (parallel, the headroom #1 — parallel parts — would unlock) against the
-zeroship numbers from `tests/e2e_s3_large_stream.sh`.
+zeroship numbers from `examples/storage-gallery/tests/large-stream.test.ts`.

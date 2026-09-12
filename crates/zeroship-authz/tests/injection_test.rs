@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use cedar_policy::PolicySet;
 use zeroship_authz::{lower, Action, Effect, Policy, Resource, Statement};
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 
 fn app_read_policy(name: &str) -> Policy {
     Policy {

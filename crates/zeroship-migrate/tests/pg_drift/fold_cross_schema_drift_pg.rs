@@ -140,7 +140,11 @@ async fn a_second_schema_folds_to_a_snapshot_live_introspection_cannot_match() {
             &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+        let guard_cfg = GuardConfig::from_policy(
+            policy.clone(),
+            zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+        );
         let base = fold_ops(
             zeroship_migrate::shipping_vendors(),
             &[],

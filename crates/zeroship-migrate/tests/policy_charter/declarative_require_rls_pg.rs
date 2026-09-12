@@ -164,8 +164,12 @@ async fn drop_schemas(session: &PgDevSession, cfg: &ExecutorConfig) {
         .await;
 }
 
-fn guard_cfg(policy: &EffectivePolicy) -> GuardConfig {
-    GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT)
+fn guard_cfg(policy: &EffectivePolicy, project_schema: &str) -> GuardConfig {
+    GuardConfig::from_policy(
+        policy.clone(),
+        zeroship_migrate_postgres::DIALECT,
+        project_schema,
+    )
 }
 
 fn author_for(cfg: &ExecutorConfig) -> DeclarativeAuthor {
@@ -253,7 +257,7 @@ async fn require_rls_over_the_created_schema_refuses_the_declarative_create() {
             &HashMap::new(),
             &author,
             &[],
-            &guard_cfg(&policy),
+            &guard_cfg(&policy, &cfg.project_schema),
             &policy,
         )
         .err();
@@ -336,7 +340,7 @@ scope = {{ include = [{:?}] }}
             &HashMap::new(),
             &author,
             &[],
-            &guard_cfg(&policy),
+            &guard_cfg(&policy, &cfg.project_schema),
             &policy,
         )
         .err();
@@ -385,7 +389,7 @@ async fn require_rls_over_another_schema_still_plans_the_create() {
         &HashMap::new(),
         &author,
         &[],
-        &guard_cfg(&policy),
+        &guard_cfg(&policy, &cfg.project_schema),
         &policy,
     );
 
@@ -433,7 +437,7 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
             &HashMap::new(),
             &author,
             &[],
-            &guard_cfg(&unobligated),
+            &guard_cfg(&unobligated, &cfg.project_schema),
             &unobligated,
         )
         .expect("plan_declarative v1");
@@ -467,7 +471,7 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
         &ownership,
         &author,
         &[],
-        &guard_cfg(&policy),
+        &guard_cfg(&policy, &cfg.project_schema),
         &policy,
     );
 
@@ -481,7 +485,7 @@ async fn require_rls_admits_an_alter_only_and_a_no_op_diff() {
         &ownership,
         &author,
         &[],
-        &guard_cfg(&policy),
+        &guard_cfg(&policy, &cfg.project_schema),
         &policy,
     );
 
@@ -529,7 +533,7 @@ async fn a_charter_without_require_rls_plans_the_create() {
         &HashMap::new(),
         &author,
         &[],
-        &guard_cfg(&policy),
+        &guard_cfg(&policy, &cfg.project_schema),
         &policy,
     );
 

@@ -7,7 +7,8 @@
   "scripts": {
     "gen-types": "vite build --mode development",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@zeroship/db": "workspace:*",
@@ -17,6 +18,13 @@
     "@zeroship/migrate": "workspace:*",
     "@zeroship/types": "workspace:*",
     "typescript": "catalog:",
-    "vite": "catalog:"
+    "vite": "catalog:",
+    "@types/node": "catalog:",
+    "playwright": "1.58.2",
+    "selfsigned": "^5.5.0",
+    "smol-toml": "^1.8.0",
+    "tar": "^7.5.13",
+    "testcontainers": "^12.1.0",
+    "vitest": "^4.1.7"
   }
 }

@@ -21,6 +21,11 @@ import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
 // would then return false for objects this test constructs.
 import { t, schema as schemaWrap } from "@zeroship/db";
 
+test("reference builders preserve an explicit target column without inventing one", () => {
+  assert.equal(t.ref("users", { column: "account_key" }).toFieldDef().refColumn, "account_key");
+  assert.equal(t.ref("users").toFieldDef().refColumn, undefined);
+});
+
 describe("B2 validateRefTargets — runtime ref check", () => {
   test("accepts a ref pointing at a declared collection", () => {
     assert.doesNotThrow(() => {

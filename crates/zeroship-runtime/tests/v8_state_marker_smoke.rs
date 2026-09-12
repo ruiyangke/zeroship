@@ -957,7 +957,6 @@ fn marker_keyed_callback_idents_compile() {
 
 mod static_method_state {
     use super::*;
-    use zeroship_runtime_macros::{v8_static_getter, v8_static_method};
 
     pub struct Builder;
 

@@ -11,23 +11,22 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_core::app_id::AppId;
-use zeroship_core::auth::derive_app_scoped_control_token;
 use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
 use zeroship_core::service_peers::ServiceAuth;
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
-use zeroship_plugin_workflow::advance::{
+use zeroship_workflow::advance::{
     collect_post_apply_registrations, worker_json_to_step_result, WorkflowAdvanceNackKind,
     WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::apply;
-use zeroship_plugin_workflow::claim::{
+use zeroship_workflow::apply;
+use zeroship_workflow::claim::{
     claim_workflow_run, renew_workflow_claim, WorkflowClaimOutcome,
 };
-use zeroship_plugin_workflow::engine::{StepRequest, WorkflowEngineConfig};
-use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::PgStore;
+use zeroship_workflow::engine::{StepRequest, WorkflowEngineConfig};
+use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::store::pg::PgStore;
 use zeroship_runtime::runtime::DispatchError;
 use zeroship_runtime::{
     CancelFlag, EnvSnapshot, FetchOutcome, RequestCtx, ResultReceiver, Runtime, SettledFetch,
@@ -561,10 +560,7 @@ fn workflow_worker_config() -> WorkflowEngineConfig {
     }
 }
 
-fn workflow_runtime_envelope(
-    config: &WorkerConfig,
-    request: &StepRequest,
-) -> serde_json::Value {
+fn workflow_runtime_envelope(request: &StepRequest) -> serde_json::Value {
     serde_json::json!({
         "runId": &request.run_id,
         "workflowName": &request.workflow_name,
@@ -585,14 +581,6 @@ fn workflow_runtime_envelope(
         "maxLiveDescendants": request.max_live_descendants,
         "maxStartManyBatch": request.max_start_many_batch,
         "journalLimits": request.journal_limits,
-        "outputRead": {
-            "controlUrl": &config.control_url,
-            "token": derive_app_scoped_control_token(
-                &config.control_key,
-                request.app_id.as_str(),
-            ),
-            "appId": request.app_id.as_str(),
-        },
     })
 }
 
@@ -607,7 +595,7 @@ fn workflow_runtime_envelope(
 /// absence - the handler returns 403 unless `workflow_advance_unsigned` is set,
 /// and that flag is hidden, defaults to false, and has no environment binding,
 /// so it takes an explicit CLI argument to turn on. `deploy/` passes it
-/// nowhere; only `tests/e2e_durable_workflows.sh` does.
+/// nowhere; the native workflow acceptance fixtures enable it explicitly.
 ///
 /// The distinction is the point: "production never enables this" is a statement
 /// about how the binary is invoked, not something the build enforces. Read it
@@ -763,7 +751,7 @@ pub async fn workflow_advance_unsigned(
         }
     };
 
-    let runtime_envelope = workflow_runtime_envelope(&config, &claim);
+    let runtime_envelope = workflow_runtime_envelope(&claim);
     let runtime_envelope_json = match serde_json::to_string(&runtime_envelope) {
         Ok(json) => json,
         Err(e) => {
@@ -1370,10 +1358,15 @@ fn stream_response(
         macro_rules! flush_delta {
             () => {{
                 let elapsed_us = stream_start.elapsed().as_micros() as u64;
-                let wall_delta = elapsed_us.saturating_sub(wall_recorded_us);
-                cache::record_stream_delta(&app_id, bytes_since_flush, wall_delta);
-                bytes_since_flush = 0;
-                wall_recorded_us = elapsed_us;
+                let wall_delta = elapsed_us.saturating_sub(std::mem::replace(
+                    &mut wall_recorded_us,
+                    elapsed_us,
+                ));
+                cache::record_stream_delta(
+                    &app_id,
+                    std::mem::take(&mut bytes_since_flush),
+                    wall_delta,
+                );
             }};
         }
 
@@ -1669,19 +1662,15 @@ pub(crate) mod tests {
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_core::types::AppRuntimeLimits;
-    use zeroship_plugin_storage::StorageBackendConfig;
+    use zeroship_storage::StorageBackendConfig;
     use zeroship_runtime::init::init_v8;
 
     use super::*;
 
     static V8_INIT: Once = Once::new();
 
-    // `pub(super)` here and on `tmpdir` / `usage_value` below, so
-    // `workflow_live_tests` at the foot of this file - a SIBLING module of this
-    // one, not a child - can reach them. It is gated on a cargo feature and so
-    // cannot live inside this module; those three are the only things it needs
-    // from here, and duplicating them would be three more copies to keep in
-    // step (one of them the V8 one-shot).
+    // `pub(super)` lets the sibling `workflow_tests` module share V8 setup,
+    // temporary directories and usage assertions.
     pub(super) fn init_runtime() {
         V8_INIT.call_once(init_v8);
     }
@@ -1869,7 +1858,7 @@ pub(crate) mod tests {
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
             db_url: None,
-            kv_url: None,
+            kv_store: None,
             storage_backend: None,
             max_isolates: 10,
             max_pinned_isolates_per_app: 4,
@@ -1899,7 +1888,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: meter.clone(),
                 },
@@ -1950,7 +1939,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter,
                 },
@@ -2110,7 +2099,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: meter.clone(),
                 },
@@ -2587,7 +2576,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -2625,7 +2614,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
@@ -2781,7 +2770,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_service: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
             },
@@ -3147,7 +3136,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -3185,7 +3174,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
@@ -3253,7 +3242,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -3291,7 +3280,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
@@ -3374,7 +3363,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: meter.clone(),
                 },
@@ -3412,7 +3401,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
@@ -3498,22 +3487,25 @@ pub(crate) mod tests {
     /// `DbPlugin` + `AuthPlugin`, so `typeof env.kv` / `typeof env.storage`
     /// were `"undefined"` and the handler's assertion would 500.
     ///
-    /// Service dependency: a single-node Redis, resolved from the test overlay
-    /// that `tests/provision_test_backends.sh` writes, or from `REDIS_TEST_URL`
-    /// overriding it. REQUIRED, not optional. Storage + db + auth need no
-    /// external service.
-    ///
-    /// This used to skip when `REDIS_TEST_URL` was unset unless
-    /// `KV_REQUIRE_REDIS=1` turned the skip into a failure, "in CI". Nothing in
-    /// this repository ever set `KV_REQUIRE_REDIS` - not a workflow, not a
-    /// script - so the panic was unreachable and the skip was the only
-    /// behaviour, matching `crates/zeroship-plugin-kv/tests/redis_backend.rs`, which had
-    /// the same dead flag and the same untrue comment. Both are resolved the
-    /// way `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was: the flag is deleted and Redis
-    /// is simply required, because the provisioner now supplies it.
+    /// Testcontainers owns the required Redis server. Storage, db namespace
+    /// registration, and anonymous auth need no external service here.
     #[test]
     fn dispatch_resolves_full_kernel_kv_storage_db_auth() {
-        let kv_url = zeroship_core::config::test_kv_url();
+        use testcontainers::{
+            core::{IntoContainerPort, WaitFor},
+            runners::SyncRunner,
+            GenericImage,
+        };
+        let redis = GenericImage::new("redis", "7")
+            .with_exposed_port(6379.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"))
+            .start()
+            .expect("kernel dispatch test requires Docker to start Redis");
+        let endpoint = format!(
+            "{}:{}",
+            redis.get_host().unwrap(),
+            redis.get_host_port_ipv4(6379).unwrap()
+        );
 
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
 
@@ -3567,11 +3559,15 @@ pub(crate) mod tests {
                     // Dummy DSN: the service validates and stores the URL and
                     // the backend connects lazily, so `env.db` is installed
                     // without a live Postgres.
-                    db_service: Some(crate::cache::test_db_service(
-                        "postgres://localhost/zs_phase2_unused",
-                        "handler-test-worker",
-                    )),
-                    kv_url: Some(kv_url),
+                    db_service: Some(crate::cache::test_db_service("postgres://localhost/zs_phase2_unused")),
+                    kv_store: Some(
+                        zeroship_kv::KvStore::open(&zeroship_kv::KvConfig::Redis {
+                            redis: zeroship_kv::RedisConfig::new(
+                                zeroship_kv::Topology::Standalone { endpoint },
+                            ),
+                        })
+                        .unwrap(),
+                    ),
                     storage_backend: Some(StorageBackendConfig::Local(storage_root.clone())),
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -3609,7 +3605,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
@@ -3700,7 +3696,7 @@ pub(crate) mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_service: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 meter: Arc::clone(&meter),
             },
@@ -3918,7 +3914,7 @@ pub(crate) mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -4064,43 +4060,10 @@ pub(crate) mod tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// The live-PostgreSQL half of this module's tests.
-//
-// WHY THESE ARE NOT IN `mod tests` ABOVE. Every test here drives
-// `workflow_advance_unsigned` end to end, and that path claims a run with
-//
-//     JOIN zeroship.apps  JOIN zeroship.plans  JOIN zeroship.app_deploys
-//
-// (crates/zeroship-plugin-workflow/src/claim.rs:89-91). Those are PLATFORM
-// tables, created by the committed migration corpus in `db/migrations-ts/` -
-// not by any fixture. A database that is merely REACHABLE is not enough, and
-// the difference is invisible in the failure: pointed at the shared, unmigrated
-// `zeroship` database these seven died on
-//
-//     relation "zeroship.plans" does not exist
-//
-// which cargo prints as seven ordinary FAILED lines. That is a VOID RUN dressed
-// as a regression - `zeroship-control` hit the identical shape on 2026-08-20
-// (see the `live-db-tests` block in crates/zeroship-control/Cargo.toml) and the
-// answer there is the answer here.
-//
-// WHAT RUNS THEM. `tests/run_worker_suite.sh`, which creates and migrates a
-// database named after this tree's migration set and then invokes
-//
-//     cargo test -p zeroship-worker --features live-db-tests
-//
-// It also counts how many of these actually reported `ok`, so gating them out
-// of the default build cannot silently become gating them out of everything.
-// CI runs that script as the `worker-live-gate` job.
-//
-// WHAT A DEFAULT `cargo test -p zeroship-worker` THEREFORE MEANS. It rules on
-// the worker's request path, config, cache and boot posture and says NOTHING
-// about workflow advance. That is the honest reading, and it is why the
-// suite script exists rather than a tolerated red.
-// ---------------------------------------------------------------------------
-#[cfg(all(test, feature = "live-db-tests"))]
-mod workflow_live_tests {
+// Workflow advance requires the platform migration corpus. These tests run
+// with ordinary cargo test; tests/run_worker_suite.sh provisions their database.
+#[cfg(test)]
+mod workflow_tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, RwLock};
@@ -4110,10 +4073,10 @@ mod workflow_live_tests {
     use ntex::web::{self, test};
     use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
     use zeroship_migrate_server::provisioning::provision_workflow_journal_schema;
-    use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
+    use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 
     use super::tests::{
-        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value,
+        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value, worker_app_path,
     };
     use super::*;
 
@@ -4214,10 +4177,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         })
     }
 
-    // Postgres is not optional for this workspace's tests (see
-    // crates/zeroship-test-support/src/lib.rs); the workflow-apply tests below cannot
-    // do without it, so this panics with the provisioning command rather than
-    // let them report a pass for a check they never ran.
+    // Workflow tests require migrated PostgreSQL. Missing configuration fails
+    // with the provisioning command so an unrun database check cannot pass.
     fn workflow_test_db_url() -> String {
         zeroship_core::config::test_database_url()
     }
@@ -4267,10 +4228,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             crate::cache::KernelConfig {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
-                db_service: db_url
-                    .as_deref()
-                    .map(|url| crate::cache::test_db_service(url, "handler-test-worker")),
-                kv_url: None,
+                db_service: db_url.as_deref().map(crate::cache::test_db_service),
+                kv_store: None,
                 storage_backend: None,
                 meter: meter.clone(),
             },
@@ -4296,7 +4255,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
             db_url,
-            kv_url: None,
+            kv_store: None,
             storage_backend: None,
             max_isolates: 10,
             max_pinned_isolates_per_app,
@@ -4333,13 +4292,13 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         let conn = pg_client(db_url).await;
         // A test seeds its app by INSERTing into `zeroship.apps` below, which
         // skips the migration apply that - in production - creates the app's
-        // workflow journal schema. `PgStore::provision` holds no CREATE and
-        // cannot make that schema itself (2a44ea8ef), so it must exist first;
-        // call the migration service's own provisioning statement rather than
-        // a hand-rolled `CREATE SCHEMA`, so the journal below ends up owned
-        // exactly the way a deployed app's is. Same sequencing as
-        // `zeroship-plugin-db`'s and `zeroship-control`'s workflow-journal
-        // test fixtures.
+        // `app_<uuid>` workflow journal schema. `PgStore::provision` holds no
+        // CREATE and cannot make that schema itself (2a44ea8ef), so it must
+        // exist first; call the migration service's own provisioning
+        // statement rather than a hand-rolled `CREATE SCHEMA`, so the journal
+        // below ends up owned exactly the way a deployed app's is. Same
+        // sequencing as `zeroship-data-v8`'s and `zeroship-control`'s
+        // workflow-journal test fixtures.
         provision_workflow_journal_schema(&conn, app_id)
             .await
             .expect("provision app workflow journal schema");

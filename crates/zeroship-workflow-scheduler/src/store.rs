@@ -1,8 +1,6 @@
 use zeroship_core::app_id::AppId;
 use chrono::{DateTime, Utc};
 use compio_postgres::{Client, GenericClient, NoTls};
-use uuid::Uuid;
-
 use crate::wheel::TimerEntry;
 
 #[derive(Debug, Clone)]
@@ -507,17 +505,6 @@ impl WorkflowSchedulerStore {
         rows.iter().map(LapsedInflightTimer::from_row).collect()
     }
 
-    #[cfg(test)]
-    #[allow(clippy::future_not_send)]
-    pub async fn clear_for_tests(&self) -> Result<(), WorkflowSchedulerStoreError> {
-        let conn = self.open_conn().await?;
-        conn.batch_execute(
-            &format!("TRUNCATE TABLE {}.workflow_scheduler_inflight, {}.workflow_scheduler_timers", self.quoted_schema(), self.quoted_schema()),
-        )
-        .await?;
-        Ok(())
-    }
-
     fn quoted_schema(&self) -> String {
         quote_ident(&self.schema)
     }
@@ -635,7 +622,7 @@ pub enum WorkflowSchedulerStoreError {
     /// A stored `app_id` is not a well-formed typed id.
     ///
     /// `zeroship.workflow_scheduler_{timers,inflight}.app_id` is text holding
-    /// `app_<base62>`, and the timer wheel keys tenants on the decoded value, so
+    /// `app_<base36>`, and the timer wheel keys tenants on the decoded value, so
     /// a row that cannot decode is not a row to dispatch on a best guess.
     #[error("workflow scheduler row has a malformed app_id: {0}")]
     MalformedAppId(String),

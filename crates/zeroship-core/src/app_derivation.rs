@@ -2,14 +2,8 @@
 //!
 //! # Why this module exists
 //!
-//! `crates/zeroship-schema/src/schema_name.rs` enumerates what a single app-id
-//! string simultaneously is: tenant identity, `PostgreSQL` schema name,
-//! role-name stem, encryption salt, publication key, replication-slot key,
-//! `SQLite` `ATTACH` alias, transaction-lane key, broker routing key and CDC
-//! event stamp - "and every site compiles with either meaning". Today those
-//! derivations are spelled at the sites that need them, over a `Uuid` or a
-//! `&str`, so the day the id changes shape each site is independently either
-//! right or silently wrong.
+//! App identity seeds database names, roles, routing keys, and other scopes.
+//! Keeping those derivations together makes each use of its spelling explicit.
 //!
 //! Every function here takes an [`AppId`] and returns one derived identifier.
 //! That makes the derivations enumerable, gives each one a name a reviewer can
@@ -41,9 +35,9 @@
 //! # What is NOT here yet
 //!
 //! The seam is typed on [`AppId`], and much of the tree still carries an app id
-//! as `&str` - `zeroship_data_core::encryption::keys::resolve`,
-//! `zeroship_plugin_db::replication`, `zeroship_plugin_kv::backend::scope`,
-//! `zeroship_plugin_storage::backend`. Those sites cannot construct an
+//! as `&str` - `zeroship_data_orm::encryption::keys::resolve`,
+//! `zeroship_data_v8::replication`, `zeroship_kv::backend::scope`,
+//! `zeroship_storage::backend`. Those sites cannot construct an
 //! [`AppId`] without a fallible parse that would refuse the non-uuid app ids
 //! their own tests pass, so they keep their present composers until the string
 //! is typed out of them. [`crate::database_role::per_app_role_name`] and
@@ -96,8 +90,7 @@ pub enum DerivationError {
 /// on it; this is that derivation, hoisted so the data plane and the migration
 /// service cannot answer the question differently.
 ///
-/// The result is not a `zeroship_schema::SchemaName`: this crate is below that
-/// one, and the validation belongs at the mint, not here.
+/// The caller validates the derived spelling with [`crate::schema_name::SchemaName`].
 #[must_use]
 pub fn schema_name(app: &AppId) -> String {
     app.as_str().to_owned()
@@ -240,7 +233,7 @@ pub fn bundle_path_segment(app: &AppId) -> String {
 
 /// The Redis cluster hash tag every one of this app's KV keys carries.
 ///
-/// `zeroship_plugin_kv::backend::scope` composes `<scope>:<user key>`. The
+/// `zeroship_kv::backend::scope` composes `<scope>:<user key>`. The
 /// braces are the tag, and they are load-bearing twice over: they keep one
 /// app's whole keyspace on one shard, and `validate_key` refuses a user key
 /// containing a brace precisely so a key cannot forge a second tag and escape
@@ -328,7 +321,7 @@ mod tests {
         assert_eq!(schema_name(&app), FIXTURE);
 
         // `replication::worker_slot_name`, which lives behind a `&str` API in
-        // `zeroship-plugin-db` that this crate must not depend on. The
+        // `zeroship-data-v8` that this crate must not depend on. The
         // differential against it is in that crate, next to the function.
         assert_eq!(
             worker_slot_name(&app, "worker-a").expect("the fixture slot name composes"),

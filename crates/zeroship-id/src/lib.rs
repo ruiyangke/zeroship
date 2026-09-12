@@ -30,7 +30,7 @@
 //!
 //! # The collation contract
 //!
-//! Base62 as spelled here is ascending in byte value, so a bytewise comparison
+//! Base36 as spelled here is ascending in byte value, so a bytewise comparison
 //! puts ids in creation order. Every database column holding one therefore owes
 //! `COLLATE "C"`, including the foreign-key copies nothing orders: a join
 //! against the collated id cannot use a copy's index when the two collations

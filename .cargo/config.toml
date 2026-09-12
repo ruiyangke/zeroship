@@ -15,3 +15,11 @@
 # duplicate, so scoping it to the linux GNU-ld targets we build on is sufficient.
 [target.'cfg(target_os = "linux")']
 rustflags = ["-C", "link-arg=-Wl,--allow-multiple-definition"]
+
+[alias]
+xtask = "run --manifest-path xtask/Cargo.toml --"
+
+[env]
+# Platform tests share a migrated database and drive fleet-wide sweeps.
+# Serialize libtest by default; nextest manages its own fixture concurrency.
+RUST_TEST_THREADS = { value = "1", force = false }

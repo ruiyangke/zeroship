@@ -13,36 +13,49 @@ const FIXTURE_DDL: &str = "CREATE SCHEMA IF NOT EXISTS zeroship; \
         updated_at TIMESTAMPTZ NOT NULL \
     )";
 
-fn database_url_or_skip() -> Option<String> {
-    match zeroship_core::test_env!("PG_TEST_URL") {
-        Some(url) if !url.trim().is_empty() => Some(url),
-        _ => {
-            zeroship_test_support::skip(
-                "no test database for PostgreSQL rate limiter (set PG_TEST_URL)",
-            );
-            None
-        }
-    }
-}
-
-async fn connect_or_skip() -> Option<Client> {
-    let url = database_url_or_skip()?;
-    let (client, connection) = match compio_postgres::connect(&url, NoTls).await {
-        Ok(connected) => connected,
-        Err(error) => {
-            zeroship_test_support::skip(&format!(
-                "cannot connect to PostgreSQL rate-limit database from PG_TEST_URL: {error}"
-            ));
-            return None;
-        }
-    };
+/// Connect to the live `PostgreSQL` this file's every arm needs.
+///
+/// IT READS THE OVERLAY, NOT `PG_TEST_URL` ALONE. It used to take the bare
+/// environment variable and announce a skip when it was unset - so a developer
+/// who had run the provisioning script, which writes the address into the
+/// overlay and exports nothing, got a silent pass rather than a run. The shared
+/// helper prefers `PG_TEST_URL` and falls back to the overlay, and panics
+/// naming the script when neither supplies one.
+///
+/// # Panics
+///
+/// When no server is named, or when nothing answers at the address that is.
+async fn connect_pg() -> Client {
+    let url = zeroship_core::config::test_database_url();
+    let (client, connection) = compio_postgres::connect(&url, NoTls)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "PostgreSQL is unreachable, and the shared token bucket lives in it.\n\
+                 \n\
+                 \x20 backend: PostgreSQL\n\
+                 \x20 error:   {error}\n\
+                 \n\
+                 A refill window this test cannot observe is not a rate limiter it\n\
+                 has ruled on. Provision the server and re-run:\n\
+                 \x20 {command}\n\
+                 \n\
+                 That brings up deploy/compose's `postgres` service and the SMTP sink,\n\
+                 waits for both to be healthy, and writes the overlay naming them.\n\
+                 Point this somewhere else with PG_TEST_URL.\n\
+                 \n\
+                 There is no environment variable that makes this a skip. A\n\
+                 database this test cannot reach is a failed run, not a green one.",
+                command = zeroship_core::config::PROVISION_COMMAND,
+            )
+        });
     compio::runtime::spawn(async move {
         if let Err(error) = connection.run().await {
             eprintln!("[rate_limit_pg_test] connection driver: {error}");
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 async fn ensure_fixture(client: &Client) {
@@ -97,9 +110,7 @@ fn assert_consumption(actual: Consumption, consumed: bool, remaining_tokens: f64
 
 #[compio::test]
 async fn postgres_limiter_refills_at_configured_rate() {
-    let Some(mut client) = connect_or_skip().await else {
-        return;
-    };
+    let mut client = connect_pg().await;
     ensure_fixture(&client).await;
     let transaction = client.transaction().await.expect("begin refill test");
     let key = unique_key("refill");
@@ -130,9 +141,7 @@ async fn postgres_limiter_refills_at_configured_rate() {
 
 #[compio::test]
 async fn postgres_limiter_caps_tokens_after_long_idle() {
-    let Some(mut client) = connect_or_skip().await else {
-        return;
-    };
+    let mut client = connect_pg().await;
     ensure_fixture(&client).await;
     let transaction = client.transaction().await.expect("begin capacity test");
     let key = unique_key("capacity");

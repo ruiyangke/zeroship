@@ -16,8 +16,8 @@
 //! that were actually used - a magic-link user must not end up holding a
 //! session that claims a password login.
 //!
-//! Skipped unless a test database is available; the skip is announced so
-//! `tests/run_auth_suite.sh` can tell a skip from a pass.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 
 use std::sync::{Arc, Mutex};
 
@@ -28,18 +28,17 @@ use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::csrf;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::{password, totp};
 use zeroship_auth::server;
 use zeroship_auth::store::{totp as totp_store, users};
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
 /// Hex-encoded 32-byte at-rest key for the TOTP secret. Passed to the booted
 /// config so the test can encrypt a seeded secret the handler can decrypt.
-const TOTP_ENC_KEY_HEX: &str =
-    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+const TOTP_ENC_KEY_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 const STASH_KEY: &str = "test-stash-key-not-for-prod-32bytes!";
 const LINK_PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -89,8 +88,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let db_url = zeroship_core::config::test_database_url_opt()?;
+    async fn boot() -> Self {
+        let db_url = crate::common::test_database_url();
 
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
@@ -140,13 +139,13 @@ impl Fixture {
         .await;
         let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-        Some(Self {
+        Self {
             srv,
             auth_base,
             pg,
             http: cyper::Client::new(),
             mailer,
-        })
+        }
     }
 
     fn url(&self, path: &str) -> String {
@@ -206,7 +205,9 @@ async fn seed_user_with_totp(
         .await
         .expect("confirm totp");
     assert!(
-        totp_store::is_enabled(pg, &user.id).await.expect("is_enabled"),
+        totp_store::is_enabled(pg, &user.id)
+            .await
+            .expect("is_enabled"),
         "seeded credential must be confirmed, else the test proves nothing"
     );
     (user, secret)
@@ -281,12 +282,16 @@ async fn assert_demands_second_factor(resp: cyper::Response, what: &str) -> Stri
         "{what}: a confirmed second factor must block the session mint, \
          but a __Host-zsidp_session cookie was issued (status {status})"
     );
-    assert_eq!(status, 200, "{what}: expected the challenge page, body={body}");
+    assert_eq!(
+        status, 200,
+        "{what}: expected the challenge page, body={body}"
+    );
     assert!(
         body.contains(CHALLENGE_MARKER),
         "{what}: expected the TOTP challenge form, body={body}"
     );
-    let challenge = challenge.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_2fa challenge cookie"));
+    let challenge =
+        challenge.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_2fa challenge cookie"));
     let csrf_cookie = csrf_cookie.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_csrf cookie"));
     format!("__Host-zsidp_2fa={challenge}; __Host-zsidp_csrf={csrf_cookie}")
 }
@@ -295,7 +300,7 @@ async fn assert_demands_second_factor(resp: cyper::Response, what: &str) -> Stri
 #[allow(clippy::future_not_send)]
 async fn session_claims(
     pg: &compio_postgres::Client,
-    user_id: zeroship_core::user_id::UserId,
+    user_id: zeroship_core::UserId,
 ) -> (String, Vec<String>, Option<String>) {
     let row = pg
         .query_one(
@@ -304,7 +309,11 @@ async fn session_claims(
         )
         .await
         .expect("load minted session");
-    (row.get("auth_method"), row.get("amr"), row.try_get("acr").ok())
+    (
+        row.get("auth_method"),
+        row.get("amr"),
+        row.try_get("acr").ok(),
+    )
 }
 
 #[allow(clippy::future_not_send)]
@@ -333,7 +342,11 @@ async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, Str
         .append_pair("return_to", return_to)
         .finish();
     let resp = fx
-        .post_form("/magic/start", &format!("__Host-zsidp_csrf={csrf_token}"), body)
+        .post_form(
+            "/magic/start",
+            &format!("__Host-zsidp_csrf={csrf_token}"),
+            body,
+        )
         .await;
     assert_eq!(resp.status().as_u16(), 200, "magic start");
     let magic_nonce =
@@ -347,12 +360,7 @@ async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, Str
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_same_device_redeem_demands_second_factor() {
-    let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip(
-            "[totp_gates_every_mint_path same-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let fx = Fixture::boot().await;
     let email = format!("totp-magic-same-{}@zeroship.test", Uuid::new_v4().simple());
     let (user, secret) = seed_user_with_totp(&fx.pg, &email, None).await;
     let return_to = native_authorize_return_to();
@@ -385,8 +393,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
         )
         .await;
 
-    let challenge_cookies =
-        assert_demands_second_factor(redeem, "magic same-device redeem").await;
+    let challenge_cookies = assert_demands_second_factor(redeem, "magic same-device redeem").await;
 
     let csrf_token = challenge_cookies
         .split("__Host-zsidp_csrf=")
@@ -439,12 +446,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_cross_device_complete_demands_second_factor() {
-    let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip(
-            "[totp_gates_every_mint_path cross-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let fx = Fixture::boot().await;
     let email = format!("totp-magic-cross-{}@zeroship.test", Uuid::new_v4().simple());
     let (user, secret) = seed_user_with_totp(&fx.pg, &email, None).await;
     let return_to = native_authorize_return_to();
@@ -541,10 +543,7 @@ async fn magic_cross_device_complete_demands_second_factor() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn link_confirm_demands_second_factor_before_linking() {
-    let Some(fx) = Fixture::boot().await else {
-        zeroship_test_support::skip("[totp_gates_every_mint_path link] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot().await;
     let email = format!("totp-link-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash(LINK_PASSWORD).expect("hash password");
     let (user, secret) = seed_user_with_totp(&fx.pg, &email, Some(&phc)).await;
@@ -576,7 +575,11 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .append_pair("password", LINK_PASSWORD)
         .finish();
     let resp = fx
-        .post_form("/link", &format!("__Host-zsidp_csrf={csrf_token}"), link_body)
+        .post_form(
+            "/link",
+            &format!("__Host-zsidp_csrf={csrf_token}"),
+            link_body,
+        )
         .await;
 
     let challenge_cookies = assert_demands_second_factor(resp, "/link confirm").await;
@@ -611,7 +614,11 @@ async fn link_confirm_demands_second_factor_before_linking() {
     let done = fx
         .post_form("/login/2fa", &challenge_cookies, second_factor_body)
         .await;
-    assert_eq!(done.status().as_u16(), 303, "second factor completes the link");
+    assert_eq!(
+        done.status().as_u16(),
+        303,
+        "second factor completes the link"
+    );
     assert_eq!(location(&done), return_to);
     assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
 
@@ -625,7 +632,10 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .await
         .expect("count identities")
         .get(0);
-    assert_eq!(linked_after, 1, "the link lands once the second factor passes");
+    assert_eq!(
+        linked_after, 1,
+        "the link lands once the second factor passes"
+    );
 
     let (auth_method, amr, acr) = session_claims(&fx.pg, user.id).await;
     assert_eq!(auth_method, "github");

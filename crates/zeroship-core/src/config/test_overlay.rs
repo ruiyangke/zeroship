@@ -19,7 +19,7 @@
 //! diverges from the obvious shape. Every DSN leaf in the schema is
 //! `secret`-classed - `auth.database_url`, `control.database_url`,
 //! `gateway.database_url`, `migrate_server.database_url`,
-//! `migrate_server.provision_database_url`, `worker.database_url`, `worker.kv_url`,
+//! `migrate_server.provision_database_url`, `worker.database_url`, `worker.kv_config`,
 //! `workflow_scheduler.database_url`, verified against the compiled contract
 //! dump. Check 8 of `tests/config_name_alignment_gate.sh` fails any TRACKED
 //! `*.toml` holding a literal at a secret-classed leaf, and it says in terms
@@ -37,8 +37,7 @@
 //! the real schema, and no credential enters git.
 //!
 //! PRECEDENCE is the services' own, and the surviving environment names are the
-//! overlay tier rather than a parallel system: an explicit `PG_TEST_URL` /
-//! `REDIS_TEST_URL` wins, else the generated file, and there is no third tier -
+//! overlay tier rather than a parallel system: an explicit `PG_TEST_URL` wins, else the generated file, and there is no third tier -
 //! a missing file is a hard failure naming the provisioning command rather than
 //! a compiled default that would let a suite pass against nothing.
 
@@ -122,7 +121,7 @@ fn load_opt() -> Option<FileConfig> {
 ///
 /// WHAT THE CALLERS ACTUALLY DECIDED, and why the answer is no longer "some of
 /// them substitute a default". This doc used to say that most announce a skip,
-/// a few panic, and `crates/zeroship-plugin-db/tests/distributed_live.rs` substitutes a
+/// a few panic, and `crates/zeroship-data-v8/tests/distributed_live.rs` substitutes a
 /// default. The census on 2026-08-21 found 26 substituting a default, not one:
 /// eighteen in `crates/control` alone, all naming `zeroship_billing_test`
 /// regardless of what the file was about, and four in `crates/plugin-db`
@@ -205,18 +204,6 @@ fn redact_dsn(url: &str) -> &str {
     url
 }
 
-/// The one Redis every test in this workspace dials, or `None`.
-///
-/// `REDIS_TEST_URL` wins over the overlay, for the same reason `PG_TEST_URL`
-/// does.
-#[must_use]
-pub fn kv_url_opt() -> Option<String> {
-    crate::test_env!("REDIS_TEST_URL")
-        .filter(|url| !url.is_empty())
-        .or_else(|| load_opt().and_then(|config| config.worker.kv_url))
-        .filter(|url| !url.is_empty())
-}
-
 /// [`database_url_opt`], for a caller that cannot proceed without one.
 ///
 /// # Panics
@@ -228,23 +215,6 @@ pub fn database_url() -> String {
     database_url_opt().unwrap_or_else(|| {
         panic!(
             "no PostgreSQL: neither PG_TEST_URL nor control.database_url in {}.\n\
-             Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
-            overlay_path().display()
-        )
-    })
-}
-
-/// [`kv_url_opt`], for a caller that cannot proceed without one.
-///
-/// # Panics
-///
-/// When neither `REDIS_TEST_URL` nor the overlay supplies one, naming the
-/// provisioning command.
-#[must_use]
-pub fn kv_url() -> String {
-    kv_url_opt().unwrap_or_else(|| {
-        panic!(
-            "no Redis: neither REDIS_TEST_URL nor worker.kv_url in {}.\n\
              Provision the test backends and their configuration with:\n    {PROVISION_COMMAND}",
             overlay_path().display()
         )

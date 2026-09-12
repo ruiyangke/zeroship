@@ -3,12 +3,9 @@ name = "zeroship-auth"
 version = "0.1.0"
 edition = "2021"
 description = "zeroship auth service — login/consent UI, identity flows, native OIDC OP"
-# Every `tests/*.rs` file is a MODULE of `tests/main.rs`, not a target of its
-# own. Auto-discovery would link one executable per file - 52 of them, each one
-# a full static link of this crate and its dependency graph - so it is off, and
-# the single `[[test]]` below is the only integration-test target. Adding a
-# `tests/<name>.rs` therefore requires `mod <name>;` in `tests/main.rs`; see
-# that file's header for the numbers and for how to select a subset now.
+# Integration cases are modules of tests/main.rs. Disable auto-discovery to
+# avoid linking a separate executable for each module; register new modules
+# in that entry point so ordinary cargo test includes them.
 autotests = false
 
 [[package.metadata.zeroship-config.targets]]
@@ -33,7 +30,7 @@ zeroship-authz = { workspace = true }
 # suppression-list gate, and the relay forward/bounce + webhook payload types.
 zeroship-mailer = { workspace = true }
 compio = { workspace = true }
-compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 ntex = { workspace = true }
 cyper = { workspace = true }
 http = { workspace = true }
@@ -79,7 +76,8 @@ jsonwebtoken = { workspace = true }
 askama = "0.12"
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+tempfile = { workspace = true }
 # Auth unit tests include `#[compio::test]` live-PG tests. The polling fallback
 # keeps them runnable in sandboxes that block io_uring; production builds use
 # the normal workspace compio dependency above the dev-dependency boundary.
@@ -95,12 +93,6 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 # Capture structured retirement fields in the live retention test.
 tracing-subscriber = { workspace = true }
-# The live-database preflight. The lib tests in `src/oidc/authorization_code.rs`
-# talk to the shared platform database directly, so they need the same refusal
-# `zeroship-gateway`, `zeroship-authz` and `zeroship-control` already run: a
-# database behind the migration ledger is refused by name rather than surfacing
-# as a failing assertion.
-zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true

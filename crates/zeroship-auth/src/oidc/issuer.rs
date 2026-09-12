@@ -14,7 +14,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use zeroship_core::device_grant::PLATFORM_TOKEN_MAX_TTL_SECS;
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{with_advisory_lock, OP_SIGNING_KEY_BOOTSTRAP_LOCK};
 use crate::error::{AuthError, Result};
@@ -178,25 +178,19 @@ impl std::fmt::Debug for BrokerSecrets {
 impl BrokerSecrets {
     /// Construct a validated broker-secret set from raw master-secret bytes.
     pub fn new(current: Vec<u8>, previous: Option<Vec<u8>>) -> Result<Self> {
-        zeroship_core::auth::validate_broker_master(&current)
-            .map_err(AuthError::Config)?;
+        zeroship_core::auth::validate_broker_master(&current).map_err(AuthError::Config)?;
         if let Some(previous) = previous.as_ref() {
-            zeroship_core::auth::validate_broker_master(previous)
-                .map_err(AuthError::Config)?;
+            zeroship_core::auth::validate_broker_master(previous).map_err(AuthError::Config)?;
         }
         Ok(Self { current, previous })
     }
 
     /// Load and validate broker master secrets from owner-only files.
     pub fn from_files(current_file: &Path, previous_file: Option<&Path>) -> Result<Self> {
-        let current =
-            signing::load_broker_master_secret(current_file, "AUTH_BROKER_SECRET_FILE")?;
+        let current = signing::load_broker_master_secret(current_file, "AUTH_BROKER_SECRET_FILE")?;
         let previous = previous_file
             .map(|path| {
-                signing::load_broker_master_secret(
-                    path,
-                    "AUTH_BROKER_SECRET_PREVIOUS_FILE",
-                )
+                signing::load_broker_master_secret(path, "AUTH_BROKER_SECRET_PREVIOUS_FILE")
             })
             .transpose()?;
         Self::new(current, previous)
@@ -265,7 +259,9 @@ impl Issuer {
 
         let issuer = issuer.trim_end_matches('/').to_string();
         if issuer.is_empty() {
-            return Err(AuthError::Config("ZEROSHIP_AUTH_PUBLIC_URL / issuer is empty".into()));
+            return Err(AuthError::Config(
+                "ZEROSHIP_AUTH_PUBLIC_URL / issuer is empty".into(),
+            ));
         }
         let private_der = signing_key
             .to_pkcs8_der()
@@ -314,9 +310,9 @@ impl Issuer {
         let result = self.reconcile_active_key(db).await;
         match result {
             Ok(()) => {
-                db.execute("COMMIT", &[]).await.map_err(|e| {
-                    AuthError::Db(format!("signing_keys bootstrap commit: {e}"))
-                })?;
+                db.execute("COMMIT", &[])
+                    .await
+                    .map_err(|e| AuthError::Db(format!("signing_keys bootstrap commit: {e}")))?;
                 Ok(())
             }
             Err(err) => {
@@ -440,27 +436,6 @@ impl Issuer {
         self.register_signed_token(db, signed).await
     }
 
-    /// Sign an unregistered access token in debug-only fixture code.
-    ///
-    /// Protocol code must use [`Self::issue_access_token`] so a stale process
-    /// cannot release a token after its registry row becomes `retired`.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_access_token_fixture(
-        &self,
-        mint: &AccessTokenMint<'_>,
-    ) -> Result<String> {
-        let subject = self.pairwise_subject(mint.user_id, mint.sector);
-        self.build_access_token_with_subject(
-            &subject,
-            mint.audience,
-            mint.client_id,
-            mint.scopes,
-            mint.ttl_secs,
-        )
-        .map(|signed| signed.token)
-    }
-
     /// Issue an RFC 9068 access token for a platform principal. This is used by
     /// first-party resource servers such as control where `sub` is the global
     /// principal id, not an end-user pairwise app subject.
@@ -484,23 +459,6 @@ impl Issuer {
             mint.ttl_secs,
         )?;
         self.register_signed_token(db, signed).await
-    }
-
-    /// Sign an unregistered principal token in debug-only fixture code.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_principal_access_token_fixture(
-        &self,
-        mint: &PrincipalAccessTokenMint<'_>,
-    ) -> Result<String> {
-        self.build_access_token_with_subject(
-            mint.principal_id.as_str(),
-            mint.audience,
-            mint.client_id,
-            mint.scopes,
-            mint.ttl_secs,
-        )
-        .map(|signed| signed.token)
     }
 
     fn build_access_token_with_subject(
@@ -578,29 +536,6 @@ impl Issuer {
             mint.ttl_secs,
         )?;
         self.register_signed_token(db, signed).await
-    }
-
-    /// Sign an unregistered ID token in debug-only fixture code.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_id_token_fixture(&self, mint: &IdTokenMint<'_>) -> Result<String> {
-        let subject = self.pairwise_subject(mint.user_id, mint.sector);
-        self.build_id_token_with_subject(
-            &subject,
-            mint.client_id,
-            mint.sid,
-            mint.nonce,
-            mint.access_token,
-            mint.auth_time,
-            mint.amr,
-            mint.acr,
-            mint.email,
-            mint.email_verified,
-            mint.name,
-            mint.picture,
-            mint.ttl_secs,
-        )
-        .map(|signed| signed.token)
     }
 
     /// Issue an OIDC Core ID token for a platform principal. This is used only
@@ -731,16 +666,6 @@ impl Issuer {
         )?;
         let signed = self.build_logout_token(mint)?;
         self.register_signed_token(db, signed).await
-    }
-
-    /// Sign an unregistered logout token in debug-only fixture code.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_logout_token_fixture(
-        &self,
-        mint: &LogoutTokenMint<'_>,
-    ) -> Result<String> {
-        self.build_logout_token(mint).map(|signed| signed.token)
     }
 
     fn build_logout_token(&self, mint: &LogoutTokenMint<'_>) -> Result<SignedJwt> {

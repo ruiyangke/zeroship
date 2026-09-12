@@ -16,9 +16,9 @@ the foreign trait; it does not require a crate of its own. The old split was a
 leftover from when the adapter also held `platform.rs`, `cluster_lock.rs`, an IR
 author, a config parser and a binary, all of which were deleted before the fold.
 
-`zeroship-plugin-db` keeps a dev-dependency on `zeroship-migrate-server`
-(`crates/zeroship-plugin-db/Cargo.toml:135`). It is live, not vestigial:
-`crates/zeroship-plugin-db/tests/integration.rs:5325-5381` calls
+`zeroship-data-v8` keeps a dev-dependency on `zeroship-migrate-server`
+(`crates/zeroship-data-v8/Cargo.toml`). It is live, not vestigial:
+`crates/zeroship-data-v8/tests/integration.rs` calls
 `zeroship_migrate_server::provisioning::provision_workflow_journal_schema` and
 `WORKFLOW_OWNER_ROLE` so the workflow-journal test exercises the production
 provisioning statement rather than a `CREATE SCHEMA` of its own, which would

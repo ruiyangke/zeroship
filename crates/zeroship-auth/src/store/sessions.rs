@@ -1,14 +1,12 @@
 //! `zeroship.idp_sessions` CRUD — the `IdP` login session at `auth.zeroship.ai`.
 
 use compio_postgres::Client;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::entity_ids;
 use crate::error::{AuthError, Result};
 
-const CREATE_SESSION_SQL: &str =
-    "INSERT INTO zeroship.idp_sessions \
+const CREATE_SESSION_SQL: &str = "INSERT INTO zeroship.idp_sessions \
         (user_id, auth_method, amr, acr, credential_version, idle_expires_at, abs_expires_at) \
      SELECT id, $2, $3, $4, credential_version, \
             NOW() + ($5::text || ' minutes')::interval, \
@@ -24,8 +22,7 @@ const CREATE_SESSION_SQL: &str =
      RETURNING id, user_id, auth_method, amr, acr, credential_version, \
                idle_expires_at, abs_expires_at";
 
-const VALIDATE_SESSION_SQL: &str =
-    "UPDATE zeroship.idp_sessions \
+const VALIDATE_SESSION_SQL: &str = "UPDATE zeroship.idp_sessions \
      SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
      FROM zeroship.users \
      WHERE zeroship.idp_sessions.id = $1 \
@@ -57,7 +54,7 @@ pub struct Session {
 
 #[derive(Debug)]
 pub struct CreateSession<'a> {
-    pub user_id: &'a UserId,
+    pub user_id: UserId,
     pub auth_method: &'a str,
     pub amr: Vec<String>,
     pub acr: Option<&'a str>,
@@ -92,7 +89,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
         .ok_or_else(|| AuthError::Db("sessions create: empty return".into()))?;
     Ok(Session {
         id: row.get("id"),
-        user_id: entity_ids::user_id(row, "user_id")?,
+        user_id: crate::user_id::from_row(row, "user_id", "sessions create")?,
         auth_method: row.get("auth_method"),
         amr: row.get("amr"),
         acr: row.try_get("acr").ok(),
@@ -125,10 +122,7 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
     let rows = conn
         .query(
             VALIDATE_SESSION_SQL,
-            &[
-                &id,
-                &crate::sessions::login::IDLE_MINUTES.to_string(),
-            ],
+            &[&id, &crate::sessions::login::IDLE_MINUTES.to_string()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("sessions validate: {e}")))?;
@@ -136,7 +130,7 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
         .map(|row| {
             Ok(Session {
                 id: row.get("id"),
-                user_id: entity_ids::user_id(row, "user_id")?,
+                user_id: crate::user_id::from_row(row, "user_id", "sessions validate")?,
                 auth_method: row.get("auth_method"),
                 amr: row.get("amr"),
                 acr: row.try_get("acr").ok(),

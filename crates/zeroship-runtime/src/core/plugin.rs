@@ -65,14 +65,9 @@ pub trait NativePlugin: Send + Sync + 'static {
     /// object while keeping its pre-existing flat callbacks working
     /// unchanged.
     ///
-    /// Plumbing for the macro-driven DB namespace (Stage 1 of the
-    /// `runtime-macros` refactor): `DbPlugin::build_instance` mints a
-    /// `Db` v8_class instance, the runtime overlays the 27 existing
-    /// `zeroship.db.*` callbacks on top, and SDK callers see no
-    /// behavioural change. Future-facing methods (`collection`,
-    /// `subscribe` returning a `Subscription` wrapper) are declared as
-    /// `#[v8_method]` on the v8_class and don't have to be wired through
-    /// `NativeRegistrar`.
+    /// `DbPlugin::build_instance` uses this to mint the `Db` v8_class
+    /// instance. Methods declared on that class do not need parallel
+    /// `NativeRegistrar` entries.
     fn build_instance<'s>(
         &self,
         _scope: &mut v8::PinScope<'s, '_>,
@@ -81,17 +76,19 @@ pub trait NativePlugin: Send + Sync + 'static {
         None
     }
 
-    /// Bind the runtime's fully validated schema descriptor before creator
-    /// modules evaluate.
+    /// Bind the runtime's fully validated schema descriptor to this plugin's
+    /// namespace before creator modules evaluate.
     ///
     /// The hook is fallible so a plugin can reject a descriptor without
     /// publishing partial native state. `None` is a real schema-less runtime,
     /// not a validation fallback. The default is a no-op for plugins that do
-    /// not consume schema metadata.
-    fn bind_runtime_descriptor(
+    /// not consume schema metadata. `namespace` is the same object published
+    /// under `env.{namespace}`.
+    fn bind_runtime_descriptor<'s>(
         &self,
-        _scope: &mut v8::PinScope<'_, '_>,
+        _scope: &mut v8::PinScope<'s, '_>,
         _app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
         _descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         Ok(())
@@ -105,6 +102,26 @@ pub(crate) fn runtime_app_id(scope: &mut v8::PinScope<'_, '_>) -> String {
         .get_slot::<crate::state::SharedState>()
         .and_then(|state| state.borrow().env_vars.get("APP_ID").cloned())
         .unwrap_or_else(|| "default".to_string())
+}
+
+/// Return the namespace object already built for a plugin on this isolate.
+pub(crate) fn runtime_plugin_namespace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    namespace: &str,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let env_global = scope
+        .get_slot::<crate::state::SharedState>()
+        .and_then(|state| state.borrow().env_obj.clone())
+        .ok_or_else(|| "runtime: plugin namespaces are not initialized".to_string())?;
+    let env = v8::Local::new(scope, env_global);
+    let key = v8::String::new(scope, namespace)
+        .ok_or_else(|| format!("runtime: could not allocate plugin namespace {namespace:?}"))?;
+    let value = env
+        .get(scope, key.into())
+        .ok_or_else(|| format!("runtime: plugin namespace {namespace:?} is missing"))?;
+    value
+        .try_into()
+        .map_err(|_| format!("runtime: plugin namespace {namespace:?} is not an object"))
 }
 
 /// Collects function registrations from a plugin.

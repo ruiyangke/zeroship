@@ -21,16 +21,52 @@ const g = globalThis as typeof globalThis & {
   __zsWorkflowDispatch: WorkflowDispatch;
 };
 
+test("blob replay reads through the bound native run and memoizes the bytes", async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "__zs_env");
+  let reads = 0;
+  Object.defineProperty(globalThis, "__zs_env", { configurable: true, value: () => ({
+    workflows: { WorkflowUnderTest: { get(runId: string) {
+      assert.equal(runId, "run_0000000000000000000000001");
+      return { async readStepOutput(name: string, occurrence: number) {
+        assert.equal(name, "payload");
+        assert.equal(occurrence, 0);
+        reads++;
+        return new TextEncoder().encode('{"saved":true}');
+      } };
+    } } },
+  }) });
+  try {
+    class WorkflowUnderTest {
+      async run(_trigger: unknown, step: any) {
+        const output = await step.run("payload", () => { throw new Error("replayed callback"); });
+        const value = await output.json();
+        await output.bytes();
+        return value;
+      }
+    }
+    const result = await g.__zsWorkflowDispatch({ WorkflowUnderTest }, envelope([{
+      ordinal: 0, name: "payload", kind: "run", state: "completed",
+      outputRef: { hash: "a".repeat(64), size: 14, contentType: "application/json" },
+    }]));
+    assert.equal(result.kind, "RunCompleted");
+    assert.deepEqual(result.output, { saved: true });
+    assert.equal(reads, 1);
+  } finally {
+    if (descriptor) Object.defineProperty(globalThis, "__zs_env", descriptor);
+    else Reflect.deleteProperty(globalThis, "__zs_env");
+  }
+});
+
 function envelope(journal: Array<Record<string, unknown>> = []): Record<string, unknown> {
   return {
-    runId: "run_0123456789ABCDEFGHIJKL",
+    runId: "run_0000000000000000000000001",
     nonce: "nonce_1",
     workflowName: "WorkflowUnderTest",
     input: { orderId: "ord_1" },
     trigger: {
       input: { orderId: "ord_1" },
       startedAt: "2026-07-05T00:00:00.000Z",
-      runId: "run_0123456789ABCDEFGHIJKL",
+      runId: "run_0000000000000000000000001",
       workflowName: "WorkflowUnderTest",
     },
     journal,

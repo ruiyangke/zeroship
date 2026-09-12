@@ -2,7 +2,7 @@
 name = "zeroship-id"
 version = "0.1.0"
 edition = "2021"
-description = "The platform's entity-id vocabulary: the base62 typed-id codec, the declare_entity_id macro, and the id types every service and artifact names. A LEAF - no database driver, no v8, no runtime, no crypto, no HTTP."
+description = "The platform's entity-id vocabulary: the base36 typed-id codec, the declare_entity_id macro, and the id types every service and artifact names. A LEAF - no database driver, no v8, no runtime, no crypto, no HTTP."
 
 [dependencies]
 # The 128 bits every typed id encodes. UUIDv7 supplies the creation-ordered

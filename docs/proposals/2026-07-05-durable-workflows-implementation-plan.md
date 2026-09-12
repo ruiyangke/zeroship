@@ -1,6 +1,6 @@
 # Durable workflows — implementation plan (approved design → shipped & launched)
 
-- **Status:** PLAN (companion to `2026-07-05-durable-workflows-design.md`; commits with the implementing PR-train per `feedback_proposal_workflow`).
+- **Status:** Superseded. The [workflow server design](2026-09-11-workflow-server.md#implementation-and-verification) owns the current implementation plan. Instructions below describe the historical control-plane implementation.
 - **Date:** 2026-07-05
 - **Design base:** the dual-reviewed design doc. Section references below use the **design doc's own numbering** (§15 build plan, §16 residual limits & open questions, §17 blob rail, §18 ingress/broadcast, §20 children, §21 compensation, §22 restart).
 - **Scope stance:** **full-featured day-1** — every feature in the design ships in this train. No v1/v2 deferral. Pre-launch, no back-compat: DDL and wire shapes land once, in the create scripts, complete.

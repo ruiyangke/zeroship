@@ -1,0 +1,18 @@
+[profile.data]
+fail-fast = false
+retries = 0
+test-threads = 8
+# Leave time for the testcontainers watchdog to stop and remove PostgreSQL.
+slow-timeout = { period = "60s", terminate-after = 5, grace-period = "30s" }
+
+# Database tests own independent PostgreSQL containers. Bound concurrent server
+# startup and V8 memory use while pure SQL and wire tests run concurrently.
+[test-groups.data-database]
+max-threads = 4
+
+[[profile.default.overrides]]
+filter = 'package(zeroship-data-orm) | package(zeroship-data-v8) | package(zeroship-data-cdc-server)'
+test-group = 'data-database'
+
+[profile.data.junit]
+path = "junit.xml"

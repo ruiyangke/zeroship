@@ -58,9 +58,9 @@ struct MagicFixture {
 
 impl MagicFixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
+    async fn boot() -> Self {
         let db_url =
-            zeroship_core::config::test_database_url_opt()?;
+            crate::common::test_database_url();
 
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
@@ -110,13 +110,13 @@ impl MagicFixture {
         .await;
         let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-        Some(Self {
+        Self {
             srv,
             auth_base,
             pg,
             http: cyper::Client::new(),
             mailer,
-        })
+        }
     }
 
     fn magic_url(&self, path_and_query: &str) -> String {
@@ -282,10 +282,7 @@ async fn assert_magic_start_rejects_invalid_return_to(fx: &MagicFixture, bad_ret
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_same_device_native_resumes_authorize_without_accept_login() {
-    let Some(fx) = MagicFixture::boot().await else {
-        zeroship_test_support::skip("[e2e_magic_native same-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = MagicFixture::boot().await;
     let email = format!("magic-native-same-{}@zeroship.test", Uuid::new_v4().simple());
     let return_to = native_authorize_return_to();
 
@@ -340,10 +337,7 @@ async fn magic_same_device_native_resumes_authorize_without_accept_login() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
-    let Some(fx) = MagicFixture::boot().await else {
-        zeroship_test_support::skip("[e2e_magic_native cross-device] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = MagicFixture::boot().await;
     let email = format!("magic-native-cross-{}@zeroship.test", Uuid::new_v4().simple());
     let return_to = native_authorize_return_to();
 
@@ -429,10 +423,7 @@ async fn magic_cross_device_native_resumes_authorize_without_accept_login() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_start_rejects_open_redirect_return_to_without_persisting() {
-    let Some(fx) = MagicFixture::boot().await else {
-        zeroship_test_support::skip("[e2e_magic_native open-redirect] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = MagicFixture::boot().await;
 
     for bad_return_to in ["//evil.com", "https://evil.com"] {
         let email = format!(
@@ -476,10 +467,7 @@ async fn magic_start_rejects_open_redirect_return_to_without_persisting() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn magic_start_rejects_wrong_path_and_crlf_return_to_without_persisting() {
-    let Some(fx) = MagicFixture::boot().await else {
-        zeroship_test_support::skip("[e2e_magic_native invalid-return-to] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = MagicFixture::boot().await;
 
     for bad_return_to in [
         "/me",

@@ -21,7 +21,6 @@ use std::sync::Arc;
 
 use ntex::web::{self, test};
 use uuid::Uuid;
-use zeroship_core::user_id::UserId;
 use zeroship_mailer::Mailer;
 
 use common::test_auth_config;
@@ -42,15 +41,14 @@ const CSRF_TOKEN: &str = "csrf-enroll-reauth";
 struct EnrollFixture {
     cfg: Arc<AuthConfig>,
     pg: Arc<compio_postgres::Client>,
-    user_id: UserId,
+    user_id: zeroship_core::UserId,
     session_id: Uuid,
 }
 
 impl EnrollFixture {
     #[allow(clippy::future_not_send)]
     async fn boot(label: &str) -> Self {
-        let db_url = zeroship_core::config::test_database_url_opt()
-            .expect("a test database is required for totp_enroll_reauth_test (set PG_TEST_URL or run tests/provision_test_backends.sh)");
+        let db_url = crate::common::test_database_url();
         let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("connect pg");
@@ -76,7 +74,7 @@ impl EnrollFixture {
         let session = sessions::create(
             &pg,
             &CreateSession {
-                user_id: &user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".to_owned()],
                 acr: None,
@@ -187,7 +185,9 @@ impl EnrollFixture {
     /// was not) replaced by the request under test.
     #[allow(clippy::future_not_send)]
     async fn stored_secret(&self) -> Option<Vec<u8>> {
-        let cred = totp_store::find(&self.pg, &self.user_id).await.expect("find")?;
+        let cred = totp_store::find(&self.pg, &self.user_id)
+            .await
+            .expect("find")?;
         Some(
             totp::decrypt_secret(&self.key(), &self.user_id, &cred.encrypted_secret)
                 .expect("decrypt stored secret"),
@@ -263,7 +263,10 @@ impl EnrollFixture {
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }
@@ -291,7 +294,10 @@ fn current_code(secret: &[u8]) -> String {
 async fn enroll_without_reauth_does_not_disarm_a_confirmed_credential() {
     let fx = EnrollFixture::boot("nodisarm").await;
     let original = fx.seed_confirmed().await;
-    let confirmed_before = fx.confirmed_at().await.expect("seeded credential is confirmed");
+    let confirmed_before = fx
+        .confirmed_at()
+        .await
+        .expect("seeded credential is confirmed");
     assert!(fx.is_enabled().await, "fixture must start with 2FA armed");
 
     let (status, body) = fx.post_enroll(None, None).await;
@@ -338,7 +344,10 @@ async fn enroll_with_password_reauth_rotates_a_confirmed_credential() {
 
     let (status, body) = fx.post_enroll(None, Some(FIXTURE_PASSWORD)).await;
 
-    assert_eq!(status, 200, "password re-auth must be accepted, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "password re-auth must be accepted, got {status} {body}"
+    );
     assert!(
         body["otpauth_uri"]
             .as_str()
@@ -370,7 +379,10 @@ async fn enroll_with_totp_code_reauth_rotates_a_confirmed_credential() {
 
     let (status, body) = fx.post_enroll(Some(&code), None).await;
 
-    assert_eq!(status, 200, "TOTP-code re-auth must be accepted, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "TOTP-code re-auth must be accepted, got {status} {body}"
+    );
     assert!(
         !fx.is_enabled().await,
         "an authorised re-enroll resets the credential to pending"
@@ -393,7 +405,10 @@ async fn enroll_with_wrong_password_is_refused() {
 
     let (status, body) = fx.post_enroll(None, Some("not-the-password")).await;
 
-    assert_eq!(status, 401, "a wrong password must be refused, got {status} {body}");
+    assert_eq!(
+        status, 401,
+        "a wrong password must be refused, got {status} {body}"
+    );
     assert!(fx.is_enabled().await, "credential stays armed");
     assert_eq!(
         fx.stored_secret().await.as_deref(),
@@ -412,13 +427,19 @@ async fn enroll_with_wrong_password_is_refused() {
 async fn first_enrollment_needs_no_reauth() {
     let fx = EnrollFixture::boot("first").await;
     assert!(
-        totp_store::find(&fx.pg, &fx.user_id).await.expect("find").is_none(),
+        totp_store::find(&fx.pg, &fx.user_id)
+            .await
+            .expect("find")
+            .is_none(),
         "fixture starts with no credential"
     );
 
     let (status, body) = fx.post_enroll(None, None).await;
 
-    assert_eq!(status, 200, "first enrollment must be frictionless, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "first enrollment must be frictionless, got {status} {body}"
+    );
     assert_eq!(body["confirmed"], serde_json::Value::Bool(false));
     let cred = totp_store::find(&fx.pg, &fx.user_id)
         .await
@@ -437,7 +458,10 @@ async fn first_enrollment_needs_no_reauth() {
 async fn re_enrolling_over_a_pending_credential_needs_no_reauth() {
     let fx = EnrollFixture::boot("pending").await;
     let first = fx.seed_pending().await;
-    assert!(!fx.is_enabled().await, "a pending credential does not gate login");
+    assert!(
+        !fx.is_enabled().await,
+        "a pending credential does not gate login"
+    );
 
     let (status, body) = fx.post_enroll(None, None).await;
 
@@ -450,7 +474,10 @@ async fn re_enrolling_over_a_pending_credential_needs_no_reauth() {
         Some(first.as_slice()),
         "the pending secret is replaced"
     );
-    assert!(!fx.is_enabled().await, "still pending after the replacement");
+    assert!(
+        !fx.is_enabled().await,
+        "still pending after the replacement"
+    );
 
     fx.cleanup().await;
 }

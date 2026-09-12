@@ -26,7 +26,6 @@ futures = { workspace = true }
 zeroship-id = { workspace = true }
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }
 
 [lints]

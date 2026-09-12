@@ -25,8 +25,8 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::password;
 use zeroship_auth::server;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::store::users;
+use zeroship_core::config::{Secret, SourceKind};
 
 use crate::common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
@@ -75,13 +75,12 @@ struct NativeGithubFixture {
 
 impl NativeGithubFixture {
     #[allow(clippy::future_not_send)]
-    async fn boot(mock: &MockProvider) -> Option<Self> {
-        let db_url = zeroship_core::config::test_database_url_opt()?;
+    async fn boot(mock: &MockProvider) -> Self {
+        let db_url = crate::common::test_database_url();
 
-        let (pg_client, pg_connection) =
-            compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                .await
-                .expect("connect pg");
+        let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_connection.run().await {
                 eprintln!("[e2e_github native] pg connection driver: {e}");
@@ -131,12 +130,12 @@ impl NativeGithubFixture {
         .await;
         let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-        Some(Self {
+        Self {
             auth_base,
             pg,
             http: cyper::Client::new(),
             srv,
-        })
+        }
     }
 
     #[allow(clippy::future_not_send)]
@@ -165,10 +164,7 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
     };
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
 
-    let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        zeroship_test_support::skip("[e2e_github native callback] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = NativeGithubFixture::boot(&mock).await;
 
     let base_return_to = native_authorize_return_to();
     let return_to_after_prompt = format!("{base_return_to}&idp_hint=github");
@@ -246,8 +242,8 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         .await
         .expect("user select");
     assert_eq!(user_rows.len(), 1, "native callback creates one user row");
-    let user_id = zeroship_core::user_id::UserId::parse(user_rows[0].get::<_, &str>("id"))
-        .expect("the created user row carries a typed user id");
+    let user_id = zeroship_core::UserId::parse(&user_rows[0].get::<_, String>("id"))
+        .expect("canonical user id");
 
     fx.pg
         .execute(
@@ -264,7 +260,10 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         .await
         .ok();
     fx.pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await
         .ok();
     fx.cleanup().await;
@@ -288,10 +287,7 @@ async fn github_native_confirmation_bounce_carries_return_to() {
     };
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
 
-    let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        zeroship_test_support::skip("[e2e_github native link] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = NativeGithubFixture::boot(&mock).await;
 
     let phc = password::hash("existing password").expect("hash password");
     let existing = users::create(&fx.pg, &test_email, "Existing Native Link", Some(&phc))
@@ -372,7 +368,10 @@ async fn github_native_confirmation_bounce_carries_return_to() {
         .await
         .ok();
     fx.pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&existing.id.as_str()])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&existing.id.as_str()],
+        )
         .await
         .ok();
     fx.cleanup().await;
@@ -412,10 +411,7 @@ async fn github_federation_rejects_noreply_only_email() {
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
     eprintln!("[e2e_github noreply] mock provider at {}", mock.base);
 
-    let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        zeroship_test_support::skip("[e2e_github noreply] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = NativeGithubFixture::boot(&mock).await;
     eprintln!("[e2e_github noreply] auth server at {}", fx.auth_base);
 
     // Drive start → mock /authorize → /callback.
@@ -475,8 +471,7 @@ async fn github_federation_rejects_noreply_only_email() {
     // the audit log instead (asserted below). So the body carries the
     // generic copy/code, not a github-specific or "sign-in failed" string.
     assert!(
-        body.to_lowercase().contains("please try again")
-            || body.contains("please_try_again"),
+        body.to_lowercase().contains("please try again") || body.contains("please_try_again"),
         "picker-failure path must render the generic please-try-again error page: body={body}"
     );
 
@@ -543,10 +538,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     let mock = MockProvider::start(ProviderMode::GitHub, mock_user.clone()).await;
     eprintln!("[e2e_github unverified] mock provider at {}", mock.base);
 
-    let Some(fx) = NativeGithubFixture::boot(&mock).await else {
-        zeroship_test_support::skip("[e2e_github unverified] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = NativeGithubFixture::boot(&mock).await;
     eprintln!("[e2e_github unverified] auth server at {}", fx.auth_base);
 
     let return_to = native_authorize_return_to();
@@ -600,8 +592,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     // not leaked to the browser; it lives in the audit log. See the noreply
     // test for the rationale.
     assert!(
-        body.to_lowercase().contains("please try again")
-            || body.contains("please_try_again"),
+        body.to_lowercase().contains("please try again") || body.contains("please_try_again"),
         "unverified-primary path must render the generic please-try-again error page: body={body}"
     );
 

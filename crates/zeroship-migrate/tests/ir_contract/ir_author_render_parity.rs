@@ -24,24 +24,9 @@ use zeroship_migrate::model::ir::{
 };
 use zeroship_migrate::render::lower::IrAuthor;
 use zeroship_migrate::{
-    resolve_create_table_policy, CollectionDescriptor, DeclarativeAuthor, DesiredSchema,
-    FieldDescriptor, IndexDescriptor, LiveSchema, SchemaSnapshot, TableSnapshot,
+    CollectionDescriptor, DeclarativeAuthor, DesiredSchema, FieldDescriptor, IndexDescriptor,
+    LiveSchema, SchemaSnapshot, resolve_create_table_policy,
 };
-
-/// A live `TableSnapshot` placeholder for an FK target — only its presence as a
-/// live key matters to the differ's inline-vs-defer decision.
-fn empty_table_snapshot() -> TableSnapshot {
-    TableSnapshot {
-        columns: vec![],
-        indexes: vec![],
-        constraints: vec![],
-        runtime_options: Default::default(),
-        attributes: Default::default(),
-        partition_by: None,
-        comment: None,
-        stored_create_sql: None,
-    }
-}
 
 fn idx_col(name: &str) -> IndexElement {
     IndexElement::Column {
@@ -133,6 +118,14 @@ fn ir_pairs_for(
     live: &BTreeSet<String>,
     dialect: &zeroship_migrate::DialectId,
 ) -> Vec<(String, Option<String>)> {
+    ir_pairs_with_live(ops, &LiveSchema::from(live), dialect)
+}
+
+fn ir_pairs_with_live(
+    ops: Vec<Op>,
+    live: &LiveSchema,
+    dialect: &zeroship_migrate::DialectId,
+) -> Vec<(String, Option<String>)> {
     let ir = MigrationIr {
         inverse_ops: None,
         irreversible: None,
@@ -155,9 +148,7 @@ fn ir_pairs_for(
         dialect,
         &support::confined_charter(),
     );
-    let migs = author
-        .lower(&ir, &LiveSchema::from(live))
-        .expect("ir lower");
+    let migs = author.lower(&ir, live).expect("ir lower");
     sql_pairs(&migs)
 }
 
@@ -286,8 +277,10 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         owner_app: OWNER.into(),
         fields: vec![FieldDescriptor {
             name: "author".into(),
-            ty: "ref".into(),
+            ty: "string".into(),
+            max_length: Some(255),
             references: Some("authors".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -303,12 +296,11 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
+    let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired snapshot");
     let mut live_snapshot = SchemaSnapshot::default();
     live_snapshot
         .tables
-        .insert("authors".into(), empty_table_snapshot());
-
-    let desired = test_desired_snapshot(SCHEMA, &[posts, authors]).expect("desired snapshot");
+        .insert("authors".into(), desired.snapshot.tables["authors"].clone());
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
@@ -333,14 +325,18 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
-            ty: ColType::Ref {
-                references: "authors".into(),
-            },
+            ty: ColType::String { length: 255 },
             nullable: None,
             default: None,
             unique: None,
             value_format: None,
-            references: None,
+            references: Some(zeroship_migrate::model::ir::ColumnReference {
+                table: "authors".into(),
+                column: "id".into(),
+                on_delete: None,
+                on_update: None,
+                name: None,
+            }),
             id_prefix: None,
             collation: None,
             case_sensitive: None,
@@ -359,13 +355,10 @@ fn create_table_with_live_fk_render_is_byte_identical_pg() {
         schema: None,
         existence_guard: None,
     }];
-    let mut live = BTreeSet::new();
-    live.insert("authors".to_string());
-    let ir = ir_pairs(ops, &live);
+    let live = LiveSchema::from_catalog_snapshot(live_snapshot, OWNER);
+    let ir = ir_pairs_with_live(ops, &live, &zeroship_migrate_postgres::DIALECT);
 
-    // Compare only the `posts`-related render (the empty live `authors` snapshot
-    // makes the differ also backfill `authors`' system fields — a test-setup
-    // artifact unrelated to the createTable-with-FK render we are pinning).
+    // Compare the statements that create the referencing table.
     let decl_posts: Vec<_> = decl
         .into_iter()
         .filter(|(up, _)| up.contains("posts"))
@@ -397,7 +390,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_pg() {
         fields: vec![FieldDescriptor {
             name: "secret".into(),
             ty: "string".into(),
-            encrypted: Some(serde_json::json!({})),
+            encrypted: Some(true),
             // Mirror the SDK's `t.encrypted()` normalized shape: encrypted columns
             // carry the fail-safe full/pii mask unless explicitly opted out.
             mask: Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
@@ -898,6 +891,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("authors".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -910,6 +904,7 @@ fn add_constraint_fk_render_is_byte_identical_pg() {
             name: "pinned".into(),
             ty: "ref".into(),
             references: Some("posts".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -1524,8 +1519,10 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         owner_app: OWNER.into(),
         fields: vec![FieldDescriptor {
             name: "author".into(),
-            ty: "ref".into(),
+            ty: "string".into(),
+            max_length: Some(255),
             references: Some("authors".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -1541,14 +1538,16 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         indexes: vec![],
         runtime_options: Default::default(),
     };
+    let desired = test_desired_snapshot_for_dialect(
+        SCHEMA,
+        &[posts, authors],
+        &zeroship_migrate_sqlite::DIALECT,
+    )
+    .expect("desired snapshot (sqlite)");
     let mut live_snapshot = SchemaSnapshot::default();
     live_snapshot
         .tables
-        .insert("authors".into(), empty_table_snapshot());
-
-    let desired =
-        test_desired_snapshot_for_dialect(SCHEMA, &[posts, authors], &zeroship_migrate_sqlite::DIALECT)
-            .expect("desired snapshot (sqlite)");
+        .insert("authors".into(), desired.snapshot.tables["authors"].clone());
     let mut live_ownership = HashMap::new();
     live_ownership.insert("authors".to_string(), OWNER.to_string());
     let author = DeclarativeAuthor::new_for_dialect(
@@ -1573,14 +1572,18 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         name: "posts".into(),
         columns: vec![IrColumn {
             name: "author".into(),
-            ty: ColType::Ref {
-                references: "authors".into(),
-            },
+            ty: ColType::String { length: 255 },
             nullable: None,
             default: None,
             unique: None,
             value_format: None,
-            references: None,
+            references: Some(zeroship_migrate::model::ir::ColumnReference {
+                table: "authors".into(),
+                column: "id".into(),
+                on_delete: None,
+                on_update: None,
+                name: None,
+            }),
             id_prefix: None,
             collation: None,
             case_sensitive: None,
@@ -1599,13 +1602,10 @@ fn create_table_with_live_fk_render_is_byte_identical_sqlite() {
         schema: None,
         existence_guard: None,
     }];
-    let mut live = BTreeSet::new();
-    live.insert("authors".to_string());
-    let ir = ir_pairs_for(ops, &live, &zeroship_migrate_sqlite::DIALECT);
+    let live = LiveSchema::from_catalog_snapshot(live_snapshot, OWNER);
+    let ir = ir_pairs_with_live(ops, &live, &zeroship_migrate_sqlite::DIALECT);
 
-    // Compare only the `posts`-related render (the empty live `authors` snapshot
-    // makes the differ also backfill `authors`' system fields — a test-setup
-    // artifact unrelated to the createTable-with-FK render we are pinning).
+    // Compare the statements that create the referencing table.
     let decl_posts: Vec<_> = decl
         .into_iter()
         .filter(|(up, _)| up.contains("posts"))
@@ -1634,7 +1634,7 @@ fn create_table_with_encrypted_column_render_is_byte_identical_sqlite() {
         fields: vec![FieldDescriptor {
             name: "secret".into(),
             ty: "string".into(),
-            encrypted: Some(serde_json::json!({})),
+            encrypted: Some(true),
             mask: Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
             ..Default::default()
         }],

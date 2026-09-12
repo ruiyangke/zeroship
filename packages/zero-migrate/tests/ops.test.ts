@@ -2638,7 +2638,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
       },
       checks: [
         check("pkce_method_check", (col) => col("pkce_method").eq("S256")),
-        { name: "user_id_fmt", expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") },
+        { name: "user_id_fmt", expr: (col) => col("user_id").regex("^usr_[0-9a-z]{25}$") },
         check("kind_ok", (col) => col("kind").in(["a", "b", "c"])),
         { name: "data_size", expr: (col) => col("data").columnSize().lt(262144) },
         check("total_matches", (col) => col("total_cents").eq(col("subtotal_cents").sub(col("credit_cents")))),
@@ -2662,7 +2662,7 @@ test("check helper and expression helpers build the frozen Expr IR nodes", () =>
   assert.deepEqual(checks[1], {
     node: "regexMatch",
     expr: { node: "colRef", name: "user_id" },
-    pattern: "^usr_[0-9A-Za-z]{20,40}$",
+    pattern: "^usr_[0-9a-z]{25}$",
   });
   assert.deepEqual(checks[2], {
     node: "inList",

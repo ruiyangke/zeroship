@@ -5,7 +5,8 @@
 //! the `/webhooks/postmark` route (with config + DB state), then POSTs
 //! representative payloads via `cyper::Client`.
 //!
-//! Skips silently when no test database is configured (CI without PG fixture).
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 //!
 //! Note: every `compio_postgres::connect` returns `(Client, Connection)`
 //! and the connection driver MUST be `spawn`+`detach`ed on the compio
@@ -45,8 +46,10 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
     cfg
 }
 
-/// Boot PG + register the `/webhooks/postmark` route. Returns `None` if
-/// no test database is configured (test then logs `skip` and exits).
+/// Boot PG + register the `/webhooks/postmark` route.
+///
+/// The DSN comes from [`crate::common::test_database_url`], which refuses the
+/// run when there is no database rather than letting the route go unexercised.
 //
 // ntex's `TestServer` future is intentionally `!Send` (holds per-worker
 // state in `Rc`s); the test helper inherits that.
@@ -54,8 +57,8 @@ fn test_cfg(user: Option<&str>, pass: Option<&str>) -> AuthConfig {
 async fn boot(
     user: Option<&str>,
     pass: Option<&str>,
-) -> Option<(ntex::web::test::TestServer, Arc<compio_postgres::Client>)> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+) -> (ntex::web::test::TestServer, Arc<compio_postgres::Client>) {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -82,15 +85,12 @@ async fn boot(
         }
     })
     .await;
-    Some((srv, pg))
+    (srv, pg)
 }
 
 #[ntex::test]
 async fn postmark_webhook_handles_hard_bounce() {
-    let Some((srv, pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, pg) = boot(Some("hookuser"), Some("hookpass")).await;
 
     let email = format!("bounce-{}@zeroship.test", Uuid::new_v4().simple());
     let auth = format!("Basic {}", STANDARD.encode("hookuser:hookpass"));
@@ -138,10 +138,7 @@ async fn postmark_webhook_handles_hard_bounce() {
 
 #[ntex::test]
 async fn postmark_webhook_rejects_bad_auth() {
-    let Some((srv, _pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, _pg) = boot(Some("hookuser"), Some("hookpass")).await;
 
     let http = cyper::Client::new();
 
@@ -185,10 +182,7 @@ async fn postmark_webhook_rejects_bad_auth() {
     // Case 3 — credentials not configured server-side (separate boot
     //         with `None`/`None`). Even a correct-looking header must 401
     //         because the server has nothing to compare against.
-    let Some((srv_unconfigured, _pg2)) = boot(None, None).await else {
-        zeroship_test_support::skip("skip second-stage (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv_unconfigured, _pg2) = boot(None, None).await;
     let some_auth = format!("Basic {}", STANDARD.encode("anyone:anything"));
     let resp = http
         .request(
@@ -217,10 +211,7 @@ async fn postmark_webhook_rejects_bad_auth() {
 
 #[ntex::test]
 async fn postmark_webhook_handles_spam_complaint() {
-    let Some((srv, pg)) = boot(Some("hookuser"), Some("hookpass")).await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, pg) = boot(Some("hookuser"), Some("hookpass")).await;
 
     let email = format!("complaint-{}@zeroship.test", Uuid::new_v4().simple());
     let auth = format!("Basic {}", STANDARD.encode("hookuser:hookpass"));

@@ -5,22 +5,23 @@
 # WHY THIS EXISTS
 # ---------------
 # The auth tests resolve their database from the generated test overlay
-# (deploy/ops/zeroship.test.toml, or PG_TEST_URL overriding it) and return
-# early when neither supplies one. Cargo captures test output by default, so a
-# skipped test is indistinguishable from a passing one: `cargo test -p
-# zeroship-auth` reports success while test bodies do nothing at all. A suite
-# that passes because it never ran is worse than a red one, because it is
-# trusted.
+# (deploy/ops/zeroship.test.toml, or PG_TEST_URL overriding it). They USED TO
+# return early when neither supplied one, and cargo captures test output by
+# default, so a skipped test was indistinguishable from a passing one: `cargo
+# test -p zeroship-auth` reported success while test bodies did nothing at all.
+# A suite that passes because it never ran is worse than a red one, because it
+# is trusted.
 #
-# This script reports the real passed and skipped counts on every run, so no
-# figure is written down here to go stale.
+# THAT IS NOW THE TESTS' OWN JOB, not this script's. A test that cannot reach
+# its backend FAILS, naming what was missing and the command that provisions it;
+# there is no announcement to count, no census here that counts one, and no
+# allowlist that excuses one. This script provisions an isolated database and
+# points the tests at it. What it still rules on afterwards is the floor below -
+# the one thing a run cannot tell you about itself, because a suite that
+# silently stopped being built prints nothing at all rather than a failure.
 #
-# This script provisions an isolated database, points the tests at it, and then
-# checks that they ACTUALLY RAN. If any test announces that it skipped, the run
-# fails - a missing database can never masquerade as a pass. The one exception
-# is an allowlist further down that names each tolerated skip and why; it is
-# there so a deferred decision reads as a deferred decision rather than as a
-# blind spot in the check.
+# It reports the real passed count on every run, so no figure is written down
+# here to go stale.
 #
 # USAGE
 # -----
@@ -40,77 +41,19 @@
 # it in; an ambient variable that silently redirects a gate is how gates get
 # silently disabled.
 #
-# TWO RUNS AT ONCE ARE GREEN, AND HERE IS WHAT IT TOOK.
-# A shared database shares DATABASE-SCOPED SINGLETONS, which no migration hash
-# can see (tests/lib/suite_db.sh says why). Running two suites together is the
-# only instrument that finds them, and it found these:
-#
-#   the active OP signing key   3 fixtures published a constant-seed key per
-#                               test; a peer run retired it and the republish
-#                               died. 96 failures -> 0.
-#   5 rate-limit bucket keys    a shared client ip, or none at all, so a peer
-#                               drained the bucket and a 429 arrived where the
-#                               test asserts 401 / 303 / 200 / 302. The last of
-#                               them was `reset_ip:0.0.0.0`, shared by the three
-#                               /reset POSTs in password_reset_test.
-#   4 globally-named DDL        triggers and a CHECK constraint installed on
-#     objects on shared tables  zeroship.{users,magic_links,magic_completions,
-#                               email_verifications}. Per-run NAMES and a WHEN
-#                               clause (or predicate) naming the run's own row;
-#                               the model is signing_key_retention_test.rs:643,
-#                               which has done both since it was written.
-#
-# MEASURED 2026-08-20 on this cluster, THREE pairs run one after another, each
-# pair two whole gates started together on the ONE shared database:
-#
-#   pair 1   641/0 and 641/0    277s of 279s overlapping
-#   pair 2   641/0 and 641/0    286s of 303s
-#   pair 3   641/0 and 641/0    304s of 316s
-#
-# and the one-variable control, the same two runs against a database EACH:
-#
-#   641/0 and 641/0             265s of 281s
-#
-# so the concurrency cost on a shared database is now zero tests, not "a few".
-#
-# WHAT THE INSTRUMENT LOOKS LIKE WHEN IT IS WORKING, because a green whole-gate
-# pair is a weak signal: 641 tests dilute a handful of colliding ones, and a
-# pre-fix pair of whole gates ALSO reported 641/0 twice on this cluster. Run
-# only the four colliding modules in both processes instead -
-#
-#   cargo test -p zeroship-auth --test main --no-fail-fast -- --test-threads 1 \
-#     magic_link_test:: password_reset_test:: verification_test:: \
-#     signup_forgot_ratelimit_test::
-#
-# - twice at once, and the collisions concentrate. Five such pairs before the
-# fixes: 9 of 10 runs red. Five after: 0 of 10.
-#
-# AND THE PART THAT WAS WORSE THAN "CONCURRENT RUNS GO RED": one of those tests
-# POISONED THE SHARED DATABASE FOR EVERY LATER RUN, INCLUDING SINGLE ONES.
-# `signup_forgot_ratelimit_test` inserts a user named `M3_FAIL` and used to add
-# `CHECK (name <> 'M3_FAIL')` to zeroship.users under a fixed name. Lose the
-# race, panic between the insert and the cleanup, and the row stays - and
-# because nothing ever drops this database, it stayed forever:
-#     add test constraint: ... check constraint
-#     "auth_users_signup_m3_name_check" of relation "users" is violated by
-#     some row      (SqlState 23514)
-# on ONE row left by a concurrent run that died mid-test. No concurrency was
-# involved in that failure; the residue was. The constraint now names one
-# email, so a leaked one can never match another row.
-#
-# RECOVERY IS ONE COMMAND, and it is the thing to reach for whenever this gate
-# fails in a way that looks like state rather than code:
-#
-#     psql -c 'DROP DATABASE zeroship_auth_test_<hash>'
-#
-# The next run recreates and re-migrates it in about a minute. That is the
-# whole point of deriving the name - the database is reproducible, so throwing
-# it away costs nothing and no one has to decide whether it was still wanted.
+# Auth fixtures are being moved to owned PostgreSQL containers. Store tests
+# and password-reset HTTP tests manage their own servers, roles and teardown;
+# the password_reset:: filter selects the reset storage and HTTP groups.
+# Other auth and mailer cases still need the configured backends below.
+# A configured database does not establish test isolation: shared signing
+# keys, rate-limit buckets and test DDL remain fixture concerns until those
+# cases also own their mutable resources.
 #
 # PROVISION FIRST. This script creates and migrates a DATABASE; it does not
-# create a SERVER, and it fails at line ~110 if none is listening. Stand one up
-# with `tests/provision_test_backends.sh`, which brings up deploy/compose's
-# postgres on the port below.
+# create a SERVER, and it refuses rather than guessing if none is listening.
+# Stand one up with `tests/provision_test_backends.sh`, which brings up
+# deploy/compose's postgres on the port below - and the SMTP sink, which the
+# `zeroship-mailer` package run below needs and fails without.
 #
 # ENV (defaults target deploy/compose's postgres service, published on :5440)
 #   The comment here read "the dev compose Postgres on :5440" for months while
@@ -137,9 +80,6 @@ cd "$ROOT"
 # Distinguishes a real failure from a run that could not happen. See the library
 # header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/measurement_integrity.sh"
-# Counts the tests that announced they did nothing, so a green tally cannot hide
-# them; `tests/lib_skip_census_selftest.sh` covers both directions.
-. "$ROOT/tests/lib/skip_census.sh"
 # Names the database after the MIGRATION SET, so every run needing this schema
 # shares one and a branch that changes the schema gets its own without being
 # told to. See that file's header; `tests/lib_suite_db_selftest.sh` covers both
@@ -278,12 +218,14 @@ status=0
 cargo test -p zeroship-auth --no-fail-fast -- --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
-# Every other database-gated binary in the workspace. These self-skip exactly
-# like the auth crate's, and until they were listed here nothing ever ran them
-# with a database: `cargo test --workspace` provisions none, and no other gate
-# names them. Measured on zeroship-authz before adding it - "ok. 1 passed" in
-# 0.00s without a DSN against the same "ok. 1 passed" in 0.22s with one. Same
-# count, same exit code, only the clock differed.
+# Every other database-gated binary in the workspace. These used to self-skip
+# exactly like the auth crate's, and until they were listed here nothing ever
+# ran them with a database: `cargo test --workspace` provisions none, and no
+# other gate names them. Measured on zeroship-authz before adding it - "ok. 1
+# passed" in 0.00s without a DSN against the same "ok. 1 passed" in 0.22s with
+# one. Same count, same exit code, only the clock differed. That measurement is
+# why they are listed here; it is not reproducible today, because the same run
+# without a DSN now fails instead of printing the first line.
 #
 # `oidc_rp_e2e` used to be excluded BY NAME here, on the stated ground that it
 # "also wants CONTROL_TEST_DB, which this script does not provision, so it would
@@ -301,10 +243,9 @@ echo "------------------------------------------------------------------"
 # target was already satisfied by whichever name happened to be exported, which
 # is another way of saying the two names never meant different things.
 #
-# It is in the list below now. It needs no allowlist entry and gets none: it
-# announces through `zeroship_test_support::skip`, so if it ever stops seeing a
-# database the census below counts it and this gate goes red, which is the
-# required behaviour - a self-skip here is a FAILURE, not a pass.
+# It is in the list below now, and it needs nothing to make a lost database
+# visible: the target REFUSES when it cannot resolve one, so this gate goes red
+# on the run itself rather than on a marker counted afterwards.
 #
 # GATEWAY_ANCHORS_DB_URL used to be set nowhere in this repo, so the 13 gated
 # tests in `auth_token_anchors_test` and the 1 in `browser_auth_test` announced
@@ -338,6 +279,10 @@ echo "------------------------------------------------------------------"
 # never executed. A private name for a value that already exists is a test that
 # does not run, and it looks exactly like a test that passes.
 
+# `zeroship-mailer` is run as a whole package and needs one backend more than a
+# database: its plaintext-transport test dials a real SMTP sink and fails
+# without one. tests/provision_test_backends.sh stands that sink up at the
+# address the test falls back to, so nothing is exported for it here.
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
 # `zeroship-authn` is here because it was in NO gate at all. Its PostgreSQL
 # integration targets announce a skip for every test that cannot reach their
@@ -382,64 +327,44 @@ for spec in \
 done
 
 echo "------------------------------------------------------------------"
-# The point of the whole script: a test that skipped is not a test that passed.
+# THE SKIP CENSUS THAT STOOD HERE IS GONE, and so is the allowlist it consulted.
 #
-# The counting itself now lives in tests/lib/skip_census.sh, which this script
-# sources at the top, so the same census runs here, in run_billing_suite.sh, and
-# over the blanket `cargo test --workspace` in CI. It used to be open-coded here
-# and nowhere else, which is why every crate outside the auth suite could
-# announce a skip into a log no gate ever read. Moving it did not weaken this
-# gate: the allowlist and the failure below are unchanged, and the library adds
-# `grep -a`, without which a log carrying a single NUL byte reports its skips as
-# one nameless "binary file matches" line instead of naming the backend.
+# It searched this log for a marker every skipping test wrote to stderr, failed
+# the run on any occurrence not named in `SKIP_ALLOWLIST`, and carried one
+# standing entry (`AUTH_TEST_SMTP_SINK`, a live SMTP sink nothing in the tree
+# stood up). An operator decision removed skipping from the workspace outright:
+# every backend guard now REFUSES - it fails the test, naming what was missing
+# and the command that provisions it - so there is no marker to count and
+# nothing for an allowlist to excuse.
 #
-# tests/lib_skip_census_selftest.sh covers the library in both directions.
-
-# Skips this gate reports but does not fail on. Each entry names a backend this
-# script does not provision, and the decision to leave it unprovisioned:
+# THE STANDING ENTRY BECAME A PROVISIONING STEP, which is the only honest way to
+# retire an exemption. `zeroship-mailer` is run below as a whole package, and its
+# plaintext-transport test dials a real sink; that sink is now one of the
+# backends `tests/provision_test_backends.sh` stands up, at the address the test
+# falls back to. An allowlist row saying "we cannot provide this" and a test that
+# fails for want of it are the same defect wearing different clothes - the fix
+# for both is to provide it.
 #
-#   GATEWAY_ANCHORS_DB_URL is NO LONGER HERE, deliberately. This script now
-#     exports it (see above), so a skip announcing it means the export broke or
-#     a test stopped seeing it - a regression, not a tolerated gap. Leaving the
-#     entry in place after provisioning the backend would make exactly that
-#     regression undetectable, which is the failure this whole allowlist exists
-#     to avoid.
-#   AUTH_TEST_SMTP_SINK - one zeroship-mailer test
-#     (smtp_plaintext_sink_delivers_relay_forward) wants a live SMTP sink at a
-#     host:port this script has no way to stand up. Its two siblings in the same
-#     binary gate only on AUTH_DB_URL and ARE covered; the allowlist matches on
-#     the reason rather than the binary precisely so exempting this one does not
-#     blind the gate to the rest of the file.
-SKIP_ALLOWLIST='AUTH_TEST_SMTP_SINK'
-
-# Two non-zero statuses, two different findings, and they must not print the
-# same sentence. 1 is "the census ruled and found skips". 2 is "the census could
-# not rule" - the log is missing or empty, so the suite above it very likely
-# never ran. The old single branch would have reported the second as
-# "FAIL:  test(s) skipped", with the count blank, blaming a run that had not
-# happened.
-census_rc=0
-zs_skip_census "$LOG" "$SKIP_ALLOWLIST" || census_rc=$?
-if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-  echo "FAIL: the skip census refused ${LOG}, so this run proved nothing about skips." >&2
-  status=1
-elif [ "$census_rc" -ne 0 ]; then
-  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped despite a provisioned database." >&2
-  echo "A skipped auth test is a silent pass. Offending lines:" >&2
-  zs_skip_lines "$LOG" "$SKIP_ALLOWLIST" | sort -u | head -20 >&2
-  status=1
-fi
+# WHY COUNTING WAS THE WEAKER DESIGN, kept because it is the argument for what
+# replaced it. A census only sees a test that ANNOUNCES. The paragraph below
+# records the measurement that made that concrete here: seven OIDC targets
+# gated on `let Some(fx) = Fixture::boot(...) else { return; }` and returned in
+# silence, so 75 tests reported "ok" in ~0.00s against no database while the
+# census printed "0 skipped" and exited 0. Widening the marker cannot fix that;
+# only the test failing can.
+#
+# The floor below is what survives, and it now guards a narrower gap than it
+# used to - not because the floor changed, but because the silent-return arm it
+# was compensating for no longer exists.
 
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 
-# The skip check above counts problems and requires none, so it succeeds when it
-# finds nothing - including when there was nothing it COULD find. It only sees a
-# test that announces, and 7 of the OIDC suites do not: they gate on
-# `let Some(fx) = Fixture::boot(...).await else { return; };` and return in
-# silence. Measured with no database: 75 tests across
-# oidc_{refresh_token,authorization_code,userinfo,brokered_login,login_consent,
-# backchannel_logout}_test and device_grant_test all report "ok" in ~0.00s, and
-# the grep above finds zero. The gate would print "0 skipped" and exit 0.
+# A count of failures requires none, so it succeeds when it finds nothing -
+# including when there was nothing it COULD find. That was the census's blind
+# spot and the reason this floor exists: measured with no database, 75 tests
+# across oidc_{refresh_token,authorization_code,userinfo,brokered_login,
+# login_consent,backchannel_logout}_test and device_grant_test all reported
+# "ok" in ~0.00s, having asserted nothing.
 #
 # So require a MINIMUM instead of forbidding a maximum. The floor tracks the
 # measured total at ~7 percent headroom, the same margin the CI test-target floor
@@ -475,13 +400,18 @@ fi
 
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  # ZS_SKIP_TOLERATED, not `tolerated`: the census lives in
-  # tests/lib/skip_census.sh and exports the ZS_-prefixed names. Under `set -u`
-  # the unprefixed spelling aborted the script HERE, on the success line, so a
-  # fully green suite exited 1 with no verdict printed and the failure looked
-  # like a test failure. Only the success branch was affected, which is why it
-  # survived: a red run takes the else branch and reports normally.
-  echo "AUTH SUITE: ${passed} tests passed, 0 unexpected skips, ${ZS_SKIP_TOLERATED} allowlisted (floor ${AUTH_MIN_PASSED})"
+  # No skip counts here any more: nothing in the workspace skips, so a line
+  # reporting "0 unexpected skips" would be a measurement of an empty set
+  # printed as if it were a finding.
+  #
+  # The bug this line once carried is worth keeping in view, because only the
+  # SUCCESS branch reported the totals: it named a census variable without its
+  # exported `ZS_` prefix, and under `set -u` a fully green suite therefore
+  # aborted HERE, exiting non-zero with no verdict printed, which read as a test
+  # failure. A red run took the else branch and reported normally, which is why
+  # it survived. Anything added to this branch is reached only when everything
+  # else passed, so it is the least exercised line in the script.
+  echo "AUTH SUITE: ${passed} tests passed (floor ${AUTH_MIN_PASSED})"
 else
   echo "AUTH SUITE: FAILED"
 fi

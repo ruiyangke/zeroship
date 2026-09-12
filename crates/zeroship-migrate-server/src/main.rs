@@ -264,9 +264,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (control_pg, control_conn) = compio_postgres::connect(&database_url, NoTls)
                 .await
                 .map_err(|err| {
-                    tracing::error!(error = %err, "migrated: control-pg connect failed");
-                    std::io::Error::other(err.to_string())
-                })?;
+                tracing::error!(error = %err, "migrated: control-pg connect failed");
+                std::io::Error::other(err.to_string())
+            })?;
             compio::runtime::spawn(async move {
                 if let Err(err) = control_conn.run().await {
                     tracing::error!(error = %err, "migrated/control-pg connection ended");

@@ -210,26 +210,11 @@ pub fn render(settings: &[Setting]) -> String {
          -->\n\n",
     );
 
-    let mut operational = 0usize;
-    let mut secret = 0usize;
-    let mut bootstrap = 0usize;
-    let mut command = 0usize;
-    for setting in settings {
-        match setting.class {
-            SupplyClass::Operational => operational += 1,
-            SupplyClass::Secret => secret += 1,
-            SupplyClass::Bootstrap => bootstrap += 1,
-            SupplyClass::Command => command += 1,
-        }
-    }
     let _ = writeln!(
         out,
-        "**{} canonical settings**: {operational} operational, {secret} secret, \
-         {bootstrap} bootstrap controls, {command} command controls. Every \
-         environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path \
+        "Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path \
          is the canonical name itself, because both are computed from the one \
          declaration rather than spelled twice.\n",
-        settings.len(),
     );
 
     // `shared` first because a name with no scope prefix is one several

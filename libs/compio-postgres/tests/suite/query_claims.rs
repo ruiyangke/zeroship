@@ -150,7 +150,7 @@ async fn pool_query_text_params_returns_its_lease() {
             assert_eq!(pool.idle_count(), 1);
             assert_eq!(pool.total_count(), 1);
 
-            let client = Box::pin(pool.get())
+            let client = Box::pin(pool.acquire())
                 .await
                 .expect("the text-parameter wrapper did not return its lease");
             assert_eq!(

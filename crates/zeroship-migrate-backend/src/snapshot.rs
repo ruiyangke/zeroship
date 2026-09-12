@@ -287,7 +287,7 @@ pub struct ColumnSnapshot {
     pub vendor: crate::dialectal::Dialectal<dyn crate::dialectal::VendorColumnFacts>,
     /// The inline encryption sentinel to append after this
     /// column's type in CREATE / ADD COLUMN DDL, e.g.
-    /// `/* zero-migrate:enc:randomised:default:string */`. Emitted for a `t.encrypted(...)`
+    /// `/* zero-migrate:enc:string */`. Emitted for a `t.encrypted(...)`
     /// column (its physical type is `BYTEA`); it is the schema-shape contract
     /// plugin-db reads at runtime to drive the AEAD encrypt/decrypt pass.
     ///
@@ -301,7 +301,7 @@ pub struct ColumnSnapshot {
     /// THIS column in CREATE / ADD COLUMN DDL. Two sentinel families ride here:
     ///   - `zero-migrate:mask:kind=...,classification=...` on a hidden `<col>_masked` sibling
     ///     (drives the runtime mask read-pass), and
-    ///   - `zero-migrate:enc:<mode>:<keyId>:<wraps>` on an encrypted column itself - the
+    ///   - `zero-migrate:enc:<wraps>` on an encrypted column itself - the
     ///     PG-recoverable form of the `encryption_sentinel`, since PG discards
     ///     the inline `/* zero-migrate:enc */` comment at parse time, so plugin-db recovers
     ///     the encryption metadata from `pg_description` at runtime.

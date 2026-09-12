@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use uuid::Uuid;
 use zeroship_core::app_id::AppId;
 
 use super::{
@@ -59,19 +58,6 @@ impl ControlLiteStore {
         ))
         .with_base_url(self.stripe_base_url.clone())
     }
-
-    /// [`billing_reconcile::owned_app_ids_for_registry`] without the
-    /// `LiteStore::owned_app_ids` trait's `Uuid` bridge. Every call in this
-    /// module that immediately feeds the typed app id into another typed-id
-    /// function (`Metering::period_totals_on`, `billing_reconcile::lookup_plan_id_on`,
-    /// `billing_reconcile::bill_organization_with_parts`) goes through this
-    /// instead, so the id is validated once and never round-trips through a
-    /// `Uuid` it does not need.
-    async fn owned_app_ids_typed(&self, organization: &str) -> Result<Vec<AppId>, ProviderError> {
-        billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
-            .await
-            .map_err(ProviderError::from)
-    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -83,33 +69,10 @@ impl LiteStore for ControlLiteStore {
         ))
     }
 
-    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<Uuid>, ProviderError> {
-        // `LiteStore::owned_app_ids` still promises `uuid::Uuid` (out of scope
-        // for this change; see `metering::provider::types::AdjustmentNote.app_id`
-        // for the sibling case). `billing_reconcile::owned_app_ids_for_registry`
-        // reads and validates the typed `AppId`; decode its base62 body back to
-        // the uuid it encodes to satisfy this trait's shape rather than widen
-        // it. Every INTERNAL use in this file goes through
-        // `owned_app_ids_typed` instead, so this bridge exists solely for
-        // callers outside this module that still want the trait's `Uuid` form.
-        let typed = billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
+    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<AppId>, ProviderError> {
+        billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
             .await
-            .map_err(ProviderError::from)?;
-        typed
-            .iter()
-            .map(|id| {
-                zeroship_core::typed_id::parse_with_prefix(
-                    id.as_str(),
-                    zeroship_core::typed_id::APP_PREFIX,
-                )
-                .map_err(|e| {
-                    ProviderError::Store(format!(
-                        "lite: app id {} failed to decode: {e}",
-                        id.as_str()
-                    ))
-                })
-            })
-            .collect()
+            .map_err(ProviderError::from)
     }
 
     async fn period_billable_units(
@@ -118,7 +81,7 @@ impl LiteStore for ControlLiteStore {
         period_start: i64,
     ) -> Result<u64, ProviderError> {
         let conn = self.registry.conn().await?;
-        let app_ids = self.owned_app_ids_typed(organization).await?;
+        let app_ids = self.owned_app_ids(organization).await?;
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let catalog = PlanCatalog::new(self.registry.clone());
@@ -150,7 +113,7 @@ impl LiteStore for ControlLiteStore {
     ) -> Result<u64, ProviderError> {
         let conn = self.registry.conn().await?;
         let period = crate::metering::period_date(period_start);
-        let app_ids = self.owned_app_ids_typed(organization).await?;
+        let app_ids = self.owned_app_ids(organization).await?;
         let mut units = 0u64;
         for app_id in app_ids {
             let rows = conn
@@ -184,7 +147,7 @@ impl LiteStore for ControlLiteStore {
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
-        let app_ids = self.owned_app_ids_typed(organization).await?;
+        let app_ids = self.owned_app_ids(organization).await?;
 
         let billed = billing_reconcile::bill_organization_with_parts(
             &self.registry,
@@ -199,9 +162,12 @@ impl LiteStore for ControlLiteStore {
         )
         .await?;
         if billed {
-            let invoice_id =
-                billing_reconcile::lookup_invoice_id_for_registry(&self.registry, organization, period.start)
-                    .await?;
+            let invoice_id = billing_reconcile::lookup_invoice_id_for_registry(
+                &self.registry,
+                organization,
+                period.start,
+            )
+            .await?;
             Ok(InvoiceRef(invoice_id))
         } else {
             Ok(InvoiceRef(None))
@@ -213,7 +179,7 @@ impl LiteStore for ControlLiteStore {
         organization: &str,
         note: &AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        let app_id = note.app_id.ok_or_else(|| {
+        let app_id = note.app_id.as_ref().ok_or_else(|| {
             ProviderError::Config(
                 "adjustment_note requires an app_id for local invoice_lines bookkeeping"
                     .to_string(),
@@ -273,13 +239,17 @@ impl LiteStore for ControlLiteStore {
         }
 
         let plan_id = conn
-            .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .query(
+                "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+                &[&app_id.as_str()],
+            )
             .await?
             .first()
             .map(|r| r.get::<_, String>("plan_id"))
             .ok_or_else(|| {
                 ProviderError::Store(format!(
-                    "adjustment_note app {app_id} has no current plan"
+                    "adjustment_note app {} has no current plan",
+                    app_id.as_str()
                 ))
             })?;
         if !conn
@@ -297,7 +267,7 @@ impl LiteStore for ControlLiteStore {
                 "SELECT COALESCE(MIN(segment_no), 32767)::smallint AS next_floor \
                  FROM zeroship.invoice_lines \
                  WHERE invoice_id = $1 AND app_id = $2 AND line_kind <> 'usage'",
-                &[&invoice_id, &app_id],
+                &[&invoice_id, &app_id.as_str()],
             )
             .await?;
         let floor: i16 = segment_row
@@ -338,7 +308,7 @@ impl LiteStore for ControlLiteStore {
              DO NOTHING",
             &[
                 &invoice_id,
-                &app_id,
+                &app_id.as_str(),
                 &segment_no,
                 &plan_id,
                 &note.amount_cents,

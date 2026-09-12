@@ -50,7 +50,7 @@ export function uuidToBase36(uuid: string): string {
 
 export function base36ToUuid(encoded: string): string {
   if (encoded.length !== 25) {
-    throw new Error(`expected 22 base36 chars, got ${encoded.length}`);
+    throw new Error(`expected 25 base36 chars, got ${encoded.length}`);
   }
 
   let n = 0n;
@@ -59,7 +59,7 @@ export function base36ToUuid(encoded: string): string {
     if (digit < 0) {
       throw new Error(`invalid base36 character: ${ch}`);
     }
-    n = n * 62n + BigInt(digit);
+    n = n * 36n + BigInt(digit);
   }
 
   if (n > ((1n << 128n) - 1n)) {

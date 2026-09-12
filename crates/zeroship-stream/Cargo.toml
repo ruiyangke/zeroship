@@ -16,7 +16,6 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
 zeroship-core = { workspace = true }
 futures = { workspace = true }
 

@@ -24,12 +24,12 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password_reset};
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::store::users;
-use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
-use zeroship_mailer::{Address, Mailer};
 use crate::ui::ForgotPage;
 use sha2::{Digest, Sha256};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
+use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
+use zeroship_mailer::{Address, Mailer};
 
 #[derive(Debug, Deserialize)]
 pub struct ForgotForm {

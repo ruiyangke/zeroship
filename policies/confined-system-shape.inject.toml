@@ -44,12 +44,6 @@
 # byte-compares it on every run. Edit THIS file and re-run the codegen; never
 # hand-edit the generated one.
 #
-# THE SEVENTH PRODUCER CANNOT TAKE THIS FILE. zeroship-schema's
-# build_system_field_columns (crates/zeroship-schema/src/query.rs) emits the
-# same seven columns from Rust rather than from a policy document, and the two
-# already differ on purpose - see the "id / created_by / updated_by" note below.
-# Nothing here reaches it; that divergence needs a check of a different kind.
-#
 # ONE SOURCE OF TRUTH IS NOT SELF-ENFORCING. Re-inlining this block into a
 # consumer is a two-line edit and would compile; so is deleting an include_str!,
 # after which that ceiling injects nothing and its tables lose their system
@@ -64,23 +58,15 @@ primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
   # The three NOT NULL columns carry defaults because the data plane does not
-  # send them. crud/system_fields_pass.rs omits created_at/updated_at/version
+  # send them. The ORM assignment pass omits database-defaulted fields
   # from every INSERT by design and relies on the DDL to supply the canonical
   # value; without these the first insert into any migration-created table fails
   # with "null value in column created_at violates not-null constraint".
   # id is deliberately defaultless - it is minted into the INSERT instead.
   #
-  # THE NAMES AND NULLABILITY match zeroship-schema's system_field_columns, and
-  # that is all that matches. An earlier version of this comment claimed the two
-  # producers "emit the same table"; they do not, and the claim is what kept
-  # anyone from checking (measured 2026-08-10 on a deployed app schema):
-  #
-  #   this file, via the engine   id / created_by / updated_by  varchar(255)
-  #   zeroship-schema PG renderer id / created_by / updated_by  text
-  #
   # TYPED-ID COMPARISON DOMAIN. id is the creator-visible row identity: prefix
-  # + "_" + a base62 UUIDv7. Its byte order is its creation-time order, so it
-  # must not inherit a locale collation that interleaves base62's case runs.
+  # + "_" + a base36 UUIDv7. Its byte order is its creation-time order, so it
+  # must not inherit a locale-dependent collation.
   # created_by and updated_by carry typed actor ids and belong to the same
   # comparison domain: mismatched collations change ordering and prevent
   # collation-compatible ordered index joins. All three therefore use the

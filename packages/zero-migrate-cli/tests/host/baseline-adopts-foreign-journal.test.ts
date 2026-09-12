@@ -39,17 +39,14 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-/** The base62 alphabet `typed_id` encodes a UUID image with
- *  (crates/zeroship-migrate-ir/src/id.rs:22). Sorted so lexicographic order matches
- *  numeric order in the high bits. */
-const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz";
 
 /**
  * The id family a VERSIONED migration runner journals under, reproduced exactly.
  *
  * `migration_id_for_version` (crates/zeroship-migrate-ir/src/migration.rs:133-141)
  * copies the low 48 bits of the file version into `bytes[0..6]` and leaves the
- * remaining ten bytes zero, then base62-encodes the 128-bit image to 22 chars. As a
+ * remaining bytes zero, then base36-encodes the UUID image. As a
  * big-endian integer that image is `version * 2^80`.
  *
  * Reproduced here rather than imported because the point of the test is that this
@@ -58,9 +55,9 @@ const BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 function migrationIdForVersion(version: bigint): string {
   let image = version << 80n;
   const digits: string[] = [];
-  for (let i = 0; i < 22; i++) {
-    digits.push(BASE62[Number(image % 62n)]);
-    image /= 62n;
+  for (let i = 0; i < 25; i++) {
+    digits.push(BASE36[Number(image % 36n)]);
+    image /= 36n;
   }
   return `mig_${digits.reverse().join("")}`;
 }

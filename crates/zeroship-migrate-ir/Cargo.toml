@@ -23,7 +23,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
-# UUIDv7-shaped migration ids (base62-encoded via the vendored typed-id module).
+# UUIDv7-shaped migration ids encoded by the vendored base36 typed-id module.
 uuid = { workspace = true }
 # The Policy Decision Point machine (KnobDef/KnobKey/KnobKind/PolicyRegistry). The
 # builtin registry (`policy_registry`) declares zeroship-migrate's engine knobs — the

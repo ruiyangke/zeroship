@@ -2,7 +2,7 @@
 //!
 //! # Why this is in the migration backend and not in the data plane
 //!
-//! Until this module existed, `zeroship-plugin-db`'s `crud/unmask.rs` issued
+//! Until this module existed, `zeroship-data-v8`'s `crud/unmask.rs` issued
 //! `CREATE TABLE IF NOT EXISTS` + three `CREATE INDEX IF NOT EXISTS` on EVERY
 //! `unmask()` call, on both dialects, from inside the worker. That is eight DDL
 //! statements on the privileged read path, executed by the process that runs
@@ -45,7 +45,7 @@
 //! spellings, decided entirely by who opened what.
 //!
 //! [`audit_unmask_ddl`] therefore takes the qualifier rather than baking one in.
-//! That is what lets `zeroship-plugin-db`'s SQLite fixtures - which reach the
+//! That is what lets `zeroship-data-v8`'s SQLite fixtures - which reach the
 //! file through the worker's backend, under the alias - execute the SAME
 //! generator the apply host does. A fixture with its own hardcoded copy of this
 //! DDL would stay green while production drifted away from it.
@@ -68,18 +68,10 @@ use super::authorizer::Mode;
 
 /// The unqualified table name, shared with the data plane's INSERT.
 ///
-/// `__zeroship_` is a reserved prefix: `zeroship_schema`'s `validate_collection`
-/// (`crates/zeroship-schema/src/query.rs`) refuses a creator collection that
-/// starts with it, which is what keeps a creator from declaring a colliding
-/// table of their own. See the module doc of `provisioning` in
-/// `zeroship-migrate-server` for the caveat on the FORKED copy of that check.
-///
-/// BOUND, as of 2026-09-04, by
-/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`. It is the one place
-/// this constant, the PostgreSQL creator's and the writer's are all nameable;
-/// it holds the three against a literal stated once there, and drives THIS
-/// module's [`audit_unmask_ddl`] to check the emitted CREATE TABLE names the
-/// relation the writer targets rather than only the constant it declares.
+/// Migration authoring reserves `__zeroship` so creator DDL cannot collide with
+/// this provisioned relation. That authoring rule does not hide the table from
+/// a trusted runtime descriptor. Name parity is covered by the data-v8 audit
+/// table test.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
 /// Double any embedded quote so `schema` cannot leave its identifier.
@@ -139,9 +131,7 @@ pub fn audit_unmask_ddl(schema: &str) -> Vec<String> {
         // The index NAMES are qualified so two apps attached into one session
         // cannot collide on them; the ON clause names the bare table, which is
         // the only shape SQLite accepts.
-        format!(
-            r#"CREATE INDEX IF NOT EXISTS {q}."{AUDIT_UNMASK_TABLE}_ts_idx" ON {t} (ts)"#
-        ),
+        format!(r#"CREATE INDEX IF NOT EXISTS {q}."{AUDIT_UNMASK_TABLE}_ts_idx" ON {t} (ts)"#),
         format!(
             r#"CREATE INDEX IF NOT EXISTS {q}."{AUDIT_UNMASK_TABLE}_actor_idx" ON {t} (actor_id, ts)"#
         ),
@@ -225,8 +215,8 @@ mod tests {
     }
 
     /// The audit table belongs in the app file, never in the journal file. The
-    /// worker attaches the app file only, so a table in `_mig` would be
-    /// invisible to the sole writer.
+    /// worker attaches the app file, so runtime ORM access requires the
+    /// relation to live there.
     #[test]
     fn statements_never_target_the_journal_file() {
         for stmt in audit_unmask_ddl("main") {

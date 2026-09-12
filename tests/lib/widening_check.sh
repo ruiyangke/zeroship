@@ -36,7 +36,7 @@
 # Usage:  tests/lib/widening_check.sh [ref] [-- path...]
 #         tests/lib/widening_check.sh                    # working tree vs HEAD
 #         tests/lib/widening_check.sh HEAD~1             # last commit included
-#         tests/lib/widening_check.sh HEAD -- crates/zeroship-plugin-db
+#         tests/lib/widening_check.sh HEAD -- crates/zeroship-data-v8
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 

@@ -281,25 +281,10 @@ function hexToBytes(hex: string): Uint8Array {
  * The subject shape the DEPLOYED gateway accepts, mirrored here so a creator
  * finds out at `pnpm dev` rather than after a deploy.
  *
- * `pws_` + EXACTLY 20 ascii-alphanumerics is `is_pairwise_subject`
- * (crates/zeroship-core/src/auth/mod.rs:225, `PAIRWISE_SUB_BODY_LEN = 20`). A cookie
- * whose `sub` fails it is hard-rejected at router/auth.rs:972 with
- * `return CookieOutcome::None` - the cookie is discarded, the caller is
- * anonymous, and every `auth: "user"` procedure answers 401 with nothing in the
- * response pointing at the id.
- *
- * The dev tier used to validate nothing, and two shipped examples declared a
- * 21-char body next to a correct 20-char one (fixed in 57cc19b93). They worked
- * locally and would have 401'd on deploy.
- *
- * THIS CANNOT BREAK A WORKING CONFIG. Every id it refuses is one the gateway
- * refuses; the only thing that changes is where the creator learns it. The
- * constant is duplicated rather than imported because this package must not
- * depend on the Rust crate - if PAIRWISE_SUB_BODY_LEN ever moves, this throws
- * on valid ids and its own CONTROL test (the plugin's generated defaults) goes
- * red, which is the intended way to find out.
+ * Pairwise subjects have a fixed lowercase base36 body. Keep this check aligned
+ * with `is_pairwise_subject` in zeroship-core.
  */
-const PAIRWISE_SUBJECT_RE = /^pws_[A-Za-z0-9]{20}$/;
+const PAIRWISE_SUBJECT_RE = /^pws_[0-9a-z]{20}$/;
 
 function assertPairwiseSubject(id: string): void {
   if (PAIRWISE_SUBJECT_RE.test(id)) return;
@@ -308,10 +293,10 @@ function assertPairwiseSubject(id: string): void {
     body === null
       ? `it does not start with "pws_"`
       : `its body is ${body.length} character(s), not 20` +
-        (/^[A-Za-z0-9]*$/.test(body) ? "" : ", and contains non-alphanumeric characters");
+        (/^[0-9a-z]*$/.test(body) ? "" : ", and contains characters outside lowercase base36");
   throw new Error(
     `zeroship devAuth: user id ${JSON.stringify(id)} is not a valid pairwise subject - ${detail}. ` +
-      `A dev id must be "pws_" followed by exactly 20 letters/digits, because the deployed ` +
+      `A dev id must be "pws_" followed by exactly 20 lowercase base36 characters, because the deployed ` +
       `gateway hard-rejects any other shape and every authenticated call would return 401 ` +
       `once deployed. Omit \`id\` to let the dev tier mint a valid one.`,
   );

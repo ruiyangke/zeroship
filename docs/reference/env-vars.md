@@ -206,7 +206,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**164 canonical settings**: 126 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
@@ -336,7 +336,17 @@ by the generator.
 
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
+| `data_cdc_server.clients_per_app` | operational | `ZEROSHIP_DATA_CDC_SERVER_CLIENTS_PER_APP` | `data_cdc_server.clients_per_app` | zeroship-data-cdc-server `--clients-per-app` | `128` |
 | `data_cdc_server.database_url` | secret | `ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL` | `data_cdc_server.database_url` | zeroship-data-cdc-server `--database-url-file` | - |
+| `data_cdc_server.listen` | operational | `ZEROSHIP_DATA_CDC_SERVER_LISTEN` | `data_cdc_server.listen` | zeroship-data-cdc-server `--listen` | `127.0.0.1:9094` |
+| `data_cdc_server.max_apps` | operational | `ZEROSHIP_DATA_CDC_SERVER_MAX_APPS` | `data_cdc_server.max_apps` | zeroship-data-cdc-server `--max-apps` | `64` |
+| `data_cdc_server.max_connections` | operational | `ZEROSHIP_DATA_CDC_SERVER_MAX_CONNECTIONS` | `data_cdc_server.max_connections` | zeroship-data-cdc-server `--max-connections` | `1024` |
+| `data_cdc_server.max_relations` | operational | `ZEROSHIP_DATA_CDC_SERVER_MAX_RELATIONS` | `data_cdc_server.max_relations` | zeroship-data-cdc-server `--max-relations` | `4096` |
+| `data_cdc_server.queue_capacity` | operational | `ZEROSHIP_DATA_CDC_SERVER_QUEUE_CAPACITY` | `data_cdc_server.queue_capacity` | zeroship-data-cdc-server `--queue-capacity` | `128` |
+| `data_cdc_server.tls_cert_file` | operational | `ZEROSHIP_DATA_CDC_SERVER_TLS_CERT_FILE` | `data_cdc_server.tls_cert_file` | zeroship-data-cdc-server `--tls-cert-file` | empty |
+| `data_cdc_server.tls_key_file` | operational | `ZEROSHIP_DATA_CDC_SERVER_TLS_KEY_FILE` | `data_cdc_server.tls_key_file` | zeroship-data-cdc-server `--tls-key-file` | empty |
+| `data_cdc_server.transaction_bytes` | operational | `ZEROSHIP_DATA_CDC_SERVER_TRANSACTION_BYTES` | `data_cdc_server.transaction_bytes` | zeroship-data-cdc-server `--transaction-bytes` | `8 * 1024 * 1024` |
+| `data_cdc_server.transaction_changes` | operational | `ZEROSHIP_DATA_CDC_SERVER_TRANSACTION_CHANGES` | `data_cdc_server.transaction_changes` | zeroship-data-cdc-server `--transaction-changes` | `10000` |
 
 ### gateway
 
@@ -393,8 +403,10 @@ by the generator.
 | Canonical | Class | Environment | Overlay path | Flag by binary | Default |
 | --- | --- | --- | --- | --- | --- |
 | `worker.bind` | operational | `ZEROSHIP_WORKER_BIND` | `worker.bind` | zeroship-worker `--bind` | `127.0.0.1` |
+| `worker.cdc_relay_ca_file` | operational | `ZEROSHIP_WORKER_CDC_RELAY_CA_FILE` | `worker.cdc_relay_ca_file` | zeroship-worker `--cdc-relay-ca-file` | empty |
+| `worker.cdc_relay_url` | operational | `ZEROSHIP_WORKER_CDC_RELAY_URL` | `worker.cdc_relay_url` | zeroship-worker `--cdc-relay-url` | empty |
 | `worker.database_url` | secret | `ZEROSHIP_WORKER_DATABASE_URL` | `worker.database_url` | zeroship-worker `--database-url-file` | - |
-| `worker.kv_url` | secret | `ZEROSHIP_WORKER_KV_URL` | `worker.kv_url` | zeroship-worker `--kv-url-file` | - |
+| `worker.kv_config` | secret | `ZEROSHIP_WORKER_KV_CONFIG` | `worker.kv_config` | zeroship-worker `--kv-config-file` | - |
 | `worker.max_isolates` | operational | `ZEROSHIP_WORKER_MAX_ISOLATES` | `worker.max_isolates` | zeroship-worker `--max-isolates` | `200` |
 | `worker.max_pinned_isolates_per_app` | operational | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `worker.max_pinned_isolates_per_app` | zeroship-worker `--max-pinned-isolates-per-app` | `4` |
 | `worker.max_step_blob_bytes` | operational | `ZEROSHIP_WORKER_MAX_STEP_BLOB_BYTES` | `worker.max_step_blob_bytes` | zeroship-worker `--max-step-blob-bytes` | `67_108_864` |
@@ -514,7 +526,6 @@ All default to the in-compose Postgres. The `.env` name IS the container name:
 | `ZEROSHIP_AUTH_DATABASE_URL` | `AUTH_DB_URL` |
 | `ZEROSHIP_MIGRATE_SERVER_DATABASE_URL` | `MIGRATED_DATABASE_URL`, then `ZEROSHIP_MIGRATED_DATABASE_URL` |
 | `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL` | `PROVISION_DATABASE_URL`, then `ZEROSHIP_MIGRATED_PROVISION_DATABASE_URL` |
-| `ZEROSHIP_WORKER_KV_URL` | `WORKER_KV_URL` |
 | `ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET` | `STRIPE_WEBHOOK_SECRET` |
 
 An operator upgrading a deployed host must ADD the left-hand name carrying the
@@ -597,7 +608,7 @@ cargo run -p zeroship-config-contract -- raw-env 2>&1 >/dev/null | grep class
 ```
 
 **creator CLI** (`CliEnv`): `ZEROSHIP_TOKEN` `ZEROSHIP_CONTROL_URL`
-`ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_URL`
+`ZEROSHIP_CONFIG` `ZEROSHIP_CONFIG_HOME` `ZEROSHIP_KV_PATH` `ZEROSHIP_KV_CONFIG_FILE`
 `ZEROSHIP_STORAGE_URL` `ZEROSHIP_HEAP_LIMIT_MB` `ZEROSHIP_WORKFLOW_SQLITE_PATH`
 `ZEROSHIP_LOG_FORMAT` `ZEROSHIP_DIE_WITH_PARENT`
 
@@ -624,7 +635,6 @@ the command. See `docs/reference/project-config.md`.
 `ZEROSHIP_STORAGE_UPLOAD_CONCURRENCY` `CONTROL_USAGE_OUTBOX_WAL_PATH`
 `CONTROL_DEPLOY_RETENTION_BATCH_SIZE` `CONTROL_DEPLOY_RETENTION_GRACE_WINDOW_MS`
 `CONTROL_WORKFLOW_RETENTION_BATCH_SIZE` `CONTROL_WORKFLOW_RETENTION_WINDOW_MS`
-`ZEROSHIP_COLUMN_KEY_<COLLECTION>` (a family, one name per collection)
 
 **creator app** (`ZEROSHIP_DEPLOY_ID`), and the ambient/external names the
 process inherits rather than owns: `PATH` `HOME` `HOSTNAME` `PORT` `CI`
@@ -706,27 +716,15 @@ shell). `deny_unknown_fields` applies, so a misspelled key in it is an error
 rather than a value that silently configures nothing.
 
 It is generated and gitignored rather than committed because every
-`*.database_url` and `worker.kv_url` leaf is `secret`-classed, and check 8 of
+`*.database_url` and `worker.kv_config` leaf is `secret`-classed, and check 8 of
 `tests/config_name_alignment_gate.sh` fails any TRACKED `*.toml` holding a
 literal at a secret-classed leaf - with no exception list, by design. That same
 gate exempts untracked overlays deliberately, which is exactly what this is.
 
-**Eight names became one.** `AUTH_DB_URL`, `CONTROL_TEST_DB`,
-`GATEWAY_ANCHORS_DB_URL`, `GATEWAY_POOL_SMOKE_URL`, `LIVE_DB_TEST_URL`,
-`MIGRATE_SERVER_TEST_DB`, `ZERO_MIGRATE_TEST_PG_URL` and `ZEROSHIP_SCHEDULER_TEST_DB`
-each named the same server, each was read by one crate, and each had to be
-exported by whichever suite remembered it. `GATEWAY_POOL_SMOKE_URL` was set
-NOWHERE in the repository, so its one test had never executed;
-`GATEWAY_ANCHORS_DB_URL` was in the same state until 2026-08-18. `PG_TEST_URL`
-is the single override, and `REDIS_TEST_URL` its Redis peer.
-
-SEVEN of those eight are deleted, not eight. `CONTROL_TEST_DB` is still read at
-`crates/zeroship-control/tests/workflow_engine_test.rs:59` and still exported at
-`tests/run_billing_suite.sh:181`, which records why: dropping the export before
-converting that file made its 93 tests announce "skip: CONTROL_TEST_DB not set"
-and pass without executing. This paragraph claimed all eight were gone from the
-day the other seven went, so the one that survived was documented as absent -
-the reason `tests/test_only_env_gate.sh` rules on the tree instead.
+`PG_TEST_URL` is the PostgreSQL test override, including the workflow engine
+fixtures. Otherwise tests read the generated overlay. Suite runners export this
+setting after preparing their migrated database. KV tests own their
+configuration and containers.
 
 `KV_REQUIRE_REDIS` is also deleted. Its comment claimed CI set it; nothing in
 the tree ever did, so its panic arm was unreachable and the Redis backend tests
@@ -736,8 +734,8 @@ required now, like Postgres, for the same reason
 
 ### The surviving test-only names
 
-`PG_TEST_URL` `REDIS_TEST_URL` `DRAGONFLY_CLUSTER_SEEDS`
-`AUTH_TEST_SMTP_SINK` `ZEROSHIP_DW_E2E*`
+`PG_TEST_URL`
+`AUTH_TEST_SMTP_SINK`
 
 `ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
 `ZEROSHIP_SESSION_NONCE_CAPACITY` were on that list until 2026-09-04 and
@@ -758,16 +756,25 @@ CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
 `tests/provision_test_backends.sh`, which writes what they resolve to into the
-overlay; no harness carries its own copy of the defaults any more.
+overlay; no harness carries its own copy of the defaults any more. That script
+takes `SMTP_HOST`/`SMTP_PORT`/`SMTP_UI_PORT`/
+`SMTP_CONTAINER`/`SMTP_IMAGE` the same way. The SMTP ones are the sink's
+coordinates rather than a variable any test reads: the sink is named to test
+code only by `AUTH_TEST_SMTP_SINK`, and by the compiled default it falls back
+to.
 
-`PG_TEST_URL` and `REDIS_TEST_URL` REDIRECT the suites; they do not enable
-them. Unset, everything resolves from the overlay - and `libs/compio-postgres`,
-`libs/compio-redis` and `libs/compio-s3` keep their own compiled defaults
-(`postgres://postgres:zeroship@localhost:5440/zeroship`,
-`redis://127.0.0.1:6390`) because they are standalone publishable drivers with
-no zeroship dependency and cannot read the overlay. A server that does not
-answer FAILS the test with the address it tried and the command that provisions
-one. There is no variable that turns that back into a skip.
+`AUTH_TEST_SMTP_SINK` (`host:port`) is the same shape one tier down: it
+redirects `zeroship-mailer`'s plaintext-transport test at a sink of your own.
+Unset, the test dials the address `tests/provision_test_backends.sh` runs mailpit
+on, and FAILS naming that script if nothing answers. It was the one standing
+allowlist entry in the deleted skip census, on the ground that no script could
+stand a sink up; provisioning one is what retired the exemption.
+
+`PG_TEST_URL` redirects PostgreSQL suites; it does not enable them. The shared
+suites resolve their default from the generated overlay. Standalone driver
+configuration belongs to each driver's test harness. KV and Redis driver suites
+start their own Redis and Dragonfly containers and fail if Docker cannot provide
+them; there is no Redis test URL override or opt-in switch.
 `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was that variable, opt-in and therefore unset
 in every run it would have helped; it is deleted, not renamed.
 
@@ -812,7 +819,7 @@ Recorded here so their absence is a stated position rather than an oversight.
 **Set-but-unread at process startup** (proposal Section 4.4). Nothing enumerates
 the ambient `ZEROSHIP_*` names at `bootstrap` and rejects the ones the current
 binary does not consume. It is not simply the contract set: `ZEROSHIP_LOG`,
-`ZEROSHIP_NET_*`, `ZEROSHIP_STORAGE_*` and the `ZEROSHIP_COLUMN_KEY_*` family are
+`ZEROSHIP_NET_*` and `ZEROSHIP_STORAGE_*` are
 legitimately read by libraries inside the same process without being settings,
 so a naive prefix rule would refuse to start a correct deployment. The allowed
 set has to be the contract union the declared per-consumer reads, and that union

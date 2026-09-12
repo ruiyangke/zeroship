@@ -23,7 +23,7 @@
 #
 #   - The first said `cargo test --workspace --no-run` could not be produced at
 #     all (feature unification broke registry `postgres-types`). That was fixed
-#     by tests/dev_dep_feature_route_gate.sh's subject.
+#     by the dependency-feature rule in xtask/tests/repository_architecture.rs.
 #   - The second said the command failed on ONE package, `zeroship-migrate-node`,
 #     whose integration targets could not LINK (`undefined reference to
 #     napi_create_function`), and concluded: "The census cannot be made correct
@@ -50,7 +50,7 @@
 # before it was pasted: 3 rows REMOVED that named things which are not packages
 # (`zeroship`, `zeroship-migrate-adapter`, `zeroship-migrated`) and 17 members
 # ADDED (`zeroship-cli`, the `zeroship-data-*` family, every `zeroship-migrate*`
-# including `zeroship-migrate-node`, `zeroship-cdc-wire`).
+# including `zeroship-migrate-node`, `zeroship-data-cdc-wire`).
 #
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
@@ -65,19 +65,18 @@ zeroship-auth
 zeroship-authn
 zeroship-authz
 zeroship-bundle
-zeroship-cdc-wire
 zeroship-cli
 zeroship-config-contract
 zeroship-config-macros
 zeroship-control
 zeroship-core
 zeroship-data-cdc-server
-zeroship-data-core
-zeroship-data-engine
-zeroship-data-postgres
-zeroship-data-query-builder
-zeroship-data-sqlite
+zeroship-data-cdc-wire
+zeroship-data-macros
+zeroship-data-orm
 zeroship-gateway
+zeroship-kv
+zeroship-kv-v8
 zeroship-mailer
 zeroship-metering
 zeroship-migrate
@@ -90,15 +89,15 @@ zeroship-migrate-policy
 zeroship-migrate-postgres
 zeroship-migrate-server
 zeroship-migrate-sqlite
-zeroship-plugin-db
-zeroship-plugin-kv
-zeroship-plugin-storage
-zeroship-plugin-workflow
+zeroship-data-v8
+zeroship-storage
+zeroship-storage-v8
+zeroship-workflow
 zeroship-runtime
 zeroship-runtime-macros
-zeroship-schema
 zeroship-stream
 zeroship-testkit
 zeroship-test-support
 zeroship-worker
 zeroship-workflow-scheduler
+zeroship-workflow-v8

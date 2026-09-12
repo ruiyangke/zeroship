@@ -496,7 +496,7 @@ fn lower(
         dialect,
         policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), dialect.clone());
+    let guard = GuardConfig::from_policy(policy.clone(), dialect.clone(), schema);
     author
         .load_and_lower_guarded(&source, OWNER, &registry(), live, &guard)
         .map_err(|error| classify_lower(&error))
@@ -898,7 +898,7 @@ fn prelude(
 
         ("renameColumn", _) => vec![table_t_without_b()],
 
-        ("addConstraint", "fkNonId") => vec![table_other(keyable()), keyed()],
+        ("addConstraint", "fkSimple") => vec![table_other(keyable()), keyed()],
         ("addConstraint", "unique" | "check") => vec![keyed()],
         ("addConstraint", "exclusion") => vec![text()],
         ("addConstraint", _) => vec![table_other(keyable()), bigint()],

@@ -552,7 +552,6 @@ impl DmlRenderer for DuckDbDmlRenderer {
             | FeatureSupportKey::TableLevelCheckExpression
             | FeatureSupportKey::CompositeForeignKey
             | FeatureSupportKey::ForeignKeyNoLocalColumn
-            | FeatureSupportKey::NonIdForeignKey
             | FeatureSupportKey::SequenceDefault
             | FeatureSupportKey::ConstraintNotValid
             | FeatureSupportKey::ExclusionConstraint

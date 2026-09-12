@@ -34,8 +34,7 @@ mkdir -p "$TMP/root/deploy/ops"
 cat > "$TMP/root/deploy/ops/zeroship.test.toml" <<'EOF'
 [control]
 database_url = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship"
-[worker]
-kv_url = "redis://127.0.0.1:6390"
+
 EOF
 
 run_load() { # run_load <env assignments...>  -> prints exit code, stderr to $TMP/err

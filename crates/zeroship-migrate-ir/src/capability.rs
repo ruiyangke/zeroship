@@ -257,7 +257,7 @@ impl VendorCapabilities {
     #[must_use]
     pub fn from_scope(scope: Option<&SchemaScope>) -> Self {
         match scope {
-            None | Some(SchemaScope::Single(_)) => Self::confined(),
+            None | Some(SchemaScope::Single(_) | SchemaScope::Policy { .. }) => Self::confined(),
             Some(SchemaScope::Allowlist(list)) => {
                 let mut caps = Self::operator();
                 caps.schemas = list.clone();

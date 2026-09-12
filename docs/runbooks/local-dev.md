@@ -214,33 +214,28 @@ Then open `http://localhost:8000/apps/db-todos/`.
 
 ## Tests
 
-Provision the backends first. PostgreSQL and Redis are required, not optional:
-the driver suites fail when nothing answers, and they name the address they
-tried and this command.
+The shared PostgreSQL and SMTP suites use the provisioner:
 
 ```bash
-tests/provision_test_backends.sh   # deploy/compose's postgres (:5440) + redis (:6390)
+tests/provision_test_backends.sh
 ```
 
-That is the whole setup. `PG_TEST_URL` and `REDIS_TEST_URL` default to exactly
-those two addresses, so nothing needs exporting; set them only to point a run
-somewhere else.
+Database verification is part of ordinary `cargo test`; it has no opt-in
+feature. Libtest runs serially by default because platform fixtures share
+fleet-wide state. The suite runners below prepare the required migrations.
+
+The provisioner writes the PostgreSQL test overlay and starts the mailer test's SMTP sink.
+Use `PG_TEST_URL` or `AUTH_TEST_SMTP_SINK` to target your own servers.
+KV and Redis driver tests provision their required servers with Testcontainers;
+they need Docker and do not read shared Redis URLs. See the
+[KV test commands](../../crates/zeroship-kv/README.md).
 
 ```bash
 cargo test -p zeroship-core
 cargo test -p zeroship-gateway
-cargo test -p zeroship-control
-# The control suites that need a live, migrated Postgres are behind the
-# `live-db-tests` feature, so the line above runs only the database-free ones.
-# To run the whole crate, provision the database first (tests/run_billing_suite.sh
-# does both):
-cargo test -p zeroship-control --features live-db-tests
-cargo test -p zeroship-worker
-# Same arrangement in the worker: the seven `workflow_advance_*` tests claim a
-# run by joining `zeroship.apps` / `plans` / `app_deploys`, so they need a
-# MIGRATED database and not merely a reachable one. They are behind
-# `live-db-tests`, and `tests/run_worker_suite.sh` is what provisions the
-# database and runs them.
+# These runners prepare migrated databases and run all package tests.
+tests/run_billing_suite.sh   # control and migration service
+tests/run_worker_suite.sh
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh
@@ -281,11 +276,9 @@ override is a flag so a gate cannot be redirected by a variable left in a shell
 nobody remembers exporting it in.
 
 `tests/run_billing_suite.sh` still takes a private database per run.
-`crates/zeroship-control/tests/workflow_engine_test.rs` clones a whole database per test
-from whatever DSN it is handed, and `CREATE DATABASE ... WITH TEMPLATE`
-requires exclusive access to the source — so that suite cannot share one until
-it clones from a quiescent template instead. See
-`tests/tests_do_not_create_databases_gate.sh`, which records that ruling.
+`cargo xtask test workflow` owns PostgreSQL through Testcontainers. Its control
+plane tests clone private databases from a migrated, quiescent template. The
+fixture helper removes the cached server when the test process exits.
 
 ## Benchmarks
 

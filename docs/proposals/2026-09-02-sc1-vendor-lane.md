@@ -1,11 +1,12 @@
 # The SC-1 vendor lane: what a transaction backend owes the protocol
 
-Status: proposed, 2026-09-02. Closes #122. Blocks the `transaction/` half of the
-data-crate split.
+Status: implemented. The staged notes below describe the original extraction;
+current crate ownership is documented in the
+[ORM architecture](../architecture/data-orm.md).
 
 ## The question
 
-`crates/zeroship-data-engine/src/transaction/` must divide between two crates: the
+`crates/zeroship-data-orm/src/transaction/` must divide between two crates: the
 SC-1 protocol (vendor-neutral, engine tier) and the mechanics that talk to a
 database (vendor tier). #122 states the division as a slogan - "transaction
 mechanics go to the backend, the SC-1 protocol does not" - without saying where
@@ -224,12 +225,10 @@ of this step.
    and sending `BEGIN`, and that order is what the DB-1 guards depend on. It was
    already the only caller.
 
-   **This was the last thing making `transaction/mod.rs` name
-   `compio_postgres`, so the whole `transaction/` subtree is now clean on the
-   tier signature census** (which fell 4 -> 3 -> 2 across steps 3 and 5). The
-   two remaining rows are elsewhere: `crud/system_fields_pass.rs`
-   (`zeroship_runtime`) and `drop_namespace.rs` (`compio_postgres`, in a
-   test-gated module the census tiers by path).
+   This removed the remaining PostgreSQL client dependency from the
+   transaction module. The current protocol opens sessions through the backend
+   contract; assignment preparation receives an actor identifier as data and
+   does not depend on the V8 runtime.
 6. **DONE, `f61682839` + `7c4b1551f`.** `TxCanceller::capture(&TxConnection)`
    became `TxConnection::canceller()`, completing the five-operation lane, and
    the module itself moved from `transaction/cancel.rs` to
@@ -248,69 +247,20 @@ of this step.
 Each step compiles and keeps the suite green on its own. Steps 1-3 remove both
 census violations; 4-6 remove the coupling the census cannot see.
 
-## Verification
+## Current implementation and verification
 
-Per step: `cargo check -p zeroship-plugin-db --all-targets` **and**
-`--all-targets --features test-helpers` (they are different builds since
-`b589cabe9`), `cargo test -p zeroship-plugin-db --lib`, and
-`cargo check -p zeroship-worker -p zeroship-runtime --all-targets` for
-dependents - `cargo check -p` alone is blind to both test cfg and dependents
-(#145).
+The protocol remains in
+[the ORM transaction module](../../crates/zeroship-data-orm/src/transaction/mod.rs).
+Its [driver](../../crates/zeroship-data-orm/src/transaction/driver.rs) calls
+`BackendHandle::open_tx_session` and holds a
+[`Session`](../../crates/zeroship-data-orm/src/driver.rs). Database-specific
+mechanics belong to the backend and driver implementations. The ORM has no
+normal dependency on the V8 runtime; actor identity reaches
+[assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
+as `Option<&str>`.
 
-End state, checkable: `grep -c 'compio_postgres\|backend::sqlite' transaction/`
-returns 0 outside `#[cfg(test)]`, and `tests/lib/tier_signature_census.sh`
-reports no `transaction/` row.
-
-## Reached, measured 2026-09-02
-
-`tests/lib/tier_signature_census.sh` reports **no `transaction/` row** (total
-4 -> 2; the two survivors are `crud/system_fields_pass.rs` and
-`drop_namespace.rs`). `driver.rs` no longer imports `compio_postgres` at all.
-
-The grep is **not** 0, and the three survivors are each accounted for rather
-than waved past:
-
-| site | what it is |
-| --- | --- |
-| `driver.rs:58` | rustdoc prose explaining why a withdrawal is not a drop |
-| `driver.rs:978` | one call to `backend::sqlite::reservation::terminal_result` - engine calling vendor, which is DOWNWARD and legal |
-| `mod.rs:662` | `use crate::backend::sqlite::SqliteBackend` inside `#[cfg(test)] mod tests` (opens line 649) |
-
-So the production coupling the proposal set out to remove is gone, and what is
-left is one legal downward call plus two things the grep cannot distinguish from
-code. Anyone re-running that command should expect `2` and `1`, not `0`.
-
-**Every step was verified the same way**, because the live suite on this target
-was flaky (#105) and a total proves nothing: `cargo test --lib` for both
-crates, `cargo check --all-targets` on the default AND `test-helpers` feature
-sets (different builds since `b589cabe9`), `cargo check` on
-`zeroship-worker`/`zeroship-runtime` for dependents, and the live
-`native_transaction` suite compared **by failing NAME** against a baseline
-measured at the pre-lane commit - identical every time, at 19 passed / 5 failed.
-
-**THAT BASELINE WAS AN ARTEFACT, AND THIS PARAGRAPH USED IT AS EVIDENCE UNTIL
-2026-09-04.** `native_transaction` has no failures. Measured at `ebb1e1d7f` on a
-database created for the measurement alone: **24 passed, 0 failed**, at the
-default thread count, twice in a row with no reset. The five "failures" were
-residue - schemas, roles, an orphaned replication slot, publications - left in a
-reused database by an earlier parallel run of the same suite. #105 fixed the
-isolation; #143, which recorded those failures as pre-existing, is closed as
-refuted.
-
-The comparison-by-failing-NAME above was still the right technique and its
-conclusion still holds: the lane move changed no test's state. But note what the
-phrase "identical every time" was actually measuring. It reproduced because the
-residue was always there, and stability is what made it credible. **A number that
-comes back the same every run is not thereby correct** - it can be a constant
-defect. When a suite is known to leak state, re-derive its baseline on a database
-no previous run of that suite has touched, and treat every figure taken before
-the leak was fixed as suspect, including this one.
-
-Where a moved rule could have gone slack it was mutation-checked in its new
-home: sampling `transaction_status()` before the cleanup `ROLLBACK` still turns
-`a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` red.
-
-**The census is necessary and not sufficient here.** It scans signature
-positions, so it never saw `StepConfig::begin_sql` - a `String` field carrying
-PostgreSQL dialect - and will not see it leave. Step 4 must be verified by
-reading the type, not by watching the number.
+Run `cargo xtask test data` for the current native data suite, including live
+database transaction coverage. Historical signature censuses and results from
+reused databases are not evidence for the current boundary. Verify ownership in
+the session contract and exercise cleanup and cancellation against isolated test
+databases.

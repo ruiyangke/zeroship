@@ -272,8 +272,7 @@ async fn rolling_back_a_dropped_view_restores_it_on_postgres() {
             OWNER,
             guard_for(zeroship_migrate::shipping_vendors(), &GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zeroship_migrate_postgres::DIALECT,
-            ))
+                zeroship_migrate_postgres::DIALECT, &cfg.project_schema))
             .as_ref(),
         )
         .await
@@ -504,8 +503,7 @@ async fn a_table_rename_reaches_the_body_a_dropped_view_is_restored_from() {
             OWNER,
             guard_for(zeroship_migrate::shipping_vendors(), &GuardConfig::from_policy(
                 support::no_inject(&cfg.project_schema),
-                zeroship_migrate_postgres::DIALECT,
-            ))
+                zeroship_migrate_postgres::DIALECT, &cfg.project_schema))
             .as_ref(),
         )
         .await
@@ -663,7 +661,11 @@ async fn a_raw_view_body_does_not_follow_a_table_rename_and_its_inverse_is_refus
             OWNER,
             guard_for(
                 zeroship_migrate::shipping_vendors(),
-                &GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT),
+                &GuardConfig::from_policy(
+                    policy.clone(),
+                    zeroship_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
+                ),
             )
             .as_ref(),
         )
@@ -787,6 +789,7 @@ async fn a_guarded_drop_keeps_no_inverse_on_postgres() {
                 &GuardConfig::from_policy(
                     support::no_inject(&cfg.project_schema),
                     zeroship_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
                 ),
             )
             .as_ref(),

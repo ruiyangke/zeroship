@@ -469,8 +469,11 @@ fn plain_structured_view_is_confined_core_but_raw_view_is_capability_gated() {
     )
     .unwrap();
 
-    let guard_cfg =
-        GuardConfig::from_policy(support::no_inject(SCHEMA), zeroship_migrate_postgres::DIALECT);
+    let guard_cfg = GuardConfig::from_policy(
+        support::no_inject(SCHEMA),
+        zeroship_migrate_postgres::DIALECT,
+        SCHEMA,
+    );
     IrAuthor::new(
         zeroship_migrate::shipping_vendors(),
         SCHEMA,

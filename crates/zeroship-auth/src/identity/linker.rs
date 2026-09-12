@@ -35,8 +35,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::Client;
 use serde::{Deserialize, Serialize};
-use zeroship_core::user_id::UserId;
 use zeroship_core::auth::hmac_sha256;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 use crate::identity::email as email_validation;
@@ -206,7 +206,9 @@ pub async fn resolve_or_link(
     if let Some(id) =
         identities::find_by_provider_subject(db, profile.provider, profile.subject).await?
     {
-        return Ok(LinkOutcome::Existing { user_id: id.user_id });
+        return Ok(LinkOutcome::Existing {
+            user_id: id.user_id,
+        });
     }
 
     // 2. Email collision with an existing local user.
@@ -214,12 +216,7 @@ pub async fn resolve_or_link(
         // 2a. Local credential present, or provider not trusted for this
         // email → require explicit confirmation before creating the link.
         if user.password_hash.is_some() || !profile.provider_trusted_for_email {
-            return pending_confirmation(
-                user.id.clone(),
-                profile,
-                resume,
-                pending_signing_key,
-            );
+            return pending_confirmation(user.id.clone(), profile, resume, pending_signing_key);
         }
 
         // 2b. OAuth-only existing user + provider trusted for this email:
@@ -250,7 +247,11 @@ pub async fn resolve_or_link(
     // the form `@example.com`) falls back to `"user"` so we always insert a
     // non-empty value.
     let fallback = profile.email.split('@').next().unwrap_or("user");
-    let name = profile.name.unwrap_or(if fallback.is_empty() { "user" } else { fallback });
+    let name = profile.name.unwrap_or(if fallback.is_empty() {
+        "user"
+    } else {
+        fallback
+    });
 
     let user = users::create(db, profile.email, name, None).await?;
 
@@ -304,7 +305,7 @@ fn pending_confirmation(
     )
     .unwrap_or(i64::MAX);
     let pending = PendingLink {
-        user_id,
+        user_id: user_id.clone(),
         provider: profile.provider.to_string(),
         subject: profile.subject.to_string(),
         email: profile.email.to_string(),
@@ -334,7 +335,10 @@ mod tests {
             provider: "google".into(),
             subject: "sub-abc".into(),
             email: "ada@example.com".into(),
-            return_to: Some("/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb".into()),
+            return_to: Some(
+                "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb"
+                    .into(),
+            ),
             exp_unix: i64::try_from(
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -435,15 +439,15 @@ mod tests {
         // Seed a fully-credentialed user (non-NULL password_hash).
         let email = format!("linker-pwd-{}@example.test", Uuid::new_v4().simple());
         let phc = crate::identity::password::hash("hunter2").expect("hash");
-        let row = client
-            .query_one(
+        let user_id = UserId::mint();
+        client
+            .execute(
                 "INSERT INTO zeroship.users (id, email, name, password_hash) \
-                 VALUES ($1, $2::citext, $3, $4) RETURNING id",
-                &[&UserId::mint().as_str(), &email, &"Ada", &phc],
+                 VALUES ($1, $2::citext, $3, $4)",
+                &[&user_id.as_str(), &email, &"Ada", &phc],
             )
             .await
             .expect("seed user");
-        let user_id = crate::entity_ids::user_id(&row, "id").expect("seeded user id");
 
         let profile = ResolvedProfile {
             provider: "google",
@@ -468,8 +472,8 @@ mod tests {
             } => {
                 assert_eq!(existing_email, email);
                 assert_eq!(provider, "google");
-                let decoded = PendingLink::decode(&pending_token, &key)
-                    .expect("decode pending token");
+                let decoded =
+                    PendingLink::decode(&pending_token, &key).expect("decode pending token");
                 assert_eq!(decoded.user_id, user_id);
                 assert_eq!(decoded.email, email);
                 assert_eq!(decoded.provider, "google");
@@ -480,7 +484,9 @@ mod tests {
 
         // No identity row should exist yet — the link is only created on
         // `/link` POST.
-        let listed = identities::list_for_user(&client, &user_id).await.expect("list");
+        let listed = identities::list_for_user(&client, &user_id)
+            .await
+            .expect("list");
         assert!(
             listed.is_empty(),
             "NeedsConfirmation must NOT create an identity row"
@@ -488,7 +494,10 @@ mod tests {
 
         // Cleanup.
         client
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -499,15 +508,15 @@ mod tests {
 
         let email = format!("linker-native-{}@example.test", Uuid::new_v4().simple());
         let phc = crate::identity::password::hash("hunter2").expect("hash");
-        let row = client
-            .query_one(
+        let user_id = UserId::mint();
+        client
+            .execute(
                 "INSERT INTO zeroship.users (id, email, name, password_hash) \
-                 VALUES ($1, $2::citext, $3, $4) RETURNING id",
-                &[&UserId::mint().as_str(), &email, &"Native Link", &phc],
+                 VALUES ($1, $2::citext, $3, $4)",
+                &[&user_id.as_str(), &email, &"Native Link", &phc],
             )
             .await
             .expect("seed user");
-        let user_id = crate::entity_ids::user_id(&row, "id").expect("seeded user id");
         let subject = format!("sub-{}", Uuid::new_v4().simple());
         let profile = ResolvedProfile {
             provider: "github",
@@ -526,8 +535,8 @@ mod tests {
 
         match outcome {
             LinkOutcome::NeedsConfirmation { pending_token, .. } => {
-                let decoded = PendingLink::decode(&pending_token, &key)
-                    .expect("decode pending token");
+                let decoded =
+                    PendingLink::decode(&pending_token, &key).expect("decode pending token");
                 assert_eq!(decoded.user_id, user_id);
                 assert_eq!(decoded.subject, subject);
                 assert_eq!(decoded.return_to.as_deref(), Some(return_to));
@@ -535,14 +544,19 @@ mod tests {
             other => panic!("expected NeedsConfirmation, got {other:?}"),
         }
 
-        let listed = identities::list_for_user(&client, &user_id).await.expect("list");
+        let listed = identities::list_for_user(&client, &user_id)
+            .await
+            .expect("list");
         assert!(
             listed.is_empty(),
             "NeedsConfirmation must NOT create an identity row"
         );
 
         client
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -553,15 +567,15 @@ mod tests {
 
         // Seed an OAuth-only user (NULL password_hash) — nothing to defend.
         let email = format!("linker-oauth-{}@example.test", Uuid::new_v4().simple());
-        let row = client
-            .query_one(
+        let user_id = UserId::mint();
+        client
+            .execute(
                 "INSERT INTO zeroship.users (id, email, name, password_hash) \
-                 VALUES ($1, $2::citext, $3, NULL) RETURNING id",
-                &[&UserId::mint().as_str(), &email, &"Linus"],
+                 VALUES ($1, $2::citext, $3, NULL)",
+                &[&user_id.as_str(), &email, &"Linus"],
             )
             .await
             .expect("seed user");
-        let user_id = crate::entity_ids::user_id(&row, "id").expect("seeded user id");
 
         let subject = format!("sub-{}", Uuid::new_v4().simple());
         let profile = ResolvedProfile {
@@ -593,7 +607,10 @@ mod tests {
 
         // Cleanup — FK cascade on zeroship.federated_identities.user_id catches the link.
         client
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -603,15 +620,15 @@ mod tests {
         let client = pg().await;
 
         let email = format!("linker-untrusted-{}@example.test", Uuid::new_v4().simple());
-        let row = client
-            .query_one(
+        let user_id = UserId::mint();
+        client
+            .execute(
                 "INSERT INTO zeroship.users (id, email, name, password_hash) \
-                 VALUES ($1, $2::citext, $3, NULL) RETURNING id",
-                &[&UserId::mint().as_str(), &email, &"Untrusted"],
+                 VALUES ($1, $2::citext, $3, NULL)",
+                &[&user_id.as_str(), &email, &"Untrusted"],
             )
             .await
             .expect("seed user");
-        let user_id = crate::entity_ids::user_id(&row, "id").expect("seeded user id");
 
         let subject = format!("sub-{}", Uuid::new_v4().simple());
         let profile = ResolvedProfile {
@@ -637,8 +654,8 @@ mod tests {
             } => {
                 assert_eq!(existing_email, email);
                 assert_eq!(provider, "google");
-                let decoded = PendingLink::decode(&pending_token, &key)
-                    .expect("decode pending token");
+                let decoded =
+                    PendingLink::decode(&pending_token, &key).expect("decode pending token");
                 assert_eq!(decoded.user_id, user_id);
                 assert_eq!(decoded.subject, subject);
                 assert_eq!(decoded.email, email);
@@ -656,7 +673,10 @@ mod tests {
         );
 
         client
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user_id.as_str()],
+            )
             .await
             .ok();
     }
@@ -665,7 +685,10 @@ mod tests {
     async fn rejects_new_user_when_provider_untrusted_for_email_even_if_email_verified() {
         let client = pg().await;
 
-        let email = format!("linker-new-untrusted-{}@example.test", Uuid::new_v4().simple());
+        let email = format!(
+            "linker-new-untrusted-{}@example.test",
+            Uuid::new_v4().simple()
+        );
         let subject = format!("sub-{}", Uuid::new_v4().simple());
         let profile = ResolvedProfile {
             provider: "google",

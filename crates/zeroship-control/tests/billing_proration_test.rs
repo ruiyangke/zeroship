@@ -465,19 +465,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
     organization_id
 }
 
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Test Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
-}
-
 /// Seed the global `requests` weight (1 CU/op) once.
 async fn seed_weight(state: &AppState) {
     common::seed_metric_catalog(&state.control_pg, "requests").await;
@@ -589,7 +576,7 @@ async fn record_plan_change_like_set_plan(
     proration::record_plan_change_tx(
         &state.registry,
         &app,
-        &organization,
+        organization,
         from_plan_id.as_deref(),
         to_plan,
         now_unix,
@@ -1470,7 +1457,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     // deterministic metadata key so the orphan-reconciler can DELETE it, and a
     // provider-ref so the reconciler knows its external id directly.
     let orphan_key =
-        billing_reconcile::invoice_item_idempotency_key(&organization, &app, period, 1);
+        billing_reconcile::invoice_item_idempotency_key(organization, &app, period, 1);
     let orphan_item_id = fx.mock.preload_invoice_item(&customer, &orphan_key);
     fx.state
         .control_pg

@@ -1,14 +1,12 @@
 // @zeroship/storage — object-storage SDK.
 //
-// Wraps the `zeroship.storage.*` native primitives in a typed, ergonomic
-// Bucket interface. Same shape your app will use in dev (local runtime state
-// local state plus local FS) and prod (S3/R2 once those land behind the
-// same native interface).
+// Wraps `env.storage` in a typed Bucket interface for LocalFs and S3-compatible
+// backends selected by the host.
 
 import { env } from "zeroship";
 
 // ---------------------------------------------------------------------------
-// Native primitive shape — what the DbPlugin / StoragePlugin actually exposes
+// Native primitive shape — what StorageBinding exposes
 // on env.storage. All inputs/outputs are JSON strings; this SDK handles the
 // (de)serialization and base64 plumbing so user code works in native types.
 // ---------------------------------------------------------------------------
@@ -41,7 +39,7 @@ function getNativeStorage(): NativeStorage {
   if (!s) {
     throw new Error(
       "@zeroship/storage: env.storage not available — " +
-      "is the StoragePlugin registered on this runtime?"
+      "is the StorageBinding registered on this runtime?"
     );
   }
   return s;
@@ -70,7 +68,7 @@ export interface PutResult {
 export interface GetResult {
   /** Raw bytes as a Uint8Array. */
   bytes: Uint8Array;
-  /** Server-recorded content-type (may be null until we add sidecar metadata). */
+  /** Server-recorded content type, when available. */
   contentType: string | null;
   size: number;
 }
@@ -81,7 +79,7 @@ export interface GetStreamResult {
    * bounded by your read rate — the whole object is never buffered.
    */
   body: ReadableStream<Uint8Array>;
-  /** Server-recorded content-type (may be null until we add sidecar metadata). */
+  /** Server-recorded content type, when available. */
   contentType: string | null;
   size: number;
 }

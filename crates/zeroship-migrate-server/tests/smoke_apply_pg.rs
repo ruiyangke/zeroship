@@ -13,11 +13,9 @@
 //!   4. assert the table, the added column, AND the journal row all exist via an
 //!      INDEPENDENT query over the same seam.
 //!
-//! GATED behind a test database (a DSN on :5440; set `PG_TEST_URL` or run
-//! `tests/provision_test_backends.sh`): the test skips cleanly when unset, so
-//! DB-free CI stays green. It runs in its OWN meta + project schema
-//! (suffixed by a unique token) so the shared DB stays clean and re-runs are
-//! independent.
+//! Requires PostgreSQL through the test overlay or `PG_TEST_URL`; missing
+//! configuration or connectivity fails the test. Each run owns token-suffixed
+//! metadata and project schemas.
 
 use zeroship_migrate::driver::SqlSession;
 use zeroship_migrate::{
@@ -114,8 +112,15 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
 }
 
 /// The env var gating the live-PG smoke test. Mirrors the standalone's suite gate.
-fn pg_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+/// The live `PostgreSQL` this target applies its migrations to.
+///
+/// # Panics
+///
+/// When neither `PG_TEST_URL` nor the test overlay names one, with the
+/// provisioning command. It used to announce a skip, so a run against no
+/// database reported the same green as one that had applied real DDL.
+fn pg_url() -> String {
+    zeroship_core::config::test_database_url()
 }
 
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
@@ -141,11 +146,7 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 /// policy (the platform's create-table policy) — the same normalisation the
 /// SQLite IR-apply test uses before lowering. `addColumn` ops pass through
 /// untouched.
-fn resolved_envelope_json(
-    raw: &str,
-    effective: &EffectivePolicy,
-    default_schema: &str,
-) -> String {
+fn resolved_envelope_json(raw: &str, effective: &EffectivePolicy, default_schema: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("test IR parses");
     let resolved =
         resolve_create_table_policy(&ir, effective, default_schema).expect("test IR resolves");
@@ -180,13 +181,7 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 
 #[compio::test]
 async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
-    let Some(url) = pg_url() else {
-        zeroship_test_support::skip(
-            "skipping Phase F smoke: no test database (set PG_TEST_URL to a DSN \
-             on :5440, or run tests/provision_test_backends.sh)"
-        );
-        return;
-    };
+    let url = pg_url();
 
     // (a) live compio client, (b) wrapped in this crate's SqlSession adapter.
     let session = CompioPgSession::connect(&url)
@@ -220,7 +215,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
 
     // (c) PostgresBackend over the compio adapter + MigrationEngine.
     let engine = MigrationEngine::new(VENDORS);
-    let guard_cfg = GuardConfig::from_policy(effective.clone(), POSTGRES);
+    let guard_cfg = GuardConfig::from_policy(effective.clone(), POSTGRES, &cfg.project_schema);
     let plan = engine.plan(&migrations, &guard_cfg);
     assert!(
         plan.denied.is_empty(),
@@ -272,9 +267,7 @@ async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = read_journal(&session, &cfg)
-        .await
-        .expect("journal re-read");
+    let applied2 = read_journal(&session, &cfg).await.expect("journal re-read");
     assert_eq!(
         applied2.len(),
         migrations.len(),

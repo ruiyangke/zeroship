@@ -97,7 +97,7 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
   // facet alongside. Reduce to the neutral `encrypted` ColType whose `of` recurses
   // on the inner token — the same shape the engine's `ColType::Encrypted { of }`
   // carries. Checked before the type switch so the facet drives the arm.
-  if (def.encrypted !== undefined) {
+  if (def.encrypted === true) {
     const inner = colTypeFromDbField({ type: def.type } as FieldDef);
     return { encrypted: { of: inner } };
   }
@@ -120,9 +120,9 @@ export function colTypeFromDbField(field: DbSchemaField): ColType {
       return "bytes";
     case "geoPoint":
       return "geoPoint";
-    // `dbType.id(...)` is the legacy internal platform ID field. The runtime mints
-    // `<prefix>_<22 base62 UUIDv7>` values; this is neither TypeID nor a public
-    // migration-column shortcut. Its historical bridge carrier is neutral `uuid`.
+    // `dbType.id(...)` is the internal platform ID field. The runtime mints
+    // `<prefix>_<25 base36 UUIDv7>` values; this is neither TypeID nor a public
+    // migration-column shortcut. Its bridge carrier is neutral `uuid`.
     case "id":
       return "uuid";
     // A foreign-key column: the neutral `ref` arm carries the target table as a

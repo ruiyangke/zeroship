@@ -1,3 +1,10 @@
+//! The Redpanda adapter against a REAL broker.
+//!
+//! `REDPANDA_BROKERS` IS REQUIRED. These used to skip when it was unset, which
+//! made the only coverage of the durable usage-event transport green on every
+//! machine that had never started a broker. `brokers()` panics instead, and
+//! carries the `docker run` that stands one up.
+
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -6,13 +13,56 @@ use serde_json::json;
 use zeroship_stream::adapters;
 use zeroship_stream::{StreamConfig, StreamOffset, StreamRegistry};
 
+/// The broker list these tests produce to and consume from.
+///
+/// NO SCRIPT IN THIS TREE PROVISIONS A STANDALONE BROKER for a `cargo test`
+/// run. `tests/provision_test_backends.sh` stands up postgres and redis only,
+/// and `tests/e2e_metering_billing.sh` starts a Redpanda of its own per run and
+/// tears it down again, so it cannot be borrowed. The recipe below is that
+/// script's, with a fixed port and container name.
+///
+/// # Panics
+///
+/// When `REDPANDA_BROKERS` is unset or empty, with that recipe.
+fn brokers() -> String {
+    let configured = zeroship_core::test_env_os!("REDPANDA_BROKERS")
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    assert!(
+        !configured.trim().is_empty(),
+        "A Redpanda broker is unreachable, and this test requires it.\n\
+         \n\
+         \x20 backend: Redpanda (Kafka-family), the durable usage-event stream\n\
+         \x20 missing: REDPANDA_BROKERS is unset or empty\n\
+         \n\
+         NOTHING IN THIS REPOSITORY PROVISIONS A BROKER FOR A CARGO RUN.\n\
+         `tests/provision_test_backends.sh` stands up postgres and redis only,\n\
+         and `tests/e2e_metering_billing.sh` starts a broker of its own and\n\
+         removes it again, so it cannot be borrowed. Start one yourself:\n\
+         \n\
+         \x20 docker run --name zs-stream-test-redpanda -d -p 19092:19092 \\\n\
+         \x20   docker.redpanda.com/redpandadata/redpanda:latest \\\n\
+         \x20   redpanda start --overprovisioned --smp 1 --memory 512M \\\n\
+         \x20   --reserve-memory 0M --node-id 0 --check=false \\\n\
+         \x20   --kafka-addr external://0.0.0.0:19092 \\\n\
+         \x20   --advertise-kafka-addr external://127.0.0.1:19092 \\\n\
+         \x20   --set redpanda.auto_create_topics_enabled=true\n\
+         \x20 docker exec zs-stream-test-redpanda rpk cluster health --exit-when-healthy\n\
+         \n\
+         The advertised listener is load-bearing: without it the broker hands\n\
+         back an address the client cannot dial, and the produce hangs rather\n\
+         than failing. Auto-create is too - each test invents its own topic.\n\
+         Then re-run with REDPANDA_BROKERS=127.0.0.1:19092.\n\
+         \n\
+         There is no environment variable that makes this a skip. A broker this\n\
+         test cannot reach is a failed run, not a green one."
+    );
+    configured
+}
+
 #[test]
 fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
-    let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
-        zeroship_test_support::skip("skipping redpanda roundtrip: REDPANDA_BROKERS is unset");
-        return;
-    };
-    let brokers = brokers.to_string_lossy().to_string();
+    let brokers = brokers();
 
     block_on(async move {
         let suffix = unique_suffix();
@@ -100,11 +150,7 @@ fn redpanda_roundtrip_preserves_per_key_order_and_commits_offsets() {
 
 #[test]
 fn redpanda_rewind_replays_from_retained_beginning_after_commit() {
-    let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
-        zeroship_test_support::skip("skipping redpanda rewind: REDPANDA_BROKERS is unset");
-        return;
-    };
-    let brokers = brokers.to_string_lossy().to_string();
+    let brokers = brokers();
 
     block_on(async move {
         let suffix = unique_suffix();

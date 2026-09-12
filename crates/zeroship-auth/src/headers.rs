@@ -66,15 +66,6 @@ fn is_framed_route(req_path: &str) -> bool {
     FRAMED_ROUTE_PATHS.contains(&req_path)
 }
 
-/// Integration-test accessor for [`is_framed_route`] (the predicate is private
-/// so handlers can't reach it; the `threat_model` e2e asserts the framed-route
-/// set against it — design §9(c) "/oauth/google is NOT in the framed set").
-#[doc(hidden)]
-#[must_use]
-pub fn is_framed_route_for_test(req_path: &str) -> bool {
-    is_framed_route(req_path)
-}
-
 /// A CSP `frame-ancestors` source MUST be a concrete `scheme://host[:port]` —
 /// NO wildcard, NO CSP-list/header-injecting bytes (design §6.2). The deployment
 /// config layer (`AuthConfig::resolve`) already drops non-concrete origins, so

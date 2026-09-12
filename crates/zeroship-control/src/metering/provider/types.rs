@@ -2,8 +2,8 @@
 
 use std::time::Duration;
 
-use uuid::Uuid;
 pub use zeroship_core::usage_event::{UsageEvent, UsageSubject};
+use zeroship_core::AppId;
 
 use crate::registry::RegistryError;
 use crate::stripe_store::StripeError;
@@ -61,7 +61,7 @@ pub struct AggregateQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdjustmentNote {
     pub period: BillingPeriod,
-    pub app_id: Option<Uuid>,
+    pub app_id: Option<AppId>,
     pub meter: String,
     pub quantity_delta: i64,
     pub correction_seq: u32,
@@ -128,7 +128,13 @@ impl ProviderError {
 
     #[must_use]
     pub fn is_permanent_reject(&self) -> bool {
-        matches!(self, Self::PermanentReject { status: 400..=499, .. })
+        matches!(
+            self,
+            Self::PermanentReject {
+                status: 400..=499,
+                ..
+            }
+        )
     }
 
     #[must_use]
@@ -185,9 +191,9 @@ impl From<ProviderError> for RegistryError {
             ProviderError::Transport(m) => Self::Database(format!("transport: {m}")),
             ProviderError::Store(m) => Self::Database(format!("provider store: {m}")),
             ProviderError::Config(m) => Self::Database(format!("provider config: {m}")),
-            ProviderError::PermanentReject { status, message } => Self::Database(format!(
-                "provider permanent reject {status}: {message}"
-            )),
+            ProviderError::PermanentReject { status, message } => {
+                Self::Database(format!("provider permanent reject {status}: {message}"))
+            }
         }
     }
 }
@@ -198,7 +204,10 @@ mod tests {
 
     #[test]
     fn billing_period_converts_to_stripe_period() {
-        let p = BillingPeriod { start: 100, end: 200 };
+        let p = BillingPeriod {
+            start: 100,
+            end: 200,
+        };
         let sp: crate::stripe_client::Period = p.into();
         assert_eq!(sp.start, 100);
         assert_eq!(sp.end, 200);

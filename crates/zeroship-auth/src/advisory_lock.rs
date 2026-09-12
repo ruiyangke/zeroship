@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use compio_postgres::{Client, GenericClient};
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -127,18 +127,19 @@ pub async fn with_xact_advisory_lock2<C>(conn: &C, ns: i32, key: i32) -> Result<
 where
     C: GenericClient + ?Sized,
 {
-    conn.execute("SELECT pg_advisory_xact_lock($1::INT4, $2::INT4)", &[&ns, &key])
-        .await
-        .map_err(|e| AuthError::Db(format!("pg_advisory_xact_lock({ns},{key}): {e}")))?;
+    conn.execute(
+        "SELECT pg_advisory_xact_lock($1::INT4, $2::INT4)",
+        &[&ns, &key],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("pg_advisory_xact_lock({ns},{key}): {e}")))?;
     Ok(())
 }
 
 /// Acquire the refresh hierarchy's per-user xact advisory lock.
 ///
 /// The SQL deliberately hashes in Postgres as `hashtext(user_id::text)`, matching
-/// the P5b lock contract and all companion writers. The hashed text is the
-/// printed typed id, which is exactly what the `user_id` columns store, so a
-/// lock taken here and one taken by a statement that hashes the column agree.
+/// the P5b lock contract and all companion writers.
 pub async fn lock_refresh_user_xact<C>(conn: &C, user_id: &UserId) -> Result<()>
 where
     C: GenericClient + ?Sized,

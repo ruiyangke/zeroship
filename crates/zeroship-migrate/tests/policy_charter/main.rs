@@ -18,6 +18,7 @@ mod guard_security;
 mod guard_vendor_lower;
 mod layered_policy;
 mod pg_fail_closed_coverage;
+mod project_schema_authority;
 mod split_part_grammar_boundary;
 mod sqlite_confinement;
 mod sqlite_dqs_hardening;

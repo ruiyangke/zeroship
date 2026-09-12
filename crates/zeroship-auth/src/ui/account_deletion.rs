@@ -210,7 +210,7 @@ pub async fn request(
             return redirect_to_me();
         }
     };
-    let mut conn = match pool.get().await {
+    let mut conn = match pool.acquire().await {
         Ok(conn) => conn,
         Err(e) => {
             tracing::error!(error = %e, user_id = user.id.as_str(), "account deletion session unavailable");
@@ -525,10 +525,7 @@ fn csrf_ok(req: &HttpRequest, form_token: &str) -> bool {
 /// Resolve the signed-in user from the `__Host-zsidp_session` cookie, or
 /// `None`. Mirrors `me::resolve_user` (kept local — that one is private).
 #[allow(clippy::future_not_send)]
-async fn resolve_user(
-    req: &HttpRequest,
-    db: &compio_postgres::Client,
-) -> Option<UserRow> {
+async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -536,10 +533,7 @@ async fn resolve_user(
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, session.user_id.as_str())
-        .await
-        .ok()
-        .flatten()
+    users::find_by_id(db, &session.user_id).await.ok().flatten()
 }
 
 fn redirect_to_login() -> HttpResponse {
@@ -566,8 +560,9 @@ mod tests {
     fn the_cancel_query_takes_token_and_not_t() {
         fn parse(q: &str) -> std::result::Result<CancelQuery, serde::de::value::Error> {
             use serde::Deserialize;
-            let pairs: Vec<(String, String)> =
-                url::form_urlencoded::parse(q.as_bytes()).into_owned().collect();
+            let pairs: Vec<(String, String)> = url::form_urlencoded::parse(q.as_bytes())
+                .into_owned()
+                .collect();
             CancelQuery::deserialize(serde::de::value::MapDeserializer::new(pairs.into_iter()))
         }
         assert_eq!(parse("token=abc").expect("token= must parse").token, "abc");
@@ -637,7 +632,10 @@ mod tests {
         };
         assert_eq!(render_blocked(&page).status(), StatusCode::CONFLICT);
         let body = page.render().expect("the refusal page renders");
-        assert!(body.contains("12.50 USD"), "the amount is on the page: {body}");
+        assert!(
+            body.contains("12.50 USD"),
+            "the amount is on the page: {body}"
+        );
         assert!(body.contains("Acme"), "the organization is named: {body}");
         assert!(
             body.contains("add a payment method"),
@@ -656,7 +654,10 @@ mod tests {
     #[test]
     fn the_summary_quotes_money_only_for_invoices() {
         let both = debt_summary(&owing_blocker(1250, 2, 1));
-        assert!(both.contains("12.50 USD") && both.contains("2 invoices"), "{both}");
+        assert!(
+            both.contains("12.50 USD") && both.contains("2 invoices"),
+            "{both}"
+        );
         assert!(both.contains("one billing period"), "{both}");
 
         let invoices_only = debt_summary(&owing_blocker(500, 1, 0));

@@ -6,33 +6,17 @@ description = "Authorization wrapper policy types for the zeroship platform"
 
 [dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }
-compio-postgres = { workspace = true, features = ["with-serde_json-1", "with-uuid-1"] }
+compio-postgres = { workspace = true, features = ["with-serde_json-1"] }
 hex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
-uuid = { workspace = true }
-# Promoted from dev-dependencies: `Resource::App` carries an `AppId`, so the
-# type is in this crate's public API and the LIB needs it, not only the tests.
-# It was promoted for `authority::app_uuid_or_refuse`, which parsed the canonical
-# rendering; that function is deleted and the need got STRONGER rather than
-# going away - the parse is now the field's own decode. This adds no closure to
-# any binary: every crate that depends on zeroship-authz already depends on
-# zeroship-core.
-zeroship-core = { workspace = true }
+zeroship-id = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true }
-# The live-database preflight this crate's two database targets run before
-# their first assertion. Without it they read a stale schema as a code
-# regression, and an unconfigured run reports a green over zero database tests;
-# see `zeroship_testkit::live_db` and `tests/common/mod.rs`.
-#
-# It REPLACED `zeroship-test-support`, whose `skip` marker is what those two
-# targets used to print. There is no skip path left here, so nothing in this
-# crate announces one.
-zeroship-testkit = { workspace = true }
+zeroship-core = { workspace = true }
 
 [build-dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }

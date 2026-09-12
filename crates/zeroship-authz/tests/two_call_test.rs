@@ -10,18 +10,16 @@
 //! (`PG_TEST_URL`). Without one this target REFUSES rather than skipping; the
 //! reasoning is in `crates/zeroship-authz/tests/common/mod.rs`.
 
-mod common;
-
-use zeroship_core::user_id::UserId;
 use common::live_dsn;
 use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
-use uuid::Uuid;
 use zeroship_authz::{
     enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext, AuthzDecision,
     Condition, Effect, Policy, Resource, Statement,
 };
-use zeroship_core::app_id::AppId;
+use zeroship_id::{AppId, UserId};
+
+mod common;
 
 // ---------------------------------------------------------------------------
 // The two-call token intersection: TOKEN is a subset of USER
@@ -513,7 +511,10 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&attacker_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&attacker_id.as_str()],
+            )
             .await;
         victim.cleanup(&pg).await;
     });
@@ -759,7 +760,7 @@ impl Fixture {
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
             &[
                 &app_id.as_str(),
-                &format!("authz-{label}-{}", Uuid::new_v4().simple()),
+                &format!("authz-{label}-{}", app_id.as_str()),
                 &project_id,
             ],
         )
@@ -887,7 +888,10 @@ impl Fixture {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }
@@ -898,7 +902,7 @@ impl Fixture {
 /// satisfying the schema's shape CHECK the moment either moves - and it fails at
 /// insert time, not at compile time.
 fn typed_id(prefix: &str) -> String {
-    zeroship_core::typed_id::generate(prefix)
+    zeroship_id::typed_id::generate(prefix)
 }
 
 /// A slug matching the schema's grammar `^[a-z0-9][a-z0-9-]*$`, derived from

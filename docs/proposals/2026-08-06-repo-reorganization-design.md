@@ -69,7 +69,7 @@ can write online from app code. (Supersedes the earlier "rename to `@zeroship/
 backfill`" plan — deletion beats rename: the name collision disappears entirely.)
 
 **Coupling caveat (verified):** the retirement is a *surgical extraction*, not a bulk
-delete. `crates/zeroship-plugin-db/src/audit.rs` + the `__zeroship_migrations` table are
+delete. `crates/zeroship-data-v8/src/audit.rs` + the `__zeroship_migrations` table are
 **shared with the schema/DDL path** — `backend/postgres.rs:1074` and
 `register_model/validate.rs:86` write `Phase::Ddl` audit rows; `ensure_audit_table_
 exists`/`next_schema_version` back schema versioning. The advisory-lock lifecycle in
@@ -228,21 +228,21 @@ native + the `env.db` V8 surface + shared audit/lock infra), not a mechanical mo
 
 **Remove (backfill-specific):**
 - `sdks/migrations/` (whole package) + `examples/db-migrations-playground/`.
-- `crates/zeroship-plugin-db/src/v8_classes/migration.rs` + `v8_classes/migrations.rs` (the
+- `crates/zeroship-data-v8/src/v8_classes/migration.rs` + `v8_classes/migrations.rs` (the
   `env.db` backfill API) and their registration in `v8_classes/mod.rs`.
-- `crates/zeroship-plugin-db/src/migration_sweeper.rs` (dead-letter sweeper) + its lib.rs wiring.
-- The `migrateOne` batched-transform loop in `crates/zeroship-plugin-db/src/migrations.rs` —
+- `crates/zeroship-data-v8/src/migration_sweeper.rs` (dead-letter sweeper) + its lib.rs wiring.
+- The `migrateOne` batched-transform loop in `crates/zeroship-data-v8/src/migrations.rs` —
   the row-fetch/apply/dead-letter parts. Keep the advisory-lock lifecycle the schema
   path shares (`exec_begin`/`release_active_lock`).
 - Docs: the "Migrations (`@zeroship/migrations`)" section of `docs/reference/db.md`;
   the `@zeroship/migrations` line in `docs/runbooks/private-registry.md`; the comment
   in `sdks/bootstrap/src/internal.d.ts`; the `examples/README.md` row.
 
-**Explicitly KEEP:** `crates/zeroship-plugin-db/src/audit.rs` + the `__zeroship_migrations`
+**Explicitly KEEP:** `crates/zeroship-data-v8/src/audit.rs` + the `__zeroship_migrations`
 table + `next_schema_version` (shared schema-DDL provenance), and any lock machinery
 in `backend/mod.rs`/`owned_lock_guard.rs` the schema apply path uses.
 
-**Verify:** `cargo build -p zeroship-plugin-db` + full per-crate test; the schema/DDL
+**Verify:** `cargo build -p zeroship-data-v8` + full per-crate test; the schema/DDL
 audit path (`register_model`) still writes `Phase::Ddl` rows; `pnpm build` clean with
 the package gone; grep for dangling `@zeroship/migrations` / `migrateOne` /
 `migration_sweeper` refs → zero.

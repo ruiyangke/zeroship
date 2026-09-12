@@ -46,8 +46,6 @@ use zeroship_core::app_id::AppId;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use uuid::Uuid;
-
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------

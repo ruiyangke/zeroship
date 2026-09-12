@@ -1,0 +1,66 @@
+[package]
+name = "zeroship-data-orm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Backend-independent ORM with native Rust models, protected execution, and database driver adapters."
+
+[dependencies]
+indexmap = { workspace = true }
+time = { workspace = true }
+scoped-tls = "1"
+async-trait = { workspace = true }
+zeroship-data-macros = { workspace = true }
+zeroship-core = { workspace = true }
+zeroship-metering = { workspace = true }
+zeroship-migrate-policy = { workspace = true }
+compio = { workspace = true }
+compio-ws = { workspace = true }
+compio-tls = { workspace = true }
+# The relay client explicitly selects this provider, including in isolated builds.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+futures = { workspace = true }
+url = { workspace = true }
+zeroship-data-cdc-wire = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-uuid-1"] }
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook", "functions"] }
+num-bigint = { workspace = true }
+flume = { workspace = true }
+sqlite-vec = { workspace = true }
+tempfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+aes-gcm = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { version = "1", features = ["alloc", "derive"] }
+
+[dev-dependencies]
+zeroship-migrate-core = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+criterion = { workspace = true }
+trybuild = "1.0"
+zeroship-migrate-postgres = { workspace = true }
+zeroship-migrate = { workspace = true }
+zeroship-migrate-sqlite = { workspace = true }
+zeroship-migrate-server = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "bench_row_decode"
+harness = false
+
+[[bench]]
+name = "bench_first_row_or_null"
+harness = false
+
+[[bench]]
+name = "bench_query_build"
+harness = false

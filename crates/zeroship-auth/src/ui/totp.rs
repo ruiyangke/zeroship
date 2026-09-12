@@ -80,10 +80,10 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::password;
 use crate::identity::totp;
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::users::UserRow;
 use crate::store::{sessions, totp as totp_store, users};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 
 /// Issuer shown in the authenticator app's account label.
 const TOTP_ISSUER: &str = "zeroship";
@@ -133,17 +133,26 @@ pub async fn enroll(
     mailer: web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
-        return json_status(StatusCode::FORBIDDEN, &json!({ "error": "invalid_request" }));
+        return json_status(
+            StatusCode::FORBIDDEN,
+            &json!({ "error": "invalid_request" }),
+        );
     }
     let Some(user) = resolve_user(&req, db.as_ref()).await else {
-        return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
+        return json_status(
+            StatusCode::UNAUTHORIZED,
+            &json!({ "error": "unauthenticated" }),
+        );
     };
 
     let active = match totp_store::find_confirmed(db.as_ref(), &user.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "totp find_confirmed failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     };
     if let Some(cred) = active.as_ref() {
@@ -152,9 +161,20 @@ pub async fn enroll(
         // no-credential and pending arms below never touch it, keeping first
         // enrollment free of throttle state.
         if rate_limited(db.as_ref(), &user.id).await {
-            return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
+            return json_status(
+                StatusCode::TOO_MANY_REQUESTS,
+                &json!({ "error": "rate_limited" }),
+            );
         }
-        if !verify_reauth(&cfg, &user, cred, form.code.as_deref(), form.password.as_deref()).await {
+        if !verify_reauth(
+            &cfg,
+            &user,
+            cred,
+            form.code.as_deref(),
+            form.password.as_deref(),
+        )
+        .await
+        {
             audit::emit(
                 db.as_ref(),
                 &AuditEvent {
@@ -167,12 +187,18 @@ pub async fn enroll(
                 },
             )
             .await;
-            return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
+            return json_status(
+                StatusCode::UNAUTHORIZED,
+                &json!({ "error": "reauth_required" }),
+            );
         }
     }
 
     let Some((provisioning, ciphertext)) = mint_enrollment(&cfg, &user) else {
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+        return json_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({ "error": "server_error" }),
+        );
     };
     // `active.is_some()` here means the re-auth above passed. The store re-checks
     // under the write, so a confirm that landed since then loses the race and the
@@ -193,11 +219,17 @@ pub async fn enroll(
                 },
             )
             .await;
-            return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
+            return json_status(
+                StatusCode::UNAUTHORIZED,
+                &json!({ "error": "reauth_required" }),
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, user_id = user.id.as_str(), "totp enroll store failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     }
 
@@ -241,37 +273,58 @@ pub async fn confirm(
     db: web::types::State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
-        return json_status(StatusCode::FORBIDDEN, &json!({ "error": "invalid_request" }));
+        return json_status(
+            StatusCode::FORBIDDEN,
+            &json!({ "error": "invalid_request" }),
+        );
     }
     let Some(user) = resolve_user(&req, db.as_ref()).await else {
-        return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
+        return json_status(
+            StatusCode::UNAUTHORIZED,
+            &json!({ "error": "unauthenticated" }),
+        );
     };
     // Bound brute-force of the 6-digit code against the pending secret.
     if rate_limited(db.as_ref(), &user.id).await {
-        return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
+        return json_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            &json!({ "error": "rate_limited" }),
+        );
     }
 
     let key = match totp::key_from_config(cfg.settings.totp_enc_key.expose_str()) {
         Ok(k) => k,
         Err(e) => {
             tracing::error!(error = %e, "totp enc key misconfigured");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     };
     let Some(cred) = (match totp_store::find(db.as_ref(), &user.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "totp find failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     }) else {
-        return json_status(StatusCode::BAD_REQUEST, &json!({ "error": "no_pending_enrollment" }));
+        return json_status(
+            StatusCode::BAD_REQUEST,
+            &json!({ "error": "no_pending_enrollment" }),
+        );
     };
     let secret = match totp::decrypt_secret(&key, &user.id, &cred.encrypted_secret) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!(error = %e, "totp secret decrypt failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     };
 
@@ -288,7 +341,10 @@ pub async fn confirm(
             },
         )
         .await;
-        return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "invalid_code" }));
+        return json_status(
+            StatusCode::UNAUTHORIZED,
+            &json!({ "error": "invalid_code" }),
+        );
     }
 
     // Code valid → mint backup codes and confirm atomically.
@@ -296,17 +352,26 @@ pub async fn confirm(
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "backup code mint failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     };
     match totp_store::confirm(db.as_ref(), &user.id, &hashes).await {
         Ok(true) => {}
         Ok(false) => {
-            return json_status(StatusCode::BAD_REQUEST, &json!({ "error": "no_pending_enrollment" }));
+            return json_status(
+                StatusCode::BAD_REQUEST,
+                &json!({ "error": "no_pending_enrollment" }),
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, "totp confirm store failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     }
 
@@ -342,20 +407,32 @@ pub async fn disable(
     mailer: web::types::State<Arc<dyn Mailer>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
-        return json_status(StatusCode::FORBIDDEN, &json!({ "error": "invalid_request" }));
+        return json_status(
+            StatusCode::FORBIDDEN,
+            &json!({ "error": "invalid_request" }),
+        );
     }
     let Some(user) = resolve_user(&req, db.as_ref()).await else {
-        return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "unauthenticated" }));
+        return json_status(
+            StatusCode::UNAUTHORIZED,
+            &json!({ "error": "unauthenticated" }),
+        );
     };
     if rate_limited(db.as_ref(), &user.id).await {
-        return json_status(StatusCode::TOO_MANY_REQUESTS, &json!({ "error": "rate_limited" }));
+        return json_status(
+            StatusCode::TOO_MANY_REQUESTS,
+            &json!({ "error": "rate_limited" }),
+        );
     }
 
     let Some(cred) = (match totp_store::find_confirmed(db.as_ref(), &user.id).await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "totp find_confirmed failed");
-            return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+            return json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({ "error": "server_error" }),
+            );
         }
     }) else {
         // No active 2FA — treat as already-disabled (idempotent).
@@ -384,12 +461,18 @@ pub async fn disable(
             },
         )
         .await;
-        return json_status(StatusCode::UNAUTHORIZED, &json!({ "error": "reauth_required" }));
+        return json_status(
+            StatusCode::UNAUTHORIZED,
+            &json!({ "error": "reauth_required" }),
+        );
     }
 
     if let Err(e) = totp_store::disable(db.as_ref(), &user.id).await {
         tracing::error!(error = %e, "totp disable store failed");
-        return json_status(StatusCode::INTERNAL_SERVER_ERROR, &json!({ "error": "server_error" }));
+        return json_status(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({ "error": "server_error" }),
+        );
     }
 
     audit::emit(
@@ -519,9 +602,10 @@ async fn verify_reauth(
         user.password_hash.clone(),
     ) {
         let pw = pw.to_string();
-        let ok = compio::runtime::spawn_blocking(move || password::verify(&pw, &phc).unwrap_or(false))
-            .await
-            .unwrap_or(false);
+        let ok =
+            compio::runtime::spawn_blocking(move || password::verify(&pw, &phc).unwrap_or(false))
+                .await
+                .unwrap_or(false);
         if ok {
             return true;
         }
@@ -533,7 +617,7 @@ async fn verify_reauth(
 /// Best-effort: a store fault is treated as NOT throttled (fail-open on the
 /// throttle only — the credential decision itself is still fail-closed).
 #[allow(clippy::future_not_send)]
-async fn rate_limited(db: &compio_postgres::Client, user_id: &zeroship_core::user_id::UserId) -> bool {
+async fn rate_limited(db: &compio_postgres::Client, user_id: &zeroship_core::UserId) -> bool {
     let key = format!("totp:verify:{}", user_id.as_str());
     match rate_limit::consume(db, &key, Quota::TOTP_VERIFY).await {
         Ok(RateLimitDecision::Allowed) => false,
@@ -559,10 +643,7 @@ fn csrf_ok(req: &HttpRequest, form_token: &str) -> bool {
 /// Resolve the signed-in user from the `__Host-zsidp_session` cookie (mirrors
 /// `me::resolve_user` / `account_deletion::resolve_user`).
 #[allow(clippy::future_not_send)]
-async fn resolve_user(
-    req: &HttpRequest,
-    db: &compio_postgres::Client,
-) -> Option<UserRow> {
+async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -570,10 +651,7 @@ async fn resolve_user(
         .unwrap_or("");
     let session_id = session_cookie::parse_cookie(cookie_header)?;
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, session.user_id.as_str())
-        .await
-        .ok()
-        .flatten()
+    users::find_by_id(db, &session.user_id).await.ok().flatten()
 }
 
 fn json_status(status: StatusCode, body: &serde_json::Value) -> HttpResponse {

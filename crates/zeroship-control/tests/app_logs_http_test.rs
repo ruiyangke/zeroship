@@ -166,14 +166,14 @@ async fn app_logs_route_proxies_worker_lines() {
     .await;
 
     let response = control
-        .get(format!("/api/apps/{app_id}/logs"))
+        .get(format!("/api/apps/{}/logs", app_id.as_str()))
         .send()
         .await
         .expect("unauthenticated control response");
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
     let response = control
-        .get(format!("/api/apps/{app_id}/logs"))
+        .get(format!("/api/apps/{}/logs", app_id.as_str()))
         .header("authorization", pat.bearer())
         .send()
         .await
@@ -187,10 +187,9 @@ async fn app_logs_route_proxies_worker_lines() {
     // worker's log endpoint by the TYPED app id - the worker parses that
     // segment with `AppId::parse` and refuses a uuid rendering. So the echo is
     // the typed rendering, not `app_id`'s own Display.
-    let worker_segment = zeroship_core::app_id::canonical_app_id_for(&app_id);
     assert_eq!(
         lines,
-        vec![format!("b2-control-route-log {}", worker_segment.as_str())]
+        vec![format!("b2-control-route-log {}", app_id.as_str())]
     );
     pat.cleanup(&fixture.state).await;
 

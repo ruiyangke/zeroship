@@ -1,7 +1,7 @@
 // This test target is its own crate ROOT and overflows rustc's layout query:
 // "query depth increased by 130 when computing layout of {async block@...}".
 // `recursion_limit` is per crate root, so the gateway's lib and its sibling
-// test targets do not cover this one. Caught by `tests/clippy_gate.sh`, which
+// test targets do not cover this one. Caught by `cargo clippy --workspace --all-targets --all-features`, which
 // lints `--all-targets`; a bare `cargo test -p zeroship-gateway --lib` never
 // builds this file, which is why it compiled clean until the gate ran.
 #![recursion_limit = "256"]
@@ -14,9 +14,9 @@
 //! unconditional tests (authorize URL shape, 503 when un-provisioned,
 //! popup-callback page + CSP + no-reflection) need NO database. The signout revocation
 //! test stands up a loopback MOCK OP (counting `/revoke` hits)
-//! and is DB-gated on a test database (set `PG_TEST_URL`; the established skip
-//! convention — no live PG in CI by default), but the same-origin guard +
-//! cookie-clear parts run unconditionally.
+//! and REQUIRES a test database: with none configured it refuses and names
+//! `tests/provision_test_backends.sh` instead of skipping into a green. The
+//! same-origin guard + cookie-clear parts run unconditionally.
 
 mod common;
 
@@ -563,10 +563,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
 /// cleared, (d) OP `/revoke` was hit exactly once.
 #[ntex::test]
 async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
     let db = zeroship_gateway::db::DbConfig::new(dsn.clone(), 4);
 
     // Loopback mock OP that counts /revoke calls.
@@ -598,7 +595,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
 
     let anchor_id = {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let a = anchors::create(
             &mut conn,
             &anchors::NewAnchor {
@@ -649,7 +646,7 @@ async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke()
     // (b) anchor row deleted (read_live now returns None).
     {
         let pool = zeroship_gateway::db::checkout(&db).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let still =
             anchors::read_live(&mut conn, &app_id(), anchor_id)
                 .await

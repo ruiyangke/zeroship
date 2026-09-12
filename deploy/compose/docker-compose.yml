@@ -123,18 +123,23 @@ services:
     # in postgres-init.sql would appear to succeed and change nothing.
     #
     # CONCRETE COST of leaving it at the default: TEN plugin-db integration
-    # tests skip themselves on a `replica` server (`pg_has_logical_wal`), and
-    # crates/plugin-db/tests/integration.rs:2243 already anticipates this,
-    # saying CI's pg-test image gets `-c wal_level=logical` "once the rollout
-    # lands". This is that rollout for the compose stack.
+    # tests FAIL on a `replica` server (`pg_has_logical_wal`). They used to
+    # SKIP, which is worse and is why this setting was pinned here in the first
+    # place - the run reported the same "11 passed; 0 failed" either way and
+    # only the elapsed time differed. They refuse now, naming this setting and
+    # that it needs a RESTART rather than a reload, so a stack brought up
+    # without it is loud instead of hollow. Pin it anyway: a red suite is not a
+    # working development stack. crates/zeroship-data-v8/tests/integration.rs
+    # anticipated this, saying CI's pg-test image gets `-c wal_level=logical`
+    # "once the rollout lands". This is that rollout for the compose stack.
     #
     # TEN, not the 12 this said until 2026-08-18. Counted three ways that day
     # and they agree: `pg_has_logical_wal` has 10 call sites, a full run on a
-    # `replica` server announces 10 wal-worded ZEROSHIP-TEST-SKIPPED markers
-    # (plus one for postgis), and the same run on a `logical` server announces
-    # none of them. Nearby comments still say eleven and twelve - the number was
-    # written once and copied, and nothing re-ran it. See NOTES-s31.md for the
-    # two-server transcript.
+    # `replica` server announced one skip per wal-gated test (plus one for
+    # postgis), and the same run on a `logical` server announced none of them.
+    # Nearby comments still say eleven and twelve - the number was written once
+    # and copied, and nothing re-ran it. Count the call sites; that is the one
+    # of the three that is still measurable now the announcements are gone.
     # max_prepared_transactions is also a restart-only setting. PostgreSQL's
     # default is zero, which makes PREPARE TRANSACTION unavailable and leaves
     # pgoutput's `two_phase` protocol untestable. compio-postgres exercises the
@@ -196,20 +201,11 @@ services:
   # gateway, worker and auth - none of which migrate anything - so the Dockerfile
   # grew a `migrate` target and this service builds it.
   #
-  # The apply is idempotent: every journal version is a hash of owner_app plus the
-  # migration name, so a re-run re-derives the same versions and skips every
-  # applied file. Measured 2026-08-28 on the host against a PostgreSQL 17.11
-  # cluster created for the run: 35 of 35 files applied and exit 0, then an
-  # immediate second run reported `"applied":[]` for all 35 and exited 0.
-  # Destructive in-place evolutions in the committed set are approved by
-  # construction (`--approve`) - this operator-side one-shot treats the committed
+  # `cargo xtask test migrations` verifies the host CLI's apply, durable journal
+  # and repeat-apply contract against an owned database. It does not build this
+  # image. Destructive in-place evolutions in the committed set are approved by
+  # construction (`--approve`): this operator one-shot treats the committed
   # migrations as the intended apply.
-  #
-  # THAT SENTENCE PREVIOUSLY CLAIMED THE SAME RESULT AND WAS NOT A MEASUREMENT.
-  # On the day it was written the corpus could not be applied by any Node applier:
-  # all 35 files imported `@zeroship/migrate`, which resolves to nothing outside
-  # the V8 module map of a binary that had just been deleted. It is re-derived now
-  # by `tests/platform_migration_corpus_gate.sh` rather than asserted here.
   #
   # A DATABASE THE OLD BINARY MIGRATED NEEDS ONE MANUAL ADOPTION, and it is
   # deliberately not automatic. Its journal holds versions this corpus does not
@@ -679,6 +675,34 @@ services:
       auth:
         condition: service_started
 
+  cdc-relay:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile
+    image: zeroship-platform:dev
+    command:
+      - zeroship-data-cdc-server
+      - --listen
+      - 0.0.0.0:9094
+      - --tls-cert-file
+      - /etc/zeroship/cdc-cert.pem
+      - --tls-key-file
+      - /etc/zeroship/cdc-key.pem
+    environment:
+      ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL: ${ZEROSHIP_DATA_CDC_SERVER_DATABASE_URL:-postgres://zeroship_cdc:zeroship_cdc@postgres:5432/zeroship}
+      ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
+    volumes:
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/cdc-cert.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-key.pem:/etc/zeroship/cdc-key.pem:ro
+    restart: unless-stopped
+    security_opt:
+      - seccomp:unconfined
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
   worker:
     build:
       context: ../..
@@ -695,8 +719,8 @@ services:
     # constrained zeroship_worker role.
     # zeroship-migrate-server creates app roles, workflow schemas, and publications;
     # the worker receives only runtime-role membership, its narrow workflow
-    # owner membership, and REPLICATION for per-worker logical slots. It has no
-    # write privilege on any zeroship system relation.
+    # owner membership. The CDC relay owns logical replication; workers have
+    # neither REPLICATION nor BYPASSRLS.
     command:
       - zeroship-worker
       - --port
@@ -735,9 +759,14 @@ services:
       # Dedicated constrained worker login. Startup rejects a DSN whose
       # effective database privileges exceed this role's narrow posture.
       ZEROSHIP_WORKER_DATABASE_URL: ${ZEROSHIP_WORKER_DATABASE_URL:-postgres://zeroship_worker:zeroship_worker@postgres:5432/zeroship}
-      # env.kv backend. Secret-classed: a Redis URL admits userinfo, so it has
-      # no value flag and arrives here instead of on the command line.
-      ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}
+      ZEROSHIP_WORKER_CDC_RELAY_URL: wss://cdc-relay:9094/internal/v1/cdc/subscribe
+      ZEROSHIP_WORKER_CDC_RELAY_CA_FILE: /etc/zeroship/secrets/cdc-cert.pem
+      # KV configuration may contain credentials, so it is secret-classed.
+      ZEROSHIP_WORKER_KV_CONFIG: |
+        backend = "redis"
+        [redis.topology]
+        mode = "standalone"
+        endpoint = "redis:6379"
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_WORKER_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-worker.pem
       ZEROSHIP_WORKER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
@@ -756,12 +785,15 @@ services:
       # Without both it refuses every dispatch and cannot read an app's
       # environment from control - absence is a closed door, not an open one.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-worker.pem:/etc/zeroship/secrets/svc-worker.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/cdc-cert.pem:/etc/zeroship/secrets/cdc-cert.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     deploy:
       replicas: 3
     security_opt:
       - seccomp:unconfined
     depends_on:
+      cdc-relay:
+        condition: service_started
       # The worker DSN points at the shared Postgres, so wait for the schema to
       # exist (postgres healthy + the one-shot migrate completed) the same
       # way control/gateway do - otherwise the first env.db op races the
@@ -784,12 +816,11 @@ services:
         condition: service_started
 
   # redis - the SHARED key-value store backing the deployed-app `env.kv`
-  # namespace. The worker's `ZEROSHIP_WORKER_KV_URL` points every
+  # namespace. The worker's `ZEROSHIP_WORKER_KV_CONFIG` points every
   # worker replica at this ONE instance, so a `kv.set` on one replica is
   # visible to another (multi-node consistency). The bespoke compio-redis
-  # driver speaks to it; zero tokio. Single-node here in dev; the
-  # `Redis` backend's URL transparently upgrades to cluster mode
-  # (`?cluster=true&seeds=...`) for a sharded prod fleet.
+  # driver speaks to it; zero tokio. Standalone here in dev; the KV topology
+  # configuration selects cluster mode for a sharded deployment.
   redis:
     image: redis:7-alpine
     command: redis-server --save 60 1 --appendonly no

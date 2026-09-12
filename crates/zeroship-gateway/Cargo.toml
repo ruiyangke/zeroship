@@ -75,21 +75,13 @@ futures = { workspace = true }
 # `DecodePrivateKey` trait used by `crates/zeroship-gateway/src/signing.rs`.
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 # Phase 3 U4 — per-origin app session store (`auth.gateway_sessions`).
-compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
 # The generated-controls test parses an overlay fixture to prove the
 # observability tier is read from the canonical TOML path.
 toml = { workspace = true }
-zeroship-test-support = { workspace = true }
-# The live-database preflight this crate's five database targets run before
-# their first assertion. Without it they read a stale schema as a code
-# regression; see `zeroship_testkit::live_db`.
-zeroship-testkit = { workspace = true }
-# Integration tests construct `GateState`, whose `meter` field is an
-# `Arc<zeroship_metering::Meter>` (coverage #27). They need the type in
-# scope to build the fixture.
 zeroship-metering = { workspace = true }
 async-trait = { workspace = true }
 # Phase 3 U4 smoke test runs `zeroship_auth::store::migrations::migrate`

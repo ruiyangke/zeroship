@@ -411,7 +411,7 @@ async fn pool_cancel_query_interrupts_a_running_query_and_preserves_the_session(
     let pool = Pool::connect(&url, 1)
         .await
         .expect("connect one-slot cancellation pool");
-    let client = Box::pin(pool.get())
+    let client = Box::pin(pool.acquire())
         .await
         .expect("borrow the pool cancellation target");
     let observer = connect(&url).await.expect("connect cancellation observer");
@@ -444,7 +444,7 @@ async fn a_pool_can_cancel_tls_with_its_private_policy_lineage() {
     let pool = Pool::connect(&url, 1)
         .await
         .expect("connect one-slot TLS pool");
-    let client = pool.get().await.expect("borrow TLS pool connection");
+    let client = pool.acquire().await.expect("borrow TLS pool connection");
     let observer = connect(&url).await.expect("connect cancellation observer");
     let pid = client.process_id();
     let token = client.cancel_token();
@@ -588,11 +588,11 @@ async fn pool_cancel_query_refuses_a_token_from_a_returned_lease() {
     let pool = Pool::connect(&url, 1).await.expect("connect one-slot pool");
     let observer = connect(&url).await.unwrap();
 
-    let first = Box::pin(pool.get()).await.expect("borrow first pool lease");
+    let first = Box::pin(pool.acquire()).await.expect("borrow first pool lease");
     let token = first.cancel_token();
     drop(first);
 
-    let second = Box::pin(pool.get())
+    let second = Box::pin(pool.acquire())
         .await
         .expect("borrow second pool lease");
     let second_pid = second.process_id();
@@ -626,12 +626,12 @@ async fn pool_cancel_query_racing_return_retires_the_physical_session() {
         .await
         .expect("connect one-slot cancellation pool");
     let observer = connect(&url).await.expect("connect cancellation observer");
-    let first = Box::pin(pool.get())
+    let first = Box::pin(pool.acquire())
         .await
         .expect("borrow the cancellation target");
     let first_pid = first.process_id();
     let token = first.cancel_token();
-    let evictions_before = pool.metrics.evictions.get();
+    let evictions_before = pool.metrics().evictions.get();
 
     let mut cancel = Box::pin(pool.cancel_query(&token));
     futures_util::future::poll_fn(|context| match cancel.as_mut().poll(context) {
@@ -646,7 +646,7 @@ async fn pool_cancel_query_racing_return_retires_the_physical_session() {
     assert_eq!(pool.active_count(), 0);
     assert_eq!(pool.idle_count(), 0);
     assert_eq!(pool.total_count(), 0);
-    assert_eq!(pool.metrics.evictions.get(), evictions_before + 1);
+    assert_eq!(pool.metrics().evictions.get(), evictions_before + 1);
 
     compio::time::timeout(OPERATION_TIMEOUT, cancel)
         .await
@@ -654,7 +654,7 @@ async fn pool_cancel_query_racing_return_retires_the_physical_session() {
         .expect("PostgreSQL did not consume the in-flight CancelRequest");
     wait_until_backend_is_gone(&observer, first_pid).await;
 
-    let replacement = Box::pin(pool.get())
+    let replacement = Box::pin(pool.acquire())
         .await
         .expect("retiring the raced session did not release pool capacity");
     assert_client_still_works(&replacement).await;

@@ -66,9 +66,10 @@ GP_SECURITY_DIR="/tmp/zeroship-golden-security-$$"
 # a differently-named ambient variable.
 #
 # The bypass arm survives - it is the right arm when the deploy API is not the
-# thing under test - but it ANNOUNCES itself with the repo's skip marker, so
-# `tests/lib/skip_census.sh` over this run's log finds it and a reader gets a
-# different sentence rather than a shorter list of ticks.
+# thing under test - but it NAMES ITSELF in the summary this script always
+# prints, so a reader gets a different sentence rather than a shorter list of
+# ticks, and CI asserts the deploy arm's line is present rather than counting
+# an announcement the bypass arm makes.
 GP_PROVISION=deploy
 for _arg in "$@"; do
   case "$_arg" in
@@ -444,15 +445,9 @@ zs_check_artifact_freshness "$ROOT" "sdks/vite-plugin/dist/index.js" \
     fail "sdks/vite-plugin/dist is stale (ZS_FRESHNESS_STRICT=1)"; exit 1;
   }
 
-# The state-dir-lock marker is declared once in Rust and once in TypeScript, and
-# the dev banner picks between two contradictory remedies based on the TS copy.
-# Both crate suites pass if only one spelling is edited - neither can see the
-# other - so this is the only comparison. Exits 2 when it cannot find a
-# declaration, because a grep that matches nothing is how a gate goes quietly
-# green. Self-test: tests/lib/state_dir_lock_marker.sh --selftest
-bash "$ROOT/tests/lib/state_dir_lock_marker.sh" || {
-  rc=$?
-  [ "$rc" = "2" ] && { fail "state-dir-lock marker gate could not run"; exit 2; }
+# Check the Vite diagnostic token against the compiled Rust storage constant.
+cargo test --manifest-path "$ROOT/Cargo.toml" -p zeroship-kv \
+  --no-default-features --features redb --test state_dir_lock_marker || {
   fail "state-dir-lock marker differs between Rust and TypeScript"; exit 1;
 }
 
@@ -946,6 +941,7 @@ e2e_export_database_urls "$DB_URL"
 # ZEROSHIP_CONTROL_SPEND_RECOMPUTE_INTERVAL). Covering those needs the per-tick differential
 # in #327, not another flag.
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # `--workers` is NOT optional decoration, and its absence was invisible for as
 # long as this harness existed. crates/zeroship-control/src/main.rs:81 declares it with
 # `default_value = "http://localhost:8080"`, and this harness runs its worker on
@@ -973,12 +969,15 @@ sleep 3
 # worker. Step 9 is dev-only and never noticed; step 10 drives the DEPLOYED tier
 # and would have reported the gateway's 502 as a platform divergence.
 #
-# ZEROSHIP_WORKER_DATABASE_URL / ZEROSHIP_WORKER_KV_URL / --storage-url: without
+# ZEROSHIP_WORKER_DATABASE_URL / ZEROSHIP_WORKER_KV_CONFIG / --storage-url: without
 # them env.db / env.kv / env.storage are
 # ABSENT on the deployed tier and step 10's app would fail for a reason that
 # has nothing to do with what it is measuring.
 gp_start_worker() {
-  ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
+  ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"127.0.0.1:$REDIS_PORT\"" \
   "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
     --storage-url /tmp/gp-storage \
     --blob-store /tmp/gp-bundles --poll-interval 2 >>/tmp/gp-worker.log 2>&1 &
@@ -1398,12 +1397,20 @@ else
   # not be able to read as a run that covered the command this file is named
   # after.
   #
-  # The marker is the one `tests/lib/skip_census.sh` counts and
-  # `zeroship_test_support::skip` emits, byte for byte, so one search over a run
-  # log finds every announced no-op in the workspace and this is one of them.
-  # stderr for the same reason that function uses it: it is the channel that
-  # survives a passing run.
-  echo "ZEROSHIP-TEST-SKIPPED: golden_path step 3: --provision=dev-provision selected, so \`zeroship deploy\` was NOT exercised - the app was written straight into the registry and blob store" >&2
+  # THE SKIP MARKER THAT PREFIXED THIS LINE IS GONE with the census that read
+  # it. The announcement stays - a reader scrolling this log still needs to be
+  # told, at the point it happens, that the command this file is named after did
+  # not run - but it is no longer spelled as a workspace-wide token, because
+  # nothing counts that token any more and a dead sentinel reads as a live one.
+  #
+  # What ENFORCES the arm is now the summary line at the bottom, which is
+  # printed on every run and names whichever arm was taken; CI greps for the
+  # deploy arm's line. Asserting the presence of the covered arm also catches a
+  # log that was truncated or never written, which counting an announcement made
+  # by the OTHER arm could not.
+  #
+  # stderr, because that is the channel that survives a passing run.
+  echo "golden_path step 3: --provision=dev-provision selected, so \`zeroship deploy\` was NOT exercised - the app was written straight into the registry and blob store" >&2
   GP_ARM_PASS_DELTA=4
   OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
   APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
@@ -4783,13 +4790,13 @@ if [ "$GP_PROVISION" = "deploy" ]; then
 else
   echo "  step 3 arm: --provision=dev-provision -- \`zeroship deploy\` was NOT exercised;"
   echo "              the app was written straight into the registry and blob store."
-  # The marker token is deliberately NOT spelled here. It is printed once, by
-  # the announcement at step 3, and a second literal in this summary would make
-  # a census over this log report two skips for one skipped arm - the same
-  # self-counting-instrument trap the floor's own comment block documents.
-  echo "              This run says nothing about the deploy CLI. Step 3 announced"
-  echo "              itself with the repo's skip marker; tests/lib/skip_census.sh"
-  echo "              over this log counts it."
+  # THIS BRANCH'S `step 3 arm:` LINE IS WHAT CI RULES ON, by requiring the
+  # OTHER branch's line to be present. That is why both branches print the same
+  # prefix and differ after it: a grep for the covered arm fails on this arm, on
+  # a truncated log, and on no log at all, which is three failure modes one
+  # assertion covers.
+  echo "              This run says nothing about the deploy CLI. Step 3 said so"
+  echo "              where it happened; this line is the durable record of it."
 fi
 for _s in $GP_EXPECTED_STEPS; do
   printf '    step %s: %s outcome(s)\n' "$_s" "${GP_STEP_OUTCOMES[$_s]-MISSING}"

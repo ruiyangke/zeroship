@@ -397,7 +397,7 @@ fn decoder_strips_bom_by_default() {
 }
 
 #[test]
-fn decoder_keeps_bom_when_ignoreBOM_set() {
+fn decoder_keeps_bom_when_ignore_bom_set() {
     // Probe via codePointAt rather than serializing — JSON.stringify
     // doesn't escape U+FEFF (it's a valid JSON string char), so the
     // raw BOM ends up in the assertion target as itself, which is

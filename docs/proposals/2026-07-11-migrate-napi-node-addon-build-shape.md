@@ -44,7 +44,7 @@ A SECOND `napi` entry sits in `[dev-dependencies]`, adding `dyn-symbols`, so tes
 resolve the Node ABI through libloading and have no undefined symbols to link. It is
 declared on the dev-dependency and never routed through `[features]`, because any route
 reachable from `default` would put libloading into the shipped `.node`
-(`tests/dev_dep_feature_route_gate.sh`, `tests/napi_symbol_shape_gate.sh`).
+(`xtask/tests/repository_architecture.rs`, `tests/napi_symbol_shape_gate.sh`).
 
 `napi` is declared `version = "3", default-features = false, features = ["napi6", "serde-json"]`.
 `napi4` supplies the ThreadsafeFunction, `napi5` supplies `Env::create_function_from_closure`

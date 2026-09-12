@@ -57,8 +57,7 @@
 //! rather than resolving anything. Loud, and on the first query.
 
 use compio_postgres::Client;
-use zeroship_core::user_id::UserId;
-use zeroship_core::app_id::AppId;
+use zeroship_id::{AppId, UserId};
 
 use crate::{AuthzError, Resource};
 
@@ -233,7 +232,12 @@ async fn resolve_narrowed(
     let rows = pg
         .query(
             &sql,
-            &[&principal_id.as_str(), &project_id, &app_id, &PROJECT_WIDE_ROLE],
+            &[
+                &principal_id.as_str(),
+                &project_id,
+                &app_id,
+                &PROJECT_WIDE_ROLE,
+            ],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("resolve project authority: {err}")))?;
@@ -252,7 +256,9 @@ async fn resolve_narrowed(
 }
 
 fn principal_row<T>(row: Option<T>, principal_id: &UserId) -> Result<T, AuthzError> {
-    row.ok_or_else(|| AuthzError::Validation(format!("principal not found: {}", principal_id.as_str())))
+    row.ok_or_else(|| {
+        AuthzError::Validation(format!("principal not found: {}", principal_id.as_str()))
+    })
 }
 
 /// Every organization the principal holds a live membership row in.
@@ -422,7 +428,7 @@ mod tests {
 
     // WHAT USED TO BE HERE, AND WHY IT IS NOT.
     //
-    // Two tests pinned `app_uuid_or_refuse`: that the canonical `app_<base62>`
+    // Two tests pinned `app_uuid_or_refuse`: that the canonical `app_<base36>`
     // rendering resolved rather than falling through to the unranked read, and
     // that an id in neither taught rendering was a REFUSAL rather than a silent
     // rank zero. Both bound a function that existed only because
@@ -434,6 +440,6 @@ mod tests {
     // refusal happens at the crate boundary instead of inside the resolve. The
     // boundary itself is bound in `resource.rs`
     // (`a_non_canonical_app_id_does_not_deserialize`) and the parse is bound in
-    // `zeroship_core::app_id`. Re-asserting either here would be a second copy
+    // `zeroship_id::app_id`. Re-asserting either here would be a second copy
     // of a check this module no longer performs.
 }

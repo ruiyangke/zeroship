@@ -8,7 +8,6 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX;
-use zeroship_core::user_id::UserId;
 
 use common::test_auth_config;
 
@@ -41,12 +40,12 @@ struct AppScope {
 struct ConsentTestApp {
     cfg: Arc<zeroship_auth::config::AuthConfig>,
     pg: Arc<compio_postgres::Client>,
-    user_id: UserId,
+    user_id: zeroship_core::UserId,
     app_id: AppId,
     client_id: String,
-    /// Real `zeroship.apps.id` UUID for a per-app (`oac_`) client; `None` for the
+    /// Real `zeroship.apps.id` for a per-app (`oac_`) client; `None` for the
     /// builder/console clients booted via `boot`.
-    seeded_app_uuid: Option<AppId>,
+    seeded_app_id: Option<AppId>,
 }
 
 impl ConsentTestApp {
@@ -63,9 +62,9 @@ impl ConsentTestApp {
     /// is FALSE (per-app clients never auto-accept — spec §5.2 round-3).
     #[allow(clippy::future_not_send)]
     async fn boot_app_client(requested: &[&str], declared: &[AppScope]) -> Self {
-        let app_uuid = AppId::mint();
-        let client_id = client_id_for_app(&app_uuid);
-        Self::boot_inner(requested, None, false, &client_id, Some(app_uuid), declared).await
+        let app_id = AppId::mint();
+        let client_id = client_id_for_app(&app_id);
+        Self::boot_inner(requested, None, false, &client_id, Some(app_id), declared).await
     }
 
     #[allow(clippy::future_not_send, clippy::too_many_arguments)]
@@ -74,17 +73,14 @@ impl ConsentTestApp {
         app_role: Option<&str>,
         skip: bool,
         client_id: &str,
-        app_uuid: Option<AppId>,
+        requested_app_id: Option<AppId>,
         declared: &[AppScope],
     ) -> Self {
         let client_id = client_id.to_owned();
-        let db_url =
-            zeroship_core::config::test_database_url_opt()
-                .expect("a test database is required for consent_ui_test (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-        let (pg_client, pg_connection) =
-            compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                .await
-                .expect("connect pg");
+        let db_url = crate::common::test_database_url();
+        let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_connection.run().await {
                 eprintln!("[consent_ui_test] pg connection driver: {e}");
@@ -93,9 +89,10 @@ impl ConsentTestApp {
         .detach();
         let pg = Arc::new(pg_client);
 
-        let user_id = UserId::mint();
-        let app_id = app_uuid.clone().unwrap_or_else(AppId::mint);
-        let seeded_app_uuid = (app_role.is_some() || app_uuid.is_some()).then(|| app_id.clone());
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = requested_app_id.clone().unwrap_or_else(AppId::mint);
+        let seeded_app_id =
+            (app_role.is_some() || requested_app_id.is_some()).then_some(app_id.clone());
         let email = format!("consent-{}@zeroship.test", user_id.as_str());
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
@@ -104,7 +101,7 @@ impl ConsentTestApp {
         )
         .await
         .expect("insert consent test user");
-        if let Some(seed_app_id) = seeded_app_uuid.as_ref() {
+        if let Some(seed_app_id) = seeded_app_id.as_ref() {
             let plan_id = "consent-test-plan";
             let limits = json!({
                 "cpu_ms": 1000,
@@ -175,13 +172,13 @@ impl ConsentTestApp {
         // Per-app client: seed zeroship.apps (FK target) + app_scope_defs so the
         // consent classifier's `client_id → app_id → app_scope_defs` resolution
         // is exercised against the real tables, not a stub.
-        if let Some(app_uuid) = app_uuid {
+        if let Some(app_id) = requested_app_id.as_ref() {
             for s in declared {
                 let desc: Option<String> = s.description.map(ToOwned::to_owned);
                 pg.execute(
                     "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
                      VALUES ($1, $2, $3, $4)",
-                    &[&app_uuid.as_str(), &s.id, &s.label, &desc],
+                    &[&app_id.as_str(), &s.id, &s.label, &desc],
                 )
                 .await
                 .expect("insert app_scope_defs");
@@ -206,10 +203,10 @@ impl ConsentTestApp {
         Self {
             cfg,
             pg,
-            user_id,
+            user_id: user_id.clone(),
             app_id,
             client_id,
-            seeded_app_uuid,
+            seeded_app_id,
         }
     }
 
@@ -247,15 +244,18 @@ impl ConsentTestApp {
             )
             .await;
         // zeroship.app_scope_defs/app_members rows cascade via the apps FK.
-        if let Some(app_uuid) = self.seeded_app_uuid {
+        if let Some(app_id) = self.seeded_app_id {
             let _ = self
                 .pg
-                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_uuid.as_str()])
+                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
                 .await;
         }
         let _ = self
             .pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 
@@ -291,7 +291,6 @@ impl ConsentTestApp {
             .status()
             .as_u16()
     }
-
 }
 
 #[ntex::test]
@@ -335,9 +334,15 @@ async fn consent_deny_redirect_includes_issuer_parameter() {
         location.starts_with(&format!("{REDIRECT_URI}?")),
         "consent denial must redirect to RP callback: {location}"
     );
-    assert_eq!(query_param(&location, "error").as_deref(), Some("access_denied"));
+    assert_eq!(
+        query_param(&location, "error").as_deref(),
+        Some("access_denied")
+    );
     assert_eq!(query_param(&location, "state").as_deref(), Some("state-m3"));
-    assert_eq!(query_param(&location, "iss").as_deref(), Some(issuer.issuer()));
+    assert_eq!(
+        query_param(&location, "iss").as_deref(),
+        Some(issuer.issuer())
+    );
 
     app.cleanup().await;
 }
@@ -361,12 +366,8 @@ const BILLING_SCOPE: AppScope = AppScope {
 
 fn test_issuer() -> zeroship_auth::oidc::Issuer {
     let signing = SigningKey::from_bytes(&[42u8; 32]);
-    zeroship_auth::oidc::Issuer::from_signing_key(
-        &signing,
-        [9u8; 32],
-        ISSUER.to_string(),
-    )
-    .expect("issuer")
+    zeroship_auth::oidc::Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string())
+        .expect("issuer")
 }
 
 fn authorize_return_to(client_id: &str, scope: &str, state: &str) -> String {
@@ -383,13 +384,16 @@ fn authorize_return_to(client_id: &str, scope: &str, state: &str) -> String {
 }
 
 fn query_param(raw_url: &str, name: &str) -> Option<String> {
-    url::Url::parse(raw_url).ok()?.query_pairs().find_map(|(key, value)| {
-        if key == name {
-            Some(value.into_owned())
-        } else {
-            None
-        }
-    })
+    url::Url::parse(raw_url)
+        .ok()?
+        .query_pairs()
+        .find_map(|(key, value)| {
+            if key == name {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })
 }
 
 /// A per-app (`oac_`) end-user client is written with skip_consent = FALSE — it
@@ -407,6 +411,9 @@ async fn per_app_client_is_not_skip_consent() {
         .await
         .expect("query skip_consent")
         .get("skip_consent");
-    assert!(!skip, "per-app end-user clients must have skip_consent = false");
+    assert!(
+        !skip,
+        "per-app end-user clients must have skip_consent = false"
+    );
     app.cleanup().await;
 }

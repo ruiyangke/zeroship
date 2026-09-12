@@ -1,30 +1,25 @@
 //! OIDC Core §5.3 `/oauth2/userinfo` tests.
 
 use crate::common;
+use common::{auth_server::AuthServer, database::Database};
+use ed25519_dalek::{pkcs8::EncodePrivateKey, SigningKey};
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::{connect, Client, NoTls};
+use compio_postgres::Client;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use ntex::web;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
-use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::metadata::jwks_document;
-use zeroship_auth::oidc::{
-    AccessTokenMint, IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
-};
-use zeroship_auth::server;
+use zeroship_auth::oidc::{IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 
-use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
+use common::{location, pkce_challenge_s256, pkce_verifier};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const WRONG_ISSUER: &str = "https://wrong-auth.zeroship.test";
@@ -44,13 +39,12 @@ struct SeededUserProfile {
 }
 
 struct Fixture {
-    srv: ntex::web::test::TestServer,
-    auth_base: String,
+    server: AuthServer,
     db: Arc<Client>,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: AppId,
-    user_id: UserId,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
     user_email: String,
     user_name: String,
     user_avatar_url: String,
@@ -59,27 +53,12 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[oidc_userinfo_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
-        let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(err) = pg_connection.run().await {
-                eprintln!("[oidc_userinfo_test] pg connection error: {err}");
-            }
-        })
-        .detach();
-        let db = Arc::new(pg_client);
-
+    async fn boot(database: &Database) -> Self {
+        let db = Arc::new(database.connect().await);
         let issuer = Arc::new(test_issuer(ISSUER));
-        common::publish_op_key_once(&issuer, &db)
-            .await
-            .expect("publish active OP key");
 
-        let user_id = UserId::mint();
-        let app_id = AppId::mint();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_id = format!("oac_userinfo_{}", Uuid::new_v4().simple());
         let app_name = format!("userinfo-{}", Uuid::new_v4().simple());
         let user_profile =
@@ -87,7 +66,7 @@ impl Fixture {
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id: &user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -104,237 +83,203 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        let cfg = Arc::new(test_auth_config(&db_url));
-        let cfg_state = cfg.clone();
-        let db_state = db.clone();
-        let issuer_state = issuer.clone();
-        let refresh_pool_state =
-            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-        let srv = web::test::server(move || {
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            let issuer_state = issuer_state.clone();
-            let refresh_pool_state = refresh_pool_state.clone();
-            async move {
-                web::App::new()
-                    .state(cfg_state)
-                    .state(db_state)
-                    .state(issuer_state)
-                    .state(refresh_pool_state)
-                    .middleware(SecurityHeaders::default())
-                    .configure(server::configure(false, false))
-            }
-        })
-        .await;
-
-        Some(Self {
-            auth_base: srv.url("").trim_end_matches('/').to_string(),
-            srv,
+        let server = AuthServer::with_issuer(database, issuer.clone()).await;
+        Self {
+            server,
             db,
             issuer,
             client_id,
             app_id,
-            user_id,
+            user_id: user_id.clone(),
             user_email: user_profile.email,
             user_name: user_profile.name,
             user_avatar_url: user_profile.avatar_url,
             session_cookie,
-        })
-    }
-
-    async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, &self.user_id, &self.app_id, &self.client_id).await;
-        drop(self.srv);
+        }
     }
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_returns_scope_gated_claims_for_valid_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let token = issue_token(&fx, "openid email profile").await;
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<IdTokenClaims>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let token = issue_token(&fx, "openid email profile").await;
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<IdTokenClaims>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
 
-    let resp = userinfo_get(&fx, Some(&token.access_token))
-        .await
-        .expect("GET /userinfo");
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(
-        resp.headers()
-            .get("cache-control")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-store")
-    );
-    assert!(
-        resp.headers()
+        let resp = userinfo_get(&fx, Some(&token.access_token))
+            .await
+            .expect("GET /userinfo");
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        assert!(resp
+            .headers()
             .get("content-type")
             .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.starts_with("application/json"))
-    );
-    let body = resp.json::<Value>().await.expect("userinfo json");
-    assert_eq!(body["sub"].as_str(), Some(id.sub.as_str()));
-    assert_eq!(body["email"].as_str(), Some(fx.user_email.as_str()));
-    assert_eq!(body["email_verified"].as_bool(), Some(true));
-    assert_eq!(body["name"].as_str(), Some(fx.user_name.as_str()));
-    assert_eq!(body["picture"].as_str(), Some(fx.user_avatar_url.as_str()));
+            .is_some_and(|value| value.starts_with("application/json")));
+        let body = resp.json::<Value>().await.expect("userinfo json");
+        assert_eq!(body["sub"].as_str(), Some(id.sub.as_str()));
+        assert_eq!(body["email"].as_str(), Some(fx.user_email.as_str()));
+        assert_eq!(body["email_verified"].as_bool(), Some(true));
+        assert_eq!(body["name"].as_str(), Some(fx.user_name.as_str()));
+        assert_eq!(body["picture"].as_str(), Some(fx.user_avatar_url.as_str()));
 
-    let post = userinfo_post(&fx, &token.access_token)
-        .await
-        .expect("POST /userinfo");
-    assert_eq!(post.status().as_u16(), 200);
-    let post_body = post.json::<Value>().await.expect("userinfo POST json");
-    assert_eq!(post_body["sub"].as_str(), Some(id.sub.as_str()));
-    assert_eq!(post_body["email"].as_str(), Some(fx.user_email.as_str()));
-
-    fx.cleanup().await;
+        let post = userinfo_post(&fx, &token.access_token)
+            .await
+            .expect("POST /userinfo");
+        assert_eq!(post.status().as_u16(), 200);
+        let post_body = post.json::<Value>().await.expect("userinfo POST json");
+        assert_eq!(post_body["sub"].as_str(), Some(id.sub.as_str()));
+        assert_eq!(post_body["email"].as_str(), Some(fx.user_email.as_str()));
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_omits_identity_claims_without_scopes() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let token = issue_token(&fx, "openid").await;
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<IdTokenClaims>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let token = issue_token(&fx, "openid").await;
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<IdTokenClaims>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
 
-    let resp = userinfo_get(&fx, Some(&token.access_token))
-        .await
-        .expect("GET /userinfo");
-    assert_eq!(resp.status().as_u16(), 200);
-    let body = resp.json::<Value>().await.expect("userinfo json");
-    assert_eq!(body["sub"].as_str(), Some(id.sub.as_str()));
-    assert_identity_claims_absent(&body);
-
-    fx.cleanup().await;
+        let resp = userinfo_get(&fx, Some(&token.access_token))
+            .await
+            .expect("GET /userinfo");
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = resp.json::<Value>().await.expect("userinfo json");
+        assert_eq!(body["sub"].as_str(), Some(id.sub.as_str()));
+        assert_identity_claims_absent(&body);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_missing_and_bad_tokens() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
 
-    let missing = userinfo_get(&fx, None).await.expect("missing bearer");
-    assert_missing_token(&missing);
+        let missing = userinfo_get(&fx, None).await.expect("missing bearer");
+        assert_missing_token(&missing);
 
-    let garbage = userinfo_get_with_authorization(&fx, "Bearer not-a-jwt")
+        let garbage = userinfo_get_with_authorization(&fx, "Bearer not-a-jwt")
+            .await
+            .expect("garbage bearer");
+        assert_invalid_token(garbage);
+
+        let token = issue_token(&fx, "openid").await;
+        let tampered = userinfo_get(&fx, Some(&tamper_token(&token.access_token)))
+            .await
+            .expect("tampered bearer");
+        assert_invalid_token(tampered);
+
+        let alg_none = userinfo_get(
+            &fx,
+            Some(&unsigned_none_token(&access_claims(&fx), fx.issuer.kid())),
+        )
         .await
-        .expect("garbage bearer");
-    assert_invalid_token(garbage).await;
+        .expect("alg none bearer");
+        assert_invalid_token(alg_none);
 
-    let token = issue_token(&fx, "openid").await;
-    let tampered = userinfo_get(&fx, Some(&tamper_token(&token.access_token)))
-        .await
-        .expect("tampered bearer");
-    assert_invalid_token(tampered).await;
+        let expired = userinfo_get(&fx, Some(&expired_access_token(&fx)))
+            .await
+            .expect("expired bearer");
+        assert_invalid_token(expired);
 
-    let alg_none = userinfo_get(
-        &fx,
-        Some(&unsigned_none_token(&access_claims(&fx), fx.issuer.kid())),
-    )
-    .await
-    .expect("alg none bearer");
-    assert_invalid_token(alg_none).await;
-
-    let expired = userinfo_get(&fx, Some(&expired_access_token(&fx)))
-        .await
-        .expect("expired bearer");
-    assert_invalid_token(expired).await;
-
-    let wrong_issuer = userinfo_get(&fx, Some(&wrong_issuer_access_token(&fx)))
-        .await
-        .expect("wrong issuer bearer");
-    assert_invalid_token(wrong_issuer).await;
-
-    fx.cleanup().await;
+        let wrong_issuer = userinfo_get(&fx, Some(&wrong_issuer_access_token(&fx)))
+            .await
+            .expect("wrong issuer bearer");
+        assert_invalid_token(wrong_issuer);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_id_token_used_as_access_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let token = issue_token(&fx, "openid email profile").await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let token = issue_token(&fx, "openid email profile").await;
 
-    let resp = userinfo_get(&fx, Some(&token.id_token))
-        .await
-        .expect("id token as bearer");
-    assert_invalid_token(resp).await;
-
-    fx.cleanup().await;
+        let resp = userinfo_get(&fx, Some(&token.id_token))
+            .await
+            .expect("id token as bearer");
+        assert_invalid_token(resp);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_token_without_openid_scope() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    // A validly-signed OP access token minted for the app resource audience but
-    // WITHOUT `openid` must not be usable as an identity oracle (OIDC Core §5.3).
-    let access_token = access_token_with_scopes(&fx, &fx.issuer, &["email", "profile"], Some(600));
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        // A validly-signed OP access token minted for the app resource audience but
+        // WITHOUT `openid` must not be usable as an identity oracle (OIDC Core §5.3).
+        let access_token =
+            access_token_with_scopes(&fx, &fx.issuer, &["email", "profile"], Some(600));
 
-    let resp = userinfo_get(&fx, Some(&access_token))
-        .await
-        .expect("no-openid bearer");
-    assert_insufficient_scope(&resp);
-
-    fx.cleanup().await;
+        let resp = userinfo_get(&fx, Some(&access_token))
+            .await
+            .expect("no-openid bearer");
+        assert_insufficient_scope(&resp);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_disabled_user() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let token = issue_token(&fx, "openid email profile").await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let token = issue_token(&fx, "openid email profile").await;
 
-    // Disable the account AFTER the token was minted: a still-live access token
-    // must stop leaking identity once the user is terminated (MED-2).
-    fx.db
-        .execute(
-            "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
-            &[&fx.user_id.as_str()],
-        )
-        .await
-        .expect("disable user");
+        // Disable the account AFTER the token was minted: a still-live access token
+        // must stop leaking identity once the user is terminated (MED-2).
+        fx.db
+            .execute(
+                "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
+                &[&fx.user_id.as_str()],
+            )
+            .await
+            .expect("disable user");
 
-    let resp = userinfo_get(&fx, Some(&token.access_token))
-        .await
-        .expect("disabled-user bearer");
-    assert_invalid_token(resp).await;
-
-    fx.cleanup().await;
+        let resp = userinfo_get(&fx, Some(&token.access_token))
+            .await
+            .expect("disabled-user bearer");
+        assert_invalid_token(resp);
+    })
+    .await;
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[12; 32])
 }
 
 fn test_issuer(issuer: &str) -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = signing_key();
     Issuer::from_signing_key(&signing, [9u8; 32], issuer.to_string()).expect("issuer")
 }
 
@@ -342,8 +287,8 @@ fn test_issuer(issuer: &str) -> Issuer {
 async fn seed_user_client(
     db: &Client,
     issuer: &Issuer,
-    user_id: &UserId,
-    app_id: &AppId,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
 ) -> SeededUserProfile {
@@ -372,11 +317,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[
-            &app_id.as_str(),
-            &app_name,
-            &project_id
-        ],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -420,7 +361,7 @@ async fn seed_user_client(
     .await
     .expect("seed oauth grant");
 
-    let pairwise_sub = issuer.pairwise_subject(&user_id, SECTOR);
+    let pairwise_sub = issuer.pairwise_subject(user_id, SECTOR);
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
@@ -434,51 +375,6 @@ async fn seed_user_client(
         name,
         avatar_url,
     }
-}
-
-async fn cleanup_seeded_rows(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_grants WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id.as_str()],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
-        .await;
 }
 
 #[allow(clippy::future_not_send)]
@@ -515,7 +411,11 @@ async fn send_authorize_with_scope(
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    let url = format!("{}/oauth2/authorize?{}", fx.auth_base, serializer.finish());
+    let url = format!(
+        "{}/oauth2/authorize?{}",
+        fx.server.auth_base,
+        serializer.finish()
+    );
     cyper::Client::new()
         .request(http::Method::GET, url)
         .expect("build GET /authorize")
@@ -540,7 +440,10 @@ async fn exchange_code(
         .append_pair("code_verifier", verifier)
         .finish();
     let resp = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
@@ -552,10 +455,7 @@ async fn exchange_code(
 }
 
 #[allow(clippy::future_not_send)]
-async fn userinfo_get(
-    fx: &Fixture,
-    token: Option<&str>,
-) -> Result<cyper::Response, cyper::Error> {
+async fn userinfo_get(fx: &Fixture, token: Option<&str>) -> Result<cyper::Response, cyper::Error> {
     let authorization = token.map(|token| format!("Bearer {token}"));
     userinfo_get_with_authorization(fx, authorization.as_deref().unwrap_or("")).await
 }
@@ -566,7 +466,10 @@ async fn userinfo_get_with_authorization(
     authorization: &str,
 ) -> Result<cyper::Response, cyper::Error> {
     let req = cyper::Client::new()
-        .request(http::Method::GET, format!("{}/oauth2/userinfo", fx.auth_base))
+        .request(
+            http::Method::GET,
+            format!("{}/oauth2/userinfo", fx.server.auth_base),
+        )
         .expect("build GET /userinfo");
     let req = if authorization.is_empty() {
         req
@@ -580,7 +483,10 @@ async fn userinfo_get_with_authorization(
 #[allow(clippy::future_not_send)]
 async fn userinfo_post(fx: &Fixture, token: &str) -> Result<cyper::Response, cyper::Error> {
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/oauth2/userinfo", fx.auth_base))
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/userinfo", fx.server.auth_base),
+        )
         .expect("build POST /userinfo")
         .header("authorization", format!("Bearer {token}"))
         .expect("authorization")
@@ -588,7 +494,7 @@ async fn userinfo_post(fx: &Fixture, token: &str) -> Result<cyper::Response, cyp
         .await
 }
 
-async fn assert_invalid_token(resp: cyper::Response) {
+fn assert_invalid_token(resp: cyper::Response) {
     assert_eq!(resp.status().as_u16(), 401);
     assert_eq!(
         resp.headers()
@@ -612,7 +518,7 @@ fn assert_missing_token(resp: &cyper::Response) {
     assert_eq!(www_authenticate(resp).as_deref(), Some("Bearer"));
 }
 
-/// A valid access token that lacks the `openid` scope → 403 insufficient_scope.
+/// A valid access token that lacks the `openid` scope → 403 `insufficient_scope`.
 fn assert_insufficient_scope(resp: &cyper::Response) {
     assert_eq!(resp.status().as_u16(), 403);
     assert_eq!(
@@ -622,13 +528,16 @@ fn assert_insufficient_scope(resp: &cyper::Response) {
 }
 
 fn query_param(raw_url: &str, name: &str) -> Option<String> {
-    url::Url::parse(raw_url).ok()?.query_pairs().find_map(|(key, value)| {
-        if key == name {
-            Some(value.into_owned())
-        } else {
-            None
-        }
-    })
+    url::Url::parse(raw_url)
+        .ok()?
+        .query_pairs()
+        .find_map(|(key, value)| {
+            if key == name {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })
 }
 
 fn assert_identity_claims_absent(claims: &Value) {
@@ -715,34 +624,39 @@ fn issue_access_token_with_issuer(fx: &Fixture, issuer: &Issuer, ttl_secs: Optio
     access_token_with_scopes(fx, issuer, &["openid"], ttl_secs)
 }
 
-/// Mint a signed OP access token with an arbitrary scope set — used to build
-/// tokens the real `/token` flow won't return (e.g. no `openid`, so no paired
-/// id_token). `issuer` both signs and supplies the pairwise sub.
+/// Sign explicit claims with the fixture key, including scope sets that the
+/// real `/token` flow cannot return. The supplied issuer sets the identity
+/// claim and key identifier; the subject comes from the fixture's person.
 fn access_token_with_scopes(
     fx: &Fixture,
     issuer: &Issuer,
     scopes: &[&str],
     ttl_secs: Option<i64>,
 ) -> String {
-    let audience = format!("app:{}", fx.app_id.as_str());
-    let scopes: Vec<String> = scopes.iter().map(|s| (*s).to_string()).collect();
-    issuer
-        .sign_unregistered_access_token_fixture(&AccessTokenMint {
-            user_id: &fx.user_id,
-            sector: SECTOR,
-            audience: &audience,
-            client_id: &fx.client_id,
-            scopes: &scopes,
-            ttl_secs,
-        })
-        .expect("issue access token")
+    let mut claims = access_claims(fx);
+    let now = unix_timestamp();
+    claims["iss"] = json!(issuer.issuer());
+    claims["scope"] = json!(scopes.join(" "));
+    claims["iat"] = json!(now);
+    claims["exp"] = json!(now + ttl_secs.unwrap_or(600));
+    let key = signing_key().to_pkcs8_der().expect("fixture signing key");
+    let mut header = jsonwebtoken::Header::new(Algorithm::EdDSA);
+    header.typ = Some(ACCESS_TOKEN_TYP.into());
+    header.kid = Some(issuer.kid().into());
+    jsonwebtoken::encode(
+        &header,
+        &claims,
+        &jsonwebtoken::EncodingKey::from_ed_der(key.as_bytes()),
+    )
+    .expect("sign explicit access-token claims")
 }
 
 fn tamper_token(token: &str) -> String {
-    let mut tampered = token.to_string();
-    let last = tampered.pop().expect("non-empty token");
-    tampered.push(if last == 'a' { 'b' } else { 'a' });
-    tampered
+    let (prefix, signature) = token.rsplit_once('.').expect("signed JWT");
+    let mut signature = signature.to_owned();
+    let replacement = if signature.starts_with('a') { "b" } else { "a" };
+    signature.replace_range(..1, replacement);
+    format!("{prefix}.{signature}")
 }
 
 fn unix_timestamp() -> i64 {

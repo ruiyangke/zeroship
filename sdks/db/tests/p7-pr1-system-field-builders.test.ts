@@ -1,231 +1,53 @@
-/**
- * **P7 PR 1** — Schema DSL + reserved-name validator + Cargo for
- * platform system fields.
- *
- * Coverage:
- * - `t.id(prefix?)` — emits `{ type: "id", idPrefix? }`.
- * - `t.timestamp().auto_now()` — emits `{ type: "date", timestampAuto: "now" }`.
- * - `t.timestamp().auto_now_on_update()` — emits
- *   `{ type: "date", timestampAuto: "now_on_update" }`.
- * - `t.actor()` — emits `{ type: "actor", actorNullable: true }`.
- * - `normalizeSchema` refuses creator-declared system-field names with
- *   `RESERVED_SYSTEM_FIELD_NAME` (mirrors the Rust-side reservation).
- * - Type-level: `Row<S>` automatically includes the seven system fields.
- *
- * No CREATE TABLE / CRUD wiring is exercised — those land in PR 2/3+.
- */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { t, type Row } from "@zeroship/db";
-import { TypeBuilder } from "@zeroship/db/internal";
+import { t, type Row, type RowInput } from "@zeroship/db";
 import { normalizeSchema } from "@zeroship/bootstrap/install-schema";
 
-describe("P7 PR 1 — t.id() builder", () => {
-  test("t.id() emits the `id` discriminator without a prefix", () => {
-    const tb = t.id();
-    assert.ok(tb instanceof TypeBuilder);
-    const def = tb.toFieldDef();
-    assert.equal(def.type, "id");
-    assert.equal(def.idPrefix, undefined);
+describe("assignment builders", () => {
+  test("ID type carries its prefix without assigning a value", () => {
+    assert.deepEqual(t.id("post").toFieldDef(), { type: "id", idPrefix: "post" });
+    assert.throws(() => t.id(""), { code: "ID_INVALID_PREFIX" });
+    assert.throws(() => t.id("Post-Type"), { code: "ID_INVALID_PREFIX" });
   });
 
-  test("t.id(prefix) carries the prefix on the wire shape", () => {
-    const def = t.id("post").toFieldDef();
-    assert.equal(def.type, "id");
-    assert.equal(def.idPrefix, "post");
+  test("timestamp modifiers declare their generator and event", () => {
+    assert.equal(t.timestamp().toFieldDef().assign, undefined);
+    assert.deepEqual(t.timestamp().auto_now().toFieldDef().assign, { by: "now", on: "insert" });
+    assert.deepEqual(t.timestamp().auto_now_on_update().toFieldDef().assign, { by: "now", on: "write" });
+    assert.throws(() => t.string().auto_now(), { code: "AUTO_NOW_ON_NON_TIMESTAMP" });
+    assert.throws(() => t.number().auto_now_on_update(), { code: "AUTO_NOW_ON_NON_TIMESTAMP" });
   });
 
-  test("t.id() refuses an empty prefix", () => {
-    assert.throws(
-      () => t.id(""),
-      (e: unknown) =>
-        (e as { code?: string })?.code === "ID_INVALID_PREFIX",
-    );
+  test("actor is a nullable string with an assignment", () => {
+    const field = t.actor().nullable().toFieldDef();
+    assert.equal(field.type, "string");
+    assert.deepEqual(field.assign, { by: "actor", on: "insert" });
+    assert.equal(field.writable, false);
   });
 
-  test("t.id() refuses a prefix with non-allowlist chars", () => {
-    assert.throws(
-      () => t.id("Post-Type"),
-      (e: unknown) =>
-        (e as { code?: string })?.code === "ID_INVALID_PREFIX",
-    );
-  });
-});
-
-describe("P7 PR 1 — t.timestamp() auto-population modifiers", () => {
-  test("bare t.timestamp() does NOT set timestampAuto", () => {
-    const def = t.timestamp().toFieldDef();
-    assert.equal(def.type, "date");
-    assert.equal(def.timestampAuto, undefined);
-  });
-
-  test("t.timestamp().auto_now() emits timestampAuto = 'now'", () => {
-    const def = t.timestamp().auto_now().toFieldDef();
-    assert.equal(def.type, "date");
-    assert.equal(def.timestampAuto, "now");
-  });
-
-  test("t.timestamp().auto_now_on_update() emits timestampAuto = 'now_on_update'", () => {
-    const def = t.timestamp().auto_now_on_update().toFieldDef();
-    assert.equal(def.type, "date");
-    assert.equal(def.timestampAuto, "now_on_update");
-  });
-
-  test(".auto_now() on a non-timestamp builder throws auto_now_on_non_timestamp", () => {
-    assert.throws(
-      () => t.string().auto_now(),
-      (e: unknown) =>
-        (e as { code?: string })?.code === "AUTO_NOW_ON_NON_TIMESTAMP",
-    );
-  });
-
-  test(".auto_now_on_update() on a non-timestamp builder throws auto_now_on_non_timestamp", () => {
-    assert.throws(
-      () => t.number().auto_now_on_update(),
-      (e: unknown) =>
-        (e as { code?: string })?.code === "AUTO_NOW_ON_NON_TIMESTAMP",
-    );
-  });
-});
-
-describe("P7 PR 1 — t.actor() builder", () => {
-  test("t.actor() emits the `actor` discriminator, nullable by default", () => {
-    const tb = t.actor();
-    assert.ok(tb instanceof TypeBuilder);
-    const def = tb.toFieldDef();
-    assert.equal(def.type, "actor");
-    assert.equal(def.actorNullable, true);
-  });
-
-  test("t.actor().nullable() stays nullable (no-op chain)", () => {
-    const def = t.actor().nullable().toFieldDef();
-    assert.equal(def.type, "actor");
-    assert.equal(def.actorNullable, true);
-  });
-});
-
-describe("P7 PR 1 — reserved-name validator (SDK side)", () => {
-  // The seven names must be refused at schema-declaration time.
-  // Mirrors the Rust-side `SYSTEM_FIELD_NAMES` in
-  // `crates/zeroship-schema/src/query.rs`.
-  const SYSTEM_FIELDS = [
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "version",
-    "deleted_at",
-  ];
-
-  for (const name of SYSTEM_FIELDS) {
-    test(`schema declaration with "${name}" throws RESERVED_SYSTEM_FIELD_NAME`, () => {
-      assert.throws(
-        () => normalizeSchema({ [name]: t.string() }),
-        (e: unknown) => {
-          const code = (e as { code?: string })?.code;
-          const msg = (e as { message?: string })?.message ?? "";
-          return (
-            code === "RESERVED_SYSTEM_FIELD_NAME" &&
-            msg.includes(name) &&
-            msg.includes("reserved")
-          );
-        },
-      );
-    });
-  }
-
-  test("reservation error message lists all seven system fields in the hint", () => {
-    try {
-      normalizeSchema({ id: t.string() });
-      assert.fail("normalizeSchema must throw on a reserved name");
-    } catch (e: unknown) {
-      const msg = (e as { message?: string })?.message ?? "";
-      for (const name of SYSTEM_FIELDS) {
-        assert.ok(
-          msg.includes(name),
-          `error message must list system field ${name}; got: ${msg}`,
-        );
-      }
+  test("ordinary names carry no implicit behavior", () => {
+    for (const name of ["id", "created_at", "updated_at", "created_by", "updated_by", "version", "deleted_at"]) {
+      assert.deepEqual(normalizeSchema({ [name]: t.string() }), { [name]: { type: "string" } });
     }
+    const schema = { id: t.number().required(), created_at: t.string().required() };
+    const input: RowInput<typeof schema> = { id: 12, created_at: "user value" };
+    const row: Row<typeof schema> = input;
+    assert.equal(row.created_at, "user value");
   });
 
-  test("non-reserved field names normalise cleanly", () => {
-    const norm = normalizeSchema({
-      title: t.string(),
-      body: t.string(),
-      author_id: t.string(),
-    });
-    assert.equal(norm.title.type, "string");
-    assert.equal(norm.body.type, "string");
-    assert.equal(norm.author_id.type, "string");
-  });
-});
-
-describe("P7 PR 1 — Row<S> auto-includes the seven system fields", () => {
-  test("Row<S> type carries every system field at compile time", () => {
-    // Type-level assertion via assignability — if `Row<S>` were missing
-    // a system field, the literal below would not be assignable.
-    type UserSchema = {
-      title: TypeBuilder<string, true>;
+  test("renamed assignments survive builder chains and remain read-only in inputs", () => {
+    const schema = {
+      id: t.string().assigned({ by: "typedId", on: "insert" }).required().primaryKey(),
+      born: t.timestamp().auto_now().required(),
+      editor: t.actor().nullable().required(),
+      title: t.string().required(),
     };
-    // The `Row<UserSchema>` must include every system field shape.
-    // Build a literal that names every system field; assignment to
-    // `Row<UserSchema>` succeeds iff the type carries them all.
-    // `id` is the typed_id STRING shape (P7 PR 3 landed the
-    // number->string cascade; `SystemFields.id: string` in
-    // src/types.ts is the current contract). `created_at`/`updated_at`
-    // stay number (epoch ms) - `SystemFields` has not widened those to
-    // ISO 8601 strings. This literal previously duplicated
-    // `created_at`/`updated_at` a second time under a comment claiming
-    // they were "legacy camelCase aliases"; they were not - camelCase
-    // keys (`createdAt`) are not part of `SystemFields` at all (the
-    // type's own doc comment: "system fields are exposed in snake_case
-    // only"), and the duplicate snake_case lines just silently
-    // overwrote the first ones with an identical value. Ticket #267
-    // surfaced this (TS1117 "object literal cannot have multiple
-    // properties with the same name") the moment tsc first looked at
-    // this file; the duplicates added nothing and are removed.
-    const row: Row<UserSchema> = {
-      title: "hello",
-      id: "usr_042",
-      created_at: 1700000000000,
-      updated_at: 1700000000000,
-      created_by: null,
-      updated_by: null,
-      version: 1,
-      deleted_at: null,
-    };
-    assert.equal(row.title, "hello");
-    assert.equal(row.id, "usr_042");
-    assert.equal(row.version, 1);
-    assert.equal(row.created_by, null);
-    assert.equal(row.deleted_at, null);
-  });
-
-  test("Row<S> permits nullable created_by / updated_by / deleted_at", () => {
-    type UserSchema = { title: TypeBuilder<string, true> };
-    const liveRow: Row<UserSchema> = {
-      title: "hi",
-      id: "usr_001",
-      created_at: 1700000000000,
-      updated_at: 1700000000000,
-      created_by: "usr_abc",
-      updated_by: "usr_abc",
-      version: 3,
-      deleted_at: null,
-    };
-    const deletedRow: Row<UserSchema> = {
-      title: "hi",
-      id: "usr_002",
-      created_at: 1700000000000,
-      updated_at: 1700000000000,
-      created_by: null,
-      updated_by: null,
-      version: 5,
-      deleted_at: 1700000060000,
-    };
-    assert.equal(liveRow.deleted_at, null);
-    assert.equal(typeof deletedRow.deleted_at, "number");
+    const input: RowInput<typeof schema> = { title: "hello" };
+    // @ts-expect-error Assigned fields are supplied by the ORM.
+    const invalid: RowInput<typeof schema> = { title: "hello", id: "chosen" };
+    void invalid;
+    const row: Row<typeof schema> = { ...input, id: "post_a", born: 1, editor: null };
+    assert.equal(row.id, "post_a");
+    assert.equal(normalizeSchema(schema).id.primaryKey, true);
   });
 });

@@ -1,36 +1,4 @@
-//! The relay's command definition plus its generated controls.
-//!
-//! In the LIBRARY rather than `main.rs` so the compiled configuration checker
-//! can link it and invoke clap's `CommandFactory`, matching the other six
-//! platform binaries. That placement is not stylistic: `platform_specs()` in
-//! `crates/zeroship-config-contract/src/registry.rs` reads
-//! `CdcServerSettings::SPECS` off the lib, so a `main.rs`-only parser is
-//! invisible to every check that tool performs.
-//!
-//! # Why a converted configuration for a process that refuses to start
-//!
-//! The same reason `zeroship-workflow-scheduler` converted before its dispatch
-//! loop was extracted: the Cargo target is classified `platform`, which the
-//! configuration design makes a REQUIREMENT to register rather than a judgement
-//! call, and an operator-visible surface is visible whether or not the process
-//! it configures currently runs.
-//!
-//! # Why the table is this short
-//!
-//! Every value here is one the relay cannot be without, and nothing here
-//! anticipates a protocol. There is no bind address and no port: this crate
-//! serves no endpoint, and declaring a listener's configuration would document
-//! a surface that does not exist. The one non-boilerplate leaf is the DSN,
-//! because a change-data relay with no database to stream from is not a relay -
-//! every function the extraction will rewrite
-//! (`crates/zeroship-plugin-db/src/replication.rs`'s `ensure_worker_slot`, and
-//! `wal_consumer.rs`'s decode loop) already takes a `PostgreSQL` connection as its
-//! first input.
-//!
-//! The bootstrap and observability controls come with the conversion for the
-//! narrower reason the scheduler records: `Operational<T>` declares a TOML tier,
-//! and without an overlay selector this binary would declare a source it could
-//! never be given.
+//! Configuration for the separately deployed PostgreSQL CDC relay.
 
 use std::path::{Path, PathBuf};
 
@@ -73,22 +41,37 @@ pub struct CdcServerSettings {
     #[config(shared = OBSERVABILITY_LOG_FORMAT, default = LogFormat::Auto)]
     pub log_format: Operational<LogFormat>,
 
-    // Secrets last within the table, by convention. The secret generates ONE
-    // `--<name>-file` path flag and no value flag, so the material cannot reach
-    // a process argument list.
-    /// `PostgreSQL` DSN the relay streams logical replication from.
-    ///
-    /// Secret-classed by grammar: a DSN admits userinfo, so the type cannot
-    /// depend on whether a particular deployment's value happens to carry a
-    /// password.
-    ///
-    /// THIS LOGIN IS THE POINT OF THE WHOLE SERVICE, and its shape is settled
-    /// even though nothing dials it yet: it takes `REPLICATION` and never
-    /// `BYPASSRLS`, and it issues no creator-table SQL. The worker's role keeps
-    /// both attributes today (`db/migrations-ts/20260818000200_worker_database_authority.ts`),
-    /// and dropping them is a coordinated privilege change that has not landed -
-    /// see `crates/zeroship-worker/src/db_posture.rs`, which currently REFUSES
-    /// to boot without them.
+    /// TLS listener address.
+    #[config(name = "data_cdc_server.listen", default = "127.0.0.1:9094".to_owned())]
+    pub listen: Operational<String>,
+    /// PEM certificate chain for the relay endpoint.
+    #[config(name = "data_cdc_server.tls_cert_file", default = PathBuf::new())]
+    pub tls_cert_file: Operational<PathBuf>,
+    /// PEM private key for the relay endpoint.
+    #[config(name = "data_cdc_server.tls_key_file", default = PathBuf::new())]
+    pub tls_key_file: Operational<PathBuf>,
+    /// Maximum concurrent app capture tasks.
+    #[config(name = "data_cdc_server.max_apps", default = 64)]
+    pub max_apps: Operational<usize>,
+    /// Maximum accepted transport connections, including pending authentication.
+    #[config(name = "data_cdc_server.max_connections", default = 1024)]
+    pub max_connections: Operational<usize>,
+    /// Maximum subscriptions sharing an app capture task.
+    #[config(name = "data_cdc_server.clients_per_app", default = 128)]
+    pub clients_per_app: Operational<usize>,
+    /// Pending events per transport connection before disconnect and resync.
+    #[config(name = "data_cdc_server.queue_capacity", default = 128)]
+    pub queue_capacity: Operational<usize>,
+    /// Maximum retained transaction bytes before commit becomes a resync.
+    #[config(name = "data_cdc_server.transaction_bytes", default = 8 * 1024 * 1024)]
+    pub transaction_bytes: Operational<usize>,
+    /// Maximum retained transaction changes before commit becomes a resync.
+    #[config(name = "data_cdc_server.transaction_changes", default = 10000)]
+    pub transaction_changes: Operational<usize>,
+    /// Maximum relation cache entries per capture task.
+    #[config(name = "data_cdc_server.max_relations", default = 4096)]
+    pub max_relations: Operational<usize>,
+    /// Replication login DSN. The role must also read enrolled worker public keys.
     #[config(name = "data_cdc_server.database_url")]
     pub database_url: Secret<String>,
 }

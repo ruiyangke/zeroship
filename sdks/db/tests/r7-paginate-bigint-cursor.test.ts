@@ -6,7 +6,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { Query } from "../src/query.js";
+import { FixtureQuery as Query } from "./_query-fixture.js";
 
 type PlainObject = Record<string, unknown>;
 
@@ -38,10 +38,10 @@ describe("Query.paginate string-id cursor handling", () => {
     assert.equal(decoded.lastId, "row_2");
   });
 
-  test("non-string id rejects with paginate_invalid_id", async () => {
+  test("boolean id rejects with paginate_invalid_id", async () => {
     const rows: PlainObject[] = [
       { id: "row_1" },
-      { id: 2 },
+      { id: true },
       { id: "row_3" },
     ];
     const { fn } = makeMockNative([rows]);

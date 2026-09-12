@@ -1,0 +1,20 @@
+error[E0277]: the trait bound `Post: CompleteInsert` is not satisfied
+ --> tests/ui/missing_required_insert.rs:3:10
+  |
+3 | #[derive(Insertable)]
+  |          ^^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `HasColumn<title>` is not implemented for `Post`
+      but trait `HasColumn<payload>` is implemented for it
+ --> tests/ui/missing_required_insert.rs:3:10
+  |
+3 | #[derive(Insertable)]
+  |          ^^^^^^^^^^
+  = help: for that trait implementation, expected `payload`, found `title`
+note: required for `Post` to implement `CompleteInsert`
+ --> tests/ui/missing_required_insert.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: see issue #48214
+  = note: this error originates in the derive macro `Insertable` which comes from the expansion of the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)

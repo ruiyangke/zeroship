@@ -394,6 +394,7 @@ impl ConcurrencyRegistry {
     }
 }
 
+#[derive(Debug)]
 pub struct ConcurrencyGuard {
     gauge: Arc<AtomicU32>,
 }

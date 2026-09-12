@@ -50,8 +50,7 @@ use std::convert::TryFrom;
 use compio_postgres::{Client, NoTls};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
+use zeroship_id::{AppId, OrganizationId, ProjectId, UserId};
 
 use crate::policy::ManagedPosture;
 
@@ -115,9 +114,8 @@ impl SchemaApplyStore {
         &self,
         input: SchemaApplyInput<'_>,
     ) -> Result<(), SchemaApplyStoreError> {
-        let ceiling_version = i64::try_from(input.ceiling_version).map_err(|_| {
-            SchemaApplyStoreError::CeilingVersionOverflow(input.ceiling_version)
-        })?;
+        let ceiling_version = i64::try_from(input.ceiling_version)
+            .map_err(|_| SchemaApplyStoreError::CeilingVersionOverflow(input.ceiling_version))?;
         let effective_profile = input.effective_profile.to_audit_json();
         let client = self.connect().await?;
         client
@@ -266,14 +264,9 @@ pub enum SchemaApplyStoreError {
     CeilingVersionOverflow(u64),
 }
 
-// Every case in this module opens a real PostgreSQL connection and `expect`s it,
-// so with no server reachable the LIB test target panics and `cargo test
-// --workspace` - which provisions no database - can never be green. The
-// `live-db-tests` feature is the same gate the crate's `apply_api_test`
-// integration target carries in Cargo.toml; `required-features` cannot reach
-// inside a lib, hence the `cfg` here. Nothing in this module is database-free,
-// so the whole module moves behind the gate rather than individual cases.
-#[cfg(all(test, feature = "live-db-tests"))]
+// Mandatory PostgreSQL tests. The suite runner applies the platform corpus
+// before these fixtures connect; unavailable infrastructure fails the run.
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -302,8 +295,7 @@ mod tests {
     /// passed against a shape the corpus does not produce, so a column the corpus
     /// declares `NOT NULL` could be nullable here and nothing would notice. The
     /// suite now REQUIRES a migrated database for the table under test as well.
-    const REQUIRED_PLATFORM_TABLES: [&str; 4] =
-        ["plans", "users", "apps", "app_schema_applies"];
+    const REQUIRED_PLATFORM_TABLES: [&str; 4] = ["plans", "users", "apps", "app_schema_applies"];
 
     /// Fail with an actionable message when the target database has no platform schema.
     async fn assert_platform_schema_present(client: &Client) {
@@ -330,7 +322,7 @@ mod tests {
              This suite needs a database the PLATFORM migrations have been applied to.\n\
              Point it at one, e.g. run `tests/provision_test_backends.sh` to provision \
              a test database and generate the TOML overlay, then:\n  \
-             cargo test -p zeroship-migrate-server --features live-db-tests\n\
+             cargo test -p zeroship-migrate-server\n\
              The DSN comes from `zeroship_core::config::test_database_url()`, which \
              panics naming that command when nothing is configured.",
             missing.join(", zeroship."),
@@ -341,7 +333,7 @@ mod tests {
         client: &Client,
         app_id: &AppId,
         migration_id: Uuid,
-        principal_id: Uuid,
+        principal_id: &UserId,
         status: &str,
     ) {
         client
@@ -357,13 +349,18 @@ mod tests {
                          CASE WHEN $3 = 'applied' \
                               THEN TIMESTAMPTZ '2026-08-01 03:04:05+00' END, \
                          CASE WHEN $3 = 'failed' THEN 'original failure' END)",
-                &[&app_id.as_str(), &migration_id, &status, &principal_id],
+                &[
+                    &app_id.as_str(),
+                    &migration_id,
+                    &status,
+                    &principal_id.as_str(),
+                ],
             )
             .await
             .expect("insert transition test row");
     }
 
-    async fn seed_transition_dependencies(client: &Client, app_id: &AppId, principal_id: Uuid) {
+    async fn seed_transition_dependencies(client: &Client, app_id: &AppId, principal_id: &UserId) {
         let plan_id = "pln_schema_apply_transition_test";
         client
             .execute(
@@ -376,12 +373,12 @@ mod tests {
             )
             .await
             .expect("seed transition test plan");
-        let email = format!("schema-apply-{principal_id}@zeroship.test");
+        let email = format!("schema-apply-{}@zeroship.test", principal_id.as_str());
         client
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, 'Schema Apply Test User', NOW())",
-                &[&principal_id, &email],
+                &[&principal_id.as_str(), &email],
             )
             .await
             .expect("seed transition test user");
@@ -390,14 +387,14 @@ mod tests {
         // `apps.project_id` is NOT NULL against a RESTRICT foreign key. This
         // fixture is about the apply-record state machine, not about who may
         // apply, so the organization is left member-less.
-        let organization_id = zeroship_core::typed_id::generate("org");
-        let project_id = zeroship_core::typed_id::generate("prj");
+        let organization_id = OrganizationId::mint();
+        let project_id = ProjectId::mint();
         client
             .execute(
                 "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
                  VALUES ($1, $2, 'Schema Apply Fixture', 'fixture@zeroship.test')",
                 &[
-                    &organization_id,
+                    &organization_id.as_str(),
                     &format!("schema-apply-org-{}", Uuid::new_v4().simple()),
                 ],
             )
@@ -407,7 +404,7 @@ mod tests {
             .execute(
                 "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
                  VALUES ($1, $2, 'default', 'Default')",
-                &[&project_id, &organization_id],
+                &[&project_id.as_str(), &organization_id.as_str()],
             )
             .await
             .expect("seed transition test project");
@@ -416,7 +413,7 @@ mod tests {
                 "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
                  SELECT $1::text, $2, $3, p.id, p.organization_id \
                    FROM zeroship.projects p WHERE p.id = $4",
-                &[&app_id.as_str(), &app_name, &plan_id, &project_id],
+                &[&app_id.as_str(), &app_name, &plan_id, &project_id.as_str()],
             )
             .await
             .expect("seed transition test app");
@@ -437,13 +434,13 @@ mod tests {
         let client = test_client().await;
         let store = SchemaApplyStore::new(test_dsn());
         let app_id = AppId::mint();
-        let principal_id = Uuid::new_v4();
+        let principal_id = UserId::mint();
         let applied_id = Uuid::now_v7();
         let failed_id = Uuid::now_v7();
 
-        seed_transition_dependencies(&client, &app_id, principal_id).await;
-        insert_transition_row(&client, &app_id, applied_id, principal_id, "applied").await;
-        insert_transition_row(&client, &app_id, failed_id, principal_id, "failed").await;
+        seed_transition_dependencies(&client, &app_id, &principal_id).await;
+        insert_transition_row(&client, &app_id, applied_id, &principal_id, "applied").await;
+        insert_transition_row(&client, &app_id, failed_id, &principal_id, "failed").await;
 
         // An error path firing after a successful apply must not erase it.
         let outcome = store
@@ -498,7 +495,7 @@ mod tests {
         // discarded row count was. A transition that WINS must say `Recorded`, or
         // `Lost` carries no information.
         let winning_id = Uuid::now_v7();
-        insert_transition_row(&client, &app_id, winning_id, principal_id, "submitted").await;
+        insert_transition_row(&client, &app_id, winning_id, &principal_id, "submitted").await;
         let outcome = store
             .mark_applied(&app_id, winning_id, &["mig_winner".to_string()])
             .await
@@ -540,11 +537,11 @@ mod tests {
         let client = test_client().await;
         let store = SchemaApplyStore::new(test_dsn());
         let app_id = AppId::mint();
-        let principal_id = Uuid::new_v4();
+        let principal_id = UserId::mint();
         let migration_id = Uuid::now_v7();
 
-        seed_transition_dependencies(&client, &app_id, principal_id).await;
-        insert_transition_row(&client, &app_id, migration_id, principal_id, "submitted").await;
+        seed_transition_dependencies(&client, &app_id, &principal_id).await;
+        insert_transition_row(&client, &app_id, migration_id, &principal_id, "submitted").await;
 
         let outcome = store
             .mark_applied(&app_id, migration_id, &[])

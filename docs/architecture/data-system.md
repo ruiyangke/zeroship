@@ -7,6 +7,75 @@ How creator data is stored, reached, isolated and evolved.
 migration DSL, and `docs/proposals/2026-08-28-app-database-decoupling.md` for the decoupling
 design in full.
 
+## Runtime ORM
+
+Crate responsibilities and driver contracts: `docs/architecture/data-orm.md`.
+
+`zeroship-data-orm` exposes `Database`, `Collection`, and `EntityCollection` for
+Rust callers. The worker's V8 adapter uses the same `PreparedOperation` path.
+
+```text
+Rust model -- derives / native codecs --+
+                                       |
+V8 values -- native capture ------------+--> PreparedOperation
+                                             |
+                                  protection passes + query compiler
+                                             |
+                                     native parameters / rows
+                                             |
+                                       PostgreSQL / SQLite
+                                             |
+                                  protected native result records
+                                             |
+                        +--------------------+--------------------+
+                        |                                         |
+                   Rust model                              V8 object / Uint8Array
+```
+
+The shared value layer preserves integers, booleans, text and binary buffers.
+Rust model mapping does not require Serde. Rust collection and column metadata is
+generated from the migration runtime descriptor by `schema!`. Focused `FromRow`,
+`Insertable`, and `Changeset` derives check field names and logical types against
+that metadata. Read projections and write inputs are independent. Typed handles
+refuse metadata that differs from the host's installed field descriptor. The V8
+adapter captures arguments before yielding and materializes results directly
+when the runtime re-enters V8. JSON encoding belongs to JSON columns, persisted metadata, and explicit
+wire contracts. The native path still allocates records and copies V8 inputs;
+it does not promise allocation-free queries.
+
+Preparation resolves the deployment's collection descriptor and captures the
+request's actor, read set, and transaction route before execution can yield.
+The ORM database handle is an execution context, separate from the persisted
+Database entity described below.
+
+`zeroship_data_orm::sql` owns runtime query compilation, typed predicates,
+catalog metadata, and the sentinel codec used by introspection. The shared
+physical schema identity lives in `zeroship_core::schema_name::SchemaName`.
+The migration engine owns DDL, schema differencing, and schema changes. Runtime
+code does not contain another schema emitter, and database fixtures use the
+migration engine's emitter.
+
+Writes apply declared assignment generators. Reads and writes use the masking,
+encryption and result-decoding stages. Drivers bind binary values from their
+native type; a text value cannot select binary binding by carrying a prefix.
+Transaction statements report completion to the reducer, which rolls back a
+poisoned transaction. Rust callback transactions use the same protocol as the
+worker, including savepoints and cancellation cleanup. Handles returned from a
+Rust transaction callback expire when that callback finishes.
+
+PostgreSQL operations and transactions use `Pool::acquire()` to obtain an owned
+`PoolConnection` from the same bounded pool. Pool handles clone shared state;
+each lease keeps that state alive across callbacks. Warm-up and checkout have
+a pool acquisition budget, including async hooks. A transaction keeps its
+lease through settlement; withdrawal
+consumes that lease with `discard()` so an uncertain session cannot be reused.
+Pool shutdown interrupts pending acquisition without invalidating leases still
+held by callers. The pool contract is documented in `libs/compio-postgres/README.md`.
+
+Implementation: `crates/zeroship-data-orm/src/orm.rs`,
+`crates/zeroship-data-orm/src/sql/filter.rs`, and
+`crates/zeroship-data-v8/src/v8_classes/dispatch.rs`.
+
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant
 entities, datastore placement, the per-grant role graph, the schema epoch's producer, and the
 `__zeroship_admin` system schema. Everything else describes code in the tree. The distinction
@@ -37,14 +106,14 @@ Three ideas, and the whole design is the consequence of separating them:
 - A **Grant** binds an app to a database with a capability. This is the edge that used to be an
   equality.
 
-### What it replaces
+### Current identity boundary
 
-Today an app id **is** the schema name, the role name, the encryption salt and the publication key -
-one string playing five parts. `crates/zeroship-data-core/src/broker.rs:78-79` says so plainly:
-"`schema` is conflated with `app_id` (every app has its own schema named after `app_id`)."
+Runtime bindings carry app identity separately from the physical schema. App identity
+keys transaction lanes and metering; the schema selects SQL qualification and PostgreSQL
+roles. The host supplies project encryption keys and authorized app bindings through
+`crates/zeroship-data-orm/src/encryption/keys.rs`.
 
-That conflation is why an app cannot have a database that outlives it, and why two apps cannot
-share one. Giving the database its own identity is the whole change; everything below follows.
+The independently managed Database and Grant records described below remain planned.
 
 ---
 
@@ -82,9 +151,9 @@ Two leak paths are easy to miss and both are real:
    *resolved* database - a workspace-local label must never be the thing a permission is checked
    against.
 
-This is the discipline `DbResourceKey` already applies to DSN passwords: a digest chosen so the
-secret "cannot reach `Debug` or a log line"
-(`crates/zeroship-plugin-db/src/service.rs:46`).
+The ORM's `ConnectionIdentity` follows this discipline for database configuration:
+its digest is private, and Debug output exposes neither the digest nor the DSN.
+See `crates/zeroship-data-orm/src/connection/factory.rs`.
 
 ---
 
@@ -96,20 +165,18 @@ has is a database.
 **Do not sweep the word out of the code.** It is still the right word in two places, and a
 half-applied rename would be worse than none:
 
-- **Where it names PostgreSQL's own object.** `crates/zeroship-plugin-db/src/drop_namespace.rs`
-  sequences "the PG teardown order for deleting an app";
-  `crates/zeroship-plugin-db/src/replication.rs:877-878` scopes a cluster-wide scan to "the calling
-  app's namespace". Both mean the PostgreSQL schema, and PostgreSQL calls it a namespace
-  (`pg_namespace`). Renaming those to "database" would make them say the wrong thing, because at
-  that layer a database is the Datastore.
+- **Where it names PostgreSQL's own object.** Catalog reads in
+  `crates/zeroship-data-orm/src/backend/postgres/pg_introspect.rs` use `pg_namespace`
+  to identify the physical schema. At this layer, a PostgreSQL database is the
+  datastore, and a namespace is a schema within it.
 - **Where it means something else entirely.** ES module namespace imports
   (`docs/reference/vite-plugin.md`), and the runtime's `env.*` plugin namespaces - a second plugin
   claiming the `db` namespace panics by design.
 
 The rule: **Database** is the product noun, used for the entity, the id, the config and everything
 creator-facing. **namespace** stays where it refers to the PostgreSQL object or to an unrelated
-concept. `NamespaceManager` from the archived `docs/archive/db-system-design.md` never shipped, so
-there is no live type to rename.
+concept. The previously proposed `NamespaceManager` never shipped, so there is
+no live type to rename.
 
 ## Ownership: the creator owns the schema, no app does
 
@@ -251,28 +318,24 @@ worker executes creator code, so any capability the worker holds is reachable by
 the worker. A privileged call the worker can make is not a boundary. What the worker may do must be
 what the tenant may do.
 
-Two exceptions exist today and are deliberate, not oversights:
+The worker's database posture permits one ambient workflow-owner membership and rejects other
+inherited data roles. CDC runs in a separate relay process: the worker login must not have
+`REPLICATION` or `BYPASSRLS`, and workers receive value-free invalidations from the relay.
 
-1. The worker holds `zeroship_workflow_owner` by a plain grant, boot *requires* that membership
-   (`crates/zeroship-worker/src/db_posture.rs:101-103`), and the fence exempts it by name
-   (`AMBIENT_MEMBERSHIP_EXEMPTION`, `crates/zeroship-worker/src/db_posture.rs:13`).
-2. **The replication plane is not fenced at all.** Logical decoding consults no column ACL and no
-   RLS - a role denied `SELECT ssn` still receives the plaintext in the decoded stream. The boot
-   posture requires `REPLICATION` and `BYPASSRLS` on that same login
-   (`crates/zeroship-worker/src/db_posture.rs:96-100`).
+### Runtime role and descriptor authority
 
-### Column-level grants are the masking authority
+The runtime role receives ordinary data privileges on every table and sequence in its bound
+creator schema. Prefixes such as `__zeroship_` do not change ORM visibility, privileges or CDC
+publication. The role receives schema `USAGE` without `CREATE`, and it receives no authority on
+another creator schema.
 
-A column a grant withholds is unreadable at the database, not merely absent from a descriptor.
-Two consequences measured on live PostgreSQL:
+The runtime descriptor remains the ORM's logical schema authority. It defines the collections,
+fields and physical storage mappings that creator code can express through the compiled query
+API. The ORM exposes no raw SQL surface to creator code, and its protection passes keep raw storage
+columns out of ordinary reads.
 
-- **The runtime role receives no blanket table grants.** A table-level grant subsumes any column
-  list, so neither production provisioning nor the plugin-db test provisioner grants DML on all
-  tables or installs prospective table default privileges. Bindings grant their columns
-  explicitly. The sole reserved-table exception is `__zeroship_audit_unmask`: the runtime role
-  receives table `INSERT` plus `USAGE` on its owned serial sequence, and nothing else. That the
-  grant is TABLE-level rather than column-scoped is what let `claimed_actor` be added on
-  2026-09-01 without a grant change; a column-scoped grant would have failed the INSERT instead.
+Consequences:
+
 - **The unmask audit row separates the actor from the claim that was refused.** `actor_id` and
   `actor_role` carry identity the platform accepted; `claimed_actor` carries, verbatim and
   untrusted, an actor claim the DB-3 fence stripped. They are distinct columns because
@@ -280,13 +343,9 @@ Two consequences measured on live PostgreSQL:
   erased the evidence anyone tried: a forged `kind: "auto"` audited byte-for-byte like a caller
   who sent no actor at all. Never read `claimed_actor` as identity - it is what a handler SENT,
   which is precisely why it is recorded.
-- **Bounded writes narrow through the primary key.** PostgreSQL refuses `SELECT ctid` with 42501
-  under column-scoped SELECT, which made update, soft-delete and restore unusable and also blocked
-  purge once its separately required table DELETE privilege was present. Those paths now select
-  the immutable, readable `id TEXT PRIMARY KEY` and retain `FOR UPDATE`; live tests execute all four
-  shipped builders and the replacement data-plan's bounded update/delete with column-scoped read
-  authority. PostgreSQL has no column-level DELETE privilege, so readwrite bindings necessarily
-  grant DELETE at table scope; it does not confer SELECT on any column.
+- **Bounded writes narrow through the primary key.** Update, soft-delete, restore and purge select
+  the immutable `id` primary key and retain `FOR UPDATE`. The compiler derives this behavior from
+  the descriptor rather than from table-name conventions.
 
 ---
 
@@ -296,7 +355,7 @@ Two consequences measured on live PostgreSQL:
 the catalog.** It is generated from the creator's migration DSL, folded at build time, shipped in
 the artifact, and immutable for the isolate's life.
 
-`crates/zeroship-data-engine/src/descriptor.rs` is the whole surface: `collection_schema` returns the
+`crates/zeroship-data-orm/src/descriptor.rs` is the whole surface: `collection_schema` returns the
 field map or a typed error, and **there is no third state**. An absent schema used to mean "carry
 on", which is how the read path came to fail open.
 
@@ -315,8 +374,8 @@ than served the wrong columns.
 is `zs_bind_<gid>_e<E>`; an apply that advances the epoch mints the roles for `E+1` and drops those
 for `E-1`. An isolate carrying a stale epoch therefore fails at `SET LOCAL ROLE`, which is the
 **first statement of the setup batch that already exists** (`tx_session_setup_sql` and
-`autocommit_local_session_setup_sql`, `crates/zeroship-data-engine/src/auth/bootstrap.rs:204-212` and
-`:226-233`, issued as one simple query at `crates/zeroship-data-engine/src/exec.rs:322`). Nothing has
+`autocommit_local_session_setup_sql`, `tests/fixtures/data/roles.rs` and
+`:226-233`, issued as one simple query at `crates/zeroship-data-orm/src/exec.rs`). Nothing has
 to remember to check: the batch is the only route to a usable connection, and a stale epoch never
 gets one.
 
@@ -342,29 +401,16 @@ that would have sunk the role-name form, and both were measured away:
 So the comparison form buys nothing the name does not, and costs a statement in every setup batch
 forever.
 
-**Only the producer is missing; the consumer ships.**
-`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:265-267`
-compares the observed epoch against the expected one and returns `Verdict::ReResolve` - retryable,
-distinct from the terminal denials above it. What has no input is `expected_authority` at
-`crates/zeroship-data-engine/src/transaction/driver.rs:142-148`, which mints `SchemaEpoch::new(0)`, and
-`observation_for` at `:157-167`, which echoes it back; the doc comment at `:140-141` says so outright:
-"The wiring is real; the *input* is not yet." Building the epoch is supplying one input to a
-classifier that already ships.
+**Schema-epoch comparison exists; a live authority source is still missing.**
+`crates/zeroship-data-orm/src/transaction/reducer/identity.rs` compares observed and expected
+epochs and can return `Verdict::ReResolve`. In
+`crates/zeroship-data-orm/src/transaction/driver.rs`, `expected_authority` supplies a
+placeholder and `observation_for` echoes it. This is not a live migration fence.
 
-<!-- CORRECTED 2026-09-04. Three of this paragraph's four line citations were
-wrong, and they were wrong DIFFERENTLY from the same claims in AGENTS.md - two
-documents drifting independently over one piece of code, not one copy-paste
-propagating. `identity.rs:313-315` pointed at `);`, `}` and a blank line;
-`driver.rs:106` is inside unrelated BACKEND_GENERATION prose; and `:100-101` was
-credited with a quote that lives at `:140-141`. Only `identity.rs:97` was right.
-Every one passed tests/doc_citation_gate.sh, which rules on the path and on the
-line being inside the file, never on it being the right line. -->
-
-
-**Live epochs are capped at two, fail-closed.** The reaper is part of the apply, not a sweep: an
-apply that cannot drop epoch `E-1`'s roles refuses to advance to `E+1`. That bounds an otherwise
-unbounded leak into the cluster-shared catalog, and it is what gives an in-flight isolate one epoch
-of grace rather than none.
+**Epoch retention must be bounded and fail closed (designed).** Applying a new epoch must
+retire obsolete roles before advancing, retaining the current epoch and its predecessor
+for in-flight isolates.
+A failed retirement must refuse advancement to prevent unbounded catalog growth.
 
 **What is not measured, and must not be read as covered:** per-backend membership cache construction
 at CONNECT time. The `SET ROLE` measurement above is on an established backend; a new backend still
@@ -375,10 +421,10 @@ the role graph ships.
 
 `__zeroship_admin` **does not exist.** It was deleted on 2026-08-27 - six tables and 32
 definer-rights routines - because the worker could call every one of them, and a privileged call the
-worker can make is not a boundary. `crates/zeroship-data-engine/src/auth/bootstrap.rs:15-18` records
+worker can make is not a boundary. `tests/fixtures/data/roles.rs` records
 that nothing replaced it, and `db/migrations-ts/` provisions no such schema. One live statement still
 names it and therefore fails on every database: the PITR placeholder at
-`crates/zeroship-data-postgres/src/postgres.rs:1333`, whose own comment at `:839-844` says so.
+`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`, whose own comment at `:839-844` says so.
 
 **This work creates it**, and the shape is the invariant's one permitted use - state a separate
 service writes and the worker only reads:
@@ -408,104 +454,40 @@ things in. It is reinstated for exactly one row shape and nothing else.
 
 ## Change streams
 
-One shared publication per DATASTORE, membership excluding the reserved `__zeroship_` namespace so
-platform journals never enter the worker-visible WAL feed.
+The deployed runtime still uses app schemas in a shared PostgreSQL database.
+Each app publication includes every top-level table in the bound app schema;
+table names do not alter CDC visibility. The CDC protocol uses the actual app
+schema rather than inventing grants or epochs.
 
-**This sentence said "per database" until 2026-09-04, contradicting the bullet nineteen lines below
-that states the opposite in bold.** The detail was corrected and the topic sentence was not, so the
-first line a reader met under this heading was the wrong cardinality and the correction was reachable
-only by reading on. That is the same failure this section already documents one bullet down, where a
-wrong catalog name supporting a right conclusion reached the decision log and two agent briefs. A
-heading sentence is what gets quoted; correct it in the same edit as the reasoning under it.
+`zeroship-data-cdc-server` owns logical decoding in a separate process. Workers
+connect through the authenticated TLS client in `zeroship-data-orm::cdc::relay`.
+The relay shares an app capture across worker connections, buffers changes until
+commit, and sends collection invalidations without row values. Workers re-read
+through the ORM's ordinary access controls. The worker login has neither
+`REPLICATION` nor `BYPASSRLS`; the relay uses its own constrained login.
 
-**Publications and slots sit at different scopes, and the difference decides what has to be
-rationed.** Measured on PostgreSQL 18.4:
+`zeroship-data-orm::cdc` owns subscription matching, readiness, cancellation and
+the process broker. `zeroship-data-v8` supplies JavaScript subscription wrappers
+and isolate cleanup. The driver supplies SQL sessions and wire decoding without
+owning application subscriptions. SQLite captures committed changes in its
+file-backed session and publishes into the same broker locally.
 
-- **A publication is DATASTORE-scoped.** `relisshared` is a column of **`pg_class`**, not of
-  `pg_publication`, and it says whether a CATALOG is shared across the cluster. Measured on 18.4:
-  `pg_class.relisshared` is `f` for both `pg_publication` and `pg_publication_rel`, so those catalogs
-  are per-database - against `pg_authid` and `pg_database`, which are `t`. That asymmetry is the whole
-  design: roles are cluster-shared, publications are not. The same publication name created in two
-  databases of one cluster therefore coexists, each seeing only its own.
+```text
+PG WAL --> relay service -- TLS --> ORM broker --> Rust / V8 subscriptions
+SQLite commit capture -----------> ORM broker
+```
 
-  **This bullet named `pg_publication.relisshared` until 2026-08-30 and the column does not exist
-  there** (`information_schema.columns` returns 0 rows for it, and 1 for `pg_class`). The conclusion
-  was right and the catalog was wrong, which is the harder error to notice: a false claim that
-  supports a true one gets repeated by everyone who trusts the conclusion. It reached the decision
-  log and two agent briefs before a reviewer caught it.
+Relay admission and delivery queues are bounded. Overflow, truncate and
+reconnection request a fresh snapshot rather than pretending to replay a durable
+event log. The final connected subscriber stops capture and releases the app's
+slot. A database advisory lock fences the relay singleton, while PostgreSQL's
+finite `max_slot_wal_keep_size` bounds retention after a process crash.
 
-  **CARDINALITY IS ONE SHARED PUBLICATION PER DATASTORE, NOT ONE PER DATABASE.** Locality makes a
-  per-Database publication *cheap*, which is why this bullet used to conclude one per Database - but
-  cheapness is not the constraint. `publication_names` is fixed at `START_REPLICATION`, so a
-  publication created after a stream starts is invisible to it, and the relay owns one stream per
-  Datastore. See the decoupling proposal and `2026-08-28-cdc-service.md`, which settle this.
-- **A replication slot's NAMESPACE and BUDGET are cluster-scoped; its DECODE is not.**
-  `max_replication_slots` defaults to 10 and is `context = postmaster`, so raising it is a restart.
-  Ten slots created in one database are all visible from another database of the same cluster, and
-  the eleventh - created **from that other database** - fails `SQLSTATE 53400`, "all replication
-  slots are in use". Slot cardinality is therefore a cluster budget shared by every datastore tenant.
-
-  **BUT A LOGICAL SLOT DECODES EXACTLY ONE DATABASE, AND CONFLATING THOSE TWO SCOPES IS HOW THE
-  DECISION BELOW WAS FIRST WRITTEN WRONG.** Measured 2026-08-30 on PostgreSQL 18.4, two databases in
-  one cluster, one slot created from A, rows written to both:
-  `pg_replication_slots.database` reads `slotprobe_a`; draining from A returns A's two INSERTs and
-  **not one row written in B**; draining that same slot while connected to B fails outright -
-  `ERROR: replication slot "probe_a" was not created in this database`. The namespace is still
-  cluster-wide: creating the same NAME from B fails `already exists`.
-
-  So a slot is cheap to name across the cluster and impossible to share across databases. The
-  consequence is a capacity ceiling nobody had stated: at one slot minimum per datastore against a
-  stock budget of 10, **a cluster holds at most 10 datastores**, fewer once anything else takes a
-  slot. That is a hard architectural bound, not a tuning knob - `context = postmaster` means raising
-  it restarts the cluster every tenant on it shares.
-- **`max_slot_wal_keep_size` measures as `-1`** - unbounded retention - on a stock server, so one
-  abandoned slot can grow `pg_wal` until the cluster dies. It is `context = sighup`, so bounding it
-  is a reload rather than a restart. The worker now refuses to boot against a cluster where it is
-  unlimited (`crates/zeroship-worker/src/db_posture.rs`, landed 2026-08-29). The finite VALUE is not
-  chosen here: too small and a legitimately slow consumer loses its slot and must resynchronise, too
-  large and the protection is theoretical. It belongs with the CDC relay, whose lag characteristics
-  set the floor.
-
-**SLOT CARDINALITY IS ONE PER DATASTORE, OWNED BY THE RELAY, AND THE DECOUPLING SEQUENCES BEHIND
-IT.** Settled 2026-08-29, and **corrected 2026-08-30 after this heading read "ONE PER CLUSTER" for a
-day.** Three cardinalities were live across the document set - per (app, worker) in code today, per
-(datastore, worker) in this design, and one per cluster in the CDC relay design - against a hard
-ceiling of 10 that only a restart moves. What settled it is that the binding term in the first two is
-the WORKER count: the documented deployment scales workers to 10, so one datastore times ten workers
-already exhausts the cluster. Moving ownership to the relay removes the worker from the term. That
-part was right and still is.
-
-**The number attached to it was not.** "One per cluster" was read off the cluster-scoped BUDGET and
-NAMESPACE without checking whether one slot can decode more than one database. It cannot - measured
-above - so one-per-cluster is not a target the relay can hit at all once a second datastore exists.
-The floor is one slot per datastore, which the relay owns rather than the worker. Today's deployment
-has a single datastore, so the two numbers coincide and nothing in the tree distinguishes them; the
-error was invisible for exactly that reason and will stay invisible until the second datastore.
-
-This is the second time a decision on this page has been settled from a real measurement of the wrong
-property. Ask what a scope claim is a claim ABOUT - a name, a quota, or the data - before building on
-it.
-
-Two consequences follow, and both are load-bearing:
-
-- **No creator-reachable operation may mint a cluster-scoped object.** Opening a subscription
-  attaches to the datastore's existing stream; creating a database creates a SCHEMA, and its tables
-  join the Datastore's ALREADY-EXISTING shared publication. Nothing a creator does may create a slot,
-  a publication, a WAL sender, or WAL retention. Roles are the one deliberate exception - the
-  enforcement model IS cluster-global rows - so they are quota'd rather than multiplexed.
-
-  **This bullet said "creating a database creates schema and publication" until 2026-08-30.** That
-  was the per-Database cardinality this page has now abandoned, and it survived the first correction
-  because that pass fixed the SLOT conclusion and left the publication one standing. A half-applied
-  correction reads as a whole one; the publication and the slot moved for the same reason and had to
-  move together.
-- **A publication is not decoded unless the running stream NAMES it.** Measured: one slot, one data
-  set, two decodes differing only in `publication_names` - 4 change records vs 8. PostgreSQL's own
-  warning explains the mechanism: "The publication does not exist at this point in the WAL." The name
-  list is fixed when the stream starts (`libs/compio-postgres/src/replication.rs` interpolates it into
-  START_REPLICATION once), so a per-database publication under one shared slot strands every database
-  created after the stream began, silently. That is why the relay must own the slot: adding a database
-  is then a fan-out change in one process, not a stream restart every co-tenant feels.
+Slots consume cluster resources even though each logical slot decodes only its
+own database. Size slot, WAL-sender and connection budgets across relay captures
+and other replication users. Worker scaling adds transport connections instead
+of duplicate slots for the same app. See `docs/runbooks/cdc-relay.md` for
+configuration and the coordinated role cutover.
 
 ## The reserved-column collision the database will not refuse
 
@@ -519,11 +501,12 @@ DDL that caused it.
 
 ## Physical names are opaque, not descriptive
 
-The database id is internal (above), and that claim is only as strong as the number of channels that
-can leak it. Three were found: a creator migration persisting `currentUser()` into an ordinary column
-it then reads back; the worker `env_vars` map, every entry of which the runtime copies into
-`process.env`; and `DbResourceKey`, a deterministic unsalted digest of the database URL that lets two
-creators compare values and learn they are co-tenants.
+The database id is internal (above), and every exposure channel must preserve that
+boundary. A creator migration can persist `currentUser()` into an ordinary column
+it then reads back; the runtime copies the worker's `env_vars` map into
+`process.env`. A deterministic database-configuration digest would also let
+creators compare values and learn they are co-tenants if exposed. The ORM keeps
+its connection digest private and formats its identity as opaque.
 
 **So the schema and role names are derived from the id by a keyed one-way function rather than
 embedding it.** Settled 2026-08-29. The alternative considered was refusing `currentUser()` in
@@ -593,22 +576,12 @@ never name a datastore.
   breaks the ordering the masking and deploy-gate story rests on: an app must not read a schema
   older than the descriptor it was built against. That is a design problem, not a config flag.
 
-## What this costs
+## Operational consequences
 
-Three costs remain, and the first two are PostgreSQL constraints rather than choices:
-
-1. **Classified columns lose plaintext reactivity for everyone, including the owner.** One published
-   column set per table per decode stream is a database constraint. Withhold a column from one
-   reader and it is withheld from the change stream for all of them.
-2. **Every apply must regenerate explicit per-column grants inside the DDL transaction.** A
-   migration that fails to do so leaves the database *unreadable* rather than *over-readable* - the
-   right failure direction, but a new way for a deploy to break.
-3. **Every grant and every live epoch is a row in the cluster-shared catalog.** `pg_authid` and
-   `pg_auth_members` are `relisshared = t`, so the role graph is the one resource a datastore's
-   tenants cannot be partitioned away from each other in. Two things bound it: `SET ROLE` measures
-   flat across a 2000x growth in membership rows, and the apply-time reaper caps live epochs at two.
-   What is not bounded by measurement is per-backend membership cache construction at connect time,
-   which nothing has measured.
+CDC carries invalidation metadata without row values. A subscriber re-reads through the ORM, where
+the descriptor and protection passes shape the result. PostgreSQL role memberships remain
+cluster-shared catalog state, so datastore capacity planning must include the tenant role graph and
+connection authentication caches.
 
 **One scope limit ships with it:** `readwrite`/`readonly` grants are restricted to apps under the
 same creator - which the workspace model satisfies by construction. Cross-creator sharing is blocked

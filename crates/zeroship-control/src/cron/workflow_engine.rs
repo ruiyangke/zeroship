@@ -12,18 +12,18 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use compio_postgres::error::SqlState;
 use compio_postgres::GenericClient;
-use zeroship_core::app_id::AppId;
-use zeroship_plugin_workflow::advance::{
+use zeroship_core::AppId;
+use zeroship_workflow::advance::{
     WorkflowAdvanceNackKind, WorkflowAdvanceRegistration, WorkflowAdvanceResponse,
     WorkflowRunDispatchRequest,
 };
-use zeroship_plugin_workflow::apply;
-use zeroship_plugin_workflow::engine;
-use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::{self, PgStore, WorkflowTables};
+use zeroship_workflow::apply;
+use zeroship_workflow::engine;
+use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::store::pg::{self, PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::{
-    self as workflow_scheduler, SchedulerConfig, TimerWheel, WakeHandle,
-    WorkflowSchedulerStore, WorkflowSchedulerStoreError, WORKFLOW_ADVANCE_PATH,
+    self as workflow_scheduler, SchedulerConfig, TimerWheel, WakeHandle, WorkflowSchedulerStore,
+    WorkflowSchedulerStoreError, WORKFLOW_ADVANCE_PATH,
 };
 
 use crate::registry::RegistryError;
@@ -32,8 +32,8 @@ use crate::workflow_rollout;
 use crate::{AppState, Registry};
 
 pub use engine::{
-    child_dedup_key, child_signal_type, RunUpdate, StepCheckpoint, StepOutcome, StepRequest, StepResult,
-    WorkflowEngineConfig, WorkflowOutputRef, DEFAULT_MAX_CHILD_DEPTH,
+    child_dedup_key, child_signal_type, RunUpdate, StepCheckpoint, StepOutcome, StepRequest,
+    StepResult, WorkflowEngineConfig, WorkflowOutputRef, DEFAULT_MAX_CHILD_DEPTH,
     DEFAULT_MAX_LIVE_DESCENDANTS, DEFAULT_MAX_START_MANY_BATCH,
 };
 
@@ -196,9 +196,9 @@ where
         .await;
     match result {
         Ok(rows) => {
-            let present = rows
-                .first()
-                .map_or(0, |row| usize::try_from(row.get::<_, i64>("present")).unwrap_or(0));
+            let present = rows.first().map_or(0, |row| {
+                usize::try_from(row.get::<_, i64>("present")).unwrap_or(0)
+            });
             if present == names.len() {
                 Ok(AppJournal::Ready(tables))
             } else if present == 0 {
@@ -370,9 +370,7 @@ where
         .map(|row| {
             let raw: String = row.get("app_id");
             let app_id = AppId::parse(&raw).map_err(|e| {
-                RegistryError::Database(format!(
-                    "apps.id {raw} is not a canonical app id: {e}"
-                ))
+                RegistryError::Database(format!("apps.id {raw} is not a canonical app id: {e}"))
             })?;
             Ok(JournalledApp {
                 app_id,
@@ -578,18 +576,13 @@ where
         .map(|row| {
             let raw: String = row.get("id");
             AppId::parse(&raw).map_err(|e| {
-                RegistryError::Database(format!(
-                    "apps.id {raw} is not a canonical app id: {e}"
-                ))
+                RegistryError::Database(format!("apps.id {raw} is not a canonical app id: {e}"))
             })
         })
         .collect()
 }
 
-async fn app_accepts_background_dispatch<C>(
-    conn: &C,
-    app_id: &AppId,
-) -> Result<bool, RegistryError>
+async fn app_accepts_background_dispatch<C>(conn: &C, app_id: &AppId) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
@@ -656,22 +649,6 @@ where
     Ok(None)
 }
 
-/// Integration-test window onto [`find_run_tables`], which is private because
-/// nothing outside this module should be locating a run by fleet scan.
-///
-/// Exposed so a test can assert the DIFFERENCE between "no such run" and "could
-/// not tell", which is the whole point of that function and is otherwise only
-/// observable through several layers of scheduler ack.
-#[cfg(feature = "live-db-tests")]
-#[allow(clippy::future_not_send)]
-pub async fn __find_run_app_for_test(
-    registry: &Registry,
-    run_id: &str,
-) -> Result<Option<AppId>, RegistryError> {
-    let conn = registry.conn().await?;
-    Ok(find_run_tables(&conn, run_id).await?.map(|t| t.app_id))
-}
-
 #[async_trait(?Send)]
 pub trait StepDispatcher: Send + Sync {
     async fn dispatch(&self, request: WorkflowRunDispatchRequest) -> DispatchOutcome;
@@ -680,10 +657,7 @@ pub trait StepDispatcher: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum DispatchOutcome {
     Completed(WorkflowAdvanceResponse),
-    Backpressure {
-        run_id: String,
-        reason: String,
-    },
+    Backpressure { run_id: String, reason: String },
 }
 
 impl DispatchOutcome {
@@ -812,10 +786,7 @@ impl StepDispatcher for GatewayStepDispatcher {
                 );
             }
             Err(_) => {
-                return DispatchOutcome::backpressure(
-                    &request,
-                    "gateway workflow advance timeout",
-                );
+                return DispatchOutcome::backpressure(&request, "gateway workflow advance timeout");
             }
         };
 
@@ -928,13 +899,19 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         match reap_lapsed_inflight_once(
             &store,
             &state,
-            Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone(), Arc::clone(&state.service_auth))),
+            Arc::new(GatewayStepDispatcher::new(
+                state.gateway_url.clone(),
+                Arc::clone(&state.service_auth),
+            )),
             WorkflowEngineConfig::default(),
             64,
         )
         .await
         {
-            Ok(n) if n > 0 => tracing::info!(redispatched = n, "workflow inflight reaper redispatched runs"),
+            Ok(n) if n > 0 => tracing::info!(
+                redispatched = n,
+                "workflow inflight reaper redispatched runs"
+            ),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow inflight reaper tick failed"),
         }
@@ -995,8 +972,11 @@ async fn reconcile_scheduler_from_journal_with_store(
               ORDER BY wake_at, id",
             tables.runs
         );
-        let Some(rows) =
-            skip_journal_scoped(&app_id, "scheduler reconcile scan", conn.query(&sql, &[&due_only]).await)?
+        let Some(rows) = skip_journal_scoped(
+            &app_id,
+            "scheduler reconcile scan",
+            conn.query(&sql, &[&due_only]).await,
+        )?
         else {
             reconcile.coverage.skipped_one();
             continue;
@@ -1098,8 +1078,11 @@ pub async fn reap_parked_cancel_requested_batch(
               RETURNING r.id, r.app_id, r.wake_at",
             runs = tables.runs,
         );
-        let Some(rows) =
-            skip_journal_scoped(&app_id, "parked-cancel scan", conn.query(&sql, &[&remaining]).await)?
+        let Some(rows) = skip_journal_scoped(
+            &app_id,
+            "parked-cancel scan",
+            conn.query(&sql, &[&remaining]).await,
+        )?
         else {
             // Readable in the catalog, denied by the statement: a different
             // exclusion from the one counted above, but the same consequence
@@ -1139,7 +1122,10 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     fire_once(
         &store,
         state,
-        Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone(), Arc::clone(&state.service_auth))),
+        Arc::new(GatewayStepDispatcher::new(
+            state.gateway_url.clone(),
+            Arc::clone(&state.service_auth),
+        )),
         WorkflowEngineConfig::default(),
     )
     .await
@@ -1394,7 +1380,9 @@ fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, RegistryError> {
     match parts.as_slice() {
         ["sleep", ordinal, name] => {
             let ordinal = ordinal.parse::<i32>().map_err(|_| {
-                RegistryError::InvalidInput(format!("invalid sleep waiting_step_key ordinal: {key}"))
+                RegistryError::InvalidInput(format!(
+                    "invalid sleep waiting_step_key ordinal: {key}"
+                ))
             })?;
             Ok(WaitingStep::Sleep {
                 ordinal,
@@ -1428,7 +1416,9 @@ fn parse_waiting_step_key(key: &str) -> Result<WaitingStep, RegistryError> {
         }
         ["child", ordinal, name] => {
             let ordinal = ordinal.parse::<i32>().map_err(|_| {
-                RegistryError::InvalidInput(format!("invalid child waiting_step_key ordinal: {key}"))
+                RegistryError::InvalidInput(format!(
+                    "invalid child waiting_step_key ordinal: {key}"
+                ))
             })?;
             Ok(WaitingStep::Child {
                 ordinal,
@@ -1450,8 +1440,10 @@ fn spawn_dispatch<D>(
     D: StepDispatcher + 'static,
 {
     INFLIGHT_DISPATCHES.fetch_add(1, Ordering::SeqCst);
+    // Capture ownership before spawning so cancellation before the first poll
+    // still releases the reserved dispatch capacity.
+    let mut inflight_guard = InflightDispatchGuard::new();
     compio::runtime::spawn(async move {
-        let mut inflight_guard = InflightDispatchGuard::new();
         let dispatch_run_id = request.run_id.clone();
         let outcome = dispatcher.dispatch(request).await;
         match outcome {
@@ -1579,8 +1571,12 @@ impl Drop for InflightDispatchGuard {
 fn workflow_error_to_registry(error: WorkflowError) -> RegistryError {
     match error {
         WorkflowError::Invalid(msg) => RegistryError::InvalidInput(msg),
-        WorkflowError::CompensableCarry(msg) => RegistryError::InvalidInput(format!("CompensableCarryError: {msg}")),
-        WorkflowError::Deadlock(msg) => RegistryError::Database(format!("retryable deadlock: {msg}")),
+        WorkflowError::CompensableCarry(msg) => {
+            RegistryError::InvalidInput(format!("CompensableCarryError: {msg}"))
+        }
+        WorkflowError::Deadlock(msg) => {
+            RegistryError::Database(format!("retryable deadlock: {msg}"))
+        }
         WorkflowError::Db(msg) => RegistryError::Database(msg),
     }
 }
@@ -1738,7 +1734,11 @@ where
     C: GenericClient + Sync,
 {
     match exec {
-        AckExec::OwnConnection => scheduler_store.ack_register_next(run_id, app_id, wake_at).await,
+        AckExec::OwnConnection => {
+            scheduler_store
+                .ack_register_next(run_id, app_id, wake_at)
+                .await
+        }
         AckExec::CallerConnection => {
             scheduler_store
                 .ack_register_next_on(conn, run_id, app_id, wake_at)
@@ -1855,7 +1855,14 @@ async fn sync_scheduler_after_apply(
         return Ok(());
     }
     for row in rows {
-        sync_scheduler_row(scheduler_store, &conn, &tables, &row, AckExec::OwnConnection).await?;
+        sync_scheduler_row(
+            scheduler_store,
+            &conn,
+            &tables,
+            &row,
+            AckExec::OwnConnection,
+        )
+        .await?;
     }
     sync_parent_after_child_apply(scheduler_store, &conn, &tables, run_id).await?;
 
@@ -1970,7 +1977,13 @@ where
             wake_at = Some(Utc::now());
         }
         if state == "waiting" && wake_at.is_none() {
-            wake_at = rearm_waiting_run_if_pending_signal(conn, tables, &run_id, waiting_step_key.as_deref()).await?;
+            wake_at = rearm_waiting_run_if_pending_signal(
+                conn,
+                tables,
+                &run_id,
+                waiting_step_key.as_deref(),
+            )
+            .await?;
         }
         if let Some(wake_at) = wake_at {
             // The journal claim gates execution; the scheduler store still
@@ -1978,7 +1991,13 @@ where
             // disappear between child-terminal applies and the parent's park.
             ack_register_next(scheduler_store, exec, conn, &run_id, app_id, wake_at).await?;
         } else if state == "waiting"
-            && waiting_run_has_live_resume_source(conn, tables, &run_id, waiting_step_key.as_deref()).await?
+            && waiting_run_has_live_resume_source(
+                conn,
+                tables,
+                &run_id,
+                waiting_step_key.as_deref(),
+            )
+            .await?
         {
             // Deliberate event-only park: no timer and no in-flight row. This
             // is safe only because the live resume source checked above
@@ -2211,7 +2230,7 @@ mod tests {
         use zeroship_core::service_peers::{
             service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
         };
-    
+
         let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
         let key = ServiceSigningKey::generate();
         let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new())
@@ -2306,7 +2325,11 @@ mod tests {
         }))
         .expect("StepResult JSON");
         assert_eq!(
-            result.run_update.wake_at().expect("run wake_at").to_rfc3339(),
+            result
+                .run_update
+                .wake_at()
+                .expect("run wake_at")
+                .to_rfc3339(),
             "2026-07-06T10:24:10+00:00"
         );
         assert_eq!(
@@ -2380,21 +2403,19 @@ mod tests {
     #[ntex::test]
     async fn gateway_step_dispatcher_maps_402_to_backpressure() {
         let gateway = test::server(|| async {
-            web::App::new().service(
-                web::resource(WORKFLOW_ADVANCE_PATH)
-                    .route(web::post().to(|| async {
-                        web::HttpResponse::PaymentRequired()
-                            .json(&serde_json::json!({"code": "SPEND_LIMIT"}))
-                    })),
-            )
+            web::App::new().service(web::resource(WORKFLOW_ADVANCE_PATH).route(web::post().to(
+                || async {
+                    web::HttpResponse::PaymentRequired()
+                        .json(&serde_json::json!({"code": "SPEND_LIMIT"}))
+                },
+            )))
         })
         .await;
 
         let request = test_dispatch_request();
         let dispatcher = GatewayStepDispatcher::new(gateway.url(""), test_control_service_auth());
         let outcome = dispatcher.dispatch(request.clone()).await;
-        let DispatchOutcome::Backpressure { run_id, reason } = outcome
-        else {
+        let DispatchOutcome::Backpressure { run_id, reason } = outcome else {
             panic!("expected backpressure dispatch outcome");
         };
         assert_eq!(run_id, request.run_id);

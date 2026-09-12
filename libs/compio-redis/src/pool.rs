@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::client::Client;
 use crate::error::{Error, Result};
+use crate::{ConnectionConfig, RedisConfig, sentinel::Source};
 
 #[derive(Clone, Debug)]
 pub struct PoolConfig {
@@ -53,7 +54,9 @@ impl Default for PoolConfig {
 }
 
 struct Inner {
-    url: String,
+    source: Source,
+    endpoint: String,
+    generation: u64,
     config: PoolConfig,
     /// Idle connections, LIFO for hottest-first reuse: `acquire` pops from
     /// the tail, release pushes onto it.
@@ -92,22 +95,47 @@ impl Pool {
     }
 
     pub async fn connect_with(url: &str, config: PoolConfig) -> Result<Self> {
-        // Warm up at least one connection so the URL is validated and
-        // auth/select ran at least once before any user code runs.
-        let mut idle = Vec::with_capacity(config.min_idle.max(1));
-        let warm = config.min_idle.max(1);
-        for _ in 0..warm {
-            let c = Client::connect(url).await?;
+        Self::connect_config(ConnectionConfig::from_url(url)?, config).await
+    }
+
+    pub async fn connect_config(connection: ConnectionConfig, config: PoolConfig) -> Result<Self> {
+        Self::from_source(Source::Direct(connection), config).await
+    }
+
+    pub(crate) async fn sentinel(config: RedisConfig, pool: PoolConfig) -> Result<Self> {
+        Self::from_source(Source::Sentinel(config), pool).await
+    }
+
+    async fn from_source(source: Source, config: PoolConfig) -> Result<Self> {
+        if config.max_size == 0 || config.min_idle > config.max_size {
+            return Err(Error::Config("invalid pool limits".into()));
+        }
+        let mut idle = Vec::new();
+        let mut endpoint = String::new();
+        for _ in 0..config.min_idle {
+            let (c, address) = source.connect().await?;
+            if endpoint != address {
+                idle.clear();
+                endpoint = address;
+            }
             idle.push((c, Instant::now()));
         }
-        Ok(Pool {
+        Ok(Self {
             inner: Rc::new(RefCell::new(Inner {
-                url: url.to_string(),
+                source,
+                endpoint,
+                generation: 0,
                 config,
                 idle,
                 busy: 0,
             })),
         })
+    }
+
+    pub(crate) fn invalidate(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.generation = inner.generation.wrapping_add(1);
+        inner.idle.clear();
     }
 
     /// Number of connections currently parked on the idle stack.
@@ -209,20 +237,26 @@ impl Pool {
             // The popped conn's reservation is now guard-protected: a probe
             // failure below, OR a cancellation while parked in the probe,
             // backs it out via `release()` / Drop.
-            let guard = BusyGuard::new(self.inner.clone());
+            let guard = BusyGuard::new(self.inner.clone(), self.inner.borrow().generation);
 
             // Hot conn (used recently): reuse without a probe.
-            if now.duration_since(parked_at) <= self.inner.borrow().config.liveness_probe_after {
+            let sentinel = self.inner.borrow().source.is_sentinel();
+            if !sentinel
+                && now.duration_since(parked_at) <= self.inner.borrow().config.liveness_probe_after
+            {
                 client = Some(conn);
                 busy_guard = Some(guard);
                 break;
             }
 
-            // Stale conn: test-on-borrow. PING it; on success reuse it, on
-            // failure DISCARD it (drop) and try the next idle entry. The
-            // probe is OUTSIDE the `RefCell` borrow (it awaits) but the
-            // reservation is already held by `guard`.
-            match conn.ping().await {
+            // Sentinel connections must still be primaries; direct connections
+            // use PING for liveness. The probe runs outside the RefCell borrow,
+            // while the reservation remains protected by the guard.
+            match if sentinel {
+                conn.require_primary().await
+            } else {
+                conn.ping().await
+            } {
                 Ok(()) => {
                     // The probe round-trip may have left trailing pipelined
                     // bytes in `rx` (a server replying `+PONG\r\n` plus extra
@@ -230,7 +264,10 @@ impl Pool {
                     // now would splice that leftover into the caller's next
                     // reply, so re-apply the checkout barrier: discard and try
                     // the next idle entry, releasing this reservation.
-                    if conn.is_dirty() || !conn.is_rx_empty() {
+                    if conn.is_dirty()
+                        || !conn.is_rx_empty()
+                        || guard.generation != self.inner.borrow().generation
+                    {
                         drop(conn);
                         guard.release();
                         continue;
@@ -258,7 +295,7 @@ impl Pool {
         // `PooledConn` is built, at which point the `PooledConn`'s own Drop
         // takes over the decrement. Exactly one of the two is armed at any
         // instant, so `busy` is never double-counted.
-        let busy_guard = match busy_guard {
+        let mut busy_guard = match busy_guard {
             Some(g) => g,
             None => {
                 let mut inner = self.inner.borrow_mut();
@@ -269,22 +306,29 @@ impl Pool {
                     )));
                 }
                 inner.busy += 1;
-                BusyGuard::new(self.inner.clone())
+                BusyGuard::new(self.inner.clone(), inner.generation)
             }
         };
 
         let client = match client {
             Some(c) => c,
             None => {
-                let url = self.inner.borrow().url.clone();
-                // On Err the guard (still armed) backs out busy; on
-                // cancellation here the guard's Drop does the same.
-                Client::connect(&url).await?
+                let source = self.inner.borrow().source.clone();
+                let (client, endpoint) = source.connect().await?;
+                let mut inner = self.inner.borrow_mut();
+                if inner.endpoint != endpoint {
+                    inner.endpoint = endpoint;
+                    inner.generation = inner.generation.wrapping_add(1);
+                    inner.idle.clear();
+                }
+                busy_guard.generation = inner.generation;
+                client
             }
         };
         let conn = PooledConn {
             pool: self.inner.clone(),
             client: Some(client),
+            generation: busy_guard.generation,
         };
         // Hand the busy decrement over to `PooledConn::drop`.
         busy_guard.disarm();
@@ -299,11 +343,15 @@ impl Pool {
 /// cancelled mid-connect acquire would otherwise leak a slot forever.
 struct BusyGuard {
     inner: Option<Rc<RefCell<Inner>>>,
+    generation: u64,
 }
 
 impl BusyGuard {
-    fn new(inner: Rc<RefCell<Inner>>) -> Self {
-        Self { inner: Some(inner) }
+    fn new(inner: Rc<RefCell<Inner>>, generation: u64) -> Self {
+        Self {
+            inner: Some(inner),
+            generation,
+        }
     }
 
     /// Relinquish ownership of the reserved slot (its decrement now belongs
@@ -336,6 +384,16 @@ impl Drop for BusyGuard {
 pub struct PooledConn {
     pool: Rc<RefCell<Inner>>,
     client: Option<Client>,
+    generation: u64,
+}
+
+impl std::fmt::Debug for PooledConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PooledConn")
+            .field("client", &self.client)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PooledConn {
@@ -359,7 +417,7 @@ impl Drop for PooledConn {
             // read buffer); returning it would let the next — possibly
             // cross-tenant — caller read this caller's reply. Drop it
             // instead; a fresh connection opens on the next acquire.
-            if !c.is_dirty() && c.is_rx_empty() {
+            if self.generation == inner.generation && !c.is_dirty() && c.is_rx_empty() {
                 inner.idle.push((c, Instant::now()));
             }
         }

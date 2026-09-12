@@ -1,18 +1,4 @@
-/**
- * Manual-source front-end — the new capability.
- *
- * Evaluate the author's committed `schema.ts` (a map of collection name →
- * `@zeroship/db` `SchemaBuilder`) into `CollectionDescriptorDto[]` — the MANUAL
- * source `genArtifacts` folds through `descriptors_to_create_ops` (which injects
- * the 7 platform system fields/indexes). Manual descriptors therefore carry ONLY
- * author-declared fields, matching `@zeroship/db` `NormalizedSchema` (which
- * excludes system fields).
- *
- * The `NormalizedSchema → CollectionDescriptorDto` mapper is the
- * correctness-critical core: every `@zeroship/db` `FieldDef` facet that the
- * declared schema can carry must have a home in `CollectionDescriptorDto`, or the
- * mapper THROWS — it never silently drops a facet.
- */
+/** Evaluate declared SDK schemas into migration descriptors; policy supplies injected columns. */
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
@@ -270,6 +256,7 @@ export function fieldDefToDto(
 
   // `ref` facets.
   if (def.refTarget !== undefined) dto.references = def.refTarget;
+  if (def.refColumn !== undefined) dto.referenceColumn = def.refColumn;
   if (def.onDelete !== undefined) dto.onDelete = def.onDelete;
   if (def.onUpdate !== undefined) dto.onUpdate = def.onUpdate;
   if (def.deferrable !== undefined) dto.deferrable = def.deferrable;
@@ -288,7 +275,7 @@ export function fieldDefToDto(
   // Facets that DO NOT round-trip through the descriptor producer. `index`
   // (single-field `.index()` flag) is subsumed by named indexes on this path;
   // `pattern`, `shape`, `items`, `literalValue`, `variants`, `discriminator`,
-  // `actorNullable`, `timestampAuto` have no descriptor home. Reject rather than
+  // Assignment generators have no manual descriptor home. Reject rather than
   // silently drop when the author actually used one.
   rejectUnmappableFacet(where, def, "pattern");
   rejectUnmappableFacet(where, def, "shape");
@@ -296,7 +283,7 @@ export function fieldDefToDto(
   rejectUnmappableFacet(where, def, "literalValue");
   rejectUnmappableFacet(where, def, "variants");
   rejectUnmappableFacet(where, def, "discriminator");
-  rejectUnmappableFacet(where, def, "timestampAuto");
+  rejectUnmappableFacet(where, def, "assign");
 
   return dto;
 }

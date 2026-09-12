@@ -4,7 +4,9 @@
 //! the `BlobStore` contract over S3 (blob round-trip, a MULTIPART-sized blob,
 //! manifest round-trip, dedup, `get_blob_to_file` refill, `delete_app_manifests`),
 //! then runs the SAME assertions against `LocalDiskBlobStore` for parity, and
-//! tears the container down. **Skips cleanly** when Docker is unavailable.
+//! tears the container down. It **FAILS** when Docker is unavailable - it used
+//! to skip, which left the only coverage `S3BlobStore` has reporting green on
+//! every machine that could not run it.
 //!
 //! Run explicitly:
 //!   `cargo test -p zeroship-bundle --test s3_blob_minio -- --nocapture`
@@ -29,14 +31,39 @@ const CONTAINER: &str = "zs-bundle-s3blob-minio-test";
 const PORT: u16 = 9112;
 const BUCKET: &str = "zs-blob-bucket";
 
-fn docker_available() -> bool {
-    Command::new("docker")
+/// Refuse the run unless a docker daemon answers `docker info`.
+///
+/// # Panics
+///
+/// When docker is absent or its daemon is not running. It used to announce a
+/// skip, so the only coverage `S3BlobStore` has - and the only place the S3 and
+/// local-disk stores are compared - reported green on every machine without
+/// docker.
+fn require_docker() {
+    let answered = Command::new("docker")
         .args(["info"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success());
+    assert!(
+        answered,
+        "Docker is unavailable, and this test requires it.\n\
+         \n\
+         \x20 backend: MinIO (S3), in a container this test starts itself\n\
+         \x20 probe:   `docker info` did not succeed\n\
+         \n\
+         Nothing in this repository provisions this container - the test does it\n\
+         inline - so what is missing is docker itself. Install it, start the\n\
+         daemon, and check that your user can reach it:\n\
+         \x20 docker info\n\
+         \n\
+         The suite then pulls `minio/minio` on first run, so the first run needs\n\
+         network access to the registry.\n\
+         \n\
+         There is no environment variable that makes this a skip. A backend this\n\
+         test cannot reach is a failed run, not a green one."
+    );
 }
 
 fn cleanup() {
@@ -47,7 +74,15 @@ fn cleanup() {
         .status();
 }
 
-fn start_minio() -> bool {
+/// Start the MinIO container this test runs against.
+///
+/// # Panics
+///
+/// When the container cannot be started, or never becomes ready. Both used to
+/// announce a skip and return `false`, and the caller returned on `false` - so
+/// a docker daemon that WAS present but refused the run, or a MinIO that never
+/// came up, produced the same pass as a full round-trip.
+fn start_minio() {
     cleanup();
     let run = Command::new("docker")
         .args([
@@ -66,10 +101,25 @@ fn start_minio() -> bool {
             "/data",
         ])
         .status();
-    if !matches!(run, Ok(s) if s.success()) {
-        zeroship_test_support::skip("skip: failed to start MinIO container");
-        return false;
-    }
+    assert!(
+        matches!(run, Ok(s) if s.success()),
+        "The MinIO container this test needs would not start.\n\
+         \n\
+         \x20 backend:   MinIO (S3)\n\
+         \x20 image:     minio/minio\n\
+         \x20 container: {CONTAINER}\n\
+         \x20 port:      {PORT} on the host, mapped to 9000\n\
+         \n\
+         `docker run` failed. The usual causes, in the order worth checking:\n\
+         \x20 docker ps -a --filter name={CONTAINER}   # a leftover container\n\
+         \x20 ss -lptn 'sport = :{PORT}'                     # the port is taken\n\
+         \x20 docker pull minio/minio                        # the image is not local\n\
+         \n\
+         Nothing in this repository provisions it; the test starts and removes\n\
+         it itself, so there is no script to run - fix the daemon and re-run.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(500));
         let alias = Command::new("docker")
@@ -87,13 +137,32 @@ fn start_minio() -> bool {
                 .stderr(std::process::Stdio::null())
                 .status();
             if matches!(mb, Ok(s) if s.success()) {
-                return true;
+                return;
             }
         }
     }
-    zeroship_test_support::skip("skip: MinIO did not become ready / bucket create failed");
     cleanup();
-    false
+    panic!(
+        "The MinIO container started but never became usable.\n\
+         \n\
+         \x20 backend:   MinIO (S3)\n\
+         \x20 container: {CONTAINER} (already removed, so it is not in the way)\n\
+         \x20 endpoint:  http://127.0.0.1:{PORT}\n\
+         \x20 bucket:    {BUCKET}\n\
+         \n\
+         The readiness loop ran to its ceiling without both `mc alias set` and\n\
+         `mc mb` succeeding inside the container. Re-run it by hand to see what\n\
+         MinIO said:\n\
+         \x20 docker run -d --name {CONTAINER} -p {PORT}:9000 \\\n\
+         \x20   -e MINIO_ROOT_USER={ACCESS_KEY} -e MINIO_ROOT_PASSWORD={SECRET_KEY} \\\n\
+         \x20   minio/minio server /data\n\
+         \x20 docker logs {CONTAINER}\n\
+         \n\
+         An `mc` that is missing from the image is the one cause this loop\n\
+         cannot outwait; the rest are slow starts, which a re-run clears.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    )
 }
 
 fn s3_url() -> String {
@@ -163,13 +232,8 @@ fn local_store() -> (LocalDiskBlobStore, std::path::PathBuf) {
 
 #[test]
 fn s3_blob_store_roundtrip_and_parity() {
-    if !docker_available() {
-        zeroship_test_support::skip("skip: docker unavailable");
-        return;
-    }
-    if !start_minio() {
-        return;
-    }
+    require_docker();
+    start_minio();
     let result = std::panic::catch_unwind(|| {
         compio::runtime::Runtime::new()
             .expect("compio runtime")

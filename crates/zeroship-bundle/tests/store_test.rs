@@ -1,4 +1,3 @@
-use zeroship_id::AppId;
 use zeroship_bundle::store::{BundleStore, LocalFs, VfsError};
 
 fn temp_dir(suffix: &str) -> std::path::PathBuf {

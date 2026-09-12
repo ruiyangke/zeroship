@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `id: UpdatableColumn` is not satisfied
+ --> tests/ui/write_generated_column.rs:3:10
+  |
+3 | #[derive(Changeset)]
+  |          ^^^^^^^^^ unsatisfied trait bound
+  |
+help: the trait `UpdatableColumn` is not implemented for `id`
+ --> tests/ui/write_generated_column.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/schema.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: the following other types implement trait `UpdatableColumn`:
+            counter
+            nickname
+            payload
+            score
+            title
+  = help: see issue #48214
+  = note: this error originates in the derive macro `Changeset` which comes from the expansion of the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -10,9 +10,9 @@ use sha2::{Digest, Sha256};
 
 use crate::precondition::PreconditionCheck;
 
-/// Typed-id prefix for migration versions (`mig_<base62 uuidv7>`).
+/// Typed-id prefix for migration versions (`mig_<base36 uuidv7>`).
 ///
-/// Three chars to match the global `^[a-z]{3}_[A-Za-z0-9]{22}$` shape every
+/// Three chars to match the global `^[a-z]{3}_[0-9a-z]{25}$` shape every
 /// other entity uses, disjoint from every other prefix in `typed_id`.
 pub const MIGRATION_PREFIX: &str = "mig";
 
@@ -25,14 +25,14 @@ pub enum IdError {
     /// The id parsed but its prefix was not `mig`.
     #[error("expected prefix 'mig', got '{got}'")]
     WrongPrefix { got: String },
-    /// The id was malformed (wrong shape, bad base62, missing underscore).
+    /// The id was malformed (wrong shape, bad base36, missing underscore).
     #[error("malformed migration id: {0}")]
     Malformed(String),
 }
 
-/// A migration version: a `UUIDv7` typed id, `mig_<base62>`.
+/// A migration version: a `UUIDv7` typed id, `mig_<base36>`.
 ///
-/// Time-ordered (the `UUIDv7` timestamp is in the high bits, and base62 here
+/// Time-ordered (the `UUIDv7` timestamp is in the high bits, and base36 here
 /// preserves that order lexicographically), so string-sorting a set of
 /// versions yields apply order - see [`MigrationId::timestamp_ms`].
 #[derive(
@@ -68,7 +68,7 @@ impl MigrationId {
     /// Deterministic (same `tag`+`seed` => same id); no OS/random/time input.
     ///
     /// # Panics
-    /// Never in practice: the derived 16-byte UUID always base62-encodes to a valid
+    /// Never in practice: the derived UUID always base36-encodes to a valid
     /// `mig_...` id that [`MigrationId::parse`] accepts.
     #[must_use]
     pub fn derive(tag: &str, seed: &[u8]) -> Self {
@@ -97,7 +97,7 @@ impl MigrationId {
     ///
     /// # Errors
     /// [`IdError::WrongPrefix`] if the prefix is not `mig`; [`IdError::Malformed`]
-    /// if the id does not parse (bad base62, missing underscore, wrong length).
+    /// if the id does not parse (bad base36, missing underscore, wrong length).
     pub fn parse(s: &str) -> Result<Self, IdError> {
         match typed_id::parse_with_prefix(s, MIGRATION_PREFIX) {
             Ok(_) => Ok(Self(s.to_string())),
@@ -812,7 +812,7 @@ mod tests {
         );
         // And the 2ms gap makes it strictly greater.
         assert!(b.timestamp_ms() > a.timestamp_ms());
-        // String sort matches time order (the UUIDv7 + base62 invariant).
+        // String sort matches time order (the UUIDv7 + base36 invariant).
         assert!(
             b.as_str() > a.as_str(),
             "string order must match time order"

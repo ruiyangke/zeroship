@@ -221,7 +221,7 @@ function runtimeDownEnvelope(status: RuntimeStatus): Record<string, unknown> {
  * could reword that in a patch release and both test suites would stay green
  * while this silently reverted to advising a port change.
  *
- * The prose match now lives in `crates/zeroship-plugin-kv/src/backend/redb.rs`, next to
+ * The prose match now lives in `crates/zeroship-kv/src/backend/redb.rs`, next to
  * the crate that produces the prose, and what crosses the language boundary is
  * `STATE_DIR_LOCK_MARKER` - a constant we own on both sides.
  *

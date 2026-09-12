@@ -1,8 +1,8 @@
-use zeroship_core::user_id::UserId;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use cedar_policy::{Entities, Entity, EntityUid, RestrictedExpression};
+use zeroship_id::UserId;
 
 use crate::authority::Authority;
 use crate::{AuthzError, Resource};
@@ -61,12 +61,8 @@ fn user_entity(principal_id: &UserId, authority: &Authority) -> Result<Entity, A
             restricted_bool(authority.account_locked)?,
         ),
     ]);
-    Entity::new(
-        uid("User", principal_id.as_str())?,
-        attrs,
-        HashSet::new(),
-    )
-    .map_err(|err| AuthzError::CedarEntities(err.to_string()))
+    Entity::new(uid("User", principal_id.as_str())?, attrs, HashSet::new())
+        .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
 /// The Cedar uid of a request's resource. ONE definition, used to build both
@@ -114,7 +110,10 @@ pub(crate) fn cedar_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use uuid::Uuid;
+
+    fn principal() -> UserId {
+        UserId::mint()
+    }
 
     fn authority() -> Authority {
         Authority {
@@ -133,7 +132,7 @@ mod tests {
         for resource in [
             Resource::Any,
             Resource::App {
-                id: zeroship_core::app_id::AppId::mint(),
+                id: zeroship_id::AppId::mint(),
             },
             Resource::Project {
                 id: "prj_0000123456789abcdefghijkl".to_owned(),
@@ -142,7 +141,7 @@ mod tests {
                 id: "org_0000123456789abcdefghijkl".to_owned(),
             },
         ] {
-            let entities = assemble_entities(&UserId::mint(), &authority(), &resource)
+            let entities = assemble_entities(&principal(), &authority(), &resource)
                 .expect("entities should assemble");
             assert_eq!(entities.iter().count(), 2, "{resource:?}");
         }
@@ -154,9 +153,7 @@ mod tests {
     /// comparison.
     #[test]
     fn the_user_entity_carries_no_rank_attribute() {
-        // The entity uid is the principal's printed form, so the lookup below
-        // must use the same value the entity was assembled from.
-        let principal = UserId::mint();
+        let principal = principal();
         let entities = assemble_entities(&principal, &authority(), &Resource::Any)
             .expect("entities should assemble");
         let user = entities

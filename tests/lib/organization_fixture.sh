@@ -46,9 +46,9 @@
 #   ERROR: null value in column "organization_id" of relation "apps"
 #          violates not-null constraint
 #
-# This example named only `project_id` until 2026-09-07, and so did every
-# harness that copied it. Arm 5 of `organization_ownership_path_gate.sh` now
-# rules on both names, because it was checking for the one that was present.
+# Native database tests in
+# crates/zeroship-migrate-node/tests/platform_corpus/organization_authority.rs
+# exercise missing and mismatched ownership columns against PostgreSQL.
 #
 # THE COLUMN LIST ABOVE IS THE WHOLE OF IT. `apps.api_key` was dropped by
 # db/migrations-ts/20260905000200_drop_app_api_key.ts, and this example named it
@@ -255,8 +255,7 @@ SELECT 'zs-seat-ok=' || count(*)::text
 #
 # The diagnostic still reaches the terminal either way (it is written to stderr,
 # which the substitution does not capture); the `|| exit 1` is what stops the
-# run. Arm 7 of `organization_ownership_path_gate.sh` checks for it, for the
-# same reason arm 6 checks the seat's heredoc.
+# run.
 app_organization() {
   local app="${1:?app_organization needs an app id}"
   shift

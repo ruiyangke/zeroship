@@ -23,9 +23,9 @@
 //! behind a disabled feature compiles out and the lint says nothing, while a
 //! different feature selection ships it. This parses the file, so a disabled
 //! cfg is still source. That is not hypothetical for the WRITE half:
-//! `tests/clippy_gate.sh` lints under a fixed `--features` list that does not
-//! include `zeroship-plugin-storage/s3`, so the `set_var` calls that used to
-//! sit behind `#[cfg(feature = "s3")]` in `crates/plugin-storage/tests/
+//! An earlier Clippy invocation used a fixed feature list that did not
+//! include `zeroship-storage/s3`, so the `set_var` calls that used to
+//! sit behind `#[cfg(feature = "s3")]` in `crates/zeroship-storage/tests/
 //! backend_parity.rs` were invisible to the lint and visible only here.
 //!
 //! What it does NOT do. It cannot see a read inside a dependency, a read behind
@@ -447,7 +447,7 @@ impl<'ast> Visit<'ast> for Reads<'_> {
     ///
     /// `syn`'s default walk stops at the token stream, so
     /// `assert!(std::env::var(NAME).is_err())` was invisible to this scanner
-    /// until 2026-08-12: `crates/zeroship-plugin-storage/src/limits.rs:198` was a real
+    /// until 2026-08-12: `crates/zeroship-storage/src/limits.rs` was a real
     /// raw read that the file's other read shadowed in every count. A gate
     /// whose blind spot is "wrap it in `assert!`" is not a gate.
     ///

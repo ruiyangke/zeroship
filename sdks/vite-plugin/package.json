@@ -44,6 +44,7 @@
     "@zeroship/rpc": "workspace:*",
     "@zeroship/workflows": "workspace:*",
     "acorn": "^8.16.0",
+    "smol-toml": "1.8.0",
     "tsx": "catalog:",
     "typescript": "catalog:",
     "vite": "catalog:"

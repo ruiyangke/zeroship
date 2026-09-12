@@ -8,8 +8,7 @@
 //!
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::registry::{Registry, RegistryError};
 
@@ -403,24 +402,18 @@ pub async fn recent_for_app(
         )
         .await?;
     rows.iter()
-        .map(|r| {
-            let raw_actor: Option<String> = r.get("actor_user_id");
-            let actor_user_id = raw_actor
-                .map(|raw| {
-                    UserId::parse(&raw).map_err(|e| {
-                        RegistryError::Database(format!(
-                            "app_audit row has a malformed actor_user_id {raw:?}: {e}"
-                        ))
-                    })
-                })
-                .transpose()?;
+        .map(|row| {
             Ok(AuditRow {
-                id: r.get("id"),
-                actor_user_id,
-                action: r.get("action"),
-                resource: r.get("resource"),
-                source_ip: r.get("source_ip"),
-                at: r.get("at_text"),
+                id: row.get("id"),
+                actor_user_id: crate::user_id::optional_from_row(
+                    row,
+                    "actor_user_id",
+                    "read app audit",
+                )?,
+                action: row.get("action"),
+                resource: row.get("resource"),
+                source_ip: row.get("source_ip"),
+                at: row.get("at_text"),
             })
         })
         .collect()

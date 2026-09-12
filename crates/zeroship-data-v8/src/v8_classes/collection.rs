@@ -1,0 +1,765 @@
+//! `Collection` — native V8 wrapper for a single named collection.
+//!
+//! A `Collection` instance is returned by `Db::collection`.
+//! Each CRUD method on it decodes its V8 arguments directly into a
+//! `zeroship_data_orm::value::Value` (via `decode_native`)
+//! and calls the shared `dispatch_*` helper in [`super::dispatch`] — no
+//! JSON.stringify / parse round-trip on the CRUD hot path.
+
+#![allow(unsafe_code)]
+
+use zeroship_data_orm::value::Value;
+use zeroship_runtime::state::OpError;
+#[allow(unused_imports)]
+use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
+
+use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::transaction::scope::TransactionScope;
+
+use super::dispatch::{
+    dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
+    dispatch_delete_one, dispatch_distinct, dispatch_exists, dispatch_find, dispatch_find_one,
+    dispatch_insert, dispatch_insert_many, dispatch_near, dispatch_purge_many, dispatch_purge_one,
+    dispatch_restore_many, dispatch_restore_one, dispatch_search, dispatch_unmask_field,
+    dispatch_update_many, dispatch_update_one, dispatch_upsert,
+};
+use crate::op_error::ToOpError;
+use crate::v8_bridge::{read_native_arg, refuse_if_query_capability};
+
+// ---------------------------------------------------------------------------
+// Collection state
+// ---------------------------------------------------------------------------
+
+pub struct Collection {
+    /// The collection name (e.g. `"users"`). Used as the first argument
+    /// to every dispatch helper. Never mutated after mint — plain
+    /// `String`, no `RefCell`.
+    pub(crate) name: String,
+    /// Immutable app-at-deploy identity captured by the owning Db wrapper.
+    pub(crate) binding: DbBinding,
+    /// The transaction frame that minted this collection, when any. Unlike the
+    /// ambient V8 continuation scope, this identity cannot disappear when the
+    /// collection escapes its callback.
+    transaction_scope: Option<TransactionScope>,
+}
+
+impl std::fmt::Debug for Collection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Collection")
+            .field("name", &self.name)
+            .field("binding", &self.binding)
+            .field("transaction_scope", &self.transaction_scope)
+            .finish()
+    }
+}
+
+impl Collection {
+    fn check_transaction_scope(&self) -> Result<(), OpError> {
+        self.transaction_scope
+            .as_ref()
+            .map_or(Ok(()), |transaction| {
+                transaction.check().map_err(ToOpError::to_op_error)
+            })
+    }
+
+    fn throw_if_transaction_expired<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Option<v8::Local<'s, v8::Value>> {
+        let error = self.check_transaction_scope().err()?;
+        let exception = error.to_exception(scope);
+        scope.throw_exception(exception);
+        Some(v8::undefined(scope).into())
+    }
+}
+
+#[cfg(test)]
+impl Collection {
+    /// Observe the deploy token and the DESCRIPTOR ENTRY the current CRUD
+    /// reader would resolve from this native receiver. Kept on the receiver so
+    /// the regression cannot accidentally re-read ambient runtime state.
+    ///
+    /// `None` is the `collection_not_declared` case — this deploy's descriptor
+    /// does not declare the collection — which is exactly what a co-resident
+    /// isolate at a DIFFERENT deploy must see for an entry it never installed.
+    pub(crate) fn resolved_runtime_schema_for_tests(
+        &self,
+    ) -> (String, Option<zeroship_data_orm::value::Value>) {
+        let schema = crate::descriptor::collection_schema(&self.binding, &self.name)
+            .ok()
+            .map(|facts| (*facts).clone());
+        (self.binding.deploy_token().to_string(), schema)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Collection IDL surface
+// ---------------------------------------------------------------------------
+
+#[v8_class]
+impl Collection {
+    /// `new Collection()` from JS rejects — real instances come from
+    /// [`mint_collection`] via `Db::collection(name)`, which stamps
+    /// `name` + `app_id` onto the wrapper.
+    #[v8_constructor]
+    fn new() -> Result<Collection, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
+    }
+
+    #[v8_method]
+    fn read<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        query: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        self.check_transaction_scope()?;
+        let input = match read_native_arg(scope, Some(query)) {
+            Ok(value) => value,
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        let query =
+            zeroship_data_orm::orm::ReadQuery::decode(input).map_err(|e| e.to_op_error())?;
+        Ok(super::dispatch::dispatch_operation(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            zeroship_data_orm::orm::Operation::Read(Box::new(query)),
+            super::dispatch::OutputMode::Many,
+        )
+        .into())
+    }
+
+    #[v8_method]
+    fn find<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_find(scope, self.binding.clone(), &self.name, filter_v, opts_v).into()
+    }
+
+    #[v8_method]
+    fn get<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        id_or_filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        self.check_transaction_scope()?;
+        let input = match read_native_arg(scope, Some(id_or_filter)) {
+            Ok(value) => value,
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        let filter = match input {
+            Value::Object(_) => input,
+            id => {
+                let mut filter = zeroship_data_orm::value::Map::new();
+                filter.insert("id".to_string(), id);
+                Value::Object(filter)
+            }
+        };
+        let mut options = match read_native_arg(scope, Some(opts)) {
+            Ok(Value::Null) => zeroship_data_orm::value::Map::new(),
+            Ok(Value::Object(options)) => options,
+            Ok(_) => return Err(OpError::type_error("get: opts must be an object")),
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        options.insert("limit".to_string(), Value::from(1_i64));
+        Ok(dispatch_find_one(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            filter,
+            Value::Object(options),
+        )
+        .into())
+    }
+
+    #[v8_method]
+    fn exists<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let filter = match read_native_arg(scope, Some(filter)) {
+            Ok(value) => value,
+            Err(error) => return crate::v8_bridge::throw_decode_error(scope, &error),
+        };
+        let options = match read_native_arg(scope, Some(opts)) {
+            Ok(value) => value,
+            Err(error) => return crate::v8_bridge::throw_decode_error(scope, &error),
+        };
+        dispatch_exists(scope, self.binding.clone(), &self.name, filter, options).into()
+    }
+
+    #[v8_method]
+    fn insert<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        doc: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.insert") {
+            return p.into();
+        }
+        let doc_v = match read_native_arg(scope, Some(doc)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_insert(scope, self.binding.clone(), &self.name, doc_v).into()
+    }
+
+    #[v8_method]
+    #[v8_name = "insertMany"]
+    fn insert_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        docs: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.insertMany") {
+            return p.into();
+        }
+        let docs_v = match read_native_arg(scope, Some(docs)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_insert_many(scope, self.binding.clone(), &self.name, docs_v).into()
+    }
+
+    #[v8_method]
+    #[v8_name = "update"]
+    fn update_one<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        update: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.update") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let update_v = match read_native_arg(scope, Some(update)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_update_one(scope, self.binding.clone(), &self.name, filter_v, update_v).into()
+    }
+
+    #[v8_method]
+    #[v8_name = "updateMany"]
+    fn update_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        update: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.updateMany") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let update_v = match read_native_arg(scope, Some(update)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_update_many(scope, self.binding.clone(), &self.name, filter_v, update_v).into()
+    }
+
+    #[v8_method]
+    #[v8_name = "delete"]
+    fn delete_one<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.delete") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_delete_one(scope, self.binding.clone(), &self.name, filter_v).into()
+    }
+
+    #[v8_method]
+    #[v8_name = "deleteMany"]
+    fn delete_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.deleteMany") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_delete_many(scope, self.binding.clone(), &self.name, filter_v).into()
+    }
+
+    /// `collection.purge(filter)` — hard-delete one matching row regardless of
+    /// the descriptor's soft-delete role.
+    #[v8_method]
+    fn purge<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purge") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_purge_one(scope, self.binding.clone(), &self.name, filter_v).into()
+    }
+
+    /// `collection.purgeMany(filter)` — bulk hard-delete.
+    #[v8_method]
+    #[v8_name = "purgeMany"]
+    fn purge_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.purgeMany") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_purge_many(scope, self.binding.clone(), &self.name, filter_v).into()
+    }
+
+    /// `collection.restore(filter)` — clear the declared soft-delete field on
+    /// the first matching row.
+    #[v8_method]
+    fn restore<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restore") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_restore_one(scope, self.binding.clone(), &self.name, filter_v).into()
+    }
+
+    /// `collection.restoreMany(filter)` — bulk-restore.
+    #[v8_method]
+    #[v8_name = "restoreMany"]
+    fn restore_many<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.restoreMany") {
+            return p.into();
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_restore_many(scope, self.binding.clone(), &self.name, filter_v).into()
+    }
+
+    /// `collection.upsert(doc, opts)` — insert or update on conflict.
+    ///
+    /// `opts.conflictFields` (string[]) names the ON CONFLICT target
+    /// columns; rejects with `TypeError` when missing or empty.
+    #[v8_method]
+    fn upsert<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        doc: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        self.check_transaction_scope()?;
+        if let Some(p) = refuse_if_query_capability(scope, "ctx.db.upsert") {
+            return Ok(p.into());
+        }
+        let doc_v = match read_native_arg(scope, Some(doc)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
+        let conflict_v = opts_v.get("conflictFields").cloned().unwrap_or(Value::Null);
+        let conflict_arr = match conflict_v.as_array() {
+            Some(arr) => arr,
+            None => {
+                let detail = match &conflict_v {
+                    Value::Null => "missing".to_string(),
+                    Value::String(_) => "string".to_string(),
+                    Value::Number(_) => "number".to_string(),
+                    Value::Bool(_) => "boolean".to_string(),
+                    Value::Object(_) => "object".to_string(),
+                    Value::Array(_) => unreachable!(),
+                    Value::Bytes(_) => "bytes".into(),
+                    Value::Timestamp(_) => "timestamp".into(),
+                    Value::Decimal(_) => "decimal".into(),
+                    Value::Json(_) => "JSON".into(),
+                };
+                return Err(OpError::type_error(format!(
+                    "upsert: opts.conflictFields must be an array of strings (got {detail})"
+                )));
+            }
+        };
+        if conflict_arr.is_empty() {
+            return Err(OpError::type_error(
+                "upsert: opts.conflictFields must be a non-empty array of strings",
+            ));
+        }
+        Ok(dispatch_upsert(scope, self.binding.clone(), &self.name, doc_v, conflict_v).into())
+    }
+
+    /// `collection.count(filter, opts?)` — count matching rows.
+    ///
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
+    #[v8_method]
+    fn count<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_count(scope, self.binding.clone(), &self.name, filter_v, opts_v).into()
+    }
+
+    /// `collection.distinct(filter, opts)` — return the unique values
+    /// of `opts.field` across rows matching `filter`. Filter-first to
+    /// match the rest of the read surface.
+    ///
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
+    #[v8_method]
+    fn distinct<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        self.check_transaction_scope()?;
+        let filter_v = match read_native_arg(scope, Some(filter)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return Ok(crate::v8_bridge::throw_decode_error(scope, &e)),
+        };
+        let field = opts_v
+            .get("field")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| OpError::type_error("distinct: opts.field must be a non-empty string"))?
+            .to_string();
+        Ok(dispatch_distinct(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            &field,
+            filter_v,
+            opts_v,
+        )
+        .into())
+    }
+
+    /// `collection.aggregate(pipeline, opts?)` — run an aggregation
+    /// pipeline.
+    ///
+    /// `opts.include_deleted: true` includes rows marked by the descriptor's
+    /// soft-delete field.
+    #[v8_method]
+    fn aggregate<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        pipeline: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let pipeline_v = match read_native_arg(scope, Some(pipeline)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_aggregate(scope, self.binding.clone(), &self.name, pipeline_v, opts_v).into()
+    }
+
+    /// Run vector search through the ORM and return rows with `_distance`.
+    #[v8_method]
+    fn search<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        args: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let args_v = match read_native_arg(scope, Some(args)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_search(scope, self.binding.clone(), &self.name, args_v).into()
+    }
+
+    /// Run spatial search through the ORM and return rows with `_distance_m`.
+    #[v8_method]
+    fn near<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        args: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let args_v = match read_native_arg(scope, Some(args)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        dispatch_near(scope, self.binding.clone(), &self.name, args_v).into()
+    }
+
+    /// `collection.unmaskField(rowPk, column, opts?)` — single-cell
+    /// unmask round-trip for the ad-hoc "no MaskedValue in
+    /// hand" case (e.g. unmask a known `(rowPk, column)` without first
+    /// reading the row). Moved off `Db` so the collection name is
+    /// inherited from the receiver and cannot be spoofed via the args
+    /// shape.
+    ///
+    /// `opts` (optional): `{ actor?: {...} | null, reason?: string }`.
+    ///
+    /// Resolves with the bare plaintext string on success; rejects with
+    /// `unmask_not_permitted` / `unmask_column_not_masked` /
+    /// `unmask_not_found` / `unmask_value_null` or a typed SQL / config
+    /// error. Every dispatch — granted OR denied — writes one row to
+    /// `<app>.__zeroship_audit_unmask`.
+    ///
+    /// Builds the `{ collection, row_pk, column, actor?, reason? }` args
+    /// object (stamping `collection` from `self.name`) and routes through
+    /// the shared [`dispatch_unmask_field`] validation + dispatch path.
+    #[v8_method]
+    #[v8_name = "unmaskField"]
+    fn unmask_field<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        row_pk: v8::Local<v8::Value>,
+        column: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let row_pk_v = match read_native_arg(scope, Some(row_pk)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let column_v = match read_native_arg(scope, Some(column)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let mut args = match opts_v {
+            Value::Object(map) => map,
+            _ => zeroship_data_orm::value::Map::new(),
+        };
+        args.insert("collection".to_string(), Value::String(self.name.clone()));
+        args.insert("row_pk".to_string(), row_pk_v);
+        args.insert("column".to_string(), column_v);
+        dispatch_unmask_field(scope, &self.binding, Value::Object(args)).into()
+    }
+
+    /// `collection.bulkUnmask(items, opts?)` — bulk,
+    /// many-row / many-column unmask in one V8↔Rust hop. Moved off
+    /// `Db.bulkUnmaskFields`; the collection name is inherited from the
+    /// receiver.
+    ///
+    /// `items`: `[{ rowPk: string, columns: string[] }, ...]`.
+    /// `opts` (optional): `{ actor?: {...} | null, reason?: string }`.
+    ///
+    /// **Atomic authorisation** (Q-MASK-F): every `(rowPk, column)` pair
+    /// is checked BEFORE any decrypt; a single denied pair refuses the
+    /// whole call with `bulk_unmask_partial_unauthorized`. Resolves with
+    /// `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
+    ///
+    /// Builds the `{ collection, items, actor?, reason? }` args object
+    /// (stamping `collection` from `self.name`) and routes through the
+    /// shared [`dispatch_bulk_unmask_field`] validation + dispatch path.
+    #[v8_method]
+    #[v8_name = "bulkUnmask"]
+    fn bulk_unmask<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        items: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        if let Some(error) = self.throw_if_transaction_expired(scope) {
+            return error;
+        }
+        let items_v = match read_native_arg(scope, Some(items)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let opts_v = match read_native_arg(scope, Some(opts)) {
+            Ok(v) => v,
+            Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
+        };
+        let mut args = match opts_v {
+            Value::Object(map) => map,
+            _ => zeroship_data_orm::value::Map::new(),
+        };
+        args.insert("collection".to_string(), Value::String(self.name.clone()));
+        args.insert("items".to_string(), items_v);
+        dispatch_bulk_unmask_field(scope, &self.binding, Value::Object(args)).into()
+    }
+
+    /// `collection.openSubscription()` — returns a
+    /// [`super::subscription::Subscription`] wrapper bound to this
+    /// collection. Synchronous mint; broker entry released by the
+    /// wrapper's Weak finalizer (or `.close()`).
+    #[v8_method]
+    #[v8_name = "openSubscription"]
+    fn open_subscription<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        self.check_transaction_scope()?;
+        let obj = super::subscription::mint_subscription(scope, self.binding.app_id(), &self.name)?;
+        Ok(obj.into())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// mint_collection — build a Collection wrapper for a given Db parent
+// ---------------------------------------------------------------------------
+
+/// Mint a `Collection` v8_class instance bound to the given
+/// `(app_id, name)` pair.
+///
+/// Called from `Db::collection(name)` and `Transaction::collection(name)`
+/// on cache miss. Callers stash the returned wrapper in their own
+/// `collection_cache` so subsequent `.collection(name)` calls return
+/// the same JS object.
+pub(crate) fn mint_collection<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    name: String,
+    binding: DbBinding,
+    transaction_scope: Option<TransactionScope>,
+) -> Result<v8::Local<'s, v8::Object>, OpError> {
+    let class_tmpl = Collection::install(scope);
+    let inst_tmpl = class_tmpl.instance_template(scope);
+    let obj = inst_tmpl
+        .new_instance(scope)
+        .ok_or_else(|| OpError::type_error("Collection instance allocation failed"))?;
+
+    let class_fn = class_tmpl
+        .get_function(scope)
+        .ok_or_else(|| OpError::type_error("Collection template missing function"))?;
+    let proto_key = v8::String::new(scope, "prototype").unwrap();
+    let proto_v = class_fn
+        .get(scope, proto_key.into())
+        .ok_or_else(|| OpError::type_error("Collection prototype missing"))?;
+    obj.set_prototype(scope, proto_v);
+
+    let state = Collection {
+        name,
+        binding,
+        transaction_scope,
+    };
+    let boxed: Box<Collection> = Box::new(state);
+    let raw = Box::into_raw(boxed);
+    let raw_addr = raw as usize;
+    let ext = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    obj.set_internal_field(0, ext.into());
+
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        obj,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut Collection));
+        }),
+    );
+    std::mem::forget(weak);
+
+    Ok(obj)
+}

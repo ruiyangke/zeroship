@@ -19,11 +19,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
-use zeroship_core::app_id::AppId;
-use zeroship_core::{crypto, typed_id, workflow_signal_token};
-use zeroship_plugin_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
-use zeroship_plugin_workflow::errors::WorkflowError;
-use zeroship_plugin_workflow::store::pg::{self, WorkflowTables};
+use zeroship_core::{crypto, typed_id, workflow_signal_token, AppId};
+use zeroship_workflow::engine::{cap_exceeded, WORKFLOW_STATE_CAP_ERROR_CODE};
+use zeroship_workflow::errors::WorkflowError;
+use zeroship_workflow::store::pg::{self, WorkflowTables};
 
 use crate::api::infrastructure_error_response;
 use crate::cron::workflow_engine;
@@ -237,15 +236,11 @@ enum WorkflowApiError {
 impl WorkflowApiError {
     fn response(self) -> web::HttpResponse {
         match self {
-            Self::BadRequest(msg) => {
-                web::HttpResponse::BadRequest().json(&json!({ "error": msg }))
-            }
+            Self::BadRequest(msg) => web::HttpResponse::BadRequest().json(&json!({ "error": msg })),
             Self::Unauthorized(msg) => {
                 web::HttpResponse::Unauthorized().json(&json!({ "error": msg }))
             }
-            Self::Forbidden(msg) => {
-                web::HttpResponse::Forbidden().json(&json!({ "error": msg }))
-            }
+            Self::Forbidden(msg) => web::HttpResponse::Forbidden().json(&json!({ "error": msg })),
             Self::NotFound(msg) => web::HttpResponse::NotFound().json(&json!({ "error": msg })),
             Self::Conflict(msg) => web::HttpResponse::Conflict().json(&json!({
                 "error": "RunConflict",
@@ -263,10 +258,8 @@ impl WorkflowApiError {
                 "error": WORKFLOW_STATE_CAP_ERROR_CODE,
                 "message": msg,
             })),
-            Self::PayloadTooLarge(msg) => {
-                web::HttpResponse::build(StatusCode::PAYLOAD_TOO_LARGE)
-                    .json(&json!({ "error": msg }))
-            }
+            Self::PayloadTooLarge(msg) => web::HttpResponse::build(StatusCode::PAYLOAD_TOO_LARGE)
+                .json(&json!({ "error": msg })),
             Self::RateLimited { retry_after_secs } => web::HttpResponse::TooManyRequests()
                 .header("retry-after", retry_after_header(retry_after_secs))
                 .json(&json!({ "error": "rate limited" })),
@@ -310,7 +303,9 @@ impl From<WorkflowError> for WorkflowApiError {
     fn from(value: WorkflowError) -> Self {
         match value {
             WorkflowError::Invalid(msg) => Self::BadRequest(msg),
-            WorkflowError::CompensableCarry(msg) => Self::BadRequest(format!("CompensableCarryError: {msg}")),
+            WorkflowError::CompensableCarry(msg) => {
+                Self::BadRequest(format!("CompensableCarryError: {msg}"))
+            }
             WorkflowError::Deadlock(msg) => Self::Database(format!("retryable deadlock: {msg}")),
             WorkflowError::Db(msg) => Self::Database(msg),
         }
@@ -347,7 +342,10 @@ fn check_app_scoped_auth(
                     key,
                     state.control_key.expose_secret(),
                     app_id.as_str(),
-                ) => Ok(()),
+                ) =>
+        {
+            Ok(())
+        }
         _ => {
             tracing::warn!(
                 method = %req.method(),
@@ -359,10 +357,7 @@ fn check_app_scoped_auth(
     }
 }
 
-fn check_control_auth(
-    req: &web::HttpRequest,
-    state: &AppState,
-) -> Result<(), web::HttpResponse> {
+fn check_control_auth(req: &web::HttpRequest, state: &AppState) -> Result<(), web::HttpResponse> {
     let header = req
         .headers()
         .get("authorization")
@@ -577,7 +572,10 @@ fn parse_suffix_duration_ms(raw: &str) -> Option<i64> {
         }
         return Some(ms.ceil() as i64);
     }
-    raw.parse::<i64>().ok().filter(|v| *v > 0).map(|secs| secs * 1000)
+    raw.parse::<i64>()
+        .ok()
+        .filter(|v| *v > 0)
+        .map(|secs| secs * 1000)
 }
 
 fn validate_token_ttl(raw: &str) -> Result<i64, WorkflowApiError> {
@@ -768,7 +766,12 @@ fn master_crypto_key(state: &AppState) -> [u8; 32] {
     crypto::derive_key(state.master_key.expose_secret())
 }
 
-fn encrypt_signal_secret(state: &AppState, app_id: &AppId, kid: &str, secret: &[u8]) -> Result<Vec<u8>, WorkflowApiError> {
+fn encrypt_signal_secret(
+    state: &AppState,
+    app_id: &AppId,
+    kid: &str,
+    secret: &[u8],
+) -> Result<Vec<u8>, WorkflowApiError> {
     let key = master_crypto_key(state);
     crypto::encrypt(&key, &signal_key_aad(app_id, kid), secret)
         .map_err(|e| WorkflowApiError::Database(format!("encrypt workflow signal key: {e}")))
@@ -887,7 +890,8 @@ fn unverified_signal_token_app_id(token: &str) -> Result<AppId, WorkflowApiError
         .get("app_id")
         .and_then(Value::as_str)
         .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
-    parse_app_id(app_id).map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))
+    parse_app_id(app_id)
+        .map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))
 }
 
 async fn verify_signal_token(
@@ -911,7 +915,11 @@ fn validate_signal_token_time(
     claims: &workflow_signal_token::WorkflowSignalTokenClaims,
     now_unix: i64,
 ) -> Result<(), WorkflowApiError> {
-    if claims.exp.saturating_add(SIGNAL_TOKEN_TIMESTAMP_TOLERANCE_SECS) < now_unix {
+    if claims
+        .exp
+        .saturating_add(SIGNAL_TOKEN_TIMESTAMP_TOLERANCE_SECS)
+        < now_unix
+    {
         return Err(WorkflowApiError::Unauthorized(
             "signal token expired".to_string(),
         ));
@@ -919,7 +927,9 @@ fn validate_signal_token_time(
     Ok(())
 }
 
-fn claims_expiry(claims: &workflow_signal_token::WorkflowSignalTokenClaims) -> Result<DateTime<Utc>, WorkflowApiError> {
+fn claims_expiry(
+    claims: &workflow_signal_token::WorkflowSignalTokenClaims,
+) -> Result<DateTime<Utc>, WorkflowApiError> {
     Utc.timestamp_opt(claims.exp, 0)
         .single()
         .ok_or_else(|| WorkflowApiError::Unauthorized("invalid signal token expiry".to_string()))
@@ -998,10 +1008,7 @@ where
     check_app_journal_capacity(conn, app_id, input_journal_bytes, limits.app_max_bytes).await
 }
 
-async fn ensure_app_workflows_enabled<C>(
-    conn: &C,
-    app_id: &AppId,
-) -> Result<(), WorkflowApiError>
+async fn ensure_app_workflows_enabled<C>(conn: &C, app_id: &AppId) -> Result<(), WorkflowApiError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
@@ -1017,7 +1024,11 @@ where
 }
 
 async fn ensure_public_ingress_enabled(state: &AppState) -> Result<(), WorkflowApiError> {
-    let conn = state.registry.conn().await.map_err(WorkflowApiError::from)?;
+    let conn = state
+        .registry
+        .conn()
+        .await
+        .map_err(WorkflowApiError::from)?;
     if crate::workflow_rollout::ingress_disabled(&conn)
         .await
         .map_err(WorkflowApiError::from)?
@@ -1224,9 +1235,7 @@ where
     }
     check_create_journal_capacity(tx, app_id, input_journal_bytes).await?;
     let candidate = typed_id::new_workflow_run_id();
-    if let Some(inserted) =
-        insert_run_on_conflict_do_nothing(tx, tables, run, &candidate).await?
-    {
+    if let Some(inserted) = insert_run_on_conflict_do_nothing(tx, tables, run, &candidate).await? {
         return Ok(inserted);
     }
     existing_keyed_run(tx, tables, app_id, workflow_name, key)
@@ -1257,7 +1266,9 @@ where
         .map_err(workflow_api_error_to_registry)?;
     let key = normalize_key(Some(dedup_key.to_string()))
         .map_err(workflow_api_error_to_registry)?
-        .ok_or_else(|| RegistryError::InvalidInput("scheduled workflow key is missing".to_string()))?;
+        .ok_or_else(|| {
+            RegistryError::InvalidInput("scheduled workflow key is missing".to_string())
+        })?;
     let input_journal_bytes = pg::json_column_size(tx, input)
         .await
         .map_err(WorkflowApiError::from)
@@ -1317,10 +1328,7 @@ async fn create_run_inner(
     let dedup_key = normalize_key(body.key)?;
 
     let mut conn = state.registry.conn().await?;
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(workflow_pg_error)?;
+    let tx = conn.transaction().await.map_err(workflow_pg_error)?;
 
     ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
@@ -1387,8 +1395,10 @@ async fn create_run_inner(
             }
             ConflictPolicy::Replace => {
                 check_create_journal_capacity(&tx, &app_id, input_journal_bytes).await?;
-                let cancelled = tx.query(
-                    &format!("UPDATE {runs} \
+                let cancelled = tx
+                    .query(
+                        &format!(
+                            "UPDATE {runs} \
                         SET state = 'cancelled', \
                             dedup_key = NULL, \
                             wake_at = NULL, \
@@ -1404,11 +1414,13 @@ async fn create_run_inner(
                             lease_expires = NULL, \
                             dispatch_nonce = NULL \
                       WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
-                      RETURNING id", runs = tables.runs),
-                    &[&app_id.as_str(), &workflow_name, key],
-                )
-                .await
-                .map_err(workflow_pg_error)?;
+                      RETURNING id",
+                            runs = tables.runs
+                        ),
+                        &[&app_id.as_str(), &workflow_name, key],
+                    )
+                    .await
+                    .map_err(workflow_pg_error)?;
                 for row in cancelled {
                     let cancelled_run_id: String = row.get("id");
                     cascade_run_ids.extend(
@@ -1484,10 +1496,11 @@ async fn create_run_inner(
             .await
             .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     }
-    tx.commit()
-        .await
-        .map_err(workflow_pg_error)?;
-    Ok((StatusCode::CREATED, json!({ "id": run_id, "state": "queued" })))
+    tx.commit().await.map_err(workflow_pg_error)?;
+    Ok((
+        StatusCode::CREATED,
+        json!({ "id": run_id, "state": "queued" }),
+    ))
 }
 
 async fn start_many_inner(
@@ -1510,10 +1523,7 @@ async fn start_many_inner(
     };
 
     let mut conn = state.registry.conn().await?;
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(workflow_pg_error)?;
+    let tx = conn.transaction().await.map_err(workflow_pg_error)?;
     ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
     let deploy = active_deploy_for_workflow(&tx, &app_id, &workflow_name).await?;
@@ -1596,8 +1606,10 @@ async fn start_many_inner(
                     run_ids.push(run_id);
                 }
                 ConflictPolicy::Replace => {
-                    let cancelled = tx.query(
-                        &format!("UPDATE {runs} \
+                    let cancelled = tx
+                        .query(
+                            &format!(
+                                "UPDATE {runs} \
                             SET state = 'cancelled', \
                                 dedup_key = NULL, \
                                 wake_at = NULL, \
@@ -1613,11 +1625,13 @@ async fn start_many_inner(
                                 lease_expires = NULL, \
                                 dispatch_nonce = NULL \
                           WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3 \
-                          RETURNING id", runs = tables.runs),
-                        &[&app_id.as_str(), &workflow_name, key],
-                    )
-                    .await
-                    .map_err(workflow_pg_error)?;
+                          RETURNING id",
+                                runs = tables.runs
+                            ),
+                            &[&app_id.as_str(), &workflow_name, key],
+                        )
+                        .await
+                        .map_err(workflow_pg_error)?;
                     for row in cancelled {
                         let cancelled_run_id: String = row.get("id");
                         cascade_run_ids.extend(
@@ -1698,9 +1712,7 @@ async fn start_many_inner(
             .await
             .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     }
-    tx.commit()
-        .await
-        .map_err(workflow_pg_error)?;
+    tx.commit().await.map_err(workflow_pg_error)?;
     Ok(json!({ "results": results }))
 }
 
@@ -1732,7 +1744,14 @@ pub async fn create_run(
         Ok(app_id) => app_id,
         Err(resp) => return resp,
     };
-    match create_run_inner(&state, app_id, workflow_name.into_inner(), body.into_inner()).await {
+    match create_run_inner(
+        &state,
+        app_id,
+        workflow_name.into_inner(),
+        body.into_inner(),
+    )
+    .await
+    {
         Ok((status, value)) => web::HttpResponse::build(status).json(&value),
         Err(e) => e.response(),
     }
@@ -1748,7 +1767,14 @@ pub async fn start_many_runs(
         Ok(app_id) => app_id,
         Err(resp) => return resp,
     };
-    match start_many_inner(&state, app_id, workflow_name.into_inner(), body.into_inner()).await {
+    match start_many_inner(
+        &state,
+        app_id,
+        workflow_name.into_inner(),
+        body.into_inner(),
+    )
+    .await
+    {
         Ok(value) => web::HttpResponse::Ok().json(&value),
         Err(e) => e.response(),
     }
@@ -1844,8 +1870,7 @@ pub async fn get_step_output(
     }
     let occurrence = query.occurrence.unwrap_or(0);
     if occurrence < 0 {
-        return WorkflowApiError::BadRequest("step occurrence must be >= 0".to_string())
-            .response();
+        return WorkflowApiError::BadRequest("step occurrence must be >= 0".to_string()).response();
     }
     let tables = WorkflowTables::for_app_id(&app_id);
     let sql = format!(
@@ -1864,15 +1889,17 @@ pub async fn get_step_output(
     );
     let rows = match state
         .control_pg
-        .query(&sql, &[&path.run_id, &app_id.as_str(), &path.name, &occurrence])
+        .query(
+            &sql,
+            &[&path.run_id, &app_id.as_str(), &path.name, &occurrence],
+        )
         .await
     {
         Ok(rows) => rows,
         Err(e) => return WorkflowApiError::Database(e.to_string()).response(),
     };
     let Some(row) = rows.first() else {
-        return WorkflowApiError::NotFound("workflow step output not found".to_string())
-            .response();
+        return WorkflowApiError::NotFound("workflow step output not found".to_string()).response();
     };
     output_row_response(&req, &state, app_id, row).await
 }
@@ -1944,10 +1971,7 @@ async fn output_row_response(
     builder.header("accept-ranges", "bytes");
     builder.header("content-length", slice.len().to_string());
     if status == StatusCode::PARTIAL_CONTENT {
-        builder.header(
-            "content-range",
-            format!("bytes {start}-{end}/{total}"),
-        );
+        builder.header("content-range", format!("bytes {start}-{end}/{total}"));
     }
     builder.body(slice)
 }
@@ -1956,7 +1980,11 @@ fn parse_bytes_range(
     req: &web::HttpRequest,
     total: usize,
 ) -> Result<Option<(usize, usize)>, web::HttpResponse> {
-    let Some(raw) = req.headers().get("range").and_then(|value| value.to_str().ok()) else {
+    let Some(raw) = req
+        .headers()
+        .get("range")
+        .and_then(|value| value.to_str().ok())
+    else {
         return Ok(None);
     };
     let Some(spec) = raw.strip_prefix("bytes=") else {
@@ -1980,7 +2008,9 @@ fn parse_bytes_range(
     } else {
         let start = match start_raw.parse::<usize>() {
             Ok(value) => value,
-            Err(_) => return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish()),
+            Err(_) => {
+                return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish())
+            }
         };
         let end = if end_raw.is_empty() {
             total - 1
@@ -1988,8 +2018,9 @@ fn parse_bytes_range(
             match end_raw.parse::<usize>() {
                 Ok(value) => value.min(total - 1),
                 Err(_) => {
-                    return Err(web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE)
-                        .finish());
+                    return Err(
+                        web::HttpResponse::build(StatusCode::RANGE_NOT_SATISFIABLE).finish()
+                    );
                 }
             }
         };
@@ -2076,10 +2107,7 @@ pub async fn signal_run(
               FOR UPDATE",
         runs = tables.runs
     );
-    let rows = match tx
-        .query(&lock_sql, &[&run_id, &app_id.as_str()])
-        .await
-    {
+    let rows = match tx.query(&lock_sql, &[&run_id, &app_id.as_str()]).await {
         Ok(rows) => rows,
         Err(e) => return workflow_pg_error(e).response(),
     };
@@ -2117,10 +2145,7 @@ pub async fn signal_run(
                   WHERE id = $1 AND app_id = $2",
             runs = tables.runs
         );
-        if let Err(e) = tx
-            .execute(&wake_sql, &[&run_id, &app_id.as_str()])
-            .await
-        {
+        if let Err(e) = tx.execute(&wake_sql, &[&run_id, &app_id.as_str()]).await {
             return WorkflowApiError::Database(e.to_string()).response();
         }
     }
@@ -2376,7 +2401,11 @@ async fn ingress_signal_inner(
     let app_id = parse_app_id(&claims.app_id)
         .map_err(|_| WorkflowApiError::Unauthorized("invalid signal token".to_string()))?;
     {
-        let conn = state.registry.conn().await.map_err(WorkflowApiError::from)?;
+        let conn = state
+            .registry
+            .conn()
+            .await
+            .map_err(WorkflowApiError::from)?;
         ensure_app_workflows_enabled(&conn, &app_id).await?;
     }
     let idempotency_key = signal_token_replay_key(&body.token);
@@ -2505,8 +2534,8 @@ async fn deliver_ingress_run_signal(
         }
         return Err(WorkflowApiError::Database(e.to_string()));
     }
-    let wakes_run =
-        run_state == "waiting" && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type);
+    let wakes_run = run_state == "waiting"
+        && waiting_key_matches_signal(waiting_step_key.as_deref(), signal_type);
     if wakes_run {
         let wake_sql = format!(
             "UPDATE {runs} \
@@ -2514,12 +2543,9 @@ async fn deliver_ingress_run_signal(
               WHERE id = $1 AND app_id = $2",
             runs = tables.runs
         );
-        tx.execute(
-            &wake_sql,
-            &[&run_id, &app_id.as_str()],
-        )
-        .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+        tx.execute(&wake_sql, &[&run_id, &app_id.as_str()])
+            .await
+            .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     }
     if wakes_run {
         workflow_engine::register_run_timer_in_tx(state, &tx, run_id)
@@ -2623,7 +2649,14 @@ pub async fn cancel_run(
     run_id: Path<String>,
     body: Option<Json<CancelBody>>,
 ) -> web::HttpResponse {
-    control_transition(req, state, run_id, "cancel", body.map(|body| body.into_inner())).await
+    control_transition(
+        req,
+        state,
+        run_id,
+        "cancel",
+        body.map(|body| body.into_inner()),
+    )
+    .await
 }
 
 pub async fn restart_run(
@@ -2677,16 +2710,22 @@ async fn restart_run_inner(
     ensure_app_workflows_enabled(&tx, &app_id).await?;
     let tables = provision_workflow_journal(&tx, &app_id).await?;
 
-    tx.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&run_id])
-        .await
-        .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
+    tx.query(
+        "SELECT pg_advisory_xact_lock(hashtext($1)::bigint)",
+        &[&run_id],
+    )
+    .await
+    .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
 
     let rows = tx
         .query(
-            &format!("SELECT workflow_name, deploy_id, output_kind, output_hash \
+            &format!(
+                "SELECT workflow_name, deploy_id, output_kind, output_hash \
                FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
-              FOR UPDATE", runs = tables.runs),
+              FOR UPDATE",
+                runs = tables.runs
+            ),
             &[&run_id, &app_id.as_str()],
         )
         .await
@@ -2718,7 +2757,8 @@ async fn restart_run_inner(
         }
         let rows = tx
             .query(
-                &format!("SELECT ordinal \
+                &format!(
+                    "SELECT ordinal \
                    FROM {steps} \
                   WHERE run_id = $1 AND name = $2 AND name_occurrence = $3",
                     steps = tables.steps
@@ -2740,12 +2780,15 @@ async fn restart_run_inner(
     if target_ordinal > 0 {
         let rows = tx
             .query(
-                &format!("SELECT 1 \
+                &format!(
+                    "SELECT 1 \
                    FROM {steps} \
                   WHERE run_id = $1 \
                     AND ordinal < $2 \
                     AND compensation_finished_at IS NOT NULL \
-                  LIMIT 1", steps = tables.steps),
+                  LIMIT 1",
+                    steps = tables.steps
+                ),
                 &[&run_id, &target_ordinal],
             )
             .await
@@ -2772,14 +2815,18 @@ async fn restart_run_inner(
     };
 
     tx.execute(
-        &format!("UPDATE {blobs} b \
+        &format!(
+            "UPDATE {blobs} b \
             SET refcount = GREATEST(refcount - 1, 0), \
                 last_referenced_at = now() \
            FROM {steps} s \
           WHERE s.run_id = $1 \
             AND s.ordinal >= $2 \
             AND s.output_kind = 'blob' \
-            AND b.hash = s.output_hash", blobs = tables.blobs, steps = tables.steps),
+            AND b.hash = s.output_hash",
+            blobs = tables.blobs,
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
@@ -2787,10 +2834,13 @@ async fn restart_run_inner(
     if output_kind == "blob" {
         if let Some(hash) = output_hash.as_ref() {
             tx.execute(
-                &format!("UPDATE {blobs} \
+                &format!(
+                    "UPDATE {blobs} \
                     SET refcount = GREATEST(refcount - 1, 0), \
                         last_referenced_at = now() \
-                  WHERE hash = $1", blobs = tables.blobs),
+                  WHERE hash = $1",
+                    blobs = tables.blobs
+                ),
                 &[hash],
             )
             .await
@@ -2799,7 +2849,8 @@ async fn restart_run_inner(
     }
 
     tx.execute(
-        &format!("UPDATE {signals} \
+        &format!(
+            "UPDATE {signals} \
             SET consumed_by = NULL \
           WHERE consumed_by = $1 \
             AND delivery <> 'topic' \
@@ -2809,13 +2860,17 @@ async fn restart_run_inner(
                  WHERE run_id = $1 \
                    AND ordinal >= $2 \
                    AND consumed_signal_id IS NOT NULL \
-            )", signals = tables.signals, steps = tables.steps),
+            )",
+            signals = tables.signals,
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("DELETE FROM {signals} \
+        &format!(
+            "DELETE FROM {signals} \
           WHERE run_id = $1 \
             AND delivery = 'topic' \
             AND id IN ( \
@@ -2824,13 +2879,17 @@ async fn restart_run_inner(
                  WHERE run_id = $1 \
                    AND ordinal >= $2 \
                    AND consumed_signal_id IS NOT NULL \
-            )", signals = tables.signals, steps = tables.steps),
+            )",
+            signals = tables.signals,
+            steps = tables.steps
+        ),
         &[&run_id, &target_ordinal],
     )
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("DELETE FROM {subscriptions} \
+        &format!(
+            "DELETE FROM {subscriptions} \
           WHERE run_id = $1 AND ordinal >= $2",
             subscriptions = tables.subscriptions
         ),
@@ -2839,7 +2898,8 @@ async fn restart_run_inner(
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("DELETE FROM {steps} \
+        &format!(
+            "DELETE FROM {steps} \
           WHERE run_id = $1 AND ordinal >= $2",
             steps = tables.steps
         ),
@@ -2848,7 +2908,8 @@ async fn restart_run_inner(
     .await
     .map_err(|e| WorkflowApiError::Database(e.to_string()))?;
     tx.execute(
-        &format!("UPDATE {steps} \
+        &format!(
+            "UPDATE {steps} \
             SET compensation_state = 'pending', \
                 compensation_attempt = 0, \
                 compensation_wake_at = NULL, \
@@ -2867,7 +2928,8 @@ async fn restart_run_inner(
     let restarted_from: Option<i32> = (!full_restart).then_some(target_ordinal);
     let restarted_by = format!("app:{}", app_id.as_str());
     tx.execute(
-        &format!("UPDATE {runs} \
+        &format!(
+            "UPDATE {runs} \
             SET state = 'queued', \
                 wake_at = now(), \
                 terminal_at = NULL, \
@@ -2958,10 +3020,13 @@ async fn control_transition(
     };
     let rows = match tx
         .query(
-            &format!("SELECT state \
+            &format!(
+                "SELECT state \
                FROM {runs} \
               WHERE id = $1 AND app_id = $2 \
-              FOR UPDATE", runs = tables.runs),
+              FOR UPDATE",
+                runs = tables.runs
+            ),
             &[&run_id, &app_id.as_str()],
         )
         .await
@@ -3065,7 +3130,8 @@ async fn control_transition(
             } else if mode == "compensate" {
                 let pending_row = match tx
                     .query_one(
-                        &format!("SELECT COUNT(*)::bigint AS n \
+                        &format!(
+                            "SELECT COUNT(*)::bigint AS n \
                            FROM {steps} \
                           WHERE run_id = $1 AND compensation_state = 'pending'",
                             steps = tables.steps
@@ -3107,7 +3173,8 @@ async fn control_transition(
                         },
                     });
                     tx.query(
-                        &format!("UPDATE {runs} \
+                        &format!(
+                            "UPDATE {runs} \
                             SET state = 'compensating', \
                                 wake_at = now(), \
                                 terminal_at = NULL, \
@@ -3134,7 +3201,8 @@ async fn control_transition(
                     .map_err(workflow_pg_error)
                 } else {
                     tx.query(
-                        &format!("UPDATE {runs} \
+                        &format!(
+                            "UPDATE {runs} \
                             SET state = 'cancelled', \
                                 wake_at = NULL, \
                                 terminal_at = now(), \
@@ -3159,7 +3227,8 @@ async fn control_transition(
                 }
             } else {
                 tx.query(
-                    &format!("UPDATE {runs} \
+                    &format!(
+                        "UPDATE {runs} \
                         SET state = 'cancelled', \
                             wake_at = NULL, \
                             terminal_at = now(), \
@@ -3234,7 +3303,11 @@ pub async fn list_runs(
         Ok(app_id) => app_id,
         Err(resp) => return resp,
     };
-    let state_filter = query.state.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty());
+    let state_filter = query
+        .state
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
     if let Some(state) = state_filter {
         if !matches!(
             state,
@@ -3274,7 +3347,16 @@ pub async fn list_runs(
     );
     let rows = match state
         .control_pg
-        .query(&sql, &[&app_id.as_str(), &state_param, &workflow_param, &limit, &offset])
+        .query(
+            &sql,
+            &[
+                &app_id.as_str(),
+                &state_param,
+                &workflow_param,
+                &limit,
+                &offset,
+            ],
+        )
         .await
     {
         Ok(rows) => rows,
@@ -3298,8 +3380,7 @@ pub async fn list_runs(
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(
-        web::resource("/internal/workflows/{workflow_name}/runs")
-            .route(web::post().to(create_run)),
+        web::resource("/internal/workflows/{workflow_name}/runs").route(web::post().to(create_run)),
     )
     .service(
         web::resource("/internal/workflows/{workflow_name}/runs/startMany")
@@ -3308,8 +3389,7 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     )
     .service(web::resource("/internal/workflows/runs").route(web::get().to(list_runs)))
     .service(
-        web::resource("/internal/workflows/runs/{run_id}")
-            .route(web::get().to(get_run_status)),
+        web::resource("/internal/workflows/runs/{run_id}").route(web::get().to(get_run_status)),
     )
     .service(
         web::resource("/internal/workflows/runs/{run_id}/output")
@@ -3349,16 +3429,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::post().to(force_signal_fanout_tick)),
     )
     .service(
-        web::resource("/internal/workflows/runs/{run_id}/pause")
-            .route(web::post().to(pause_run)),
+        web::resource("/internal/workflows/runs/{run_id}/pause").route(web::post().to(pause_run)),
     )
     .service(
-        web::resource("/internal/workflows/runs/{run_id}/resume")
-            .route(web::post().to(resume_run)),
+        web::resource("/internal/workflows/runs/{run_id}/resume").route(web::post().to(resume_run)),
     )
     .service(
-        web::resource("/internal/workflows/runs/{run_id}/cancel")
-            .route(web::post().to(cancel_run)),
+        web::resource("/internal/workflows/runs/{run_id}/cancel").route(web::post().to(cancel_run)),
     )
     .service(
         web::resource("/internal/workflows/runs/{run_id}/restart")
@@ -3417,16 +3494,13 @@ mod tests {
 
     #[test]
     fn manifest_workflow_shape_accepts_array_and_map() {
-        assert!(
-            manifest_declares_workflow(r#"{"workflows":["Checkout"]}"#, "Checkout").unwrap()
-        );
-        assert!(
-            manifest_declares_workflow(r#"{"workflows":{"Checkout":{"concurrency":1}}}"#, "Checkout")
-                .unwrap()
-        );
-        assert!(
-            !manifest_declares_workflow(r#"{"workflows":["Other"]}"#, "Checkout").unwrap()
-        );
+        assert!(manifest_declares_workflow(r#"{"workflows":["Checkout"]}"#, "Checkout").unwrap());
+        assert!(manifest_declares_workflow(
+            r#"{"workflows":{"Checkout":{"concurrency":1}}}"#,
+            "Checkout"
+        )
+        .unwrap());
+        assert!(!manifest_declares_workflow(r#"{"workflows":["Other"]}"#, "Checkout").unwrap());
     }
 
     #[test]

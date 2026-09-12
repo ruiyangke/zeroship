@@ -7,7 +7,12 @@ const g = globalThis as typeof globalThis & {
   __zsRuntimeDescriptor?: unknown;
 };
 
-function makeDevEntry() {
+function makeDevEntry(
+  envDb: Record<string, unknown> = {
+    transaction: (cb: (raw: unknown) => unknown) => cb(undefined),
+    collection: () => ({ find: async () => [] }),
+  },
+) {
   return devEntry({
     loadUserModule: async () => ({
       default: {
@@ -16,10 +21,7 @@ function makeDevEntry() {
         },
       },
     }),
-    getEnvDb: () => ({
-      transaction: (cb: (raw: unknown) => unknown) => cb(undefined),
-      collection: () => ({ find: async () => [] }),
-    }),
+    getEnvDb: () => envDb as never,
     logger: { log: () => {}, error: () => {} },
     getDevAuthEnv: () => undefined,
   });
@@ -67,5 +69,25 @@ describe("devEntry runtime descriptor install", () => {
       () => Promise.resolve(entry.rpc("ping", null, {})),
       /invalid RuntimeSchemaDescriptor|indexes\[0\]/,
     );
+  });
+
+  test("preserves __proto__ as a collection name", async () => {
+    const collections = Object.create(null) as Record<string, unknown>;
+    collections.__proto__ = {
+      fields: { id: { type: "string", required: true, primaryKey: true } },
+      options: { softDelete: false, versioning: false, strictness: "strict" },
+      indexes: [],
+    };
+    g.__zsRuntimeDescriptor = { version: 2, collections };
+    const envDb = {
+      transaction: (cb: (raw: unknown) => unknown) => cb(undefined),
+      collection: () => ({ find: async () => [] }),
+    } as Record<string, unknown>;
+
+    const entry = makeDevEntry(envDb);
+    const out = await Promise.resolve(entry.rpc("ping", null, {}));
+
+    assert.equal(out, "pong");
+    assert.deepEqual(envDb.__zeroshipDbInstalledNames, ["__proto__"]);
   });
 });

@@ -231,7 +231,7 @@ fn the_export_carries_indexes_and_runtime_options_not_only_fields() {
             strictness: zeroship_migrate::TableStrictness::Lenient,
         },
     }];
-    let charter = charter();
+    let charter = support::lifecycle_charter_toml(SCHEMA);
     let reply =
         gen_artifacts_from_descriptors(&descriptors, "postgres", Some(SCHEMA), &[charter.as_str()]);
     assert!(reply.ok, "refused: {:?}", reply.error);
@@ -254,4 +254,16 @@ fn the_export_carries_indexes_and_runtime_options_not_only_fields() {
     assert_eq!(options.soft_delete, Some(true));
     assert_eq!(options.versioning, Some(true));
     assert_eq!(options.strictness.as_deref(), Some("lenient"));
+    let runtime: Value = serde_json::from_str(reply.runtime_json.as_deref().unwrap()).unwrap();
+    let fields = &runtime["collections"]["hits"]["fields"];
+    assert_eq!(fields["removed"]["softDelete"], true);
+    assert_eq!(
+        fields["removed"]["assign"],
+        json!({"by": "now", "on": "delete"})
+    );
+    assert_eq!(fields["revision"]["concurrency"], true);
+    assert_eq!(
+        fields["revision"]["assign"],
+        json!({"by": "increment(1)", "on": "write"})
+    );
 }

@@ -15,7 +15,7 @@
 //! handlers compiled without strict type-checking (e.g. plain JS) still
 //! hit the rail. Consumers:
 //!
-//!   - `crates/zeroship-plugin-db/src/v8_bridge.rs` — `refuse_if_query_capability`
+//!   - `crates/zeroship-data-v8/src/v8_bridge.rs` — `refuse_if_query_capability`
 //!     makes write ops refuse when `current_kind() == Some(Query)`.
 //!   - `crates/zeroship-runtime/src/web/fetch/mod.rs` — fetch callback refuses
 //!     when `current_kind() == Some(Mutation)`.
@@ -117,7 +117,7 @@ thread_local! {
     /// it reads `Some(Query)` for two consecutive query handlers just as it
     /// does for one, and the `None` in between is only observable from a hook.
     ///
-    /// `zeroship-plugin-db`'s read-set capture is the consumer. It lives above
+    /// `zeroship-data-v8`'s read-set capture is the consumer. It lives above
     /// this crate, so an observer callback here would invert the dependency;
     /// a generation it can pull keeps the arrow pointing one way.
     static DISPATCH_GENERATION: Cell<u64> = const { Cell::new(0) };
@@ -481,7 +481,7 @@ mod tests {
     /// This is the whole reason the counter exists: `current_kind()` reads
     /// `Some(Query)` inside either of two back-to-back query handlers, so a
     /// consumer caching per-dispatch state cannot tell them apart from it.
-    /// `zeroship-plugin-db`'s read-set capture keys its reset on this, and
+    /// `zeroship-data-v8`'s read-set capture keys its reset on this, and
     /// without a bump it would attach the first handler's reads to the
     /// second handler's subscription.
     #[test]

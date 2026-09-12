@@ -610,7 +610,11 @@ async fn per_row_backfill_generates_fresh_exact_values_on_live_postgres() {
         &POSTGRES,
         &support::no_inject("app"),
     );
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(&cfg.project_schema), POSTGRES);
+    let guard_cfg = GuardConfig::from_policy(
+        support::no_inject(&cfg.project_schema),
+        POSTGRES,
+        &cfg.project_schema,
+    );
     let artifact = author
         .load_and_lower_guarded(
             &ir,
@@ -2361,7 +2365,7 @@ async fn interrupt_online_rename_deploy(
         "app_test",
         &registry,
         &initial_live,
-        &GuardConfig::from_policy(policy.clone(), POSTGRES),
+        &GuardConfig::from_policy(policy.clone(), POSTGRES, &cfg.project_schema),
     )
     .expect("lower rename before interruption");
     let rename_plan = authored
@@ -6275,7 +6279,7 @@ async fn rollback_unwinds_both_migrations_in_reverse_order_on_live_postgres() {
     assert!(table_exists(&session, &schema, "child").await);
 
     let set = vec![parent.clone(), child.clone()];
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), POSTGRES);
+    let guard_cfg = GuardConfig::from_policy(support::no_inject(&schema), POSTGRES, &schema);
     let guard = zeroship_migrate::guard_for(zeroship_migrate::shipping_vendors(), &guard_cfg);
     let outcome = zeroship_migrate::rollback(
         &backend,
@@ -6608,7 +6612,11 @@ async fn a_resumed_per_row_backfill_does_not_regenerate_values_it_already_wrote(
         &POSTGRES,
         &support::no_inject("app"),
     );
-    let guard_cfg = GuardConfig::from_policy(support::no_inject(&cfg.project_schema), POSTGRES);
+    let guard_cfg = GuardConfig::from_policy(
+        support::no_inject(&cfg.project_schema),
+        POSTGRES,
+        &cfg.project_schema,
+    );
     let schema_artifact = author
         .load_and_lower_guarded(
             &ir,

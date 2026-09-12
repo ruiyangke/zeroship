@@ -166,7 +166,7 @@ pub async fn handle(
         }
     };
     let mut conn = match pool.as_ref() {
-        Some(pool) => match pool.get().await {
+        Some(pool) => match pool.acquire().await {
             Ok(c) => Some(c),
             Err(e) => {
                 tracing::error!(error = %e, "backchannel_logout: pg pool checkout failed");

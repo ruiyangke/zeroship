@@ -45,6 +45,9 @@ zeroship-migrate-mysql = { workspace = true }
 zeroship-migrate-backend = { workspace = true }
 
 [dev-dependencies]
+# Owned PostgreSQL fixtures for target-schema authorization regressions.
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+url = { workspace = true }
 # The wire contract, named DIRECTLY by the suites that build IR envelopes and dialect
 # ids rather than reading them off the engine's re-exports. It is not a `[dependencies]`
 # entry: `shipping_backends()` returns a `BackendRegistry`, but that name reaches this
@@ -138,17 +141,17 @@ schemars = { workspace = true }
 # used to read `ZERO_MIGRATE_TEST_PG_URL` / `ZERO_MIGRATE_MYSQL_URL` with a raw
 # `std::env::var`, which is exactly the un-enumerable read Section 4.5 of
 # docs/proposals/2026-08-11-config-name-alignment.md exists to remove. `test_env!` is
-# the one sanctioned way for first-party test code to read a literal env name (13+
-# other crates' test suites already use it, e.g. `zeroship-plugin-kv`'s
-# `DRAGONFLY_CLUSTER_SEEDS`); both names are registered in
+# the sanctioned way for first-party test code to read a literal env name;
+# both names are registered in
 # `tests/test_only_env_gate.sh`'s closed INVENTORY in the same commit that adds them.
 #
 # Dev-only, so it never ships (`cargo tree -p zeroship-migrate -e normal` stays free of
 # it). It reaches tokio via `cyper`/`hyper` as a NORMAL dependency of zeroship-core
 # itself, which is not a new category of exposure for this crate's TEST build: the
 # `postgres` dev-dependency above already pulls tokio in transitively, accepted for the
-# same never-ships reason. `tests/zero_tokio_gate.sh` arms 2 and 3 both resolve with
-# `-e normal`, which never walks a dev edge, so this addition moves neither pinned set.
+# same never-ships reason. `cargo xtask test repository` checks normal dependency
+# paths and direct carrier declarations across every dependency kind. This dev
+# dependency names zeroship-core, not a carrier, so neither boundary set changes.
 zeroship-core = { workspace = true }
 
 [lints]

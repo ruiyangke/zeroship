@@ -56,9 +56,8 @@ pub enum ConnectError {}
 /// only the inputs.
 #[derive(Debug, Clone)]
 pub struct ConfinementConfig {
-    /// The per-project **meta schema** that holds the append-only migration
-    /// journal. Separate from the project schema so a creator migration can't
-    /// touch its own history.
+    /// The namespace that holds the migration journal when the backend uses a
+    /// schema for journal placement. It may be the project schema.
     ///
     /// Read by the PostgreSQL journal and by MySQL's; both spell it
     /// `<meta>.<journal table>`, but the table names DIFFER. PostgreSQL fences
@@ -197,9 +196,8 @@ pub struct ExecutorConfig {
     /// lock (on PostgreSQL, the two `int4` halves of
     /// `hashtextextended(project_id, 0)`).
     pub project_id: String,
-    /// The one schema this project's migrations own and may touch. Pinned into
-    /// `search_path` for every apply, and the registered line-1
-    /// guard's confinement target.
+    /// The host-selected migration target, pinned into `search_path` for apply.
+    /// Foreign-schema references require separate policy grants.
     pub project_schema: String,
     /// The **confinement parameters** - the journal's meta schema and the three
     /// timeout budgets, each read by more than one dialect, plus whatever
@@ -255,15 +253,19 @@ impl ExecutorConfig {
     /// Build the [`GuardConfig`](crate::guard::GuardConfig) every executor-path
     /// guard site uses for an explicitly selected backend.
     ///
-    /// The caller-authored policy is preserved exactly, and it is the whole of what
-    /// distinguishes one config's guard from another's.
+    /// The host-selected project schema and caller-authored policy are preserved
+    /// independently. A foreign-schema grant never selects the project target.
     ///
     /// Public because the engine's `rollback_with_lock` takes its
     /// guard as an argument, so an out-of-crate driver has to be able to build the
     /// one this config implies.
     #[must_use]
     pub fn guard_config_for(&self, dialect: &DialectId) -> crate::guard::GuardConfig {
-        crate::guard::GuardConfig::from_policy(self.effective.clone(), dialect.clone())
+        crate::guard::GuardConfig::from_policy(
+            self.effective.clone(),
+            dialect.clone(),
+            &self.project_schema,
+        )
     }
 
     // A Platform-trust constructor stood here. It took a capability token and

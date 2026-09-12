@@ -197,7 +197,7 @@ or an artifact another process consumes.
 
 | candidate | verdict |
 | --- | --- |
-| plan / IR | **build.** Pure leaf: no I/O, no V8, testable without a database. Landed as `crates/zeroship-data-query-builder` |
+| plan / IR | **build.** Pure leaf: no I/O, no V8, testable without a database. Landed as `crates/zeroship-data-sql` |
 | CDC | **build.** It becomes a separate *service*, which is a process boundary rather than a taste boundary |
 | error, crypto | **modules.** Nothing outside plugin-db consumes them; crypto's pair (`mask_codec.rs`) is already in `zeroship-schema` |
 | per-backend | **defer.** The capability traits in `backend/mod.rs` (`Backend` is a pure composition marker, `:38-41`) already are the seam. Having the seam is the win; splitting before a third backend exists buys nothing |
@@ -205,7 +205,7 @@ or an artifact another process consumes.
 *The workspace already carries 35 crates, 11 of them `zeroship-migrate-*`. That
 family was the precedent the six-crate plan copied, and at eleven it is the
 counter-example rather than the model.* The module layout inside
-`zeroship-plugin-db` is in `design.md`.
+`zeroship-data-v8` is in `design.md`.
 
 ---
 
@@ -241,7 +241,7 @@ raw column named with a leading underscore is therefore already unrepresentable
 on every path a creator can reach, and the entire inbound half of the flip
 disappears: no new reservation, no filter-builder change, no schema hint threaded
 through. Adding a `_raw` suffix reservation instead would have to land in **two**
-independent tables (`crates/zeroship-schema/src/query.rs:754` and
+independent tables (`crates/zeroship-schema/src/query.rs:754` and (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-migrate-core/src/schema/query.rs:379`) with no dependency edge to keep them
 agreeing. Choosing a name no existing gate admits is strictly better than adding
 a fence, because a fence protects only the surfaces someone remembered to fence.
@@ -254,7 +254,7 @@ integration target, 6 prose):
 | --- | --- |
 | `zeroship-schema` | 9 - `query.rs:754`, `:2160`, `:3414`; `diff.rs:582`, `:671`, `:716`, `:1203`, `:1286`, `:1308` |
 | `zeroship-migrate-core` | 9 - `crates/zeroship-migrate-core/src/schema/query.rs:379`; `crates/zeroship-migrate-core/src/schema/diff.rs:410`, `:747`, `:825`, `:847`; `render/fold.rs:3678`; `render/lower.rs:4803`, `:7185`; `render/declarative.rs:2223` |
-| `zeroship-plugin-db` | 3 - `crud/mask_pass.rs:150`, `:469`; `crud/encryption_pass.rs:295` |
+| `zeroship-data-v8` | 3 - `crud/mask_pass.rs:150`, `:469`; `crud/encryption_pass.rs:295` |
 | `zeroship-migrate-backend` | 1 - `schema.rs:566` |
 
 Ten of those are on the migration side, which
@@ -327,7 +327,7 @@ was never blocked by it:
 | relation family's **live-query** lowering | Yes - `read_set.rs` is relation-unaware |
 | **effects** family (the publication a committed mutation owes the broker) | Yes - the transport choice changes the node shape |
 
-The existence proof is on disk: `crates/zeroship-data-query-builder` implements the core
+The existence proof is on disk: `crates/zeroship-data-sql` implements the core
 plus the read family with zero dependencies, references neither subscriptions nor
 CDC nor WAL, and builds and tests without a database.
 
@@ -375,12 +375,12 @@ including the two the design records as owed for steps 3 and 5a.
 
 | contract | state |
 | --- | --- |
-| **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), The `SQLITE_BUSY_SNAPSHOT` arm IS handled - `crates/zeroship-data-sqlite/src/error.rs:37` (the 517 constant), classified at `:97`, pinned at `:214` (checked 2026-08-29) |
+| **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), The `SQLITE_BUSY_SNAPSHOT` arm IS handled - `crates/zeroship-data-orm/src/backend/sqlite/error.rs` (the 517 constant), classified at `:97`, pinned at `:214` (checked 2026-08-29) |
 | **SC-5** | **step 5a fully implemented** (`40c3df95f` plus three fixes), with unusually strong instrumentation. **SC-5 as a contract is at zero**: Fork C (`AppIncarnationId` occurs 0 times in the tree), the ceiling as a service field, service-owned key custody |
-| **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH **and WRITE** families ported onto the IR - `search.rs` 562 lines, `write.rs` 1057, so neither is a stub (counted 2026-08-29). `crates/zeroship-data-query-builder/src/` also carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
+| **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH **and WRITE** families ported onto the IR - `search.rs` 562 lines, `write.rs` 1057, so neither is a stub (counted 2026-08-29). `crates/zeroship-data-sql/src/` also carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
 | **SC-4** | **decision 4 is implemented** (`8c6caa465`, dev-ness as a typed input) and SC-4 does not record it. Decision 1 unblocked and small; decision 2 underspecified by SC-4's own admission |
-| **SC-1** | **the reducer is BUILT AND WIRED** (checked 2026-08-29). `crates/zeroship-data-engine/src/transaction/reducer/` carries `deadline.rs`, `frames.rs`, `identity.rs` and its own `tests.rs`, and it is reached from `crates/zeroship-data-engine/src/transaction/driver.rs` and `.../transaction/probe.rs`. |
-| **SC-6** | **the flip is IN THE TREE** (checked 2026-08-29): `mask_sibling_column_for_field` no longer exists, and `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material |
+| **SC-1** | **the reducer is BUILT AND WIRED** (checked 2026-08-29). `crates/zeroship-data-orm/src/transaction/reducer/` carries `deadline.rs`, `frames.rs`, `identity.rs` and its own `tests.rs`, and it is reached from `crates/zeroship-data-orm/src/transaction/driver.rs` and `.../transaction/probe.rs`. |
+| **SC-6** | **the flip is IN THE TREE** (checked 2026-08-29): `mask_sibling_column_for_field` no longer exists, and `__zs_raw__` / `raw_column_name` appear 44 times in `crates/zeroship-schema/src/query.rs` and 14 in `.../src/diff.rs`. The masked field's own column holds the mask and `__zs_raw__<field>` holds the plaintext. **Owed:** adding `.mask()` to a column that already holds data is now a real engine backfill for unencrypted columns; the ENCRYPTED case stays refused by decision, because `BackfillSpec` is structured SQL and the engine holds no key material | (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 
 At zero and named as such in the design: the private module map, the
 artifact/init channel, `DbIsolateBinding`, the deletion of `registerModel`, the

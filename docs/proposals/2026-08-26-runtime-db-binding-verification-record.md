@@ -78,7 +78,7 @@ this class - see class 7 for what it cannot catch.
 An arm running in a racing suite produces no consistent signal in either
 direction.
 
-`zeroship-plugin-db`'s tests publish into a process-global broker registry and a
+`zeroship-data-v8`'s tests publish into a process-global broker registry and a
 process-global suppression map, and cargo runs them on parallel threads. A dozen
 of them shared the app ids `"myapp"`, `"xapp"` and `"app_active"`, so tests
 popped one another's events; the shared `reset_world` helper called
@@ -122,7 +122,7 @@ red, and all five were hit while implementing against this design.
 
 ### `required-features` filters the target out, silently
 
-`cargo test -p zeroship-plugin-db` does not build the `integration` target at
+`cargo test -p zeroship-data-v8` does not build the `integration` target at
 all, because that target declares `required-features = ["test-helpers"]`. Cargo
 does not warn - it filters the target out. Every `--lib` run in this session
 reported "638 passed" while the entire integration suite, including the
@@ -130,7 +130,7 @@ logical-decoding tests this design depends on, was never compiled.
 
 Derived from `cargo metadata` on 2026-08-28: **10 of 170 test/bench targets in
 the workspace are gated this way, and five of them are in
-`zeroship-plugin-db`** - `integration`, `missing_role`, `native_transaction`,
+`zeroship-data-v8`** - `integration`, `missing_role`, `native_transaction`,
 `sqlite_integration` (all `test-helpers`) and `distributed_live`
 (`live-db-tests`). A default run of this design's own crate builds none of them.
 The other five: `compio-postgres::tls_live` and `unix_socket_live`,
@@ -141,7 +141,7 @@ That has a direct consequence for the citations in this set. SC-1's invariant 14
 cites the L8 regression test as standing coverage of the poisoned-commit case.
 The test is real and it passes - it is
 `commit_that_postgres_rolled_back_must_not_report_success_l8`
-(`crates/zeroship-plugin-db/tests/native_transaction.rs:1249`) - but
+(`crates/zeroship-data-v8/tests/native_transaction.rs`) - but
 `native_transaction` is one of the five, so **a default run never builds it**.
 **Any arm this design cites must name the exact invocation that runs it, features
 included.**
@@ -178,7 +178,7 @@ eleven days** (L27, fixed in `a0074e154`; the full attribution is in
 ### The skip that counts as a pass
 
 Ten tests guard on `pg_has_logical_wal(&pool)` and, when false, call `skip(...)`
-and `return` (`crates/zeroship-plugin-db/tests/integration.rs:2045` and nine
+and `return` (`crates/zeroship-data-v8/tests/integration.rs` and nine
 siblings). A server with `wal_level=replica` produces a run whose totals are
 **identical** to one where all ten passed. Measured 2026-08-27: the canonical
 test port `127.0.0.1:5440` was held by an unrelated container running
@@ -217,7 +217,7 @@ skipped arm you cannot.
 
 ### The same blindness covers lints, doubly
 
-Measured 2026-08-27: `zeroship-plugin-db` held **two standing deny-level clippy
+Measured 2026-08-27: `zeroship-data-v8` held **two standing deny-level clippy
 errors** that no routine command could surface, hidden behind two independent
 mechanisms. A deny-level lint elsewhere - eight `doc list item without
 indentation` errors in `zeroship-migrate-policy`, untouched by this branch -
@@ -229,7 +229,7 @@ the `required-features` gating above makes a rare invocation.
 The errors themselves were small: a bare `std::env::var_os("RUST_LOG")` where the
 workspace's `disallowed_methods` lint wants the typed declared-env accessor, and
 a doc line beginning `- ` that clippy reads as an unindented list item. Both are
-fixed and `cargo clippy -p zeroship-plugin-db --all-targets --all-features
+fixed and `cargo clippy -p zeroship-data-v8 --all-targets --all-features
 --no-deps` exits 0. Their size is not the point: **a crate that cannot be linted
 accumulates them silently.** AGENTS.md records the same pattern biting before,
 when the clippy gate reported "148 of 148" on a workspace declaring 158 targets
@@ -240,7 +240,7 @@ errors.
 
 ```text
 RUST_MIN_STACK=33554432 \
-cargo test -p zeroship-plugin-db --test integration --features test-helpers \
+cargo test -p zeroship-data-v8 --test integration --features test-helpers \
   -- --test-threads=1
 ```
 
@@ -264,9 +264,9 @@ it is generally caused by the code lying about its own scope.
 
 **The sharing arm was already satisfied.** `DbPlugin` carries `url`,
 `worker_id`, `meter`, a `resource_key` and a `backend: BackendUrl` *decision* -
-**no pool and no backend handle** (`crates/zeroship-plugin-db/src/lib.rs`, the
+**no pool and no backend handle** (`crates/zeroship-data-v8/src/lib.rs`, the
 `DbPlugin` struct). The pool and the `PostgresBackend` live in the thread-local
-`THREAD_DB_CTX` / `ThreadDbContext` (`crates/zeroship-plugin-db/src/context.rs`;
+`THREAD_DB_CTX` / `ThreadDbContext` (`crates/zeroship-data-v8/src/context.rs`;
 cite the symbols, not lines - the declaration moves whenever that file is
 touched). Two isolates on one OS thread have therefore always shared them, and
 minting a fresh `DbPlugin` per `build_runtime` never produced two backends.
@@ -334,7 +334,7 @@ Three instances, all found 2026-08-28, all in code that had been reviewed:
 
 | the claim | the fixture | what it could not reach |
 | --- | --- | --- |
-| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`crates/zeroship-plugin-db/tests/sqlite_integration.rs:4191`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
+| `updateMany` refuses over `MAX_QUERY_LIMIT` | updates `{ ssn: ... }` on a randomised-**encrypted** schema (`crates/zeroship-data-v8/tests/sqlite_integration.rs`) | the cap sits inside `if per_row_encrypted_update` (`crud/mod.rs:1233`). `ssn` being encrypted is exactly what routes onto the **guarded** branch. The unguarded branch has no cap and renders an unbounded whole-table `UPDATE` |
 | CDC events carry the masked value for masked columns (`broker.rs`, `cdc_event_carries_masked_value_for_masked_columns`) | parent column is `"\\x0123..."`, a BYTEA **ciphertext** literal | the leaking shape is a **mask-only** field, whose parent holds plaintext. The same assertion would fail on it; no fixture builds one |
 | SC-2 Decision 1: "WAL permits this concurrency" | unqualified `CREATE TABLE t` (`sqlite_integration.rs:9956`), and no `ATTACH` at all | the table lands in `main`, the WAL **control** database. Every app file is pinned to DELETE (`zeroship-migrate-sqlite/src/backend/actor.rs:719-729`). The mechanism was proved on the wrong database |
 

@@ -8,13 +8,13 @@ use uuid::Uuid;
 use zeroship_authn::rate_limit::RateLimitDecision;
 use zeroship_authz::Action;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 
 use crate::apply::{
     apply_error_kind, apply_ir_documents, ApplyMigrationsRequest, ApplyRequestError,
 };
 use crate::auth::AuthError;
-use crate::provisioning::provision_database;
+use crate::provisioning::{provision_database, provision_workflow_journal_schema};
 use crate::session::CompioPgSession;
 use crate::MigrationServiceState;
 
@@ -36,11 +36,48 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::resource("/v1/databases/{database_id}").route(web::post().to(create_database)),
     )
     .service(web::resource("/v1/apps/{app_id}/migrations/apply").route(web::post().to(apply)))
+    .service(
+        web::resource("/v1/apps/{app_id}/workflows/provision")
+            .route(web::post().to(provision_workflows)),
+    )
     .service(web::resource("/v1/apps/{app_id}/migrations/plan").route(web::post().to(stub_phase2)))
     .service(web::resource("/v1/apps/{app_id}/migrations/status").route(web::get().to(stub_phase2)))
     .service(web::resource("/v1/apps/{app_id}/migrations/rollback").route(web::post().to(rollback)))
     .service(web::resource("/healthz").route(web::get().to(healthz)))
     .service(web::resource("/readyz").route(web::get().to(readyz)));
+}
+
+/// Provision a workflow-only app without requiring creator database migrations.
+/// The authenticated app deployer selects the app; schema authority stays here.
+pub async fn provision_workflows(
+    req: web::HttpRequest,
+    state: State<Arc<MigrationServiceState>>,
+    app_id: Path<AppId>,
+) -> web::HttpResponse {
+    let app_id = app_id.into_inner();
+    let caller = match authorize_mutation(&req, &state, &app_id).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let result = async {
+        let session = CompioPgSession::connect(&state.provision_dsn).await?;
+        provision_workflow_journal_schema(session.client(), &app_id).await
+    }
+    .await;
+    match result {
+        Ok(()) => {
+            tracing::info!(
+                app_id = app_id.as_str(),
+                principal_id = caller.principal_id.as_str(),
+                "workflow journal schema provisioned"
+            );
+            web::HttpResponse::Ok().json(&json!({"app_id": app_id}))
+        }
+        Err(error) => {
+            tracing::error!(app_id = app_id.as_str(), %error, "workflow journal schema provisioning failed");
+            database_infrastructure_response()
+        }
+    }
 }
 
 /// Explicitly create the data schema and migrator role for an app-derived
@@ -81,7 +118,7 @@ pub async fn create_database(
         tracing::error!(
             error = %error,
             database_id = database_id.as_str(),
-            principal_id = %caller.principal_id.as_str(),
+            principal_id = caller.principal_id.as_str(),
             "migrate-server: database create failed"
         );
         return database_infrastructure_response();
@@ -89,7 +126,7 @@ pub async fn create_database(
 
     tracing::info!(
         database_id = database_id.as_str(),
-        principal_id = %caller.principal_id.as_str(),
+        principal_id = caller.principal_id.as_str(),
         "migrate-server: database created"
     );
     web::HttpResponse::Ok().json(&json!({"database_id": database_id}))
@@ -168,7 +205,7 @@ pub async fn apply(
         Ok(report) => {
             tracing::info!(
                 app_id = app_id.as_str(),
-                principal_id = %caller.principal_id.as_str(),
+                principal_id = caller.principal_id.as_str(),
                 applied = report.applied.len(),
                 skipped = report.skipped.len(),
                 "migrate-server: applied frozen IR migrations"

@@ -4,7 +4,7 @@
  * collecting all field errors before throwing a single ValidationError.
  */
 import { NormalizedSchema } from "./schema";
-import { FieldDef, PlainObject, TypeName } from "./types";
+import { decimal, FieldDef, PlainObject, TypeName, PrimitiveTypeName } from "./types";
 import { ValidationError, FieldError } from "./errors";
 
 type Doc = PlainObject;
@@ -16,7 +16,7 @@ type Doc = PlainObject;
  * Typed as `ReadonlySet<TypeName>` and built from a `TypeName[]` literal on
  * purpose: adding a member to the union without adding it here is then a
  * compile error rather than a silent hole, which is the failure this set exists
- * to close. `vector`, `geoPoint`, `bytes` and `actor` are listed and are
+ * to close. `vector`, `geoPoint` and `bytes` are listed and are
  * deliberately not field-validated — they belong to the union, so they must not
  * trip the unknown-type guard.
  */
@@ -45,21 +45,39 @@ const KNOWN_FIELD_TYPES: ReadonlySet<string> = new Set<TypeName>([
   "geoPoint",
   "bytes",
   "id",
-  "actor",
 ]);
 
-/**
- * Strict ISO 8601 date-or-datetime check. `Date.parse("2026")` returns
- * a real timestamp (year-only), which is almost never what the schema
- * meant; require at least a `YYYY-MM-DD` prefix before delegating to
- * `Date.parse` so values like `"2026"`, `"abc"`, or empty strings are
- * rejected. The optional time component (`T...`) is accepted because
- * `t.date()` is used for full timestamps; calendar-date-only fields
- * use `t.calendarDate()` which enforces the stricter shape above.
- */
+const MIN_TIMESTAMP_MILLIS = -62_135_596_800_000;
+const MAX_TIMESTAMP_MILLIS = 253_402_300_799_999;
+
+function isTimestampMillis(value: number): boolean {
+  return Number.isInteger(value) && value >= MIN_TIMESTAMP_MILLIS && value <= MAX_TIMESTAMP_MILLIS;
+}
+
+/** Real calendar timestamps with an optional time and UTC as the default zone. */
 export function isParseableDateString(s: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}(?:[T ].*)?$/.test(s)) return false;
-  return !isNaN(Date.parse(s));
+  const match = /^(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(?:[Zz]|([+-])(\d{2})(?::?(\d{2}))?)?)?$/.exec(s);
+  if (!match || match[0] !== s || !isValidCalendarDate(match[1])) return false;
+  const hour = Number(match[2] ?? 0);
+  const minute = Number(match[3] ?? 0);
+  const second = Number(match[4] ?? 0);
+  const offsetHour = Number(match[7] ?? 0);
+  const offsetMinute = Number(match[8] ?? 0);
+  if (hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) return false;
+  const fraction = Number((match[5] ?? "").slice(0, 3).padEnd(3, "0"));
+  const day = new Date(0);
+  const [year, month, date] = match[1].split("-").map(Number);
+  day.setUTCFullYear(year, month - 1, date);
+  day.setUTCHours(hour, minute, second, fraction);
+  const offset = (offsetHour * 60 + offsetMinute) * (match[6] === "-" ? -1 : 1);
+  return isTimestampMillis(day.getTime() - offset * 60_000);
+}
+
+/** Inputs accepted by the ORM's portable timestamp codec. */
+export function isTimestampValue(value: unknown): boolean {
+  if (typeof value === "number") return isTimestampMillis(value);
+  if (value instanceof Date) return isTimestampMillis(Date.prototype.getTime.call(value));
+  return typeof value === "string" && isParseableDateString(value);
 }
 
 /**
@@ -124,6 +142,20 @@ export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): bool
   return true;
 }
 
+const ARRAY_ITEM_VALIDATORS: Record<PrimitiveTypeName, (value: unknown) => boolean> = {
+  string: value => typeof value === "string",
+  number: value => typeof value === "number",
+  boolean: value => typeof value === "boolean",
+  date: isTimestampValue,
+  calendarDate: value => typeof value === "string" && isValidCalendarDate(value),
+  json: isJsonSerializable,
+};
+
+/** Shared by document and array-operation validation. */
+export function isArrayElement(itemType: PrimitiveTypeName, value: unknown): boolean {
+  return Object.hasOwn(ARRAY_ITEM_VALIDATORS, itemType) && ARRAY_ITEM_VALIDATORS[itemType](value);
+}
+
 /**
  * D3 — strict `YYYY-MM-DD` validator. Confirms the value is a 10-char
  * date string AND a real calendar date (no Feb 31, no month 13).
@@ -132,10 +164,13 @@ export function isJsonSerializable(value: unknown, seen?: WeakSet<object>): bool
 export function isValidCalendarDate(s: string): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
   const [y, m, d] = s.split("-").map(Number);
+  if (y === 0) return false;
   if (m < 1 || m > 12) return false;
   if (d < 1 || d > 31) return false;
   // Round-trip through Date to catch overflow (e.g. 2026-02-31 → Mar 3).
-  const dt = new Date(Date.UTC(y, m - 1, d));
+  // setUTCFullYear preserves early years; Date.UTC maps them to another century.
+  const dt = new Date(0);
+  dt.setUTCFullYear(y, m - 1, d);
   return (
     dt.getUTCFullYear() === y &&
     dt.getUTCMonth() === m - 1 &&
@@ -202,6 +237,25 @@ function checkField(
       };
       return;
     }
+  } else if (type === "bigInt" && typeof value === "bigint") {
+    if (value < -(1n << 63n) || value > (1n << 63n) - 1n) {
+      errors[key] = { path: key, message: key + " is outside the database integer range" };
+    } else if (min !== undefined && value < min) {
+      errors[key] = { path: key, message: key + " is below its minimum" };
+    } else if (max !== undefined && value > max) {
+      errors[key] = { path: key, message: key + " exceeds its maximum" };
+    }
+  } else if (type === "number" && def.precision !== undefined) {
+    if (typeof value !== "string") {
+      errors[key] = { path: key, message: `${key} must be an exact decimal string` };
+      return;
+    }
+    try {
+      decimal(value);
+    } catch {
+      errors[key] = { path: key, message: `${key} must be a valid exact decimal string` };
+      return;
+    }
   } else if (
     type === "number" ||
     type === "int" ||
@@ -214,7 +268,7 @@ function checkField(
     //
     // The loss happens in the native V8->serde decoder, NOT at a JSON.stringify
     // boundary - `env.db` ops receive the document as V8 values. In
-    // `crates/zeroship-plugin-db/src/v8_bridge.rs` the number arm skips its lossless-integer
+    // `crates/zeroship-data-v8/src/v8_bridge.rs` the number arm skips its lossless-integer
     // branch (non-finite `fract()` is NaN) and then calls
     // `serde_json::Number::from_f64`, which returns `None` for anything non-finite,
     // so the arm falls through to `Value::Null`. Measured, and pinned there by
@@ -275,10 +329,10 @@ function checkField(
     // generator's renderer treats `date` and `timestamp` as one case. Leaving it
     // out would send every timestamp column into the unknown-type guard below.
   } else if (type === "date" || type === "timestamp") {
-    if (!(value instanceof Date) && (typeof value !== "string" || !isParseableDateString(value))) {
+    if (!isTimestampValue(value)) {
       errors[key] = {
         path: key,
-        message: `${key} must be a Date or ISO 8601 date string`,
+        message: `${key} must be a valid Date, ISO timestamp, or integral Unix milliseconds`,
       };
       return;
     }
@@ -407,23 +461,12 @@ function checkField(
       errors[key] = { path: key, message: `${key} must have at most ${max} items` };
       return;
     }
-    // Validate each array element against the declared item type.
-    // R6 — keep this branch list in sync with `PRIMITIVE_ITEM_TYPES` in
-    // types.ts and `validateArrayPushOps` in collection.ts. Adding a new
-    // primitive item type means a case here, a case there, and a case in
-    // `t.array()`'s allow-list.
+    // Document writes and array operators use the same item contract.
     if (def.items !== undefined) {
       const itemType = def.items;
       for (let i = 0; i < value.length; i++) {
         const elem = value[i];
-        let ok = true;
-        if (itemType === "string") ok = typeof elem === "string";
-        else if (itemType === "number") ok = typeof elem === "number";
-        else if (itemType === "boolean") ok = typeof elem === "boolean";
-        else if (itemType === "date") ok = elem instanceof Date || (typeof elem === "string" && isParseableDateString(elem));
-        else if (itemType === "calendarDate") ok = typeof elem === "string" && isValidCalendarDate(elem);
-        else if (itemType === "json") ok = isJsonSerializable(elem);
-        if (!ok) {
+        if (!isArrayElement(itemType, elem)) {
           errors[key] = {
             path: key,
             message: `${key}[${i}] must be a ${itemType}`,
@@ -431,6 +474,11 @@ function checkField(
           return;
         }
       }
+    }
+  } else if (type === "bytes") {
+    if (!(value instanceof Uint8Array)) {
+      errors[key] = { path: key, message: key + " must be a Uint8Array" };
+      return;
     }
   } else if (!KNOWN_FIELD_TYPES.has(type)) {
     // Fail closed on a type name this SDK does not know.
@@ -449,7 +497,7 @@ function checkField(
     // is unknown, and answering "yes" is the one option that loses data.
     //
     // Names that ARE in `TypeName` but have no branch above (vector, geoPoint,
-    // bytes, actor) keep passing: they are deliberately not field-validated at
+    // bytes) keep passing: they are deliberately not field-validated at
     // this layer, and this guard is about unknown names, not missing branches.
     throw new Error(
       `unknown field type ${JSON.stringify(type)} for field ${JSON.stringify(key)}: ` +

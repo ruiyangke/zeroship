@@ -297,8 +297,8 @@ export interface IrColumn {
    *  `ColType` variant `{ ref: { references } }`, which names a table only.
    *  A transcription that stops at whichever it meets first loses the difference. */
   references?: ColumnReference | null;
-  /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix, retained
-   *  for old internal descriptors. It is not TypeID or public authoring.
+  /** An internal `<prefix>_<25 base36 UUIDv7>` platform-ID prefix used by
+   *  platform descriptors. It is not TypeID or public authoring.
    *  Camel-cased on the wire and default-absent. */
   idPrefix?: string | null;
   /** The `t.vector(n, { metric })` distance metric (closed

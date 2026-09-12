@@ -1,6 +1,6 @@
 use serde_json::json;
 use zeroship_authz::{Action, Condition, Effect, Policy, Resource, Statement};
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 
 #[test]
 fn policy_roundtrips_through_wrapper_json_shape() {
@@ -101,14 +101,20 @@ fn resource_cedar_uids_are_canonical() {
     // Both halves come from ONE value. Spelling the id twice lets the input and
     // the expectation drift apart, and the assertion then measures nothing but
     // the two literals.
-    let project = zeroship_core::typed_id::generate("prj");
+    let project = zeroship_id::typed_id::generate("prj");
     assert_eq!(
-        Resource::Project { id: project.clone() }.cedar_uid(),
+        Resource::Project {
+            id: project.clone()
+        }
+        .cedar_uid(),
         format!("Project::\"{project}\"")
     );
-    let organization = zeroship_core::typed_id::generate("org");
+    let organization = zeroship_id::typed_id::generate("org");
     assert_eq!(
-        Resource::Organization { id: organization.clone() }.cedar_uid(),
+        Resource::Organization {
+            id: organization.clone()
+        }
+        .cedar_uid(),
         format!("Organization::\"{organization}\"")
     );
     assert_eq!(Resource::Any.cedar_uid(), "*");

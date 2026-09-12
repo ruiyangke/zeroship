@@ -480,7 +480,11 @@ async fn a_reimported_bounded_string_phantom_diffs_the_bound_off_a_live_column()
                     zeroship_migrate_postgres::DIALECT,
                 ),
                 &[],
-                &GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT),
+                &GuardConfig::from_policy(
+                    policy.clone(),
+                    zeroship_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
+                ),
                 &policy,
             )
             .map_err(|error| format!("plan the re-imported schema declaratively: {error}"))?;

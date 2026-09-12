@@ -1,39 +1,15 @@
-//! **The descriptor CARRIES the physical storage facts, it does not imply them.**
+//! Check physical storage metadata in serialized runtime descriptors.
 //!
-//! One declared field can occupy more than one physical database object. When this
-//! module was written, the only consumer that needed those names re-derived them by
-//! string formatting - `format!("{col}_masked")` appeared at eight independent sites
-//! listed in `docs/reviews/2026-08-27-descriptor-specification.md` section 1.4 - and
-//! a name derived at eight sites is eight chances to disagree with the one emitter
-//! that actually created the column.
-//!
-//! **The raw column's half of that is closed as of 2026-09-04.** The data plane's
-//! three CRUD consumers (the write relocation, the read strip and the unmask SELECT)
-//! read `storage.rawColumn` through `zeroship_schema::query::declared_raw_column`
-//! instead of formatting it. What still derives is the pair of backend
-//! introspectors, and no descriptor can serve them: introspection reports what a
-//! database contains, and the catalog records no mask-to-raw pairing to report.
-//!
-//! These arms pin the emitter side of that fix: every field of every rendered
-//! descriptor names the column a default projection reads, the column holding the
-//! authoritative value when the two differ, the raw column's read-surface
-//! capabilities, and any auxiliary physical object the field owns.
-//!
-//! The arms deliberately assert on the SERIALIZED `schema.runtime.json` rather than
-//! on the typed struct behind it. A capability flag that a reader supplies as a
-//! `Default` looks identical to one the producer emitted, from inside Rust; only the
-//! bytes can tell them apart, and the bytes are what the TypeScript consumer sees.
+//! Assertions use emitted JSON so omitted fields cannot be hidden by Rust defaults.
+//! The descriptor names visible and raw storage and restricts raw-column access.
+//! The DDL comparison checks those names against the migration emitter.
 
 use super::*;
 use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use crate::test_fixtures::{POSTGRES, SQLITE};
 use serde_json::json;
 
-/// Render one collection to the runtime descriptor and hand back the parsed JSON.
-///
-/// `no_inject` rather than the confined charter: the platform charter injects seven
-/// system columns into every table, and an assertion about "the fields of this
-/// collection" reads far better over the two the test declared.
+/// Render declared fields without injected columns.
 fn descriptor_for(
     fields: Vec<FieldDescriptor>,
     dialect: &zeroship_migrate_ir::dialect::DialectId,
@@ -74,24 +50,13 @@ fn masked(name: &str) -> FieldDescriptor {
 
 fn encrypted_and_masked(name: &str) -> FieldDescriptor {
     FieldDescriptor {
-        encrypted: Some(json!({ "mode": "randomised", "keyId": "default", "wraps": "string" })),
+        encrypted: Some(true),
         mask: Some(json!({ "kind": "full", "classification": "pii" })),
         ..plain(name)
     }
 }
 
-/// A masked field occupies TWO columns, and the descriptor names both.
-///
-/// The three raw capability flags declare a policy, not just an observation: they
-/// say the raw column is not reachable through the creator-facing read surface.
-/// Before the 2026-08-28 storage flip the field's own column held plaintext and
-/// `build_where` (which takes no schema hint) could reach it directly through an
-/// ordinary `find({ ssn: x })` - an unaudited binary search over a value the caller
-/// could not read (specification section 4.3). After the flip the field's own
-/// column holds the mask and the raw column's `__zs_raw__` name is refused by
-/// every inbound identifier surface, so an ordinary filter can no longer name it at
-/// all; the flags remain the declared contract a consumer reads instead of
-/// re-deriving the naming rule.
+/// The descriptor separates visible mask storage from the protected raw value.
 #[test]
 fn a_masked_field_records_both_of_its_physical_columns() {
     let value = descriptor_for(vec![masked("ssn")], &POSTGRES);
@@ -155,7 +120,7 @@ fn an_encrypted_and_masked_field_puts_the_ciphertext_column_in_raw_column() {
     let storage = &field["storage"];
 
     assert!(
-        field.get("encrypted").is_some(),
+        field.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true),
         "fixture must actually be encrypted: {value}"
     );
     assert_eq!(
@@ -169,20 +134,7 @@ fn an_encrypted_and_masked_field_puts_the_ciphertext_column_in_raw_column() {
     );
 }
 
-/// An encrypted field that opts out of masking with `kind: "none"` has ONE column,
-/// and the ciphertext lives in it.
-///
-/// Pinned because it is the case that makes the AAD rule total: with no `rawColumn`
-/// the consumer must fall back to the field's own column, and if this arm emitted a
-/// `rawColumn` anyway the fallback would be dead code that never got exercised.
-///
-/// The `classification` is not decoration. The descriptor producer reads it with
-/// `.get("classification").and_then(as_str)?` (`render/fold.rs:5819-5821`), so a mask
-/// facet without one is dropped WHOLE - and on an encrypted column the fail-safe
-/// `{ full, pii }` auto-mask then reapplies (`render/lower.rs:9591`). The first draft of
-/// this arm authored a bare `{ kind: "none" }` and measured a `token_masked` sibling it
-/// had just asked not to exist. The direction is safe (more masking, never less), but
-/// the fixture has to say what the pipeline actually reads.
+/// An explicit mask opt-out leaves encrypted data in the field's value column.
 #[test]
 fn an_encrypted_field_that_opts_out_of_masking_keeps_one_column() {
     let field = FieldDescriptor {
@@ -249,18 +201,7 @@ fn the_capability_flags_are_present_in_the_bytes_not_supplied_by_the_reader() {
     assert!(storage.get("rawColumn").is_some(), "{reparsed}");
 }
 
-/// The descriptor's `valueColumn` / `rawColumn` are the DDL emitter's OWN names,
-/// not a second spelling of the same convention.
-///
-/// This is the arm that outlives the current physical layout: it reads both names
-/// from `raw_column_for_field` rather than hardcoding either, so a storage change
-/// only has to move the projection here to keep this arm green. The 2026-08-28
-/// storage flip already exercised that promise once - `valueColumn` was the
-/// emitted `<col>_masked` sibling before the flip and is the field's own column
-/// now, while `rawColumn` moved the other way, from the field's own column to
-/// `raw_column_name(field)` - and this arm needed no shape change, only the
-/// renamed source function, which is exactly the coupling the eight `format!`
-/// sites never had.
+/// Compare descriptor storage names directly with the DDL emitter's names.
 #[test]
 fn the_recorded_columns_are_the_ddl_emitters_own_names() {
     let value = descriptor_for(vec![masked("ssn"), plain("nickname")], &POSTGRES);
@@ -289,87 +230,24 @@ fn the_recorded_columns_are_the_ddl_emitters_own_names() {
     }
 }
 
-/// Auxiliary physical objects a field owns round-trip through the artifact.
-///
-/// A `vector` column on a target that cannot express a non-B-tree index method is
-/// searched through a shadow relation joined on `rowid`; the data plane names that
-/// relation by formatting `"{collection}__vec_{column}"`. Recording it makes the
-/// descriptor the authority for the name instead of the fifth independent `format!`.
-///
-/// The fixture drives the target through the registry rather than by name: SQLITE is
-/// used because it is a target that does NOT declare `Capability::NonBtreeIndexMethod`,
-/// and the control arm below pins that a target which DOES declare it owns no shadow
-/// relation at all.
+/// Vector storage describes the column migrations actually create.
 #[test]
-fn auxiliary_physical_objects_round_trip() {
-    let embedding = FieldDescriptor {
-        name: "embedding".to_string(),
-        ty: "vector".to_string(),
-        vector_dims: Some(3),
-        vector_metric: Some("cosine".to_string()),
-        ..Default::default()
-    };
-    let value = descriptor_for(vec![embedding], &SQLITE);
-    let storage = &value["collections"]["people"]["fields"]["embedding"]["storage"];
-
-    let auxiliary = storage["auxiliary"]
-        .as_array()
-        .unwrap_or_else(|| panic!("a sqlite vector column owns auxiliary objects: {value}"));
-    assert_eq!(auxiliary.len(), 1, "{value}");
-    assert_eq!(auxiliary[0]["kind"], "shadowTable", "{value}");
-    assert_eq!(auxiliary[0]["name"], "people__vec_embedding", "{value}");
-    assert_eq!(auxiliary[0]["joinOn"], "rowid", "{value}");
-    assert_eq!(
-        auxiliary[0]["triggers"],
-        json!([
-            "people__vec_embedding_ai",
-            "people__vec_embedding_ad",
-            "people__vec_embedding_au"
-        ]),
-        "{value}"
-    );
-
-    let reparsed: Value =
-        serde_json::from_str(&serde_json::to_string(&value).expect("descriptor reserializes"))
-            .expect("descriptor reparses");
-    assert_eq!(
-        reparsed["collections"]["people"]["fields"]["embedding"]["storage"]["auxiliary"],
-        storage["auxiliary"],
-        "auxiliary survives the round trip: {reparsed}"
-    );
-}
-
-/// A field with no auxiliary objects emits no empty array.
-#[test]
-fn a_field_owning_no_auxiliary_objects_emits_no_auxiliary_key() {
-    let value = descriptor_for(vec![plain("nickname")], &POSTGRES);
-    let storage = &value["collections"]["people"]["fields"]["nickname"]["storage"];
-    assert!(storage.get("auxiliary").is_none(), "{value}");
-}
-
-/// The CONTROL for `auxiliary_physical_objects_round_trip`, differing in exactly one
-/// variable: the same vector column, on a target that DOES declare
-/// `Capability::NonBtreeIndexMethod`, owns no shadow relation.
-///
-/// Without this arm the round-trip test above would pass just as well if the producer
-/// emitted a shadow table for every vector column on every target, which is the bug the
-/// capability gate exists to prevent.
-#[test]
-fn a_vector_column_on_a_target_with_native_vector_indexing_owns_no_shadow_table() {
-    let embedding = FieldDescriptor {
-        name: "embedding".to_string(),
-        ty: "vector".to_string(),
-        vector_dims: Some(3),
-        vector_metric: Some("cosine".to_string()),
-        ..Default::default()
-    };
-    let value = descriptor_for(vec![embedding], &POSTGRES);
-    let storage = &value["collections"]["people"]["fields"]["embedding"]["storage"];
-    assert_eq!(storage["valueColumn"], "embedding", "{value}");
-    assert!(
-        storage.get("auxiliary").is_none(),
-        "a target that indexes a vector column in place owns no extra object: {value}"
-    );
+fn vector_storage_is_the_base_column_on_each_target() {
+    for dialect in [&SQLITE, &POSTGRES] {
+        let embedding = FieldDescriptor {
+            name: "embedding".to_string(),
+            ty: "vector".to_string(),
+            vector_dims: Some(3),
+            vector_metric: Some("cosine".to_string()),
+            ..Default::default()
+        };
+        let value = descriptor_for(vec![embedding], dialect);
+        assert_eq!(
+            value["collections"]["people"]["fields"]["embedding"]["storage"],
+            json!({"valueColumn": "embedding"}),
+            "{value}"
+        );
+    }
 }
 
 /// The descriptor announces itself as v2.
@@ -429,26 +307,4 @@ fn the_typed_storage_block_survives_a_serde_round_trip() {
     }
     assert_eq!(seen_raw, 1, "the masked field must exercise the raw arm");
     assert_eq!(seen_plain, 1, "the plain field must exercise the no-raw arm");
-}
-
-/// The auxiliary vocabulary round-trips as a TYPED value, tag included.
-#[test]
-fn the_typed_auxiliary_vocabulary_survives_a_serde_round_trip() {
-    let original = AuxiliaryObject::ShadowTable {
-        name: "people__vec_embedding".to_string(),
-        join_on: "rowid".to_string(),
-        triggers: vec![
-            "people__vec_embedding_ai".to_string(),
-            "people__vec_embedding_ad".to_string(),
-            "people__vec_embedding_au".to_string(),
-        ],
-    };
-    let bytes = serde_json::to_string(&original).expect("auxiliary serializes");
-    assert!(
-        bytes.contains("\"kind\":\"shadowTable\""),
-        "the variant tag rides on the wire: {bytes}"
-    );
-    let back: AuxiliaryObject =
-        serde_json::from_str(&bytes).expect("auxiliary deserializes");
-    assert_eq!(back, original);
 }

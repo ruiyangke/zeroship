@@ -14,7 +14,7 @@
 //!
 //! `tokio-postgres` is a DEV-dependency only, permitted by the 2026-08-24
 //! decision recorded in AGENTS.md. It never enters a shipped binary, and
-//! `tests/zero_tokio_gate.sh` still refuses a normal or build dependency on
+//! `cargo xtask test repository` still refuses a normal or build dependency on
 //! tokio.
 //!
 //! WHERE THE REFERENCE IS WRONG. tokio-postgres is a reference, not an
