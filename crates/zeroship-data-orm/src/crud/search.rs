@@ -1,9 +1,9 @@
 use super::{predicate, resolved::ResolvedTable};
 use crate::{
     sql::{
-        mapping::{self, QueryError},
         compiler::CompiledQuery,
         descriptors::{GeoPoint, VectorMetric},
+        mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
             SpatialNearParts, SpatialNearStatement, Statement, VectorSearchParts,
@@ -164,9 +164,9 @@ fn spatial_query(
 }
 
 fn validate_limit(name: &str, value: usize) -> Result<(), QueryError> {
-    if value > MAX_SEARCH_LIMIT {
+    if value == 0 || value > MAX_SEARCH_LIMIT {
         return Err(invalid(format!(
-            "{name} exceeds the maximum of {}, got {value}",
+            "{name} must be between one and {}, got {value}",
             MAX_SEARCH_LIMIT
         )));
     }

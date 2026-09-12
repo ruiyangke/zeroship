@@ -677,8 +677,8 @@ fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError>
     if parts.vector.storage() != StorageType::Vector || !StorageType::Vector.accepts(&parts.query) {
         return Err(invalid("vector search requires a vector column and query"));
     }
-    if parts.limit < 0 {
-        return Err(invalid("vector search limit cannot be negative"));
+    if parts.limit <= 0 {
+        return Err(invalid("vector search limit must be positive"));
     }
     if parts.projection.is_empty() {
         return Err(invalid("vector search requires a projection"));
@@ -696,7 +696,7 @@ fn validate_spatial_near(parts: &SpatialNearParts) -> Result<(), CompileError> {
             "spatial search requires a geographic column and point",
         ));
     }
-    if !parts.radius_m.is_finite() || parts.radius_m <= 0.0 || parts.limit < 0 {
+    if !parts.radius_m.is_finite() || parts.radius_m <= 0.0 || parts.limit <= 0 {
         return Err(invalid("spatial search bounds are invalid"));
     }
     if parts.projection.is_empty() {
@@ -727,6 +727,7 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
     let mut outputs = HashSet::new();
     for selected in &parts.projection {
         validate_operand(&tables, &selected.expression, true)?;
+        Ident::parse_as(selected.alias.as_str(), IdentRole::Alias)?;
         if !outputs.insert(selected.alias.as_str()) {
             return Err(invalid("duplicate select output alias"));
         }
@@ -754,6 +755,9 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
             .order_by
             .iter()
             .any(|order| matches!(order.expression, ResolvedOperand::Aggregate { .. }));
+    if !grouped && !matches!(&parts.having, ResolvedPredicate::Const(true)) {
+        return Err(invalid("having requires a grouped or aggregate select"));
+    }
     if grouped {
         for selected in &parts.projection {
             validate_grouped_operand(&selected.expression, &parts.group_by)?;
@@ -1139,13 +1143,21 @@ fn validate_operand(
 
 fn validate_returning(table: &Table, returning: &[ReturnedColumn]) -> Result<(), CompileError> {
     let mut columns = HashSet::new();
+    let mut outputs = HashSet::new();
     for field in returning {
         table.check_column(&field.column)?;
         if !columns.insert(field.column.index) {
             return Err(invalid("duplicate returning column"));
         }
-        if let Some(alias) = &field.alias {
-            Ident::parse_as(alias.as_str(), IdentRole::Alias)?;
+        let output = match &field.alias {
+            Some(alias) => {
+                Ident::parse_as(alias.as_str(), IdentRole::Alias)?;
+                alias.as_str()
+            }
+            None => field.column.name().as_str(),
+        };
+        if !outputs.insert(output) {
+            return Err(invalid("duplicate returning output name"));
         }
     }
     Ok(())

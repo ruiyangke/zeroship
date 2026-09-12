@@ -548,15 +548,98 @@ async fn search_limit_is_checked_during_preparation() {
         value!({"embedding":{"type":"vector","vectorDims":2}}),
     )
     .await;
-    let error = owner
+    for k in [0, 501] {
+        let error = owner
+            .database
+            .collection("records")
+            .unwrap()
+            .execute(Operation::Search {
+                arguments: value!({"vector":[1.0,0.0],"k":k}),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("search.k"), "{error}");
+    }
+    owner.close().await;
+}
+
+#[compio::test]
+async fn malformed_optional_search_arguments_are_not_defaulted() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({"embedding":{"type":"vector","vectorDims":2}}),
+    )
+    .await;
+    for arguments in [
+        value!({"vector":[1.0,0.0],"k":-1}),
+        value!({"vector":[1.0,0.0],"k":"5"}),
+        value!({"vector":[1.0,0.0],"metric":"sideways"}),
+        value!({"vector":[1.0,0.0],"column":7}),
+    ] {
+        owner
+            .database
+            .collection("records")
+            .unwrap()
+            .execute(Operation::Search { arguments })
+            .await
+            .unwrap_err();
+    }
+    owner.close().await;
+
+    let owner = CollectionFixture::sqlite("places", value!({"location":{"type":"geoPoint"}})).await;
+    for limit in [value!(-1), value!("5")] {
+        owner
+            .database
+            .collection("places")
+            .unwrap()
+            .execute(Operation::Near {
+                arguments: value!({
+                    "field":"location",
+                    "point":{"lat":51.5,"lng":-0.1},
+                    "radius":1000,
+                    "limit":limit
+                }),
+            })
+            .await
+            .unwrap_err();
+    }
+    owner.close().await;
+}
+
+#[compio::test]
+async fn search_infers_only_a_unique_vector_field() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({"features":{"type":"vector","vectorDims":2}}),
+    )
+    .await;
+    owner
         .database
         .collection("records")
         .unwrap()
         .execute(Operation::Search {
-            arguments: value!({"vector":[1.0,0.0],"k":501}),
+            arguments: value!({"vector":[1.0,0.0]}),
+        })
+        .await
+        .unwrap();
+    owner.close().await;
+
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({
+            "first":{"type":"vector","vectorDims":2},
+            "second":{"type":"vector","vectorDims":2}
+        }),
+    )
+    .await;
+    owner
+        .database
+        .collection("records")
+        .unwrap()
+        .execute(Operation::Search {
+            arguments: value!({"vector":[1.0,0.0]}),
         })
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("search.k"), "{error}");
     owner.close().await;
 }

@@ -153,6 +153,38 @@ fn registered_compilers_choose_the_spatial_execution_statement() {
     assert!(sqlite.sql().starts_with("SELECT \"source\".\"id\""));
 }
 
+#[test]
+fn search_statements_require_a_positive_limit() {
+    let table = search_table();
+    assert!(VectorSearchStatement::new(VectorSearchParts {
+        projection: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: None,
+        }],
+        identity: table.column("id").unwrap(),
+        vector: table.column("embedding").unwrap(),
+        query: Value::Bytes(vec![0; 8]),
+        metric: zeroship_data_orm::sql::descriptors::VectorMetric::Cosine,
+        predicate: ResolvedPredicate::Const(true),
+        limit: 0,
+        table: table.clone(),
+    })
+    .is_err());
+    assert!(SpatialNearStatement::new(SpatialNearParts {
+        projection: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: None,
+        }],
+        spatial: table.column("location").unwrap(),
+        point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
+        radius_m: 1000.0,
+        predicate: ResolvedPredicate::Const(true),
+        limit: 0,
+        table,
+    })
+    .is_err());
+}
+
 fn insert_parts(table: &Table) -> InsertParts {
     InsertParts {
         table: table.clone(),
@@ -339,6 +371,57 @@ fn an_aggregate_select_rejects_an_ungrouped_column() {
 }
 
 #[test]
+fn an_ungrouped_select_rejects_a_plain_having_clause() {
+    let source = search_table();
+    let statement = SelectStatement::new(SelectParts {
+        table: source.clone(),
+        joins: Vec::new(),
+        projection: vec![SelectedExpression {
+            expression: ResolvedOperand::Column(source.column("id").unwrap()),
+            alias: Ident::parse_as("id", IdentRole::Alias).unwrap(),
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Compare {
+            lhs: ResolvedOperand::Column(source.column("label").unwrap()),
+            op: CompareOp::Eq,
+            rhs: ResolvedPredicateValue::Bind {
+                storage: StorageType::Text,
+                value: Value::from("open"),
+            },
+        },
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        lock: zeroship_data_orm::sql::statement::RowLock::None,
+    });
+    assert!(statement.is_err());
+}
+
+#[test]
+fn select_revalidates_output_identifiers_for_the_alias_role() {
+    let source = search_table();
+    let statement = SelectStatement::new(SelectParts {
+        table: source.clone(),
+        joins: Vec::new(),
+        projection: vec![SelectedExpression {
+            expression: ResolvedOperand::Column(source.column("id").unwrap()),
+            alias: Ident::parse_as("__zs_private", IdentRole::StoredColumn).unwrap(),
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        lock: zeroship_data_orm::sql::statement::RowLock::None,
+    });
+    assert!(statement.is_err());
+}
+
+#[test]
 fn insert_columns_are_canonical_and_rows_follow_their_columns() {
     let table = table();
     let statement = Statement::Insert(Insert::new(insert_parts(&table)).unwrap());
@@ -381,6 +464,31 @@ fn insert_rejects_foreign_columns_and_invalid_row_shapes() {
     let mut input = insert_parts(&own);
     input.rows[0][0] = Expression::Incoming(own.column("payload").unwrap());
     assert!(Insert::new(input).is_err());
+}
+
+#[test]
+fn returning_projection_rejects_duplicate_output_names() {
+    let table = table();
+    let id = table.column("id").unwrap();
+    let revision = table.column("revision").unwrap();
+    for aliases in [(Some("result"), Some("result")), (None, Some("id"))] {
+        let mut input = insert_parts(&table);
+        input.returning = vec![
+            ReturnedColumn {
+                column: id.clone(),
+                alias: aliases
+                    .0
+                    .map(|name| Ident::parse_as(name, IdentRole::Alias).unwrap()),
+            },
+            ReturnedColumn {
+                column: revision.clone(),
+                alias: aliases
+                    .1
+                    .map(|name| Ident::parse_as(name, IdentRole::Alias).unwrap()),
+            },
+        ];
+        assert!(Insert::new(input).is_err());
+    }
 }
 
 fn parts(table: &Table) -> UpsertParts {
