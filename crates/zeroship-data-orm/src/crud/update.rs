@@ -1,8 +1,8 @@
 use super::{predicate, resolved::ResolvedTable};
 use crate::{
     sql::{
-        mapping::QueryError,
         lifecycle::{AssignedValue, WriteAssignments},
+        mapping::QueryError,
         registration::SqlRegistration,
         statement::{
             ArithmeticOperator, ArrayOperator, Assignment, Expression, MutationScope, Statement,
@@ -139,10 +139,7 @@ pub(crate) fn resolve_assignments(
                     Expression::ArrayMutation {
                         column: column.clone(),
                         operator,
-                        operand: match assignment.operand {
-                            Value::Json(encoded) => Value::Json(encoded),
-                            value => Value::Json(value.to_string()),
-                        },
+                        operand: registration.encode(input.storage, assignment.operand)?,
                     }
                 }
             };
@@ -179,4 +176,71 @@ pub(crate) fn resolve_generated(
 
 fn invalid(message: impl Into<String>) -> QueryError {
     QueryError::InvalidFilter(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql::{
+        compiler::{CompileError, SqlCompiler, SqliteCompiler},
+        registration::{SqlStorageCodecs, SQLITE_FAMILY},
+        statement::StorageType,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[derive(Clone)]
+    struct CountingCodecs(Arc<AtomicUsize>);
+
+    impl SqlStorageCodecs for CountingCodecs {
+        fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+            SqlRegistration::sqlite().storage_type(definition)
+        }
+
+        fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            SqlRegistration::sqlite().encode(storage, value)
+        }
+
+        fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+            SqlRegistration::sqlite().decode(storage, value)
+        }
+    }
+
+    #[test]
+    fn array_mutation_operands_cross_the_registered_codec_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let compiler = SqliteCompiler;
+        let registration = SqlRegistration::new(
+            "array-codec",
+            SQLITE_FAMILY,
+            compiler,
+            CountingCodecs(calls.clone()),
+            compiler.support(),
+        )
+        .unwrap();
+        let schema = crate::value!({
+            "id":{"type":"string","primaryKey":true},
+            "items":{"type":"array","items":"json"}
+        });
+        let resolved = ResolvedTable::new(
+            &SchemaName::new("app").unwrap(),
+            "entries",
+            &schema,
+            &registration,
+        )
+        .unwrap();
+
+        resolve_assignments(
+            crate::value!({"items":{"$push":{"key":"value"}}}),
+            &WriteAssignments::default(),
+            &resolved,
+            &registration,
+        )
+        .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
 }

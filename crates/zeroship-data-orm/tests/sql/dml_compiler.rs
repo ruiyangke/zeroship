@@ -6,11 +6,12 @@ use zeroship_data_orm::{
         },
         registration::{SqlFamily, SqlRegistration, SqlStorageCodecs},
         statement::{
-            Assignment, Comparison, Expression, IdentityRequest, Insert, InsertParts, ResolvedJoin,
-            ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn,
-            SelectParts, SelectStatement, SelectedExpression, SpatialNearParts,
-            SpatialNearStatement, Statement, StorageType, Table, Upsert, UpsertParts,
-            VectorSearchParts, VectorSearchStatement,
+            ArrayOperator, Assignment, Comparison, Expression, IdentityRequest, Insert,
+            InsertParts, MutationScope, ResolvedJoin, ResolvedOperand, ResolvedPredicate,
+            ResolvedPredicateValue, ReturnedColumn, SelectParts, SelectStatement,
+            SelectedExpression, SpatialNearParts, SpatialNearStatement, Statement, StorageType,
+            Table, Update, UpdateParts, Upsert, UpsertParts, VectorSearchParts,
+            VectorSearchStatement,
         },
         CompareOp, Ident, IdentRole, JoinKind, SchemaName,
     },
@@ -563,6 +564,27 @@ fn returning_projection_rejects_duplicate_output_names() {
         ];
         assert!(Insert::new(input).is_err());
     }
+}
+
+#[test]
+fn array_mutations_accept_structured_json_from_storage_codecs() {
+    let table = table();
+    let document = table.column("document").unwrap();
+    let statement = Update::new(UpdateParts {
+        table,
+        assignments: vec![Assignment {
+            column: document.clone(),
+            value: Expression::ArrayMutation {
+                column: document,
+                operator: ArrayOperator::Push,
+                operand: zeroship_data_orm::value!({"nested":true}),
+            },
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        scope: MutationScope::Matching,
+        returning: Vec::new(),
+    });
+    assert!(statement.is_ok());
 }
 
 fn parts(table: &Table) -> UpsertParts {
