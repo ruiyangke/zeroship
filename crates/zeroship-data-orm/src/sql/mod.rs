@@ -16,7 +16,6 @@ pub mod path;
 pub mod predicate;
 pub mod read;
 
-pub use compiler::BindBudget;
 pub use ident::{Ident, IdentError, IdentRole, MAX_IDENT_BYTES};
 pub use literal::{
     Finite, Finite32, Literal, LiteralError, LiteralSet, QueryVector, MAX_MEMBERSHIP_LIST_LEN,
