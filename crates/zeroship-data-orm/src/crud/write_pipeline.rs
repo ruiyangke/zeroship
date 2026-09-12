@@ -841,12 +841,6 @@ mod tests {
             &value!({"name":{}, "ssn":{}})
         )
         .is_ok());
-        // The user must not forge the masked sibling suffix the platform emits.
-        assert!(validate_user_doc_keys(
-            &value!({ "ssn_masked": "x" }),
-            &value!({"name":{}, "ssn":{}})
-        )
-        .is_err());
         // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
         assert!(validate_user_doc_keys(
@@ -878,9 +872,8 @@ mod tests {
         );
         // $set's nested field keys are validated; the operator key itself is skipped.
         assert!(validate_update_patch_keys(&value!({ "$set": { "name": "a" } })).is_ok());
-        assert!(validate_update_patch_keys(&value!({ "$set": { "ssn_masked": "x" } })).is_err());
         // A top-level reserved field key is rejected.
-        assert!(validate_update_patch_keys(&value!({ "ssn_masked": "x" })).is_err());
+        assert!(validate_update_patch_keys(&value!({ "_rank": 1 })).is_err());
     }
 
     #[test]

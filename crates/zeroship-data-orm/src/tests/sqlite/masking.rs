@@ -52,10 +52,6 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
             !sql.contains(&format!("\"{raw_ssn}\" TEXT /* __zsmask")),
             "the raw column must not carry the mask sentinel: {sql}"
         );
-        assert!(
-            !sql.contains("\"name_masked\""),
-            "non-masked column must not emit a sibling: {sql}"
-        );
         let raw_name = raw_column_name("name");
         assert!(
             !sql.contains(&format!("\"{raw_name}\"")),
@@ -298,11 +294,6 @@ fn aliased_select_skips_kind_none_sqlite() {
             &schema,
         )
         .expect("build_find_with_schema");
-        assert!(
-            !bq.sql.contains("\"ssn_masked\""),
-            "kind=none must NOT trigger the AS-rewrite: {}",
-            bq.sql,
-        );
         // Schema-aware reads now always expand to the allowlisted public
         // column set, even when every mask is `kind: "none"`.
         assert!(
@@ -312,45 +303,5 @@ fn aliased_select_skips_kind_none_sqlite() {
         );
         assert!(bq.sql.contains("\"source\".\"ssn\" AS \"ssn\""));
         assert!(bq.sql.contains("\"source\".\"name\" AS \"name\""));
-    })
-}
-
-/// **NOT NULL contract on the sibling**: omitting the
-/// sibling from an INSERT against a masked-column DDL must fail at the
-/// engine level (the sibling is `TEXT NOT NULL`). This is the
-/// load-bearing assertion that mask-pass must run before the SQL
-/// builder - skip it and the engine rejects with a NOT NULL violation.
-#[test]
-fn missing_sibling_fails_not_null_constraint_sqlite() {
-    Host::test(|host| {
-        host.run(async {
-            let (backend, _dir) = fresh_backend(host);
-            backend
-                .attach_app_file("app_demo")
-                .await
-                .expect("ensure_app_schema");
-            backend
-                .execute_fixture(
-                    "CREATE TABLE \"app_demo\".\"users\" (\
-                     id  INTEGER PRIMARY KEY, \
-                     ssn TEXT, \
-                     ssn_masked TEXT NOT NULL\
-                 )",
-                    &[],
-                )
-                .await
-                .expect("CREATE TABLE ok");
-            // Insert WITHOUT the sibling. The engine must refuse.
-            let res = backend
-                .execute_fixture(
-                    "INSERT INTO \"app_demo\".\"users\" (\"ssn\") VALUES (?)",
-                    &[("plaintext-no-mask").into()],
-                )
-                .await;
-            assert!(
-                res.is_err(),
-                "INSERT without sibling MUST fail (sibling is NOT NULL); got Ok"
-            );
-        });
     })
 }

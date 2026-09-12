@@ -48,8 +48,7 @@ pub enum IdentRole {
     /// A column name being *referenced*. Not a column being declared: this
     /// crate plans no DDL.
     Column,
-    /// A column the PLATFORM references, not one a creator declared: the
-    /// physical side of a [`zeroship_data_orm::sql::ProjectionSource::Stored`].
+    /// A column the platform references rather than one a creator declared.
     ///
     /// It exists for the same reason [`Self::Alias`] does. The platform's stored
     /// forms are spelled with the very prefixes `COLUMN_RESERVATIONS` refuses,
@@ -114,8 +113,6 @@ enum Reservation {
     Exact(&'static str),
     /// Refuse any name starting with this, case-insensitively.
     Prefix(&'static str),
-    /// Refuse any name ending with this, case-sensitively.
-    Suffix(&'static str),
 }
 
 impl Reservation {
@@ -130,7 +127,6 @@ impl Reservation {
                 name.len() >= p.len()
                     && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
             }
-            Self::Suffix(s) => name.ends_with(s),
         }
     }
 
@@ -138,7 +134,6 @@ impl Reservation {
         match self {
             Self::Exact(n) => format!("the name '{n}' is reserved"),
             Self::Prefix(p) => format!("the prefix '{p}' is reserved"),
-            Self::Suffix(s) => format!("the suffix '{s}' is reserved"),
         }
     }
 }
@@ -188,8 +183,6 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("_"),
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship_"),
-    // Masked-column sibling suffix (the Path B sibling-column strategy).
-    Reservation::Suffix("_masked"),
     // The six default classifications, reserved at column level so a creator
     // schema cannot collide with the taxonomy authorization and audit use.
     Reservation::Exact("public"),
@@ -203,10 +196,8 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
 /// Fences for a column the platform references rather than one a creator
 /// declared.
 ///
-/// This is `COLUMN_RESERVATIONS` with the four platform-shape rows removed -
-/// `Prefix("_")`, `Prefix("__zs_")`, `Prefix("__zeroship_")` and
-/// `Suffix("_masked")` - because those rows exist to stop a CREATOR naming a
-/// platform column, and this role is the platform doing exactly that. The
+/// This omits the platform prefixes that creator columns cannot use because
+/// this role is the platform naming those columns. The
 /// classification names stay: nothing the platform stores is called `pii`, and
 /// keeping them costs nothing while preserving the taxonomy fence in both roles.
 ///
@@ -229,9 +220,6 @@ const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
 /// emitted as aliases, never declared as columns. The `_` fence on
 /// `COLUMN_RESERVATIONS` is what stops a creator column shadowing one; the
 /// alias side is the platform's to spell.
-///
-/// The `_masked` suffix is likewise allowed here, because an internal-exposure
-/// projection may legitimately surface a sibling under its own name.
 const ALIAS_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("__zs_"),
     Reservation::Prefix("__zeroship"),
@@ -429,8 +417,6 @@ mod tests {
             "prefix fence must be case-insensitive"
         );
         assert!(!Reservation::Prefix("pg_").matches("page_views"));
-        assert!(Reservation::Suffix("_masked").matches("ssn_masked"));
-        assert!(!Reservation::Suffix("_masked").matches("masked_ssn"));
         assert!(Reservation::Exact("pii").matches("pii"));
         assert!(!Reservation::Exact("pii").matches("piix"));
     }
@@ -440,7 +426,6 @@ mod tests {
     #[test]
     fn a_short_name_does_not_panic_the_prefix_fence() {
         assert!(!Reservation::Prefix("__zeroship").matches("_"));
-        assert!(!Reservation::Suffix("_masked").matches("s"));
     }
 
     /// Every role must have deliberate reservation behavior. Collection and
