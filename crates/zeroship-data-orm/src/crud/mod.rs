@@ -1244,17 +1244,6 @@ pub async fn run_upsert(
 // search - vector entry point
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `collection.search(args)`.
-///
-/// - `{ vector, k?, metric?, column?, filter? }` ->
-///   [`crate::backend_handle::routed_vector_search`], routed to pgvector on PG
-///   or the pure-Rust flat-scan implementation on SQLite, on the lane this
-///   dispatch belongs to.
-///
-/// Resolves with a JSON array of rows; each row carries the
-/// `_distance` synthetic column from pgvector. Errors are coded
-/// (`vector_extension_missing` / `vector_unsupported` / standard
-/// SQLSTATE) so the SDK can branch on `e.code`.
 /// The eagerly-decoded inputs of a vector `search`, produced by [`plan_search`]
 /// and consumed by [`run_search`].
 #[derive(Debug)]
@@ -1401,21 +1390,6 @@ pub async fn run_search(
     .await
 }
 
-/// Shared dispatch for the `Collection.near()` v8_method.
-///
-/// `args` shape (validated SDK-side):
-/// ```js
-/// { field: "location",
-///   point: { lat: 51.5, lng: -0.1 },
-///   radius: 1000,           // metres
-///   filter?: {...},
-///   limit?: 100 }
-/// ```
-///
-/// Routes to [`crate::backend_handle::routed_spatial_near`], dispatching to
-/// PG's `geography(POINT, 4326)` support or SQLite's pure-Rust haversine
-/// flat-scan implementation, on the lane this dispatch belongs to. Each
-/// returned row carries a synthetic `_distance_m` (`f64`) column.
 /// The eagerly-decoded inputs of a spatial `near`, produced by [`plan_near`] and
 /// consumed by [`run_near`].
 #[derive(Debug)]
