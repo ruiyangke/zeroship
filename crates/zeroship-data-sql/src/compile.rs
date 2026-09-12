@@ -936,7 +936,7 @@ fn compose_where_with_soft_delete(
     })
 }
 
-/// Project readable fields through the runtime storage mapping.
+/// Project readable fields and protection identity through the storage mapping.
 pub fn build_masked_aware_select_expr(
     select: Option<&Value>,
     schema_hint: &Value,
@@ -944,7 +944,7 @@ pub fn build_masked_aware_select_expr(
     build_masked_aware_select_expr_with_unmask(select, schema_hint, &[])
 }
 
-/// Project the descriptor's readable value columns from a qualified table.
+/// Project readable value columns and protection identity from a qualified table.
 /// Each physical `storage.valueColumn` is aliased to its logical field name.
 pub fn build_masked_aware_select_expr_for_table_alias(
     schema_hint: &Value,
@@ -1071,7 +1071,7 @@ fn implicit_read_projection_parts(
     Ok(parts)
 }
 
-/// Project declared readable fields after a mutation.
+/// Project readable fields and the identity required by protection after a mutation.
 pub fn build_returning_expr(schema_hint: &Value) -> Result<String, QueryError> {
     Ok(implicit_read_projection_parts(schema_hint, None)?.join(", "))
 }
