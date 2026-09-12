@@ -165,7 +165,12 @@ fn grouped_projection(
             _ => return Err(invalid("aggregate: $group.by must be a string or array")),
         };
         for field in names_in {
-            validate_value_field(field, schema, "groupable")?;
+            validate_value_field(field, schema, "filterable")?;
+            if !crate::sql::descriptors::supports_grouping(&schema[field]) {
+                return Err(invalid(format!(
+                    "aggregate: field '{field}' has no portable grouping equality"
+                )));
+            }
             if !names.insert(field.to_owned()) {
                 return Err(invalid("aggregate: duplicate group field"));
             }
@@ -285,7 +290,7 @@ fn resolve_having(
         let output = if let Some(output) = outputs.get(field) {
             output.clone()
         } else {
-            validate_value_field(field, schema, "groupable")?;
+            validate_value_field(field, schema, "filterable")?;
             let selected = read::selected(table, field)?;
             AggregateOutput {
                 operand: selected.expression,
@@ -311,6 +316,18 @@ fn resolve_having(
                 "$gte" => CompareOp::Gte,
                 _ => return Err(invalid(format!("unsupported $having operator: {operator}"))),
             };
+            if let Some(field) = output.source_field.as_deref() {
+                let operator = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                    crate::sql::descriptors::PredicateOperator::Equality
+                } else {
+                    crate::sql::descriptors::PredicateOperator::Ordering
+                };
+                if !crate::sql::descriptors::supports_predicate_operator(&schema[field], operator) {
+                    return Err(invalid(
+                        "aggregate: predicate operator is not supported for this field type",
+                    ));
+                }
+            }
             if value.is_null() {
                 if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
                     return Err(invalid("null supports only equality in $having"));
@@ -373,6 +390,11 @@ fn resolve_order(
                 output.operand.clone()
             } else {
                 validate_value_field(field, schema, "sortable")?;
+                if !crate::sql::descriptors::supports_sorting(&schema[field]) {
+                    return Err(invalid(format!(
+                        "aggregate: field '{field}' has no portable sort order"
+                    )));
+                }
                 read::selected(table, field)?.expression
             };
             let descending = direction.as_i64().is_some_and(|value| value < 0);

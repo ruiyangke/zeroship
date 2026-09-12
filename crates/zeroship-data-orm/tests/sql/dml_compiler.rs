@@ -13,7 +13,7 @@ use zeroship_data_orm::{
             SpatialNearStatement, Statement, StorageType, Table, Update, UpdateParts, Upsert,
             UpsertParts, VectorSearchParts, VectorSearchStatement,
         },
-        CompareOp, Ident, IdentRole, JoinKind, MembershipOp, SchemaName,
+        CompareOp, Direction, Ident, IdentRole, JoinKind, MembershipOp, NullOrder, SchemaName,
     },
     value::Value,
 };
@@ -101,6 +101,152 @@ fn select_with_predicate(
         lock: zeroship_data_orm::sql::statement::RowLock::None,
         table,
     })
+}
+
+fn scalar_select(
+    storage: StorageType,
+    configure: impl FnOnce(&mut SelectParts),
+) -> Result<SelectStatement, CompileError> {
+    let table = Table::aliased(
+        SchemaName::new("app-selects").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        Ident::parse_as("source", IdentRole::Alias).unwrap(),
+        [
+            (
+                Ident::parse_as("id", IdentRole::StoredColumn).unwrap(),
+                StorageType::Integer,
+            ),
+            (
+                Ident::parse_as("value", IdentRole::StoredColumn).unwrap(),
+                storage,
+            ),
+        ],
+    )
+    .unwrap();
+    let value = ResolvedOperand::Column(table.column("value").unwrap());
+    let mut parts = SelectParts {
+        table,
+        joins: Vec::new(),
+        projection: vec![SelectedExpression {
+            expression: value,
+            alias: Ident::parse_as("value", IdentRole::Alias).unwrap(),
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        lock: zeroship_data_orm::sql::statement::RowLock::None,
+    };
+    configure(&mut parts);
+    SelectStatement::new(parts)
+}
+
+#[test]
+fn resolved_selects_reject_backend_dependent_ordering() {
+    for storage in [
+        StorageType::Boolean,
+        StorageType::Bytes,
+        StorageType::Decimal,
+        StorageType::Json,
+        StorageType::Vector,
+        StorageType::GeoPoint,
+    ] {
+        let result = scalar_select(storage, |parts| {
+            parts.order_by.push(zeroship_data_orm::sql::statement::ResolvedOrder {
+                expression: parts.projection[0].expression.clone(),
+                direction: Direction::Ascending,
+                nulls: NullOrder::Last,
+            });
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            CompileError::InvalidStatement("order by requires portable ordered storage".into())
+        );
+    }
+    for storage in [
+        StorageType::Integer,
+        StorageType::Real,
+        StorageType::Text,
+        StorageType::Timestamp,
+    ] {
+        assert!(scalar_select(storage, |parts| {
+            parts.order_by.push(zeroship_data_orm::sql::statement::ResolvedOrder {
+                expression: parts.projection[0].expression.clone(),
+                direction: Direction::Ascending,
+                nulls: NullOrder::Last,
+            });
+        })
+        .is_ok());
+    }
+}
+
+#[test]
+fn resolved_selects_reject_backend_dependent_grouping_and_distinctness() {
+    for storage in [
+        StorageType::Decimal,
+        StorageType::Json,
+        StorageType::Vector,
+        StorageType::GeoPoint,
+    ] {
+        let grouped = scalar_select(storage, |parts| {
+            parts.group_by.push(parts.projection[0].expression.clone());
+        });
+        assert_eq!(
+            grouped.unwrap_err(),
+            CompileError::InvalidStatement("group by requires portable equality storage".into())
+        );
+
+        let distinct = scalar_select(storage, |parts| parts.distinct = true);
+        assert_eq!(
+            distinct.unwrap_err(),
+            CompileError::InvalidStatement("distinct requires portable equality storage".into())
+        );
+    }
+    for storage in [
+        StorageType::Boolean,
+        StorageType::Integer,
+        StorageType::Real,
+        StorageType::Text,
+        StorageType::Bytes,
+        StorageType::Timestamp,
+    ] {
+        assert!(scalar_select(storage, |parts| {
+            parts.group_by.push(parts.projection[0].expression.clone());
+        })
+        .is_ok());
+        assert!(scalar_select(storage, |parts| parts.distinct = true).is_ok());
+    }
+}
+
+#[test]
+fn count_distinct_rejects_backend_dependent_equality() {
+    for storage in [
+        StorageType::Decimal,
+        StorageType::Json,
+        StorageType::Vector,
+        StorageType::GeoPoint,
+    ] {
+        let result = scalar_select(storage, |parts| {
+            let column = match &parts.projection[0].expression {
+                ResolvedOperand::Column(column) => column.clone(),
+                _ => unreachable!(),
+            };
+            parts.projection[0].expression = ResolvedOperand::Aggregate {
+                function: zeroship_data_orm::sql::AggregateFunc::Count,
+                column: Some(column),
+                distinct: true,
+            };
+        });
+        assert_eq!(
+            result.unwrap_err(),
+            CompileError::InvalidStatement(
+                "distinct aggregate requires portable equality storage".into()
+            )
+        );
+    }
 }
 
 #[test]

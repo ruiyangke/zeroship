@@ -115,8 +115,7 @@ type ZeroshipDbAccumulator =
   | { $sum: string }
   | { $avg: string }
   | { $min: string }
-  | { $max: string }
-  | { $first: string };
+  | { $max: string };
 
 // ---------------------------------------------------------------------------
 // Wrapper v8_classes — the v2 native surface.

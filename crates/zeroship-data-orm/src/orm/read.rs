@@ -187,10 +187,12 @@ impl PreparedRead {
         for path in &input.group_by {
             check_field(path, &sources, false)?;
             check_capability(path, &sources, "filterable")?;
+            check_grouping(path, &sources)?;
         }
         for key in &input.order_by {
             check_field(&key.path, &sources, false)?;
             check_capability(&key.path, &sources, "sortable")?;
+            check_sorting(&key.path, &sources)?;
         }
 
         let aggregating = input.projection.iter().any(|p| {
@@ -747,6 +749,20 @@ fn check_capability(
     }
     Ok(())
 }
+fn check_sorting(path: &FieldPath, sources: &[SourceLayout]) -> Result<(), DbError> {
+    let source = source_for(path, sources)?;
+    let definition = &source.schema[path.root().as_str()];
+    crate::sql::descriptors::supports_sorting(definition)
+        .then_some(())
+        .ok_or_else(|| invalid("field has no portable sort order"))
+}
+fn check_grouping(path: &FieldPath, sources: &[SourceLayout]) -> Result<(), DbError> {
+    let source = source_for(path, sources)?;
+    let definition = &source.schema[path.root().as_str()];
+    crate::sql::descriptors::supports_grouping(definition)
+        .then_some(())
+        .ok_or_else(|| invalid("field has no portable grouping equality"))
+}
 fn validate_predicate(
     predicate: &Predicate,
     sources: &[SourceLayout],
@@ -1011,6 +1027,36 @@ mod tests {
             literal(value!({"key":true})),
         );
         assert!(validate_predicate(&predicate, &sources, false).is_ok());
+    }
+
+    #[test]
+    fn typed_read_sorting_and_grouping_follow_portable_semantics() {
+        let sources = vec![source(value!({
+            "id": {"type":"string"},
+            "enabled": {"type":"boolean"},
+            "amount": {"type":"decimal"},
+            "payload": {"type":"json"},
+            "bytes": {"type":"bytes"},
+            "score": {"type":"number"}
+        }))];
+        for field in ["enabled", "amount", "payload", "bytes"] {
+            assert!(
+                check_sorting(&sources[0].source.column(field).unwrap(), &sources).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["amount", "payload"] {
+            assert!(
+                check_grouping(&sources[0].source.column(field).unwrap(), &sources).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["id", "score"] {
+            assert!(check_sorting(&sources[0].source.column(field).unwrap(), &sources).is_ok());
+        }
+        for field in ["id", "enabled", "bytes", "score"] {
+            assert!(check_grouping(&sources[0].source.column(field).unwrap(), &sources).is_ok());
+        }
     }
 
     #[test]

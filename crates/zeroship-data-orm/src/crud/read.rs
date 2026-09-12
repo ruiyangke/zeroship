@@ -117,6 +117,11 @@ pub(crate) fn distinct(
         )));
     }
     mapping::validate_value_operation(field, schema)?;
+    if !crate::sql::descriptors::supports_grouping(&schema[field]) {
+        return Err(invalid(format!(
+            "field '{field}' has no portable distinct equality"
+        )));
+    }
     let table = ResolvedTable::aliased(namespace, collection, SOURCE_ALIAS, schema, registration)?;
     let selected = selected(&table, field)?;
     let order_by = vec![ResolvedOrder {
@@ -298,6 +303,11 @@ fn parse_order(
             mapping::validate_value_operation(field, schema)?;
             if schema[field]["sortable"].as_bool() == Some(false) {
                 return Err(invalid(format!("field '{field}' is not sortable")));
+            }
+            if !crate::sql::descriptors::supports_sorting(&schema[field]) {
+                return Err(invalid(format!(
+                    "field '{field}' has no portable sort order"
+                )));
             }
             let input = table
                 .inputs

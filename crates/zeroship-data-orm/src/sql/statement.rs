@@ -66,6 +66,13 @@ impl StorageType {
             Self::Integer | Self::Real | Self::Text | Self::Timestamp
         )
     }
+
+    fn supports_portable_equality(self) -> bool {
+        matches!(
+            self,
+            Self::Boolean | Self::Integer | Self::Real | Self::Text | Self::Bytes | Self::Timestamp
+        )
+    }
 }
 
 fn valid_decimal(value: &str) -> bool {
@@ -825,9 +832,22 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
     validate_predicate_for_tables(&tables, &parts.having, true)?;
     for expression in &parts.group_by {
         validate_operand(&tables, expression, false)?;
+        if !expression.storage()?.supports_portable_equality() {
+            return Err(invalid("group by requires portable equality storage"));
+        }
     }
     for order in &parts.order_by {
         validate_operand(&tables, &order.expression, true)?;
+        if !order.expression.storage()?.supports_ordering() {
+            return Err(invalid("order by requires portable ordered storage"));
+        }
+    }
+    if parts.distinct {
+        for selected in &parts.projection {
+            if !selected.expression.storage()?.supports_portable_equality() {
+                return Err(invalid("distinct requires portable equality storage"));
+            }
+        }
     }
     let grouped = !parts.group_by.is_empty()
         || parts
@@ -1218,6 +1238,18 @@ fn validate_operand(
     operand: &ResolvedOperand,
     allow_aggregate: bool,
 ) -> Result<(), CompileError> {
+    if let ResolvedOperand::Aggregate {
+        column: Some(column),
+        distinct: true,
+        ..
+    } = operand
+    {
+        if !column.storage().supports_portable_equality() {
+            return Err(invalid(
+                "distinct aggregate requires portable equality storage",
+            ));
+        }
+    }
     match operand {
         ResolvedOperand::Column(column) => {
             if !tables
