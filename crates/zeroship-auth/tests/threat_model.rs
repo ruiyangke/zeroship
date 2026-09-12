@@ -24,7 +24,7 @@ async fn login_csrf_missing_field_rejected() {
     Database::run(async |database| {
         let fx = AuthServer::start(database).await;
 
-        let return_to = fx.fresh_challenge();
+        let return_to = AuthServer::fresh_challenge();
         let login_url = login_url(&fx, &return_to);
 
         // First GET /login so we have a cookie — but we intentionally omit the
@@ -74,7 +74,7 @@ async fn login_csrf_mismatched_token_rejected() {
     Database::run(async |database| {
         let fx = AuthServer::start(database).await;
 
-        let return_to = fx.fresh_challenge();
+        let return_to = AuthServer::fresh_challenge();
         let login_url = login_url(&fx, &return_to);
 
         let resp = fx
@@ -137,7 +137,7 @@ async fn login_clickjacking_headers_present() {
         let fx = AuthServer::start(database).await;
 
         // (a) The FRAMED route `/login` GET: relaxed frame-ancestors, NO XFO.
-        let return_to = fx.fresh_challenge();
+        let return_to = AuthServer::fresh_challenge();
         let login_url = login_url(&fx, &return_to);
         let resp = fx
             .http
@@ -209,7 +209,7 @@ async fn login_referrer_policy_set() {
     Database::run(async |database| {
         let fx = AuthServer::start(database).await;
 
-        let return_to = fx.fresh_challenge();
+        let return_to = AuthServer::fresh_challenge();
         let login_url = login_url(&fx, &return_to);
         let resp = fx
             .http
@@ -244,7 +244,7 @@ async fn login_rate_limit_kicks_in() {
 
         let mut last_status: u16 = 0;
         for i in 1..=6 {
-            let return_to = fx.fresh_challenge();
+            let return_to = AuthServer::fresh_challenge();
             let login_url = login_url(&fx, &return_to);
 
             let resp = fx
@@ -301,7 +301,7 @@ async fn login_rate_limit_kicks_in() {
 // `AuthServer` carries `!Send` ntex/cyper handles.
 #[allow(clippy::future_not_send)]
 async fn one_login(fx: &AuthServer, email: &str, password: &str, xff_ip: &str) -> String {
-    let return_to = fx.fresh_challenge();
+    let return_to = AuthServer::fresh_challenge();
     let login_url = login_url(fx, &return_to);
 
     let resp = fx

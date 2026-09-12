@@ -45,7 +45,7 @@ impl AuthServer {
         }
     }
 
-    pub fn fresh_challenge(&self) -> String {
+    pub fn fresh_challenge() -> String {
         native_authorize_return_to("auth-test-client", "http://127.0.0.1:9999/cb")
     }
 }
