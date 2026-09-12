@@ -19,13 +19,7 @@ use zeroship_data_orm::storage::LockManager;
 
 use crate::cdc::ChangeSink;
 
-/// A `ChangeSink` that drops every event, for this crate's own tests.
-///
-/// The adapter injects `BrokerChangeSink`; a vendor crate cannot reach it
-/// without depending on the crate that composes it. Tests here exercise the
-/// backend, not delivery, so a no-op port is the honest double - and it keeps
-/// the composer's shape visible: `open`/`new` take the sink and the key source
-/// as parameters precisely so the policy lives above.
+/// No-op change sink for backend tests.
 #[cfg(test)]
 struct NullChangeSink;
 
@@ -36,72 +30,28 @@ impl ChangeSink for NullChangeSink {
     }
     fn publish(&self, _event: &zeroship_data_orm::cdc::ChangeEvent) {}
 }
-// `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
-// `preupdate_hook` install + worker->compio publisher integration).
-// Crate-private - the public consumer surface is
-// `BackendHandle::as_change_stream_sqlite()` (mirroring the
-// `as_postgres` / `as_sqlite` accessor shape).
 pub mod cdc;
 mod decimal;
 pub mod error;
 mod json;
 pub mod lock;
-/// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
-/// reads. Peer of `backend::pg_row_json`; see that module for why the two are
-/// deliberately not shared.
-pub mod row_json;
-// SC-2's reservation / cancellation / terminal-classification protocol.
-// Public because the cancellation surface (`SqliteCancelHandle`,
-// `TerminalOutcome`) is the contract a deadline or a dropped caller-side
-// future acts through; the actor in `session` is its only driver.
 pub mod reservation;
+pub mod row_json;
 pub mod session;
-// Pure-Rust haversine + `(lat, lng)` BLOB round-trip. The
-// `impl SpatialIndex for SqliteBackend` block at the bottom of
-// this file routes the flat-scan path through this module; the math
-// (`haversine_m`) and the `point_to_blob` / `blob_to_point` helpers
-// stay unit-testable in `spatial.rs`.
 pub mod spatial;
-// SQLite vector metric validation.
 
 use cdc::CommitPacket;
 use lock::InProcessLockRegistry;
 use session::{SqliteSession, SqliteSessionHandle};
 
-/// SQLite backend handle. One instance per worker thread (mirrors
-/// `zeroship_data_orm::backend::postgres::PostgresBackend`'s lifecycle).
-///
-/// **Field set** (`docs/archive/p1-sqlite-implementation-plan.md` §2.1):
-///
-/// - `session`: the writer-actor handle. Owns the single
-///   `rusqlite::Connection` for this backend and serialises all DDL
-///   / DML / DQL through a `flume` mpsc queue.
-/// - `lock_registry`: in-process advisory-lock map.
-/// - `db_dir`: filesystem directory holding per-app SQLite files
-///   (`zs-<app_id>.sqlite`).
-/// - `app_id_cache`: dedup set for `attach_app_file`
-///   path — SQLite errors on a second ATTACH of the same alias, so
-///   we filter the second call site in Rust.
-/// - `_publisher`: the worker->compio publisher task that
-///   drains the dispatcher's `flume::Receiver<CommitPacket>` and
-///   re-emits each event onto the thread-local broker. The
-///   `JoinHandle` is held so dropping `SqliteBackend` cancels the task
-///   (the task body is `while let Ok(packet) = rx.recv_async().await
-///   { … }`; cancellation simply stops polling — no resources to
-///   release). The matching sender lives on the writer thread, captured
-///   by the three CDC hook closures; dropping the session drops the
-///   connection drops the hooks drops the sender drops the channel.
+/// File-backed SQLite backend with one actor-owned connection.
 #[allow(dead_code)]
 pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
-    /// Keeps the publisher task alive for the lifetime of the
-    /// backend; dropped via `Drop` when the backend goes away. The
-    /// `JoinHandle` is a `compio::runtime::Task<Result<(), …>>` whose
-    /// `Drop` cancels the task per the `async-task` contract (see
-    /// `async_task::Task` rustdoc).
+    /// Keeps change publication alive with the backend.
     _publisher: compio::runtime::JoinHandle<()>,
     /// Project encryption keys supplied by the trusted host.
     key_store: zeroship_data_orm::encryption::KeyStore,
@@ -120,9 +70,6 @@ fn validate_database_path(path: &Path) -> Result<(), DbError> {
 
 impl std::fmt::Debug for SqliteBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirrors `PostgresBackend`'s opaque Debug impl — no field
-        // exposure (the `db_dir` path may carry deployment-internal
-        // information operators don't want spilled to log lines).
         f.debug_struct("SqliteBackend").finish()
     }
 }
@@ -137,23 +84,7 @@ impl SqliteBackend {
         crate::backend::sqlite::row_json::typed_rows_to_values(&typed)
     }
 
-    /// Production constructor used by the runtime URL-scheme
-    /// dispatcher.
-    ///
-    /// `path` names the control database file for the backend. Per-app
-    /// files still live beside it as `zs-<app_id>.sqlite` and are bound into
-    /// the session by `attach_app_file`. It is idempotent, and data-plane
-    /// entry points call it lazily before addressing an app table.
-    ///
-    /// If `path` points at an existing directory we place the control
-    /// session at `<dir>/zs-control.sqlite`. SQLite requires a filesystem path;
-    /// no ephemeral database mode or implicit temporary directory is supported.
-    ///
-    /// `sink` is an `Arc<dyn ChangeSink>` rather than a generic because it is
-    /// held on BOTH sides of the CDC channel: the commit hook on the writer
-    /// thread samples `disposition`, the publisher task on the compio thread
-    /// calls `publish`. One shared owner is the honest shape for that, and it
-    /// keeps the generic off six signatures in this file.
+    /// Open a control file and place per-app database files beside it.
     pub async fn open(
         path: impl AsRef<Path>,
         sink: Arc<dyn ChangeSink>,
@@ -170,12 +101,6 @@ impl SqliteBackend {
         Ok(Self::finish_open(opened, sink, key_source))
     }
 
-    // `pause_broker_for_tests` and `engage_schema_pending_for_tests` were here
-    // until 2026-09-02. They forwarded to guard constructors without reading
-    // any backend state, which is what made the guards look like a vendor
-    // concern. Tests now call `broker::BrokerPauseGuard::new(app_id)` and
-    // `broker::SchemaPendingGuard::new(app_id)` directly - there was never a
-    // backend to dispatch on.
     #[allow(dead_code)]
     pub fn new(
         db_dir: PathBuf,
@@ -225,13 +150,9 @@ impl SqliteBackend {
         session_path: PathBuf,
         sink: Arc<dyn ChangeSink>,
     ) -> Result<OpenedBackend, DbError> {
-        // CDC packet channel — worker thread (producer, via commit
-        // hook) → compio publisher task (consumer, calls its ChangeSink on
-        // this thread).
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
 
-        // The worker installs CDC hooks during PRAGMA bootstrap. The sender
-        // carries the sink so suppression is sampled at the commit boundary.
+        // Sample delivery state when the transaction commits.
         let session =
             SqliteSession::open(&session_path, Some(cdc::CommitSender::new(packet_tx, sink)))?;
 
@@ -255,17 +176,8 @@ impl SqliteBackend {
         } = opened;
         let session = Rc::new(session);
 
-        // Spawn the publisher task on the current compio runtime. The
-        // task captures `Rc<SqliteSession>` (for lazy column-name
-        // resolution via `PRAGMA table_info`) + the receiver end of
-        // the CDC channel. Dropping the returned `JoinHandle` cancels
-        // the task; the channel sender on the worker thread will then
-        // fail-fast on the next commit attempt (logged + dropped, no
-        // commit veto).
         let _publisher = cdc::spawn_publisher(session.clone(), packet_rx, sink);
 
-        // Wire the column-key store. SQLite has no admin-schema sidecar
-        // Project keys are supplied by the host, independently of the database.
         let key_store = zeroship_data_orm::encryption::KeyStore::new(key_source);
 
         Self {
