@@ -95,7 +95,6 @@ use session::{SqliteSession, SqliteSessionHandle};
 pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
-    cdc_name_cache_invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
     /// Keeps the publisher task alive for the lifetime of the
@@ -129,29 +128,6 @@ impl std::fmt::Debug for SqliteBackend {
 }
 
 impl SqliteBackend {
-    /// Mark one table's cached CDC column-name list stale. The
-    /// publisher loop clears the entry before decoding the next event
-    /// for the same `(app_id, collection)` pair.
-    ///
-    /// UNWIRED PRODUCER, LIVE CONSUMER - do not delete it as dead. Nothing
-    /// calls this today, so `cdc_name_cache_invalidations` is a set that is
-    /// drained and never filled. The CONSUMER is real:
-    /// `cdc::publisher_loop` does `invalidations.borrow_mut().remove(&key)`
-    /// and evicts `name_cache` on a hit, so removing this leaves the
-    /// publisher serving stale column names after DDL with no way to be told.
-    /// The missing caller is the SQLite apply path
-    /// (`docs/archive/proposals/2026-06-20-sqlite-engine-production-wiring-design.md`
-    /// §7b.4: invalidate per changed collection after CreateTable/AddColumn).
-    /// Deleting half a live mechanism is a design change, not a dead-code
-    /// sweep; a 2026-09-04 audit flagged this as dead on caller count alone
-    /// and it was kept for exactly that reason.
-    #[allow(dead_code)] // producer unwired; the consumer above is not - read the doc
-    pub(crate) fn invalidate_cdc_name_cache(&self, app_id: &str, collection: &str) {
-        self.cdc_name_cache_invalidations
-            .borrow_mut()
-            .insert((app_id.to_string(), collection.to_string()));
-    }
-
     pub async fn query_values(
         &self,
         sql: &str,
@@ -256,10 +232,8 @@ impl SqliteBackend {
 
         // The worker installs CDC hooks during PRAGMA bootstrap. The sender
         // carries the sink so suppression is sampled at the commit boundary.
-        let session = SqliteSession::open(
-            &session_path,
-            Some(cdc::CommitSender::new(packet_tx, sink)),
-        )?;
+        let session =
+            SqliteSession::open(&session_path, Some(cdc::CommitSender::new(packet_tx, sink)))?;
 
         Ok(OpenedBackend {
             session,
@@ -280,7 +254,6 @@ impl SqliteBackend {
             packet_rx,
         } = opened;
         let session = Rc::new(session);
-        let cdc_name_cache_invalidations = Rc::new(RefCell::new(HashSet::new()));
 
         // Spawn the publisher task on the current compio runtime. The
         // task captures `Rc<SqliteSession>` (for lazy column-name
@@ -289,12 +262,7 @@ impl SqliteBackend {
         // the task; the channel sender on the worker thread will then
         // fail-fast on the next commit attempt (logged + dropped, no
         // commit veto).
-        let _publisher = cdc::spawn_publisher(
-            session.clone(),
-            Rc::clone(&cdc_name_cache_invalidations),
-            packet_rx,
-            sink,
-        );
+        let _publisher = cdc::spawn_publisher(session.clone(), packet_rx, sink);
 
         // Wire the column-key store. SQLite has no admin-schema sidecar
         // Project keys are supplied by the host, independently of the database.
@@ -303,7 +271,6 @@ impl SqliteBackend {
         Self {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
-            cdc_name_cache_invalidations,
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
             _publisher,

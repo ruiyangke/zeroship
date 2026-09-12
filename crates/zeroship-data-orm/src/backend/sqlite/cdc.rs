@@ -9,16 +9,15 @@
 //! before calling the change sink. Hooks cannot query the connection they run on,
 //! and borrowed SQLite values must be copied before returning.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use base64::Engine;
-use rusqlite::Connection;
 use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
+use rusqlite::Connection;
 use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
 use crate::backend::sqlite::session::SqliteSession;
@@ -470,21 +469,19 @@ fn is_filtered_relation(table: &str) -> bool {
 /// thread-safe by construction.
 pub(crate) fn spawn_publisher(
     session: Rc<SqliteSession>,
-    invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
     sink: Arc<dyn ChangeSink>,
 ) -> compio::runtime::JoinHandle<()> {
-    compio::runtime::spawn(publisher_loop(session, invalidations, rx, sink))
+    compio::runtime::spawn(publisher_loop(session, rx, sink))
 }
 
 async fn publisher_loop(
     session: Rc<SqliteSession>,
-    invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
     sink: Arc<dyn ChangeSink>,
 ) {
-    // Cache column order and the declared scalar key until schema invalidation.
     let mut name_cache: HashMap<(String, String), (Vec<String>, Option<String>)> = HashMap::new();
+    let mut schema_versions: HashMap<String, String> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
         // Backfill pause + schema-pending decoder fence (plan §5 + §7). The
@@ -535,15 +532,29 @@ async fn publisher_loop(
             continue;
         }
 
+        let mut checked_databases = HashSet::new();
         for pending in delivered {
-            // Look up column names for this (db, table). Cache miss
-            // routes through the session actor's `Query` command —
-            // safe to await here because we're on the compio thread
-            // post-COMMIT, NOT inside a hook.
-            let key = (pending.db_name.clone(), pending.table.clone());
-            if invalidations.borrow_mut().remove(&key) {
-                name_cache.remove(&key);
+            if checked_databases.insert(pending.db_name.clone()) {
+                match fetch_schema_version(&session, &pending.db_name).await {
+                    Ok(version) => {
+                        if schema_versions
+                            .insert(pending.db_name.clone(), version.clone())
+                            .is_some_and(|previous| previous != version)
+                        {
+                            name_cache.retain(|(db_name, _), _| db_name != &pending.db_name);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            app_id = %pending.db_name,
+                            err = %error,
+                            "SQLite CDC schema version lookup failed"
+                        );
+                    }
+                }
             }
+
+            let key = (pending.db_name.clone(), pending.table.clone());
             if !name_cache.contains_key(&key) {
                 match fetch_column_names(&session, &pending.db_name, &pending.table).await {
                     Ok(names) => {
@@ -614,6 +625,17 @@ async fn publisher_loop(
         }
     }
     // rx error = sender dropped (backend torn down). Exit cleanly.
+}
+
+async fn fetch_schema_version(session: &SqliteSession, db_name: &str) -> Result<String, DbError> {
+    let sql = format!("PRAGMA {}.schema_version", quote_ident(db_name));
+    session
+        .query(&sql, &[])
+        .await?
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Clone::clone)
+        .ok_or_else(|| DbError::internal("SQLite did not return a schema version"))
 }
 
 async fn fetch_column_names(
@@ -790,13 +812,7 @@ mod tests {
         let reader = Rc::new(reader);
         drop(writer);
 
-        publisher_loop(
-            reader,
-            Rc::new(RefCell::new(HashSet::new())),
-            rx,
-            sink.clone() as Arc<dyn ChangeSink>,
-        )
-        .await;
+        publisher_loop(reader, rx, sink.clone() as Arc<dyn ChangeSink>).await;
 
         sink.published()
     }
