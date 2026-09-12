@@ -336,6 +336,7 @@ COPY --from=sdks /build/node_modules /app/node_modules
 COPY --from=sdks /build/packages /app/packages
 COPY --from=sdks /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
 COPY --from=sdks /build/crates/zeroship-workflow-server/schema /app/crates/zeroship-workflow-server/schema
+COPY --from=sdks /build/crates/zeroship-workflow/schema/deployments /app/crates/zeroship-workflow/schema/deployments
 COPY --from=sdks /build/package.json /build/pnpm-workspace.yaml /app/
 # The corpus, from the `sdks` stage rather than the build context, so its
 # `node_modules/@zeroship/migrate` link comes with it. Copying it from the context

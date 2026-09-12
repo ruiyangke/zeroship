@@ -14,6 +14,9 @@ and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
   worker task protocol through the shared Rust ORM.
 - `schema/`: customer journal recorded through the canonical migration DSL
   and generated through its PostgreSQL and SQLite compilers.
+- `deployment_holds/`: platform deployment retention metadata through ORM models;
+  it never reads customer journals. Its canonical schema lives in
+  `schema/deployments/` and is composed into the platform migration.
 
 Rust hosts can construct `HttpWorkflowBackend` with `WorkflowClientConfig` and
 call `WorkflowBackend::{start,status,signal,transition,restart,read_step_output}`. The host binds
@@ -35,6 +38,11 @@ The shared engine is composed into the CLI; production worker and Control
 integration remain unfinished. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
 embeds it in the customer's worker with customer-bound persistence; a lightweight
 server coordinates metadata and does not own the journal or payloads.
+`DeploymentHolds` accepts an authorized platform ORM database. Holds survive
+reconnection, and generation checks reject stale releases. The collector helpers
+run inside a host-owned transaction that also fences routing and other deployment
+consumers. Worker hold intents and production host composition remain unfinished;
+the existing journal-reading collector has not yet been replaced.
 `OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.

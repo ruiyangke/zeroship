@@ -1,8 +1,10 @@
 import { table, t, now, grant } from "@zeroship/migrate";
+import { deploymentSchema } from "../../crates/zeroship-workflow/schema/deployments/schema.ts";
 
 const schema = "zeroship";
 const journalTables = [
   "app_deploys",
+  "app_deploy_holds",
   "workflow_runs",
   "workflow_blobs",
   "workflow_signal_keys",
@@ -29,21 +31,7 @@ function journalTableTarget() {
 export default {
   name: "durable_workflows_journal",
   schema() {
-    zs("app_deploys").create({
-      columns: {
-        id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
-        deploy_hash: t.text().notNull(),
-        manifest_json: t.text().notNull(),
-        created_at: t.timestamp().notNull().default(now()),
-        activated_at: t.timestamp(),
-      },
-      primaryKey: ["id"],
-    });
-    zs("app_deploys").unique("app_deploys_app_id_deploy_hash_key").add({ columns: ["app_id", "deploy_hash"] });
-    zs("app_deploys").index("app_deploys_app_created_idx").add({
-      on: ["app_id", { column: "created_at", order: "desc" }],
-    });
+    deploymentSchema(schema);
 
     zs("workflow_runs").create({
       columns: {
