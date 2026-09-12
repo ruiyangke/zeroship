@@ -2,9 +2,9 @@
 
 #![allow(dead_code)]
 
+pub mod database;
 pub mod mock_control;
 pub mod mock_provider;
-pub mod database;
 
 use std::sync::Arc;
 
@@ -224,57 +224,6 @@ pub async fn dedicated_test_db(db_url: &str) -> compio_postgres::Client {
     })
     .detach();
     client
-}
-
-// --- The fleet-wide sweeps ----------------------------------------------
-
-/// Fixed locks for sweep tests that still use the configured shared database.
-pub mod sweep_lock {
-    /// `zeroship_auth::cron::token_sweep::tick`.
-    pub const TOKEN_SWEEP: i64 = 7_111_000_001;
-    /// `zeroship_auth::cron::signing_key_retention::tick`.
-    pub const SIGNING_KEY_RETENTION: i64 = 7_111_000_003;
-}
-
-/// Cross-process exclusion for a sweep over the shared database.
-/// Dropping the client releases the session lock, including during unwinding.
-/// Account-deletion cases use owned databases and need no fixture lease.
-pub struct SweepLease {
-    _session: compio_postgres::Client,
-}
-
-/// Bound the wait for another process's fixture lease.
-const SWEEP_LEASE_TIMEOUT_MS: u32 = 900_000;
-
-/// Take a [`SweepLease`] on `key`, waiting for any peer run that holds it.
-#[allow(clippy::future_not_send)]
-pub async fn lease_sweep(key: i64) -> SweepLease {
-    let db_url = crate::common::test_database_url();
-    let session = dedicated_test_db(&db_url).await;
-    // A literal, because `SET` takes no bind parameters. The value is a
-    // constant in this file and reaches the server as one.
-    session
-        .batch_execute(&format!("SET lock_timeout = {SWEEP_LEASE_TIMEOUT_MS}"))
-        .await
-        .expect("bound the sweep lease wait");
-    session
-        .execute("SELECT pg_advisory_lock($1)", &[&key])
-        .await
-        .unwrap_or_else(|error| {
-            // `pg_locks` SPLITS a 64-bit advisory key across two 32-bit
-            // columns - MEASURED, key 7111000001 lands as classid 1, objid
-            // 2816032705 - so the obvious `objid = {key}` predicate does not
-            // merely miss, it fails with `OID out of range`.
-            panic!(
-                "waited {}s for a peer run to release the sweep lease on {key}: {error}\n\
-                 Something holds it and is not finishing. This names it:\n\
-                 SELECT a.pid, a.state, a.query FROM pg_locks l \
-                 JOIN pg_stat_activity a USING (pid) WHERE l.locktype = 'advisory' \
-                 AND (l.classid::bigint << 32 | l.objid::bigint) = {key} AND l.granted;",
-                SWEEP_LEASE_TIMEOUT_MS / 1000,
-            )
-        });
-    SweepLease { _session: session }
 }
 
 // ─── PKCE ────────────────────────────────────────────────────────────────
