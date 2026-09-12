@@ -120,3 +120,40 @@ fn typed_plan_output_debug_does_not_disclose_bound_values() {
     );
     assert_eq!(query.params(), &[Value::from(secret)]);
 }
+
+#[test]
+fn postgres_compiler_counts_pagination_in_statement_bind_limit() {
+    use zeroship_data_orm::sql::{
+        BindBudget, Ident, IdentRole, Literal, MembershipOp, Operand, Predicate, ProjectedField,
+        Projection, Select, literal::MAX_MEMBERSHIP_LIST_LEN, render::postgres,
+    };
+    let column = Ident::parse_as("id", IdentRole::Column).unwrap();
+    let limit = BindBudget::POSTGRES.max();
+    let plan = |binds: usize| {
+        let values: Vec<_> = (0..binds).map(|value| Literal::Int(value as i64)).collect();
+        let predicates = values
+            .chunks(MAX_MEMBERSHIP_LIST_LEN)
+            .map(|values| {
+                Predicate::membership(
+                    Operand::column(column.clone()),
+                    MembershipOp::In,
+                    values.iter().cloned().map(Some).collect(),
+                )
+                .unwrap()
+            })
+            .collect();
+        Select::builder(
+            Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+            Projection::rows(vec![ProjectedField::column(column.clone()).unwrap()]).unwrap(),
+        )
+        .filter(Predicate::Or(predicates))
+        .build()
+        .unwrap()
+    };
+    let query = postgres::render_select(&plan(limit - 2)).unwrap();
+    assert_eq!(query.params().len(), limit);
+    assert!(
+        postgres::render_select(&plan(limit - 1)).is_err(),
+        "pagination exceeded the statement bind limit without a compiler error"
+    );
+}
