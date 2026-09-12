@@ -30,6 +30,7 @@ mod frontier_models;
 mod graph;
 mod ingress_models;
 mod journal_models;
+mod management;
 mod orm;
 mod output_reads;
 mod output_writes;
