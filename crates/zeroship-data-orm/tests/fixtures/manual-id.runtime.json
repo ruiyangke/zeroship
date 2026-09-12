@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "collections": {
+    "records": {
+      "fields": {
+        "id": { "type": "string", "required": true, "primaryKey": true },
+        "label": { "type": "string", "required": true }
+      }
+    }
+  }
+}

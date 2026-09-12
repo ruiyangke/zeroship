@@ -1,15 +1,15 @@
-error[E0277]: the trait bound `id: WritableColumn` is not satisfied
+error[E0277]: the trait bound `id: UpdatableColumn` is not satisfied
  --> tests/ui/write_generated_column.rs:3:10
   |
 3 | #[derive(Changeset)]
   |          ^^^^^^^^^ unsatisfied trait bound
   |
-help: the trait `WritableColumn` is not implemented for `id`
+help: the trait `UpdatableColumn` is not implemented for `id`
  --> tests/ui/write_generated_column.rs:2:1
   |
 2 | schema!(pub schema = "../fixtures/schema.runtime.json");
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: the following other types implement trait `WritableColumn`:
+  = help: the following other types implement trait `UpdatableColumn`:
             counter
             nickname
             payload

@@ -1,7 +1,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 use std::collections::HashSet;
-use syn::{spanned::Spanned, Data, DeriveInput, Fields, LitStr, Path};
+use syn::{Data, DeriveInput, Fields, LitStr, Path, spanned::Spanned};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -124,7 +124,7 @@ pub fn expand(input: DeriveInput, kind: Kind) -> syn::Result<TokenStream> {
                 presence.push(column);
             }
             Kind::Update => {
-                predicates.push(syn::parse_quote!(#column: #orm::WritableColumn));
+                predicates.push(syn::parse_quote!(#column: #orm::UpdatableColumn));
                 predicates.push(syn::parse_quote!(#ty: #orm::ChangeInput<#column>));
                 statements.push(quote!(<#ty as #orm::ChangeInput<#column>>::encode_change(self.#ident, &mut record)?;));
             }

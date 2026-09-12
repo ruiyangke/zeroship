@@ -159,6 +159,8 @@ fn generate(
             let read = readable.then(|| quote!(impl #orm::ReadableColumn for #column {}));
             let filter = filterable.then(|| quote!(impl #orm::FilterableColumn for #column {}));
             let write = writable.then(|| quote!(impl #orm::WritableColumn for #column {}));
+            let update = (writable && field != "id")
+                .then(|| quote!(impl #orm::UpdatableColumn for #column {}));
             let default = defaultable.then(|| quote!(impl #orm::DefaultableColumn for #column {}));
             if writable && !defaultable {
                 required.push(quote!(#orm::HasColumn<columns::#column>));
@@ -172,7 +174,7 @@ fn generate(
                     type SqlType = #sql_type;
                     const NAME: &'static str = #field;
                 }
-                #read #filter #write #default
+                #read #filter #write #update #default
             });
             constants.push(quote! {
                 #[allow(non_upper_case_globals)]
@@ -263,9 +265,11 @@ mod tests {
                 });
                 let result = generate(&descriptor, &orm, proc_macro2::Span::call_site());
                 if group == "valid" {
-                    assert!(!result
-                        .unwrap_or_else(|error| panic!("{name}: {error}"))
-                        .is_empty());
+                    assert!(
+                        !result
+                            .unwrap_or_else(|error| panic!("{name}: {error}"))
+                            .is_empty()
+                    );
                 } else {
                     assert_eq!(
                         result.expect_err(name).to_string(),

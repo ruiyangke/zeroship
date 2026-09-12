@@ -13,7 +13,6 @@ struct NewEntry {
 #[derive(Changeset)]
 #[orm(entity = entries)]
 struct EditEntry {
-    id: Change<String>,
     created_at: Change<String>,
     version: Change<i64>,
 }
@@ -29,13 +28,12 @@ fn main() {
     assert_eq!(record["id"].as_str(), Some("chosen"));
     assert!(!record.contains_key("entry_key"));
     let patch = EditEntry {
-        id: Change::Set("changed".into()),
         created_at: Change::Keep,
         version: Change::Set(10),
     }
     .into_changes()
     .unwrap();
     assert_eq!(patch["version"].as_i64(), Some(10));
-    entries::id.set("changed".to_owned()).unwrap();
+    assert!(!patch.contains_key("id"));
     entries::version.set(10_i64).unwrap();
 }
