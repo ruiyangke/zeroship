@@ -1195,7 +1195,9 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
         )
         .await
         .unwrap();
-    let mut runner = fixture.runner(Duration::from_millis(30));
+    // Leave room for ordinary journal I/O when reusing the slot. The blocked
+    // callback remains pending until the execution budget interrupts it.
+    let mut runner = fixture.runner(Duration::from_secs(1));
     assert!(matches!(
         runner.run_once().await,
         Err(WorkflowServiceError::Timeout)
