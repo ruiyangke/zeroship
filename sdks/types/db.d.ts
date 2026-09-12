@@ -25,10 +25,10 @@ type ZeroshipDbFilterValue =
   | ZeroshipScalar
   | { $eq?: ZeroshipScalar }
   | { $ne?: ZeroshipScalar }
-  | { $gt?: string | number }
-  | { $gte?: string | number }
-  | { $lt?: string | number }
-  | { $lte?: string | number }
+  | { $gt?: string | number | bigint }
+  | { $gte?: string | number | bigint }
+  | { $lt?: string | number | bigint }
+  | { $lte?: string | number | bigint }
   | { $in?: ZeroshipScalar[] }
   | { $nin?: ZeroshipScalar[] }
   | { $like?: string }
