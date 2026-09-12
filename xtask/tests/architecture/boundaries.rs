@@ -177,6 +177,15 @@ fn dependency_closures_preserve_library_and_service_boundaries() {
             assert!(!closure.contains(forbidden), "{name} reaches {forbidden}");
         }
     }
+    let closure = repo::normal_closure("zeroship-data-macros");
+    assert!(
+        !closure.contains("zeroship-data-sql"),
+        "macros must validate descriptors without depending on SQL"
+    );
+    assert!(
+        closure.contains("syn"),
+        "macro parsing must be in the closure"
+    );
     let closure = repo::normal_closure("zeroship-data-orm");
     for forbidden in ["zeroship-runtime", "zeroship-data-v8", "v8"] {
         assert!(!closure.contains(forbidden), "ORM reaches {forbidden}");
