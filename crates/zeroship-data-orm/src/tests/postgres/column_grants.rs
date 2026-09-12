@@ -277,7 +277,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: crate::sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: crate::sql::compiler::CompiledQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "insert",
@@ -368,7 +368,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: crate::sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: crate::sql::compiler::CompiledQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "updateOne",

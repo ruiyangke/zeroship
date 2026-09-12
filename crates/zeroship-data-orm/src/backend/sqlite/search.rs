@@ -94,7 +94,7 @@ pub(super) fn build_spatial_near_base_query(
     collection: &str,
     filter: &crate::value::Value,
     schema_hint: &crate::value::Value,
-) -> Result<crate::sql::compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::sql::compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         schema_name,
         collection,
