@@ -77,11 +77,15 @@ impl Database {
         self.connect_to(self.url()).await
     }
 
-    pub async fn connect_as_auth(&self) -> Client {
+    pub fn auth_url(&self) -> url::Url {
         let mut url = self.url.clone();
         url.set_username("zeroship_auth").unwrap();
         url.set_password(Some("zeroship_auth")).unwrap();
-        self.connect_to(url.as_str()).await
+        url
+    }
+
+    pub async fn connect_as_auth(&self) -> Client {
+        self.connect_to(self.auth_url().as_str()).await
     }
 
     async fn connect_to(&self, url: &str) -> Client {
