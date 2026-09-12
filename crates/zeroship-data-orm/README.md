@@ -22,6 +22,11 @@ collection descriptors. `Database::new` takes an explicit `OrmContext` with inst
 opens the configured backend through `ConnectOptions`, using the same URL grammar
 as the worker. Application functions take a backend-independent `&Database`. Schema changes and
 physical table creation belong to the migration engine and its service.
+Native platform services call `ConnectOptions::connection_authority` with a URL
+that authenticates as their provisioned service role. This preserves the login
+role while keeping the ORM's transaction-local resource limits. The option does
+not accept a role name or grant privileges, and worker connections retain the
+default per-app role narrowing.
 SQLite requires filesystem storage. Memory selectors and URI options are
 rejected; tests create and own their temporary database files explicitly.
 

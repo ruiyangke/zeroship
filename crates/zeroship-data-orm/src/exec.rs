@@ -1455,9 +1455,10 @@ mod tests {
             // SET LOCAL role + timeouts are live on the backend.
             let cancelled = compio::time::timeout(
                 Duration::from_millis(100),
-                crate::backend::pg_autocommit::roled_rows(
+                crate::backend::pg_autocommit::scoped_rows(
                     &pool,
                     &crate::sql::SchemaName::new(app_id).expect("fixture schema"),
+                    crate::connection::SessionAuthority::PerAppRole,
                     "SELECT pg_sleep(1)",
                     &[],
                 ),

@@ -8,6 +8,19 @@ pub enum BackendUrl {
     Sqlite { path: PathBuf },
 }
 
+/// Authority applied to sessions opened by a built-in backend.
+///
+/// Worker databases use [`Self::PerAppRole`]. A trusted native service whose
+/// connection already authenticates as its provisioned database role can use
+/// [`Self::Connection`] to retain that role while the ORM still installs its
+/// transaction-scoped resource limits.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub(crate) enum SessionAuthority {
+    #[default]
+    PerAppRole,
+    Connection,
+}
+
 /// Parse configuration without opening a database.
 pub fn backend_for_url(url: &str) -> Result<BackendUrl, DbError> {
     CONFIGURATION_PARSES.with(|count| count.set(count.get() + 1));
@@ -64,11 +77,13 @@ pub struct ConnectOptions {
     url: String,
     key_source: ProjectKeySource,
     max_connections: Option<NonZeroUsize>,
+    session_authority: SessionAuthority,
 }
 impl std::fmt::Debug for ConnectOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConnectOptions")
             .field("max_connections", &self.max_connections)
+            .field("session_authority", &self.session_authority)
             .finish_non_exhaustive()
     }
 }
@@ -78,6 +93,7 @@ impl ConnectOptions {
             url: url.into(),
             key_source,
             max_connections: None,
+            session_authority: SessionAuthority::PerAppRole,
         }
     }
     /// Set the capacity of a backend that uses a connection pool.
@@ -85,10 +101,22 @@ impl ConnectOptions {
         self.max_connections = Some(limit);
         self
     }
+    /// Select authority already established by this connection's credentials.
+    ///
+    /// Platform services use this with their own service-role database URL.
+    /// The option accepts no role name and cannot elevate the connection.
+    pub fn connection_authority(mut self) -> Self {
+        self.session_authority = SessionAuthority::Connection;
+        self
+    }
     pub async fn connect(self) -> Result<BackendHandle, DbError> {
-        ConnectionFactory::for_url_with_limit(&self.url, self.max_connections)?
-            .connect(self.key_source)
-            .await
+        ConnectionFactory::for_url_with_limit(
+            &self.url,
+            self.max_connections,
+            self.session_authority,
+        )?
+        .connect(self.key_source)
+        .await
     }
 }
 

@@ -250,6 +250,158 @@ async fn postgres_native_models_round_trip() {
         .unwrap();
 }
 
+#[compio::test]
+async fn platform_service_credentials_drive_orm_authority() {
+    use std::num::NonZeroUsize;
+    use std::time::Duration;
+
+    let postgres = crate::tests::fixtures::postgres::Postgres::start();
+    crate::tests::fixtures::reset_engine();
+    let admin = Rc::new(
+        zeroship_data_orm::backend::postgres::PostgresBackend::connect(
+            &postgres.url(),
+            2,
+            ProjectKeySource::unavailable(),
+        )
+        .await
+        .unwrap(),
+    );
+    let suffix = uuid::Uuid::new_v4().simple().to_string();
+    let service_role = format!("zs_control_{suffix}");
+    let service_schema = format!("zs_platform_{suffix}");
+    let creator_schema = format!("zs_creator_{suffix}");
+    let quoted_role = crate::sql::mapping::quote_ident(&service_role);
+    let quoted_service_schema = crate::sql::mapping::quote_ident(&service_schema);
+    let quoted_creator_schema = crate::sql::mapping::quote_ident(&creator_schema);
+
+    admin
+        .execute_fixture(
+            &format!("CREATE ROLE {quoted_role} LOGIN PASSWORD 'service-fixture'"),
+            &[],
+        )
+        .await
+        .unwrap();
+    for schema in [&service_schema, &creator_schema] {
+        admin
+            .execute_fixture(
+                &format!("CREATE SCHEMA {}", crate::sql::mapping::quote_ident(schema)),
+                &[],
+            )
+            .await
+            .unwrap();
+        for sql in table_statements(schema, &zeroship_migrate_postgres::DIALECT) {
+            admin.execute_fixture(&sql, &[]).await.unwrap();
+        }
+    }
+    admin
+        .execute_fixture(
+            &format!(
+                "GRANT USAGE ON SCHEMA {quoted_service_schema} TO {quoted_role}; \
+                 GRANT SELECT, INSERT, UPDATE, DELETE ON {quoted_service_schema}.posts TO {quoted_role}; \
+                 ALTER TABLE {quoted_service_schema}.posts ENABLE ROW LEVEL SECURITY; \
+                 ALTER TABLE {quoted_service_schema}.posts FORCE ROW LEVEL SECURITY; \
+                 CREATE POLICY service_role_only ON {quoted_service_schema}.posts \
+                   USING (current_user = '{service_role}') \
+                   WITH CHECK (current_user = '{service_role}')"
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let mut service_url = url::Url::parse(&postgres.url()).unwrap();
+    service_url.set_username(&service_role).unwrap();
+    service_url.set_password(Some("service-fixture")).unwrap();
+    let options = crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
+        .max_connections(NonZeroUsize::new(1).unwrap())
+        .connection_authority();
+    let binding = DbBinding::new(
+        "zeroship_control",
+        "platform_fixture",
+        crate::sql::SchemaName::new(&service_schema).unwrap(),
+    );
+    let db = Database::connect(
+        binding,
+        options,
+        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+    )
+    .await
+    .unwrap();
+
+    exercise_native_models(&db).await;
+    let backend = db
+        .backend
+        .get::<zeroship_data_orm::backend::postgres::PostgresBackend>()
+        .unwrap();
+    let cancelled = compio::time::timeout(
+        Duration::from_millis(50),
+        backend.query_scoped_values(db.binding.schema(), "SELECT pg_sleep(1)", &[]),
+    )
+    .await;
+    assert!(
+        cancelled.is_err(),
+        "the query must be cancelled while leased"
+    );
+
+    let client = backend.pool().acquire().await.unwrap();
+    let state = client
+        .query_text_params(
+            "SELECT current_user, current_setting('statement_timeout'), \
+                    current_setting('idle_in_transaction_session_timeout'), \
+                    current_setting('lock_timeout')",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(state[0].get::<_, &str>(0), service_role);
+    assert_eq!(state[0].get::<_, &str>(1), "0");
+    assert_eq!(state[0].get::<_, &str>(2), "0");
+    assert_eq!(state[0].get::<_, &str>(3), "0");
+    drop(client);
+
+    let creator_db = Database::connect(
+        DbBinding::new(
+            "creator_journal",
+            "platform_fixture",
+            crate::sql::SchemaName::new(&creator_schema).unwrap(),
+        ),
+        crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
+            .connection_authority(),
+        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+    )
+    .await
+    .unwrap();
+    let denied = creator_db
+        .entity::<posts::Entity>()
+        .unwrap()
+        .find::<Post>(Filter::all(), Default::default())
+        .await
+        .expect_err("the Control login must not read a creator schema");
+    assert!(denied.message_str().contains("permission denied"));
+    assert!(!matches!(
+        denied,
+        DbError::Configuration {
+            code: crate::error::SCHEMA_NOT_PROVISIONED,
+            ..
+        }
+    ));
+
+    drop(creator_db);
+    drop(db);
+    admin
+        .execute_fixture(&format!("DROP SCHEMA {quoted_creator_schema} CASCADE"), &[])
+        .await
+        .unwrap();
+    admin
+        .execute_fixture(&format!("DROP SCHEMA {quoted_service_schema} CASCADE"), &[])
+        .await
+        .unwrap();
+    admin
+        .execute_fixture(&format!("DROP ROLE {quoted_role}"), &[])
+        .await
+        .unwrap();
+}
+
 async fn exercise_native_models(db: &Database) {
     let records = db.entity::<posts::Entity>().unwrap();
     let row: Details = records

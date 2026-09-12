@@ -137,37 +137,8 @@ fn unmask_fetch_runs_under_per_app_role_via_rls() {
     })
 }
 
-/// PG + masked + **ENCRYPTED** + unmask: the matrix cell that never existed.
-///
-/// `fetch_and_decrypt`'s PostgreSQL arm reads the raw column as
-/// `Option<&str>` (`crud/unmask.rs:546-547`). For an ENCRYPTED column the raw
-/// sibling is BYTEA, and `&str: FromSql::accepts` refuses BYTEA -
-/// `libs/compio-postgres/vendor/postgres-types/src/lib.rs:729-742` lists
-/// VARCHAR/TEXT/BPCHAR/NAME/UNKNOWN plus citext/ltree and falls through to
-/// `false` for everything else. `Row::get_inner` consults `accepts` BEFORE
-/// decoding, and does so even for NULL (`libs/compio-postgres/src/row.rs:256`).
-///
-/// The funnel additionally binds every result in BINARY format
-/// (`libs/compio-postgres/src/query.rs:186`), so the `\xHHHH...` text rendering
-/// the pre-fix comment described is not what arrives either. Two independent
-/// reasons, one outcome: a `DbError::internal` carrying `error deserializing
-/// column 0`. The read now goes through
-/// `backend::pg_autocommit::roled_scalar_bytes`, so on the pre-fix code the
-/// message was prefixed `unmask: get column value: ` and today it would be
-/// `db: read scalar bytes: `; this test asserts on the unmasked VALUE, not on
-/// either string.
-///
-/// WHY NOTHING CAUGHT IT. Every live PG unmask fixture declares a masked but
-/// UNENCRYPTED column, so this arm was never entered; the encrypted round-trip
-/// test never unmasks; and the SQLite twin passes because it reads
-/// `TypedCell::Blob` (`crud/unmask.rs:585`).
-///
-/// THIS IS THE SIBLING OF `unmask_fetch_runs_under_per_app_role_via_rls` WITH
-/// EXACTLY ONE VARIABLE CHANGED: the column is encrypted. Same role, same
-/// column grants, same role-bound policy, same login pool, same dispatch call.
-/// That is deliberate - a failure here cannot be a missing grant, a missing
-/// audit table or an unprovisioned role, because those would fail the sibling
-/// too. The only new thing is the BYTEA raw column.
+/// An encrypted masked column must preserve PostgreSQL's binary storage through
+/// the unmask pipeline and return its decrypted value.
 #[test]
 fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     Host::test(|host| {

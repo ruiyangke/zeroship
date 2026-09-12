@@ -1,4 +1,4 @@
-use super::{backend_for_url, BackendUrl};
+use super::{backend_for_url, BackendUrl, SessionAuthority};
 use crate::{
     backend::{BackendHandle, PostgresBackend},
     encryption::ProjectKeySource,
@@ -92,11 +92,12 @@ impl ConnectionFactory {
     }
     /// Validate built-in configuration without opening a database.
     pub fn for_url(url: &str) -> Result<Self, DbError> {
-        Self::for_url_with_limit(url, None)
+        Self::for_url_with_limit(url, None, SessionAuthority::PerAppRole)
     }
     pub(super) fn for_url_with_limit(
         url: &str,
         limit: Option<NonZeroUsize>,
+        session_authority: SessionAuthority,
     ) -> Result<Self, DbError> {
         let selection = backend_for_url(url)?;
         let url = url.trim().to_owned();
@@ -109,13 +110,14 @@ impl ConnectionFactory {
             .unwrap_or_else(crate::backend::postgres::default_pool_capacity);
         Ok(Self {
             identity: ConnectionIdentity::new(
-                &format!("builtin\0{url}\0{capacity}"),
+                &format!("builtin\0{url}\0{capacity}\0{session_authority:?}"),
                 registration.identity(),
             ),
             factory: Arc::new(BuiltinFactory {
                 url: url.clone(),
                 selection,
                 capacity,
+                session_authority,
             }),
             registration,
             url: Some(url),
@@ -158,6 +160,7 @@ struct BuiltinFactory {
     url: String,
     selection: BackendUrl,
     capacity: usize,
+    session_authority: SessionAuthority,
 }
 impl BackendFactory for BuiltinFactory {
     fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
@@ -173,7 +176,13 @@ impl BackendFactory for BuiltinFactory {
         Box::pin(async move {
             match &self.selection {
                 BackendUrl::Postgres => Ok(BackendHandle::new(Rc::new(
-                    PostgresBackend::connect(&self.url, self.capacity, keys).await?,
+                    PostgresBackend::connect_with_session_authority(
+                        &self.url,
+                        self.capacity,
+                        keys,
+                        self.session_authority,
+                    )
+                    .await?,
                 ))),
                 BackendUrl::Sqlite { path } => Ok(BackendHandle::new(Rc::new(
                     crate::backend_selection::open_sqlite_backend(path, keys).await?,
