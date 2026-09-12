@@ -15,6 +15,7 @@ mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
 mod journal;
+mod management;
 mod models;
 mod payloads;
 mod policy;

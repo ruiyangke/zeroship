@@ -6,6 +6,156 @@ use crate::{
 use std::time::{Duration, Instant};
 
 #[test]
+fn management_authority_preserves_raw_admission_near_lease_expiry() {
+    let app = AppId::mint();
+    let policies = HostPolicies::default();
+    let policy = AppPolicy::default();
+    let stop = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < stop,
+            "could not capture a live management authority"
+        );
+        let until = Instant::now() + Duration::from_micros(900);
+        policies
+            .install(
+                &app,
+                PolicySnapshot::lease(1.try_into().unwrap(), policy.clone(), until).unwrap(),
+            )
+            .unwrap();
+        let authority = match policies.management_authority(&app) {
+            Ok(authority) => authority,
+            Err(WorkflowServiceError::Unavailable(_)) if Instant::now() >= until => continue,
+            Err(error) => panic!("unexpected management authority failure: {error}"),
+        };
+        assert_eq!(authority.deadline, Some(until));
+        assert_eq!(authority.policy, policy);
+        assert!(authority.policy.admission);
+        assert!(authority.policy.admit().is_ok());
+        assert!(
+            !policies.resolve(&app).unwrap().admission,
+            "the effective execution policy must exercise its expiry rounding"
+        );
+        break;
+    }
+}
+
+#[test]
+fn management_authority_keeps_the_original_deadline_after_refresh() {
+    let app = AppId::mint();
+    let policies = HostPolicies::default();
+    let until = Instant::now() + Duration::from_secs(30);
+    policies
+        .install(
+            &app,
+            PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), until).unwrap(),
+        )
+        .unwrap();
+    let mut authority = policies.management_authority(&app).unwrap();
+    authority.check(&policies, &app).unwrap();
+    let refreshed_until = until + Duration::from_secs(30);
+    policies
+        .install(
+            &app,
+            PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), refreshed_until)
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(authority.deadline, Some(until));
+    authority.check(&policies, &app).unwrap();
+    let refreshed = policies.management_authority(&app).unwrap();
+    assert_eq!(refreshed.deadline, Some(refreshed_until));
+    refreshed.check(&policies, &app).unwrap();
+
+    // Simulate expiration of the captured budget while the refreshed host lease
+    // remains valid, without waiting for wall-clock scheduling.
+    authority.deadline = Some(Instant::now());
+    assert!(matches!(
+        authority.check(&policies, &app),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    refreshed.check(&policies, &app).unwrap();
+}
+
+#[test]
+fn management_authority_retries_when_the_host_revision_changes() {
+    let app = AppId::mint();
+    let policies = HostPolicies::default();
+    policies
+        .install(&app, configured_policy(1, AppPolicy::default()))
+        .unwrap();
+    let authority = policies.management_authority(&app).unwrap();
+    authority.check(&policies, &app).unwrap();
+    policies
+        .install(&app, configured_policy(2, AppPolicy::default()))
+        .unwrap();
+    assert!(matches!(
+        authority.check(&policies, &app),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    policies
+        .management_authority(&app)
+        .unwrap()
+        .check(&policies, &app)
+        .unwrap();
+}
+
+#[test]
+fn management_authority_requires_a_present_unexpired_host_snapshot() {
+    let app = AppId::mint();
+    let policies = HostPolicies::default();
+    assert!(matches!(
+        policies.management_authority(&app),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    policies
+        .install(&app, configured_policy(1, AppPolicy::default()))
+        .unwrap();
+    let authority = policies.management_authority(&app).unwrap();
+    authority.check(&policies, &app).unwrap();
+    assert!(matches!(
+        authority.check(&HostPolicies::default(), &app),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    policies
+        .install(
+            &app,
+            PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), Instant::now())
+                .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        policies.management_authority(&app),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert!(matches!(
+        authority.check(&policies, &app),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+}
+
+#[test]
+fn management_authority_preserves_an_explicit_configured_admission_denial() {
+    let app = AppId::mint();
+    let policies = HostPolicies::default();
+    let policy = AppPolicy {
+        admission: false,
+        ..AppPolicy::default()
+    };
+    policies
+        .install(&app, configured_policy(1, policy.clone()))
+        .unwrap();
+    let authority = policies.management_authority(&app).unwrap();
+    assert_eq!(authority.deadline, None);
+    assert_eq!(authority.policy, policy);
+    authority.check(&policies, &app).unwrap();
+    assert!(matches!(
+        authority.policy.admit(),
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
+}
+
+#[test]
 fn host_policy_revisions_reject_conflicting_limits_and_accept_authorized_refreshes() {
     let app = AppId::mint();
     let policies = HostPolicies::default();
@@ -65,7 +215,7 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
     let observer = connect(&fixture.admin_url).await;
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND query LIKE 'SELECT app_id FROM %')", &[]).await.unwrap().get(0);
+            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0)", &[]).await.unwrap().get(0);
             if waiting { break; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }

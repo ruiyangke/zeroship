@@ -81,7 +81,51 @@ impl PolicySnapshot {
 pub struct HostPolicies {
     entries: RwLock<BTreeMap<AppId, PolicySnapshot>>,
 }
+
+/// Authority captured for a management attempt. Refreshing the host snapshot
+/// does not extend an operation already waiting on customer storage.
+pub(crate) struct ManagementAuthority {
+    revision: Revision,
+    pub(crate) deadline: Option<Instant>,
+    pub(crate) policy: AppPolicy,
+}
+
+impl ManagementAuthority {
+    pub(crate) fn check(
+        &self,
+        policies: &HostPolicies,
+        app: &AppId,
+    ) -> Result<(), WorkflowServiceError> {
+        if self
+            .deadline
+            .is_some_and(|deadline| deadline <= Instant::now())
+            || policies.management_authority(app)?.revision != self.revision
+        {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+}
+
 impl HostPolicies {
+    pub(crate) fn management_authority(
+        &self,
+        app: &AppId,
+    ) -> Result<ManagementAuthority, WorkflowServiceError> {
+        let entries = self.entries.read().map_err(|_| unavailable())?;
+        let snapshot = entries.get(app).ok_or_else(unavailable)?;
+        let deadline = match snapshot.validity {
+            Validity::Configuration => None,
+            Validity::Until(deadline) if deadline > Instant::now() => Some(deadline),
+            Validity::Until(_) => return Err(unavailable()),
+        };
+        Ok(ManagementAuthority {
+            revision: snapshot.revision,
+            deadline,
+            policy: snapshot.policy.clone(),
+        })
+    }
+
     /// Candidate discovery includes expired assignments so their leases and
     /// abandoned uploads can still be recovered. Mutation resolves policy again.
     pub(crate) fn app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {

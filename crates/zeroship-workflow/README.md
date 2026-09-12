@@ -41,6 +41,12 @@ server coordinates metadata and does not own the journal or payloads. Workers
 may access only creator databases; Control and other platform services may access
 only the control database. Authenticated service contracts carry cross-boundary
 requests without sharing database credentials.
+`AppWorkflows::apply_management` commits coordinator lifecycle commands with
+durable customer-journal receipts. Repeated commands return their recorded
+outcome even after ordinary request cleanup or policy expiry. Changed command
+bodies conflict; infrastructure failures remain retryable. Lifecycle rejection
+and database failure are separate paths, so a failed write cannot become a
+permanent denial. Receipt compaction awaits a coordinator redelivery contract.
 `DeploymentHolds` accepts an authorized platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers
 run inside a host-owned transaction that also fences routing and other deployment

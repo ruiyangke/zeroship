@@ -292,14 +292,25 @@ authenticated Control issuer. Delivery can repeat after a lost response or reach
 another assigned worker; applying it still requires the customer's engine to
 deduplicate by request identity in its own database.
 
-Production management execution must retain its outcome for the coordinator's
-entire redelivery lifetime. The engine's ordinary request receipts expire, while
-a queued coordinator command currently remains pending until acknowledgement.
-Connecting polling directly to `transition` or `restart` would therefore allow a
-lost acknowledgement and delayed retry to repeat a restart after receipt expiry.
-The worker needs durable management receipts, including rejected outcomes,
-before that connection is enabled. Acknowledgements remain closed metadata;
-their durability must not require either service to read the other's database.
+`AppWorkflows::apply_management` retains command outcomes in the customer's
+`__zeroship_workflow_management_receipts` table. Its app-scoped request identity
+and command digest survive ordinary request cleanup and worker replacement.
+Receipts have no expiry: compaction requires an explicit protocol proving the
+coordinator cannot redeliver the command. The row references the app rather than
+the run, so a missing run can have a durable rejection and run deletion cannot
+erase retry protection.
+
+Lifecycle preparation distinguishes rejected decisions from storage failures.
+The worker commits lifecycle mutations and their closed outcome together;
+rejected decisions also receive a receipt. Storage errors, exhausted capacity
+and expired host authority leave the command retryable. Matching receipts replay
+before admission checks, including after policy expiry. Fresh commands use the
+host's raw authorized policy, recheck its revision before mutation and settlement,
+and bound the mutation attempt by its captured lease deadline. A lost commit
+acknowledgement is resolved by reading the receipt on retry. These checks do not
+claim that a concurrent policy update can retract a commit already in flight.
+Production polling integration remains unfinished. Acknowledgements remain
+closed metadata; neither service reads the other's database.
 
 The worker publishes wake-up metadata from a durable intent committed beside
 its own scheduling changes. Publication is retryable and revisioned. A wake-up
