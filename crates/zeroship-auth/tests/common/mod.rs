@@ -2,18 +2,14 @@
 
 #![allow(dead_code)]
 
+pub mod auth_server;
 pub mod database;
 pub mod mock_control;
 pub mod mock_provider;
 
-use std::sync::Arc;
-
-use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_auth::headers::SecurityHeaders;
-use zeroship_auth::server;
 use zeroship_core::config::{Secret, SourceKind};
 
 /// The database every live test in this target uses, or no run at all.
@@ -126,7 +122,7 @@ pub fn op_signing_key() -> ed25519_dalek::SigningKey {
 /// The console origin the test fixture admits via `frame-ancestors` on the
 /// framed login routes (immersive iframe login, design §4.3). The rewritten
 /// clickjacking test reads this from the booted config rather than hard-coding
-/// it, exercising the route-aware `SecurityHeaders` against the live `/login`.
+/// it, exercising the route-aware security headers against the live `/login`.
 #[allow(dead_code)]
 pub const TEST_CONSOLE_ORIGIN: &str = "http://localhost:5173";
 
@@ -419,95 +415,6 @@ pub async fn cleanup_rate_limits_like(pg: &compio_postgres::Client, patterns: &[
                 &[pat],
             )
             .await;
-    }
-}
-
-// ─── Test fixture ────────────────────────────────────────────────────────
-
-/// Common bootstrap: PG client + in-process auth server. Used by
-/// `threat_model`.
-#[allow(dead_code)]
-pub struct Fixture {
-    pub srv: ntex::web::test::TestServer,
-    pub auth_base: String,
-    pub pg: Arc<compio_postgres::Client>,
-    pub http: cyper::Client,
-    pub test_client_id: String,
-    pub test_redirect: &'static str,
-}
-
-impl Fixture {
-    /// Boot a fresh fixture. Returns `None` if no test database is configured.
-    ///
-    /// `client_id_prefix` is used to disambiguate generated client ids across
-    /// concurrent tests / binaries (e.g. `"threat"`, `"enum"`).
-    //
-    // The Fixture holds ntex's `TestServer` + cyper client, both of which
-    // are intentionally `!Send`. Test helper futures here inherit that.
-    #[allow(clippy::future_not_send)]
-    pub async fn boot(client_id_prefix: &str) -> Self {
-        let db_url = crate::common::test_database_url();
-
-        let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
-            .await
-            .expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(e) = pg_connection.run().await {
-                eprintln!("[common::Fixture] pg connection driver: {e}");
-            }
-        })
-        .detach();
-        let pg = Arc::new(pg_client);
-
-        let cfg = Arc::new(test_auth_config(&db_url));
-        let cfg_state = cfg.clone();
-        let db_state = pg.clone();
-        let refresh_pool_state =
-            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-        // Thread the configured console origin into the route-aware security
-        // headers exactly as `server::run` does in prod (§4.3), so the booted
-        // fixture serves the relaxed `frame-ancestors` on the framed routes.
-        let frame_ancestor_origins = cfg.frame_ancestor_origins().to_vec();
-        let srv = web::test::server(move || {
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            let refresh_pool_state = refresh_pool_state.clone();
-            let frame_ancestor_origins = frame_ancestor_origins.clone();
-            async move {
-                web::App::new()
-                    .state(cfg_state)
-                    .state(db_state)
-                    .state(refresh_pool_state)
-                    .middleware(SecurityHeaders::new(frame_ancestor_origins))
-                    .configure(server::configure(false, false))
-            }
-        })
-        .await;
-        let auth_base = srv.url("").trim_end_matches('/').to_string();
-
-        let test_client_id = format!("{client_id_prefix}-{}", Uuid::new_v4().simple());
-        let test_redirect: &'static str = "http://127.0.0.1:9999/cb";
-
-        Self {
-            srv,
-            auth_base,
-            pg,
-            http: cyper::Client::new(),
-            test_client_id,
-            test_redirect,
-        }
-    }
-
-    // `TestServer` + cyper client are `!Send`; see note on `boot`.
-    #[allow(clippy::future_not_send)]
-    pub async fn cleanup(self) {
-        drop(self.srv);
-    }
-
-    // cyper client is `!Send`; see note on `boot`.
-    #[allow(clippy::future_not_send)]
-    pub async fn fresh_challenge(&self) -> String {
-        native_authorize_return_to(&self.test_client_id, self.test_redirect)
     }
 }
 
