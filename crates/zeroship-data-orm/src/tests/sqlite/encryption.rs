@@ -95,7 +95,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                                 .to_vec(),
                             obj.get("ssn")
                                 .and_then(|v| v.as_str())
-                                .expect("masked sibling stays on the field's own column")
+                                .expect("mask stays on the field's display column")
                                 .to_string(),
                         ),
                     )
@@ -152,7 +152,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 let (prepared_ciphertext, prepared_masked) = expected_by_id
                     .get(&id)
                     .expect("stored row id should match prepared docs");
-                assert_eq!(masked, *prepared_masked, "masked sibling must be persisted");
+                assert_eq!(masked, *prepared_masked, "mask must be persisted");
                 assert_ne!(
                     stored_blob,
                     b"123-45-6789".to_vec(),
@@ -163,8 +163,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                     b"987-65-4321".to_vec(),
                     "stored bytes must not equal raw plaintext",
                 );
-                // The field's own column (`ssn`) must never hold the real value:
-                // it is the masked sibling's new home after the storage flip.
+                // The display column must never hold the real value.
                 assert_ne!(
                     masked, "123-45-6789",
                     "ssn (field's own column) must not hold plaintext",
@@ -459,7 +458,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 &schema,
                 &doc,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             assert!(
                 !bq.sql.contains("decode("),
                 "SQLite dialect must not emit `decode(...)::bytea`: {}",

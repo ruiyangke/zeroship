@@ -1,14 +1,12 @@
-//! Runtime query grammar, collection SQL compilation, and catalog contracts.
+//! Validated SQL statements, registered compilers, storage codecs, and catalog contracts.
 //!
-//! The typed plan grammar validates identifiers and bounds predicates. The SDK
-//! filter decoder feeds that grammar on the ORM execution path. The compiler
-//! applies descriptor-based projections and value conversions for each dialect.
-//! SQL is a compiler output; the operation grammar has no raw SQL input node.
+//! Rust expressions and decoded SDK inputs resolve into the same statement
+//! grammar. SQL is compiler output; the grammar has no raw SQL input node.
 //!
 //! Catalog types and sentinel codecs describe what migration-created tables
 //! store. DDL, schema differencing, and migration execution belong exclusively
-//! to the migration engine. This module performs no database I/O. Plans are
-//! local values and do not derive serialization traits.
+//! to the migration engine. This module performs no database I/O, and statements
+//! do not derive serialization traits.
 
 pub mod ident;
 pub mod joins;

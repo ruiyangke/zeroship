@@ -43,7 +43,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
         );
         assert!(
             sql.contains("\"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */"),
-            "the field's own column must be the masked sibling and carry the mask sentinel: {sql}"
+            "the field's display column must carry the mask sentinel: {sql}"
         );
         // The sentinel rides the masked column only - the raw column is not
         // itself masked (it holds the real value), so it must carry no mask
@@ -132,17 +132,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
 }
 
 /// **A default SELECT serves the masked column**: a default
-/// read against a masked-column DDL must name the field's own column
-/// directly - no AS-rewrite; the sibling-alias scheme is gone since the
-/// storage flip - and must NEVER reference the raw column. Since the
-/// field's own column is now where a dual-write leaves the mask, a
-/// schema-blind SELECT already reads the mask with no special casing.
-/// End-to-end gate: drive a dual-write through the dialect-aware INSERT
-/// builder (mirroring what `mask_pass::relocate_masked_columns`
-/// produces), then build a `find` SQL via `build_find_with_schema` with
-/// the cached schema, run it through the SQLite session, and assert the
-/// engine returns the masked string under the field's own column - and
-/// that the real value is nowhere in the row.
+/// read names the field's display column and never selects raw storage.
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     Host::test(|host| {
@@ -195,7 +185,7 @@ fn a_select_serves_the_masked_column_sqlite() {
                 &schema,
                 &doc,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             let param_refs = &bq.params;
             let client = backend
                 .fixture_session("app_demo")
@@ -220,7 +210,7 @@ fn a_select_serves_the_masked_column_sqlite() {
                 None,
                 &schema,
             )
-            .expect("build_find_with_schema");
+            .expect("compile find");
             let select_clause = bq
                 .sql
                 .split(" FROM ")
@@ -293,7 +283,7 @@ fn aliased_select_skips_kind_none_sqlite() {
             None,
             &schema,
         )
-        .expect("build_find_with_schema");
+        .expect("compile find");
         // Schema-aware reads now always expand to the allowlisted public
         // column set, even when every mask is `kind: "none"`.
         assert!(

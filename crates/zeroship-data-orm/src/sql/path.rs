@@ -1,35 +1,14 @@
 //! Field paths: a column, optionally with nested JSON access.
 //!
-//! # Why the segments exist when nothing lowers them yet
-//!
-//! SC-3 pins "field paths (including nested access)" into the shared expression
-//! grammar deliberately, and the reason it gives is the one that applies here:
-//! the families are separable and can each be shaped by their own port, but the
-//! expression nodes underneath them cannot, so whichever family ports first
-//! would otherwise fix the shape for every family after it.
-//!
-//! `query.rs` builds **no** nested access today - the string `->>` occurs zero
-//! times in its 12,104 lines - so a lowering written now would be new surface
-//! rather than a port, and it would have to settle a `PostgreSQL` operator-
-//! resolution question (`jsonb ->> unknown` is ambiguous between the `text` and
-//! `integer` overloads) that cannot be settled without a server to try it on.
-//!
-//! So the shape is pinned and the lowering is **refused**, with a typed error
-//! from the backend module - which is SC-3's decision 2 applied to its own
-//! grammar rather than only to dialect gaps. A caller gets
-//! [`crate::sql::render::postgres::RenderError::Unsupported`] naming the node, never a guess.
+//! The grammar retains nested segments, but ORM reads currently refuse them
+//! until their portable typing and compilation contract is implemented.
 
 use crate::sql::ident::Ident;
 use core::fmt;
 
 /// The deepest nested access a path may express.
 ///
-/// A bound is needed because the rendered expression grows one operator per
-/// segment, and an unbounded one is a way to make the planner emit an
-/// arbitrarily large statement from a small request. Eight matches the depth
-/// bound the filter walker already applies (`MAX_FILTER_NESTING_DEPTH`,
-/// `query.rs:604`) closely enough to be recognisable, and nothing lowers a
-/// nested path yet, so it binds no shipped behaviour.
+/// The deepest nested access accepted by the grammar.
 pub const MAX_PATH_SEGMENTS: usize = 8;
 
 /// The longest a single JSON key may be.
@@ -40,9 +19,7 @@ pub const MAX_JSON_KEY_BYTES: usize = 255;
 /// This is **not** an [`Ident`] and must not be validated as one: it names a
 /// key inside a document, not a database object, so it is legitimately any
 /// UTF-8 string and the 63-byte ASCII identifier fence would be wrong. It is
-/// still a validated newtype, because the alternative is a bare `String`
-/// arriving at a renderer - which is the shape this whole crate exists to
-/// remove.
+/// still a validated newtype so compilers never receive an unchecked key.
 ///
 /// When a lowering is written, a key must be emitted as a **bind parameter**
 /// (`"col" ->> $1`), never interpolated. That keeps it a value, which is what

@@ -251,7 +251,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 &schema,
                 &doc,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             let client = backend
                 .fixture_session(app_id)
                 .await
@@ -358,8 +358,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
                 .execute_fixture(
                     "CREATE TABLE \"app_unmask_user\".\"users\" (\
                      id  TEXT PRIMARY KEY, \
-                     ssn BLOB, \
-                     ssn_masked TEXT NOT NULL DEFAULT '***'\
+                     ssn BLOB\
                  )",
                     &[],
                 )
@@ -677,7 +676,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 &schema,
                 &doc,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             let client = backend
                 .fixture_session(app_id)
                 .await
@@ -984,9 +983,7 @@ fn unmask_ignores_policy_sidecar_files() {
 }
 
 /// **Malformed sentinel does not poison introspection** on
-/// SQLite: a sibling carrying a garbled sentinel parses to "no mask"
-/// on the parent (and a `tracing::warn!` fires; the test only checks
-/// the introspection shape).
+/// SQLite: a field carrying a garbled sentinel parses to no mask metadata.
 #[test]
 fn malformed_mask_sentinel_skipped_on_sqlite() {
     Host::test(|host| {
@@ -1000,8 +997,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
             .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      \"id\" INTEGER PRIMARY KEY, \
-                     \"ssn\" TEXT, \
-                     \"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic_radiation,classification=spi */\
+                     \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic_radiation,classification=spi */\
                  )",
                 &[],
             )

@@ -239,16 +239,7 @@ fn native_scalar(rows: Vec<Value>, column: &str) -> ScalarRead<Value> {
 
 #[cfg(test)]
 mod routed_read_tests {
-    //! The SQLite half of the routed raw-column read.
-    //!
-    //! The PostgreSQL half is bound live by
-    //! `zeroship-data-v8/tests/unmask_tx_lane.rs`, which needs a server.
-    //! SQLite needs none, and it is the tier `pnpm dev` runs on - so the arm
-    //! that would otherwise ship unbound is this one. It is a REAL divergence
-    //! there and not a formality: SC-2 Decision 1 gave the session actor a
-    //! shared `op_conn` plus a transaction connection per app, so an unmask
-    //! sent to `op_conn` inside a transaction cannot see that transaction's
-    //! writes, exactly as on PostgreSQL.
+    //! SQLite transaction routing for protected raw-column reads.
 
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -257,7 +248,7 @@ mod routed_read_tests {
     use crate::tests::fixtures::DatabaseFixture;
     use crate::tx_route::CapturedRoute;
 
-    /// A raw-sibling read inside a transaction must see that transaction's own
+    /// A raw-column read inside a transaction must see that transaction's own
     /// write; the same read outside it must not.
     ///
     /// The two arms differ in ONE token - `in_tx` on the route - so a failure
@@ -294,6 +285,14 @@ mod routed_read_tests {
                 .expect("CREATE TABLE people");
 
             let handle = BackendHandle::new(Rc::clone(&backend));
+            let schema = crate::value!({
+                "id": {"type":"string", "primaryKey":true},
+                "ssn": {
+                    "type":"string",
+                    "mask":{"kind":"last4", "classification":"spi"},
+                    "storage":{"valueColumn":"ssn", "rawColumn":"__zs_raw__ssn"}
+                }
+            });
 
             let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
             crate::transaction::exec_begin_or_savepoint(false, None, app,
@@ -314,7 +313,7 @@ mod routed_read_tests {
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
+                &schema,
             )
             .await
             .expect("the pooled read itself must succeed");
@@ -335,7 +334,7 @@ mod routed_read_tests {
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
+                &schema,
             )
             .await
             .expect("a routed read inside the transaction must reach the row");

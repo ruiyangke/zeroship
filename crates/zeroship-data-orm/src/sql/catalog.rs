@@ -107,7 +107,7 @@ pub struct MaskMeta {
     pub classification: Classification,
     /// Conventional raw-column name derived during catalog recovery.
     /// Runtime reads and writes use the installed descriptor’s storage mapping.
-    pub sibling_column: String,
+    pub raw_column: String,
 }
 
 /// Built-in mask strategy. `None` disables masking while retaining encryption.
@@ -129,7 +129,7 @@ pub enum MaskKind {
     DateYear,
     /// `"198?-**-**"` — preserve decade. Coarser-grained analytics.
     DateDecade,
-    /// Explicit opt-out: no sibling emission, no mask wrap on read.
+    /// Explicit opt-out: no raw storage column and no mask wrapper on read.
     /// Used by encrypted columns the creator wants plaintext-on-read
     /// for (e.g. background-job-only read paths).
     None,
