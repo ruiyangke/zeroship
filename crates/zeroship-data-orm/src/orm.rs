@@ -555,7 +555,7 @@ enum Plan {
     Aggregate {
         query: CompiledQuery,
         groups: Vec<String>,
-        columns: Option<Vec<String>>,
+        projection: Option<crud::aggregate::AggregateProjection>,
     },
     Distinct {
         query: CompiledQuery,
@@ -663,11 +663,11 @@ impl PreparedOperation {
                 &binding, &route, collection, filter, &options,
             )?),
             Operation::Aggregate { pipeline, options } => {
-                let (query, columns) =
+                let (query, projection) =
                     crud::plan_aggregate(&binding, &route, collection, &pipeline, &options)?;
                 Plan::Aggregate {
                     query,
-                    columns,
+                    projection,
                     groups: crud::aggregate_group_fields(&pipeline),
                 }
             }
@@ -850,9 +850,9 @@ impl PreparedOperation {
             Plan::Aggregate {
                 query,
                 groups,
-                columns,
+                projection,
             } => Box::pin(crud::exec_aggregate_read(
-                binding, collection, route, query, groups, columns,
+                binding, collection, route, query, groups, projection,
             ))
             .await?
             .into(),
