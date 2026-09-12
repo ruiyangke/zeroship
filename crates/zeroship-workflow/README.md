@@ -75,8 +75,11 @@ Schedules for unavailable code keep their due frontier without admitting runs
 or consuming occurrences. Repair resumes the configured catch-up behavior;
 unavailable deployments do not occupy the schedule discovery budget.
 Native contracts cover these boundaries against SQLite, PostgreSQL and S3.
-Worker and Vite snapshot producers, snapshot collection and the worker/CLI
-composition remain unfinished.
+The Vite plugin's `workflow-bundle.ts` builds local workflow archives through
+the deployment compiler and `.zship` packer, retaining static and dynamic module
+dependencies and the captured runtime descriptor. Each build discovers fresh
+declarations. Dev-server publication, worker/CLI ingestion and snapshot
+collection remain unfinished.
 
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,
