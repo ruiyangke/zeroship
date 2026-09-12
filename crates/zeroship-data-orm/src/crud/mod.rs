@@ -23,6 +23,7 @@ mod aggregate;
 mod bytes_pass;
 mod delete;
 mod identity;
+pub(crate) mod internal;
 pub(crate) mod insert;
 pub(crate) mod predicate;
 mod read;

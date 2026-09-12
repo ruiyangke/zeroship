@@ -13,9 +13,10 @@
 
 use zeroship_data_orm::sql::{Ident, IdentError, IdentRole};
 
-const ALL_ROLES: [IdentRole; 7] = [
+const ALL_ROLES: &[IdentRole] = &[
     IdentRole::Namespace,
     IdentRole::Collection,
+    IdentRole::StoredCollection,
     IdentRole::Column,
     IdentRole::StoredColumn,
     IdentRole::Alias,
@@ -38,6 +39,7 @@ fn _all_roles_covers_the_enum(role: IdentRole) {
     match role {
         IdentRole::Namespace
         | IdentRole::Collection
+        | IdentRole::StoredCollection
         | IdentRole::Column
         | IdentRole::StoredColumn
         | IdentRole::Alias
@@ -68,7 +70,7 @@ fn no_role_accepts_text_that_is_not_an_identifier() {
         "*",
     ];
     let mut ruled_on = 0_usize;
-    for role in ALL_ROLES {
+    for &role in ALL_ROLES {
         for vector in vectors {
             let outcome = Ident::parse_as(vector, role);
             assert!(
@@ -97,7 +99,7 @@ fn no_role_accepts_text_that_is_not_an_identifier() {
 fn ordinary_names_are_accepted() {
     let vectors = ["users", "user_profiles", "a", "created_at", "x1", "A_B_9"];
     let mut ruled_on = 0_usize;
-    for role in ALL_ROLES {
+    for &role in ALL_ROLES {
         for vector in vectors {
             assert!(
                 Ident::parse_as(vector, role).is_ok(),

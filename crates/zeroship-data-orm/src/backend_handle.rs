@@ -11,7 +11,7 @@ use crate::{
 };
 use std::{any::Any, ops::Deref, rc::Rc, sync::Arc};
 
-pub use crate::sql::internal::AUDIT_UNMASK_TABLE;
+pub use crate::crud::internal::AUDIT_UNMASK_TABLE;
 
 /// A registered backend, erased once at the host boundary. Models never name it.
 #[derive(Clone, Debug)]
@@ -79,7 +79,8 @@ impl BackendHandle {
         attach_alias: &str,
         row: &UnmaskAuditRow<'_>,
     ) -> Result<(), DbError> {
-        let namespace = self.namespace(attach_alias, schema);
+        let namespace = SchemaName::new(self.namespace(attach_alias, schema))
+            .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
         let params = vec![
             row.actor_id.into(),
             row.actor_role.into(),
@@ -91,7 +92,8 @@ impl BackendHandle {
             row.reason.into(),
             row.outcome.into(),
         ];
-        let query = crate::sql::internal::unmask_audit(namespace, self.dialect(), params);
+        let query =
+            crate::crud::internal::unmask_audit(&namespace, params, self.sql_registration())?;
         self.query(attach_alias, schema, &query.sql, &query.params)
             .await?;
         Ok(())
@@ -184,7 +186,8 @@ pub async fn read_raw_column_value(
     row_pk: &str,
     schema: &Value,
 ) -> Result<ScalarRead<Value>, DbError> {
-    let namespace = route.backend().namespace(route.app_id(), route.schema());
+    let namespace = SchemaName::new(route.backend().namespace(route.app_id(), route.schema()))
+        .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
     let key_column = "id";
     let key_value = match schema[key_column]["type"].as_str() {
         Some("int" | "integer" | "bigInt" | "bigint") => {
@@ -194,19 +197,16 @@ pub async fn read_raw_column_value(
         }
         _ => Value::from(row_pk),
     };
-    let physical_key = schema[key_column]["storage"]["valueColumn"]
-        .as_str()
-        .unwrap_or(key_column);
-    let query = crate::sql::internal::raw_column(
-        namespace,
+    let query = crate::crud::internal::raw_column(
+        &namespace,
         collection,
         raw_column,
-        physical_key,
         key_value,
-        route.dialect(),
-    );
+        schema,
+        route.sql_registration(),
+    )?;
     let rows = crate::exec::run_sql(route, &query.sql, &query.params).await?;
-    Ok(native_scalar(rows, raw_column))
+    Ok(native_scalar(rows, "_raw"))
 }
 pub async fn read_raw_column_bytes(
     route: &TxRoute,
