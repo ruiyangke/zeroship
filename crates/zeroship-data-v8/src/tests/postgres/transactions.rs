@@ -1989,14 +1989,14 @@ const _procedures = { seed, failBulk };
         1,
         "the PG fan-out must execute one non-empty target probe: {counters:?}"
     );
-    let expected_probe_suffix = format!(
-        " LIMIT {} FOR UPDATE",
-        zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1
-    );
     assert!(
-        counters[0].ends_with(&expected_probe_suffix),
+        counters[0].sql.ends_with(" LIMIT $2 FOR UPDATE"),
         "the PG target probe must cap and lock the rows it will update: {counters:?}"
     );
+    let expected_limit = zeroship_data_orm::value::Value::from(
+        zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1,
+    );
+    assert_eq!(counters[0].params.last(), Some(&expected_limit));
     let mut caller_visible: Vec<(String, i64)> = after
         .iter()
         .map(|row| {

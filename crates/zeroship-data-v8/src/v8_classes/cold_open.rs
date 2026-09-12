@@ -310,7 +310,7 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
 
     let collection = cold_collection(scope, app_id, "users");
     let filter = js_json(scope, "{}");
-    let opts = js_json(scope, r#"{ "unmask": { "columns": ["ssn"] } }"#);
+    let opts = js_json(scope, r#"{ "unmask": ["ssn"] }"#);
     call_js_method(scope, collection, "find", &[filter, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_find", &state);
