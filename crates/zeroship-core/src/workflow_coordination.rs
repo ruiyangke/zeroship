@@ -93,6 +93,7 @@ pub enum WorkerState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RegisterWorker {
+    /// Concurrent app placements; execution slot capacity stays worker-local.
     pub capacity: NonZeroU32,
     pub state: WorkerState,
 }
@@ -125,6 +126,14 @@ pub struct Assignment {
     pub worker_id: WorkerId,
     pub revision: Revision,
     pub expires_at: UnixMillis,
+}
+
+/// A worker may renew only its current, unexpired placement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssignedScope {
+    pub app_id: AppId,
+    pub assignment_revision: Revision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,4 +200,12 @@ pub struct AcknowledgeManagement {
     pub app_id: AppId,
     pub assignment_revision: Revision,
     pub outcome: ManagementOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementReceipt {
+    pub app_id: AppId,
+    pub request_id: RequestId,
+    pub outcome: Option<ManagementOutcome>,
 }

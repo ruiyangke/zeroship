@@ -2,6 +2,18 @@ use crate::{cargo, checked, root, Result};
 use std::process::Command;
 
 pub fn run() -> Result<()> {
+    for schema in [
+        "crates/zeroship-workflow/schema",
+        "crates/zeroship-workflow-server/schema",
+    ] {
+        checked(
+            Command::new("node")
+                .current_dir(root())
+                .arg(format!("{schema}/generate.mjs"))
+                .arg("--check"),
+            "workflow migration compiler artifacts",
+        )?;
+    }
     checked(
         cargo().args([
             "test",
@@ -23,6 +35,18 @@ pub fn run() -> Result<()> {
             "zeroship-workflow-scheduler",
         ]),
         "workflow engine, binding and scheduler tests",
+    )?;
+    checked(
+        cargo().args([
+            "test",
+            "-p",
+            "zeroship-workflow-server",
+            "--test",
+            "coordination_wire",
+            "--test",
+            "coordinator",
+        ]),
+        "workflow coordinator metadata contracts",
     )?;
     checked(
         cargo().args([
