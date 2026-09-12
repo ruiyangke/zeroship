@@ -29,7 +29,7 @@ impl StorageType {
     fn accepts(self, value: &Value) -> bool {
         match self {
             Self::Boolean => matches!(value, Value::Bool(_)),
-            Self::Integer => value.as_i64().is_some(),
+            Self::Integer => matches!(value, Value::Number(value) if value.as_i64().is_some()),
             Self::Real | Self::Decimal => match value {
                 Value::Number(_) => true,
                 Value::Decimal(value) => valid_decimal(value),
