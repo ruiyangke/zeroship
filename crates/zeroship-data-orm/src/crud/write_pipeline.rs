@@ -80,6 +80,7 @@ fn validate_upsert_conflict_fields(
 ) -> Result<(), DbError> {
     let fields = compile::parse_conflict_fields(conflict_fields)?;
     let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
+    let protected = upsert_requires_conflict_probe(schema, doc);
     for field in fields {
         if assignments
             .columns()
@@ -105,6 +106,12 @@ fn validate_upsert_conflict_fields(
                 format!(
                     "upsert conflict field '{field}' must be declared and supplied in the document"
                 ),
+            ));
+        }
+        if protected && doc.get(field).is_some_and(Value::is_null) {
+            return Err(DbError::validation(
+                "protected_upsert_nullable_conflict",
+                "a protected upsert cannot use a null conflict value",
             ));
         }
     }

@@ -22,6 +22,7 @@ mod protected_updates;
 mod schema_updates;
 mod sql_registration;
 mod timestamp;
+mod upsert_contract;
 mod typed_arrays;
 mod typed_updates;
 mod update_operators;

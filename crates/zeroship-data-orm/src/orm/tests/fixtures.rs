@@ -254,6 +254,42 @@ impl CollectionFixture {
         .unwrap();
     }
 
+    pub async fn add_unique_index(&self, collection: &str, fields: &[&str]) {
+        let namespace = self.database.binding.schema().as_str();
+        let name = format!("{collection}_{}_fixture", fields.join("_"));
+        let columns = fields
+            .iter()
+            .map(|field| crate::sql::compile::quote_ident(field))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if let Some(file) = &self.sqlite_file {
+            let sql = format!(
+                "CREATE UNIQUE INDEX {} ON {} ({columns})",
+                crate::sql::compile::quote_ident(&name),
+                crate::sql::compile::quote_ident(collection),
+            );
+            rusqlite::Connection::open(file)
+                .unwrap()
+                .execute_batch(&sql)
+                .unwrap();
+        } else {
+            let sql = format!(
+                "CREATE UNIQUE INDEX {} ON {}.{} ({columns})",
+                crate::sql::compile::quote_ident(&name),
+                crate::sql::compile::quote_ident(namespace),
+                crate::sql::compile::quote_ident(collection),
+            );
+            self.postgres
+                .as_ref()
+                .unwrap()
+                .0
+                .pool()
+                .batch_execute(&sql)
+                .await
+                .unwrap();
+        }
+    }
+
     pub async fn close(self) {
         let Self {
             database,
