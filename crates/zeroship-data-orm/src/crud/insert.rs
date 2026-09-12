@@ -41,7 +41,7 @@ pub(crate) fn build_many(
     schema: &Value,
     documents: Value,
     registration: &SqlRegistration,
-) -> Result<CompiledQuery, QueryError> {
+) -> Result<Vec<CompiledQuery>, QueryError> {
     let Value::Array(documents) = documents else {
         return Err(invalid("insertMany documents must be an array"));
     };
@@ -55,7 +55,42 @@ pub(crate) fn build_many(
             _ => Err(invalid("insertMany documents must be objects")),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    compile(namespace, collection, schema, documents, registration)
+    if registration.support().default_expression || documents_share_columns(&documents) {
+        return compile(namespace, collection, schema, documents, registration)
+            .map(|query| vec![query]);
+    }
+
+    let mut groups: Vec<Vec<Record>> = Vec::new();
+    for document in documents {
+        let columns: BTreeSet<_> = document.keys().cloned().collect();
+        if groups.last().is_some_and(|group| {
+            group
+                .first()
+                .is_some_and(|first| first.keys().cloned().collect::<BTreeSet<_>>() == columns)
+        }) {
+            groups
+                .last_mut()
+                .expect("existing insert group")
+                .push(document);
+        } else {
+            groups.push(vec![document]);
+        }
+    }
+    groups
+        .into_iter()
+        .map(|group| compile(namespace, collection, schema, group, registration))
+        .collect()
+}
+
+fn documents_share_columns(documents: &[Record]) -> bool {
+    let Some(first) = documents.first() else {
+        return true;
+    };
+    let first: BTreeSet<_> = first.keys().collect();
+    documents
+        .iter()
+        .skip(1)
+        .all(|document| document.keys().collect::<BTreeSet<_>>() == first)
 }
 
 fn compile(
@@ -93,11 +128,10 @@ fn compile(
         let mut row = Vec::with_capacity(columns.len());
         for name in &names {
             let input = resolved.inputs.get(name).expect("resolved insert column");
-            let value = document.shift_remove(name).unwrap_or(Value::Null);
-            row.push(if value.is_null() {
-                Expression::Null
-            } else {
-                Expression::Bind(registration.encode(input.storage, value)?)
+            row.push(match document.shift_remove(name) {
+                None => Expression::Default,
+                Some(Value::Null) => Expression::Null,
+                Some(value) => Expression::Bind(registration.encode(input.storage, value)?),
             });
         }
         rows.push(row);
@@ -116,4 +150,59 @@ fn compile(
 
 fn invalid(message: &str) -> QueryError {
     QueryError::InvalidFilter(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insert_many_distinguishes_absent_fields_from_null() {
+        let queries = build_many(
+            &SchemaName::new("app").unwrap(),
+            "entries",
+            &crate::value!({
+                "id":{"type":"string","primaryKey":true},
+                "nickname":{"type":"string"}
+            }),
+            crate::value!([
+                {"id":"entry_a","nickname":null},
+                {"id":"entry_b"}
+            ]),
+            &SqlRegistration::postgres(),
+        )
+        .unwrap();
+        let query = &queries[0];
+
+        assert!(query.sql().contains("VALUES ($1, NULL), ($2, DEFAULT)"));
+        assert_eq!(
+            query.params(),
+            &[crate::value!("entry_a"), crate::value!("entry_b")]
+        );
+    }
+
+    #[test]
+    fn sqlite_groups_heterogeneous_rows_without_default_expressions() {
+        let queries = build_many(
+            &SchemaName::new("app").unwrap(),
+            "entries",
+            &crate::value!({
+                "id":{"type":"string","primaryKey":true},
+                "nickname":{"type":"string"}
+            }),
+            crate::value!([
+                {"id":"entry_a","nickname":null},
+                {"id":"entry_b"}
+            ]),
+            &SqlRegistration::sqlite(),
+        )
+        .unwrap();
+
+        assert_eq!(queries.len(), 2);
+        assert!(queries.iter().all(|query| !query.sql().contains("DEFAULT")));
+        assert!(queries[0]
+            .sql()
+            .contains("(\"id\", \"nickname\") VALUES ($1, NULL)"));
+        assert!(queries[1].sql().contains("(\"id\") VALUES ($1)"));
+    }
 }

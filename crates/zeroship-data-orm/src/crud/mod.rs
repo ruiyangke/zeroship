@@ -470,14 +470,8 @@ pub async fn run_insert_many(
         .sql_registration()
         .check(&insert::requirements(&schema))
         .map_err(compile::QueryError::from)?;
-    let frame;
-    let route = if identity::requires_allocation(&schema, &docs) {
-        frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
-        frame.as_ref().expect("opened write frame").route()
-    } else {
-        frame = None;
-        &route
-    };
+    let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
+    let route = frame.route();
     let result = async {
         let mut docs = docs;
         prepare_insert_many_docs_for_binding(
@@ -489,7 +483,7 @@ pub async fn run_insert_many(
             actor_id.as_deref(),
         )
         .await?;
-        let bq = insert::build_many(
+        let queries = insert::build_many(
             binding.schema(),
             &coll,
             &schema,
@@ -497,14 +491,19 @@ pub async fn run_insert_many(
             route.sql_registration(),
         )
         .map_err(DbError::from)?;
-        let rows = exec_mutation_with_emit(
-            bq,
-            route,
-            &coll,
-            zeroship_data_orm::cdc::ChangeOp::Insert,
-            &binding,
-        )
-        .await?;
+        let mut rows = Vec::new();
+        for query in queries {
+            rows.extend(
+                exec_mutation_with_emit(
+                    query,
+                    route,
+                    &coll,
+                    zeroship_data_orm::cdc::ChangeOp::Insert,
+                    &binding,
+                )
+                .await?,
+            );
+        }
         read_pipeline::apply(
             route,
             &binding,
@@ -515,10 +514,7 @@ pub async fn run_insert_many(
         .await
     }
     .await;
-    match frame {
-        Some(frame) => frame.finish(result).await,
-        None => result,
-    }
+    frame.finish(result).await
 }
 
 // ---------------------------------------------------------------------------
