@@ -18,7 +18,7 @@
 //! - **The rank fence.** An actor may act only on a strictly lower rank with at
 //!   least equal billing authority. Each refusal is paired with a control that
 //!   differs in ONE variable, so a green is a result rather than a coincidence.
-//! - **The last owner.** Not a CHECK - the claim is about a set. What the tests
+//! - **The last owner.** Not a CHECK - the claim is about a set. The tests
 //!   bind both the predicate and concurrent departures queued behind an
 //!   observed PostgreSQL row lock in the `concurrency` module.
 //! - **Invite redemption.** The schema froze the inviter's rank at issue time
