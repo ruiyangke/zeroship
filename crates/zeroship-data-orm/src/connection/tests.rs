@@ -5,6 +5,35 @@ use std::sync::{
     Arc,
 };
 
+struct SingleReadFactory {
+    calls: Arc<AtomicUsize>,
+    registration: crate::sql::registration::SqlRegistration,
+}
+
+impl BackendFactory for SingleReadFactory {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        assert_eq!(self.calls.fetch_add(1, Ordering::SeqCst), 0);
+        self.registration.clone()
+    }
+
+    fn connect(&self, _: ProjectKeySource) -> LocalBoxFuture<'_, Result<BackendHandle, DbError>> {
+        async { Err(DbError::config("fixture", "connection is not expected")) }.boxed_local()
+    }
+}
+
+#[test]
+fn connection_factory_captures_the_sql_registration_once() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let _factory = ConnectionFactory::new(
+        "single-read",
+        SingleReadFactory {
+            calls: calls.clone(),
+            registration: crate::sql::registration::SqlRegistration::sqlite(),
+        },
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 struct ControlledFactory {
     inner: ConnectionFactory,
     calls: Arc<AtomicUsize>,

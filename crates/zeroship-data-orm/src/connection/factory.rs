@@ -59,8 +59,7 @@ impl ConnectionFactory {
     /// that cannot safely share a backend, including credentials and routing.
     pub fn new(identity: &str, factory: impl BackendFactory) -> Self {
         let registration = factory.sql_registration();
-        Self::with_sql(identity, factory, registration)
-            .expect("factory SQL registration matches its execution family")
+        Self::custom(identity, factory, registration)
     }
     /// Register compiler and storage codecs with a custom connection factory.
     pub fn with_sql(
@@ -74,7 +73,14 @@ impl ConnectionFactory {
                 "connection factory and SQL registration use different SQL families",
             ));
         }
-        Ok(Self {
+        Ok(Self::custom(identity, factory, registration))
+    }
+    fn custom(
+        identity: &str,
+        factory: impl BackendFactory,
+        registration: crate::sql::registration::SqlRegistration,
+    ) -> Self {
+        Self {
             identity: ConnectionIdentity::new(
                 &format!("custom\0{identity}"),
                 registration.identity(),
@@ -82,7 +88,7 @@ impl ConnectionFactory {
             factory: Arc::new(factory),
             registration,
             url: None,
-        })
+        }
     }
     /// Validate built-in configuration without opening a database.
     pub fn for_url(url: &str) -> Result<Self, DbError> {
