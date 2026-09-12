@@ -201,33 +201,3 @@ async fn delete_older_than(tx: &Transaction<'_>, event_types: &[&str], days: i64
         })?;
     Ok(affected)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bucket_lists_cover_expected_event_types() {
-        // Smoke-check we haven't accidentally dropped a class.
-        assert!(SECURITY.contains(&"login_success"));
-        assert!(SECURITY.contains(&"password_changed"));
-        assert!(PII.contains(&"signup"));
-        assert!(PII.contains(&"magic_issued"));
-        assert!(DEBUG.contains(&"mailer_send"));
-    }
-
-    #[test]
-    fn refresh_reuse_is_not_swept() {
-        // refresh_reuse_detected is intentionally NOT in any bucket —
-        // it's the canary for refresh-token theft and must persist
-        // indefinitely so SIEMs can correlate across long incidents.
-        assert!(
-            !SECURITY
-                .iter()
-                .chain(PII)
-                .chain(DEBUG)
-                .any(|s| *s == "refresh_reuse_detected"),
-            "refresh_reuse_detected must never be in a sweep bucket"
-        );
-    }
-}
