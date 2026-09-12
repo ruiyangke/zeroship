@@ -155,6 +155,62 @@ fn invalid(message: &str) -> QueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::{
+        compiler::{CompileError, SqlCompiler, SqliteCompiler},
+        registration::SqlStorageCodecs,
+        statement::StorageType,
+    };
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    #[derive(Clone)]
+    struct CountingCodecs(Arc<AtomicUsize>);
+
+    impl SqlStorageCodecs for CountingCodecs {
+        fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+            SqlRegistration::sqlite().storage_type(definition)
+        }
+
+        fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            SqlRegistration::sqlite().encode(storage, value)
+        }
+
+        fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+            SqlRegistration::sqlite().decode(storage, value)
+        }
+    }
+
+    #[test]
+    fn insert_values_cross_the_registered_codec_once_and_json_stays_native() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let compiler = SqliteCompiler;
+        let registration = SqlRegistration::new(
+            "counting-codecs",
+            crate::sql::registration::SQLITE_FAMILY,
+            compiler,
+            CountingCodecs(calls.clone()),
+            compiler.support(),
+        )
+        .unwrap();
+        let queries = build_many(
+            &SchemaName::new("app").unwrap(),
+            "entries",
+            &crate::value!({
+                "id":{"type":"string","primaryKey":true},
+                "payload":{"type":"json"}
+            }),
+            crate::value!([{"id":"entry_a","payload":{"nested":[true]}}]),
+            &registration,
+        )
+        .unwrap();
+
+        let params: Vec<_> = queries.iter().flat_map(|query| query.params()).collect();
+        assert_eq!(calls.load(Ordering::Relaxed), params.len());
+        assert!(params.iter().any(|value| matches!(value, Value::Object(_))));
+    }
 
     #[test]
     fn insert_many_distinguishes_absent_fields_from_null() {

@@ -2,7 +2,7 @@
 //!
 //! The public API is [`orm`]: deployment-bound database and collection handles,
 //! Rust model mapping, and the prepared operations used by the V8 adapter.
-//! [`crud`] applies system fields, masking, encryption and result decoding.
+//! [`crud`] applies descriptor generators, masking, encryption and result decoding.
 //! [`transaction`] and [`exec`] own transaction state and routed statements.
 //! [`backend_handle`] registers drivers behind shared contracts; this crate has no
 //! dependency on V8 or the worker adapter.
@@ -27,8 +27,6 @@ zeroship_core::declare_env_consumer!(
     target = "zeroship-data-orm",
     scope = "data_orm");
 
-pub mod sql;
-pub mod value;
 pub(crate) mod assignments;
 pub mod backend;
 pub mod backend_handle;
@@ -52,10 +50,12 @@ pub mod orm;
 pub mod protection;
 pub(crate) mod schema_cache;
 pub mod search;
+pub mod sql;
 pub mod storage;
 pub mod transaction;
 pub(crate) mod tx_lanes;
 pub mod tx_route;
+pub mod value;
 pub use connection::ConnectOptions;
 pub use orm::{Collection, Database, Value};
 

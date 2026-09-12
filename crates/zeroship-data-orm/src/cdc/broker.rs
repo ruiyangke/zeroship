@@ -943,7 +943,7 @@ pub fn message_to_json(msg: &SubscriptionMessage) -> String {
     }
 }
 
-/// Remove protected storage names while retaining visible system fields.
+/// Remove protected storage names while retaining visible declared fields.
 /// Events carry no descriptor, so this uses the platform’s reserved storage prefix.
 fn creator_visible_columns(columns: &[String]) -> Vec<String> {
     columns

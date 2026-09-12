@@ -206,7 +206,7 @@ pub enum Classification {
     Phi,
     /// PCI — card numbers, CVV, magnetic stripe data (PCI-DSS scope).
     Pci,
-    /// Internal — platform-internal metadata, system field overrides.
+    /// Internal application metadata.
     Internal,
 }
 

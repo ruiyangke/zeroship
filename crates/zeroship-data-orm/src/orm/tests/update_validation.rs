@@ -66,7 +66,7 @@ async fn exercise_arithmetic_validation(db: &Database) {
     };
     assert_eq!(
         before, after,
-        "refused updates must not change system fields"
+        "refused updates must not apply descriptor assignments"
     );
 
     db.transaction(|tx| async move {
