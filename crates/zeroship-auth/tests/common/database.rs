@@ -88,6 +88,38 @@ impl Database {
         self.connect_to(self.auth_url().as_str()).await
     }
 
+    /// Observe all requested backends waiting on locks before releasing a fixture transaction.
+    #[allow(
+        clippy::future_not_send,
+        reason = "the database belongs to this compio runtime"
+    )]
+    pub async fn wait_until_blocked(&self, pids: &[i32]) -> bool {
+        assert!(
+            !pids.is_empty(),
+            "a lock observation needs waiting backends"
+        );
+        let observer = self.connect().await;
+        compio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = observer
+                    .query_one(
+                        "SELECT bool_and(cardinality(pg_blocking_pids(pid)) > 0) \
+                         FROM unnest($1::int[]) AS requested(pid)",
+                        &[&pids],
+                    )
+                    .await
+                    .expect("observe fixture lock waiters")
+                    .get(0);
+                if blocked {
+                    return;
+                }
+                compio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     async fn connect_to(&self, url: &str) -> Client {
         let mut config: compio_postgres::Config = url.parse().expect("fixture database URL");
         config.connect_timeout(Duration::from_secs(15));
