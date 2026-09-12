@@ -44,7 +44,9 @@ mod support;
 
 use zeroship_migrate::model::expr::{BinaryOp, Expr};
 use zeroship_migrate::model::ir::{ColType, GeneratedCol, IdentityCol, IrColumn, Op};
-use zeroship_migrate::render::declarative::{CollectionDescriptor, FieldDescriptor, IndexDescriptor};
+use zeroship_migrate::render::declarative::{
+    CollectionDescriptor, FieldDescriptor, IndexDescriptor,
+};
 use zeroship_migrate::{DialectId, TableRuntimeOptions};
 use zeroship_migrate_mysql::DIALECT as MYSQL;
 use zeroship_migrate_postgres::DIALECT as POSTGRES;
@@ -55,6 +57,11 @@ use zeroship_migrate_node::descriptors::{
 };
 
 const SCHEMA: &str = "public";
+
+fn lifecycle_policy() -> zeroship_migrate::EffectivePolicy {
+    zeroship_migrate::effective_policy_from_charter_toml(&support::lifecycle_charter_toml(SCHEMA))
+        .expect("the export fixture declares its lifecycle generators")
+}
 
 /// Preserve the former enum's `Debug` labels in assertion diagnostics while the
 /// test itself uses the open dialect identity.
@@ -284,7 +291,7 @@ fn width_and_generated_ops() -> Vec<Op> {
 /// as a three-dialect loop and watching it refuse; `the_wire_is_dialect_independent`
 /// below carries the portable arm across all three instead of pretending this one does.
 fn folded_fields() -> Vec<(String, FieldDescriptor)> {
-    let policy = support::no_inject(SCHEMA);
+    let policy = lifecycle_policy();
     let dialect = &POSTGRES;
 
     let from_descriptors = zeroship_migrate::render_schema_export_from_descriptors(
@@ -428,7 +435,10 @@ fn the_corpus_exercises_every_facet_it_claims_to() {
     // VERBATIM as opaque JSON, so a wire that dropped one would still pass a
     // presence check on the others.
     let masked = fields.iter().filter(|(_, f)| f.mask.is_some()).count();
-    let encrypted = fields.iter().filter(|(_, f)| f.encrypted == Some(true)).count();
+    let encrypted = fields
+        .iter()
+        .filter(|(_, f)| f.encrypted == Some(true))
+        .count();
     let generated = fields.iter().filter(|(_, f)| f.generated.is_some()).count();
     let identity = fields.iter().filter(|(_, f)| f.identity.is_some()).count();
     // TWO masks: the one authored on `email`, plus the fail-safe `{ full, pii }` the
@@ -436,12 +446,38 @@ fn the_corpus_exercises_every_facet_it_claims_to() {
     // synthesised one does not read as "still covered".
     assert_eq!((masked, encrypted, generated, identity), (2, 1, 1, 1));
 
-    // A floor on the corpus SIZE, so a fold that silently stops emitting a table
-    // cannot leave a smaller corpus passing every assertion above.
+    // Reconcile identities against the authored fixtures and their injected
+    // fields so a missing table or column cannot leave the facet checks green.
+    let mut expected = std::collections::BTreeSet::new();
+    for collection in seed_descriptors() {
+        for field in collection
+            .fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .chain(["removed", "revision"])
+        {
+            assert!(expected.insert(format!("{}.{}", collection.name, field)));
+        }
+    }
+    for op in width_and_generated_ops() {
+        let Op::CreateTable { name, columns, .. } = op else {
+            panic!("the portable fixture must declare its tables explicitly");
+        };
+        for column in columns {
+            assert!(expected.insert(format!("{name}.{}", column.name)));
+        }
+    }
     assert_eq!(
         fields.len(),
-        20,
-        "corpus size moved; re-measure before re-pinning"
+        expected.len(),
+        "duplicate or missing exported fields"
+    );
+    assert_eq!(
+        fields
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
     );
 }
 
@@ -490,7 +526,7 @@ fn every_folded_field_survives_the_export_round_trip() {
 fn a_whole_collection_survives_the_export_round_trip() {
     use zeroship_migrate::TableStrictness;
 
-    let policy = support::no_inject(SCHEMA);
+    let policy = lifecycle_policy();
     for strictness in [
         TableStrictness::Strict,
         TableStrictness::Lenient,
@@ -562,7 +598,7 @@ fn the_wire_is_dialect_independent() {
 /// and the full corpus can be carried across all three dialects.
 #[test]
 fn the_check_bearing_corpus_is_postgres_only() {
-    let policy = support::no_inject(SCHEMA);
+    let policy = lifecycle_policy();
     for dialect in [&MYSQL, &SQLITE] {
         let dialect_label = dialect_debug_label(dialect);
         let refused = zeroship_migrate::render_schema_export_from_descriptors(
@@ -588,7 +624,7 @@ fn the_check_bearing_corpus_is_postgres_only() {
 /// this fails and the exclusion has to be revisited.
 #[test]
 fn unbounded_text_is_re_derived_rather_than_carried() {
-    let policy = support::no_inject(SCHEMA);
+    let policy = lifecycle_policy();
     let export = zeroship_migrate::render_schema_export_from_descriptors(
         zeroship_migrate::shipping_vendors(),
         &seed_descriptors(),
@@ -631,7 +667,12 @@ fn unbounded_text_is_re_derived_rather_than_carried() {
     )
     .expect("the round-tripped descriptor re-folds");
     assert!(
-        refolded.collections["refolded"].fields[0].unbounded_text,
+        refolded.collections["refolded"]
+            .fields
+            .iter()
+            .find(|field| field.name == "body")
+            .expect("the re-folded body is present")
+            .unbounded_text,
         "unbounded_text was neither carried nor re-derived — the exclusion is unsound"
     );
 }

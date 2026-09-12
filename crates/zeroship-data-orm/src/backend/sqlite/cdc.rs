@@ -21,8 +21,8 @@ use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
 use zeroship_data_orm::cdc::{ChangeEvent, ChangeOp};
 
-use crate::cdc::{ChangeSink, DeliveryDisposition};
 use crate::backend::sqlite::session::SqliteSession;
+use crate::cdc::{ChangeSink, DeliveryDisposition};
 use zeroship_data_orm::error::DbError;
 
 // ---------------------------------------------------------------------------
@@ -64,10 +64,6 @@ pub(crate) struct PendingEvent {
     /// for the column-name PRAGMA.
     pub(crate) db_name: String,
     pub(crate) table: String,
-    /// SQLite's stable per-row identifier. For an UPDATE we capture the
-    /// new rowid (the post-image — same convention as the WAL consumer
-    /// emits in [`crate::backend::sqlite::broker::emit_local`]).
-    pub(crate) pk: Option<String>,
     /// Positional values for the new tuple (INSERT / UPDATE). `None`
     /// for DELETE.
     pub(crate) new_values: Option<Vec<Option<String>>>,
@@ -254,7 +250,6 @@ fn preupdate_callback(
             op: ChangeOp::Insert,
             db_name: db_name.to_string(),
             table: table.to_string(),
-            pk: Some(new_acc.get_new_row_id().to_string()),
             new_values: Some(materialise_new(new_acc)),
             old_values: None,
         },
@@ -262,7 +257,6 @@ fn preupdate_callback(
             op: ChangeOp::Delete,
             db_name: db_name.to_string(),
             table: table.to_string(),
-            pk: Some(old_acc.get_old_row_id().to_string()),
             new_values: None,
             old_values: Some(materialise_old(old_acc)),
         },
@@ -273,7 +267,6 @@ fn preupdate_callback(
             op: ChangeOp::Update,
             db_name: db_name.to_string(),
             table: table.to_string(),
-            pk: Some(new_value_accessor.get_new_row_id().to_string()),
             new_values: Some(materialise_new(new_value_accessor)),
             old_values: Some(materialise_old(old_value_accessor)),
         },
@@ -512,13 +505,8 @@ async fn publisher_loop(
     rx: flume::Receiver<CommitPacket>,
     sink: Arc<dyn ChangeSink>,
 ) {
-    // Per-task local cache: `(db_name, table) → Arc<Vec<String>>`. The
-    // dispatcher's `column_cache` field is reserved for a future
-    // pre-cache strategy that runs inside the writer thread. Today
-    // every name resolution flows through this map so the publisher
-    // owns the lookup end-to-end (one PRAGMA round-trip per (db,
-    // table) per process lifetime; tens of microseconds at dev scale).
-    let mut name_cache: HashMap<(String, String), Vec<String>> = HashMap::new();
+    // Cache column order and the declared scalar key until schema invalidation.
+    let mut name_cache: HashMap<(String, String), (Vec<String>, Option<String>)> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
         // Backfill pause + schema-pending decoder fence (plan §5 + §7). The
@@ -594,11 +582,11 @@ async fn publisher_loop(
                         // Fall through with empty names — `tuple_from_positional`
                         // synthesises `c0`/`c1`/… placeholders so the
                         // subscriber still sees a populated map.
-                        name_cache.insert(key.clone(), Vec::new());
+                        name_cache.insert(key.clone(), (Vec::new(), None));
                     }
                 }
             }
-            let names = name_cache.get(&key).expect("just inserted");
+            let (names, identity) = name_cache.get(&key).expect("just inserted");
 
             let new_tuple = pending
                 .new_values
@@ -623,15 +611,12 @@ async fn publisher_loop(
                 ChangeOp::Delete => Vec::new(),
             };
 
-            let pk: Option<String> = new_tuple
-                .get("id")
-                .cloned()
-                .or_else(|| {
-                    old_tuple
-                        .as_ref()
-                        .and_then(|tuple| tuple.get("id").cloned())
-                })
-                .or(pending.pk);
+            let pk = identity.as_deref().and_then(|key| {
+                new_tuple
+                    .get(key)
+                    .cloned()
+                    .or_else(|| old_tuple.as_ref().and_then(|tuple| tuple.get(key).cloned()))
+            });
 
             let event = ChangeEvent {
                 app_id: pending.db_name,
@@ -657,25 +642,27 @@ async fn fetch_column_names(
     session: &SqliteSession,
     db_name: &str,
     table: &str,
-) -> Result<Vec<String>, DbError> {
-    // PRAGMA table_info returns rows of (cid, name, type, notnull,
-    // dflt_value, pk). We only need column 1 (name) in cid order. The
-    // identifier escaping mirrors `SqliteDialect::quote_ident`: double
-    // any embedded `"`s and wrap in double-quotes.
+) -> Result<(Vec<String>, Option<String>), DbError> {
+    // Read column names in storage order and discover the declared primary key.
     let q_db = quote_ident(db_name);
     let q_tbl = quote_ident(table);
     let sql = format!("PRAGMA {q_db}.table_info({q_tbl})");
     let rows = session.query(&sql, &[]).await?;
     let mut names = Vec::with_capacity(rows.len());
+    let mut keys = Vec::new();
     for row in rows {
-        // `row.get(1)` is the column-name cell, materialised as
-        // `Option<String>` by the session's `run_query`. NULL or
-        // missing → empty string (the engine never emits NULL here in
-        // practice).
         let name = row.get(1).and_then(|c| c.clone()).unwrap_or_default();
+        if row
+            .get(5)
+            .and_then(|cell| cell.as_deref())
+            .is_some_and(|value| value != "0")
+        {
+            keys.push(name.clone());
+        }
         names.push(name);
     }
-    Ok(names)
+    let identity = if keys.len() == 1 { keys.pop() } else { None };
+    Ok((names, identity))
 }
 
 /// Build a `HashMap<column_name, value_string>` from positional

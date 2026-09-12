@@ -2,13 +2,13 @@
 //!
 //! A `Collection` instance is returned by `Db::collection`.
 //! Each CRUD method on it decodes its V8 arguments directly into a
-//! `zeroship_data_sql::value::Value` (via `decode_native`)
+//! `zeroship_data_orm::value::Value` (via `decode_native`)
 //! and calls the shared `dispatch_*` helper in [`super::dispatch`] — no
 //! JSON.stringify / parse round-trip on the CRUD hot path.
 
 #![allow(unsafe_code)]
 
-use zeroship_data_sql::value::Value;
+use zeroship_data_orm::value::Value;
 use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
@@ -22,6 +22,7 @@ use super::dispatch::{
     dispatch_restore_one, dispatch_search, dispatch_unmask_field, dispatch_update_many,
     dispatch_update_one, dispatch_upsert,
 };
+use crate::op_error::ToOpError;
 use crate::v8_bridge::{read_native_arg, refuse_if_query_capability};
 
 // ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ impl Collection {
     /// isolate at a DIFFERENT deploy must see for an entry it never installed.
     pub(crate) fn resolved_runtime_schema_for_tests(
         &self,
-    ) -> (String, Option<zeroship_data_sql::value::Value>) {
+    ) -> (String, Option<zeroship_data_orm::value::Value>) {
         let schema = crate::descriptor::collection_schema(&self.binding, &self.name)
             .ok()
             .map(|facts| (*facts).clone());
@@ -77,6 +78,28 @@ impl Collection {
     #[v8_constructor]
     fn new() -> Result<Collection, OpError> {
         Err(OpError::type_error("Illegal constructor"))
+    }
+
+    #[v8_method]
+    fn read<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        query: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let input = match read_native_arg(scope, Some(query)) {
+            Ok(value) => value,
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        let query =
+            zeroship_data_orm::orm::ReadQuery::decode(input).map_err(|e| e.to_op_error())?;
+        Ok(super::dispatch::dispatch_operation(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            zeroship_data_orm::orm::Operation::Read(Box::new(query)),
+            false,
+        )
+        .into())
     }
 
     #[v8_method]
@@ -507,7 +530,7 @@ impl Collection {
         };
         let mut args = match opts_v {
             Value::Object(map) => map,
-            _ => zeroship_data_sql::value::Map::new(),
+            _ => zeroship_data_orm::value::Map::new(),
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("row_pk".to_string(), row_pk_v);
@@ -549,7 +572,7 @@ impl Collection {
         };
         let mut args = match opts_v {
             Value::Object(map) => map,
-            _ => zeroship_data_sql::value::Map::new(),
+            _ => zeroship_data_orm::value::Map::new(),
         };
         args.insert("collection".to_string(), Value::String(self.name.clone()));
         args.insert("items".to_string(), items_v);

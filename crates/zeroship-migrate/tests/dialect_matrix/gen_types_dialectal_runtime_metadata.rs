@@ -76,12 +76,13 @@ fn history() -> Vec<Op> {
 }
 
 fn runtime_json(dialect: &zeroship_migrate::DialectId) -> Value {
+    let (ops, policy) = support::lifecycle_fixture(&history(), SCHEMA);
     let artifacts = render_artifacts(
         zeroship_migrate::shipping_vendors(),
-        &history(),
+        &ops,
         dialect,
         SCHEMA,
-        &support::no_inject(SCHEMA),
+        &policy,
     )
     .expect("the dialectal history renders artifacts");
     serde_json::from_str(&artifacts.runtime_json).expect("schema.runtime.json parses")

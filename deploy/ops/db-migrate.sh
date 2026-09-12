@@ -21,15 +21,14 @@
 # The apply is idempotent: a re-run re-derives byte-identical journal versions
 # (each is a hash of owner_app + migration name) and skips every applied file.
 #
-# `tests/platform_migration_corpus_gate.sh` is the executable proof for this
-# path. It reconciles every file against a committed recorder-operation ledger,
-# applies the corpus to a real database, verifies the durable journal and status
-# step IDs, then proves a second run is an exact no-op. Do not replace that proof
-# with hand-maintained totals in this comment.
+# `cargo xtask test migrations` exercises this CLI and platform policy directly
+# from Rust. It reconciles the recorder-operation ledger, applies the corpus to
+# owned PostgreSQL, verifies journal and status identities, and checks that
+# applying again leaves history unchanged. It does not invoke this wrapper.
 #
 # Examples:
 #   deploy/ops/db-migrate.sh
-#   deploy/ops/db-migrate.sh --json                     # extra flags pass through
+#   ZEROSHIP_MIGRATE_VERB=history deploy/ops/db-migrate.sh --json
 #   ZEROSHIP_MIGRATE_VERB=status deploy/ops/db-migrate.sh
 #
 # Targets the compose Postgres on its host-mapped port by default. Override the

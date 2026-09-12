@@ -3,8 +3,8 @@ use quote::quote;
 use serde_json::Value;
 use std::collections::HashSet;
 use syn::{
-    parse::{Parse, ParseStream},
     Ident, LitStr, Token, Visibility,
+    parse::{Parse, ParseStream},
 };
 
 pub struct Input {
@@ -82,6 +82,30 @@ fn flag(def: &Value, name: &str, fallback: bool, span: proc_macro2::Span) -> syn
     }
 }
 
+fn validate_identity(fields: &serde_json::Map<String, Value>) -> Result<(), &'static str> {
+    let id = fields
+        .get("id")
+        .ok_or("collection requires an 'id' primary key")?;
+    if id.get("primaryKey").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be declared as its primary key");
+    }
+    if id.get("required").and_then(Value::as_bool) != Some(true) {
+        return Err("collection 'id' must be required and non-null");
+    }
+    if id
+        .get("assign")
+        .is_some_and(|assignment| assignment.get("on").and_then(Value::as_str) != Some("insert"))
+    {
+        return Err("collection 'id' can only be assigned on insertion");
+    }
+    if fields.iter().any(|(name, def)| {
+        name != "id" && def.get("primaryKey").and_then(Value::as_bool) == Some(true)
+    }) {
+        return Err("collection 'id' must be its sole primary key");
+    }
+    Ok(())
+}
+
 fn generate(
     descriptor: &Value,
     orm: &syn::Path,
@@ -111,6 +135,8 @@ fn generate(
                 syn::Error::new(span, format!("collection '{name}' has no field map"))
             })?;
         let schema = serde_json::to_string(fields).map_err(|error| syn::Error::new(span, error))?;
+        validate_identity(fields)
+            .map_err(|message| syn::Error::new(span, format!("{name}: {message}")))?;
         let mut columns = Vec::new();
         let mut constants = Vec::new();
         let mut required = Vec::new();
@@ -131,22 +157,16 @@ fn generate(
             let readable =
                 flag(def, "readable", true, span)? && flag(def, "projectable", true, span)?;
             let filterable = flag(def, "filterable", true, span)?;
-            let system = matches!(
-                field.as_str(),
-                "id" | "created_at"
-                    | "updated_at"
-                    | "created_by"
-                    | "updated_by"
-                    | "version"
-                    | "deleted_at"
-            );
-            let writable =
-                !system && flag(def, "writable", true, span)? && def.get("generated").is_none();
+            let writable = flag(def, "writable", true, span)?
+                && def.get("assign").is_none()
+                && def.get("generated").is_none();
             let defaultable =
                 writable && (def.get("default").is_some() || !flag(def, "required", false, span)?);
             let read = readable.then(|| quote!(impl #orm::ReadableColumn for #column {}));
             let filter = filterable.then(|| quote!(impl #orm::FilterableColumn for #column {}));
             let write = writable.then(|| quote!(impl #orm::WritableColumn for #column {}));
+            let update = (writable && field != "id")
+                .then(|| quote!(impl #orm::UpdatableColumn for #column {}));
             let default = defaultable.then(|| quote!(impl #orm::DefaultableColumn for #column {}));
             if writable && !defaultable {
                 required.push(quote!(#orm::HasColumn<columns::#column>));
@@ -160,7 +180,7 @@ fn generate(
                     type SqlType = #sql_type;
                     const NAME: &'static str = #field;
                 }
-                #read #filter #write #default
+                #read #filter #write #update #default
             });
             constants.push(quote! {
                 #[allow(non_upper_case_globals)]
@@ -218,7 +238,7 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
             return Err(syn::Error::new(
                 span,
                 format!("unsupported logical field type '{name}'"),
-            ))
+            ));
         }
     };
     let marker = syn::Ident::new(marker, span);
@@ -228,4 +248,42 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
     } else {
         quote!(#orm::sql_types::Nullable<#ty>)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_generation_obeys_shared_identity_contract() {
+        let corpus: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/data/collection-identity.json"
+        ))
+        .unwrap();
+        let orm = syn::parse_quote!(::zeroship_data_orm::orm);
+        for group in ["valid", "invalid"] {
+            let cases = corpus[group].as_object().unwrap();
+            assert!(!cases.is_empty(), "{group} fixtures must not be empty");
+            for (name, case) in cases {
+                let descriptor = serde_json::json!({
+                    "version": 2,
+                    "collections": {"entries": {"fields": case["fields"]}}
+                });
+                let result = generate(&descriptor, &orm, proc_macro2::Span::call_site());
+                if group == "valid" {
+                    assert!(
+                        !result
+                            .unwrap_or_else(|error| panic!("{name}: {error}"))
+                            .is_empty()
+                    );
+                } else {
+                    assert_eq!(
+                        result.expect_err(name).to_string(),
+                        format!("entries: {}", case["error"].as_str().unwrap()),
+                        "{name}"
+                    );
+                }
+            }
+        }
+    }
 }

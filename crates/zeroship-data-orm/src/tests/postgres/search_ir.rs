@@ -2,7 +2,7 @@
 //!
 //! # Why this target exists separately from the IR's own tests
 //!
-//! `zeroship-data-sql` declares no dependencies at all, so its tests can
+//! `zeroship-data-orm::sql` declares no dependencies at all, so its tests can
 //! compare the SQL it renders against a fixture string and nothing more. A
 //! string comparison cannot tell whether `"embedding" <=> $1::vector` is
 //! syntax `pgvector` accepts, whether `ST_DWithin` over a `geography` column
@@ -27,10 +27,10 @@
 //! # What these arms do NOT establish
 //!
 //! **The shipped product path does not use the IR.** No crate outside
-//! `zeroship-data-sql` depends on it - the dependency this target adds is a
+//! `zeroship-data-orm::sql` depends on it - the dependency this target adds is a
 //! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
-//! still reaches `zeroship_data_sql::compile::build_vector_search`
-//! (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs:456`).
+//! still reaches `crate::sql::compile::build_vector_search`
+//! (`crates/zeroship-data-orm/src/backend/postgres/implementation.rs`).
 //!
 //! That is why `the_ir_and_the_shipped_builder_rank_identically` is here. It is
 //! the only arm that ties the two together, and it does it the one way that is
@@ -43,9 +43,9 @@
 use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
-use zeroship_data_sql::render::postgres::render_search;
-use zeroship_data_sql::value;
-use zeroship_data_sql::{
+use crate::sql::render::postgres::render_search;
+use crate::value;
+use crate::sql::{
     CompareOp, GeoPoint, Ident, IdentRole, Literal, Operand, Predicate, ProjectedField, Projection,
     QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, VectorMetric,
 };
@@ -172,40 +172,6 @@ fn vector_text(values: &[f32]) -> String {
     out
 }
 
-/// The seam a consumer of [`zeroship_data_sql::RenderedSql`] must implement:
-/// a typed parameter to whatever the driver takes.
-///
-/// It is written **here** rather than in the IR because it is the driver's
-/// half. Parameters are encoded from their types, and binary interpretation
-/// belongs to the compiled expression.
-///
-/// Text format is used because it is the channel the shipped path uses
-/// (`query_text_params`, reached from
-/// `crates/zeroship-data-orm/src/exec.rs`), so the differential arm below
-/// compares two statements over one execution mechanism rather than over two.
-fn bind_text(params: &[Literal]) -> Vec<String> {
-    params
-        .iter()
-        .map(|value| match value {
-            Literal::Bool(b) => b.to_string(),
-            Literal::Int(i) => i.to_string(),
-            Literal::Float(f) => f.get().to_string(),
-            Literal::Text(t) | Literal::Json(t) => t.clone(),
-            Literal::Bytes(b) => {
-                let mut out = String::from("\\x");
-                for byte in b {
-                    out.push_str(&format!("{byte:02x}"));
-                }
-                out
-            }
-            Literal::Vector(v) => {
-                let elements: Vec<f32> = v.elements().iter().map(|e| e.get()).collect();
-                vector_text(&elements)
-            }
-        })
-        .collect()
-}
-
 fn column(name: &str) -> Ident {
     Ident::parse_as(name, IdentRole::Column).expect("valid column")
 }
@@ -234,10 +200,11 @@ fn docs_search(criterion: SearchCriterion, limit: i64) -> Search {
 /// Execute a rendered plan and return the `id` column in result order.
 async fn ranked_ids(pool: &Pool, plan: &Search) -> Vec<String> {
     let sql = render_search(plan).expect("the postgres backend serves this plan");
-    let owned = bind_text(sql.params());
-    let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let rows = pool
-        .query_text_params(sql.sql(), &params)
+    let rows = crate::backend::postgres::params::query(
+        &pool.acquire().await.unwrap(),
+        sql.sql(),
+        sql.params(),
+    )
         .await
         .unwrap_or_else(|e| panic!("the IR rendered SQL the server refused: {e}\n{}", sql.sql()));
     rows.iter().map(|r| r.get::<_, String>("id")).collect()
@@ -260,7 +227,7 @@ async fn ranked_ids(pool: &Pool, plan: &Search) -> Vec<String> {
 /// server - so no `ToSql` impl can be written against it in advance.
 ///
 /// That is precisely the constraint
-/// [`zeroship_data_sql::render::ValueFormat::vector_placeholder`] documents,
+/// [`crate::sql::render::ValueFormat::vector_placeholder`] documents,
 /// observed rather than quoted, and it is why `query_text_params` (an empty OID
 /// list, server-side inference) is the channel both this fixture and the
 /// shipped path use.
@@ -311,10 +278,11 @@ fn a_vector_search_ranks_by_distance_on_real_pgvector() {
                 10,
             );
             let sql = render_search(&plan).expect("renderable");
-            let owned = bind_text(sql.params());
-            let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let rows = pool
-                .query_text_params(sql.sql(), &params)
+            let rows = crate::backend::postgres::params::query(
+                &pool.acquire().await.unwrap(),
+                sql.sql(),
+                sql.params(),
+            )
                 .await
                 .unwrap_or_else(|e| panic!("pgvector refused the IR's SQL: {e}\n{}", sql.sql()));
 
@@ -386,17 +354,18 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
             // The shipped builder's answer, for the same search. The schema hint is
             // what `PostgresBackend::vector_search` passes it.
             let schema_hint = value!({
+                "id": {"type":"integer", "primaryKey":true},
                 "title": { "type": "string" },
                 "tenant_id": { "type": "number" },
                 "embedding": { "type": "vector", "vectorDims": DIMS },
             });
-            let shipped = zeroship_data_sql::compile::build_vector_search(
-                &zeroship_data_sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
+            let shipped = crate::sql::compile::build_vector_search(
+                &crate::sql::SchemaName::new(SCHEMA).expect("fixture schema name"),
                 "docs",
                 "embedding",
                 &query,
                 10,
-                zeroship_data_sql::descriptors::VectorMetric::Cosine,
+                crate::sql::descriptors::VectorMetric::Cosine,
                 &value!({ "tenant_id": 1 }),
                 &schema_hint,
             )
@@ -511,8 +480,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                         query: &unit_vector(3),
                         k: 5,
                         metric: BackendMetric::InnerProduct,
-                        filter: &zeroship_data_sql::value::Value::Null,
-                        schema: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
+                        schema: &crate::value::Value::Null,
                     },
                 )
                 .await
@@ -537,8 +506,8 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                         query: &unit_vector(3),
                         k: 5,
                         metric: BackendMetric::Cosine,
-                        filter: &zeroship_data_sql::value::Value::Null,
-                        schema: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
+                        schema: &crate::value::Value::Null,
                     },
                 )
                 .await
@@ -656,7 +625,7 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 /// Asserted by executing the **same SQL string** twice with different arguments
 /// and getting different row counts - which is the property the shipped SQLite
 /// arm does not have, formatting `k` into the statement
-/// (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs:117`) so every `k`
+/// (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs`) so every `k`
 /// is a distinct statement and a distinct cache entry.
 #[test]
 fn one_statement_serves_every_k() {
@@ -683,10 +652,11 @@ fn one_statement_serves_every_k() {
 
             let mut counts = Vec::new();
             for rendered in [&five, &twenty] {
-                let owned = bind_text(rendered.params());
-                let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-                let rows = pool
-                    .query_text_params(rendered.sql(), &params)
+                let rows = crate::backend::postgres::params::query(
+                    &pool.acquire().await.unwrap(),
+                    rendered.sql(),
+                    rendered.params(),
+                )
                     .await
                     .expect("runs");
                 counts.push(rows.len());

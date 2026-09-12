@@ -4,7 +4,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
-use zeroship_data_sql::compile::SqlDialect;
+use crate::sql::compile::SqlDialect;
 
 struct ControlledFactory {
     inner: ConnectionFactory,

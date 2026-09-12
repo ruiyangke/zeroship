@@ -1,6 +1,6 @@
 //! Decode adapter values into the shared relational query grammar.
 use super::*;
-use zeroship_data_sql::{
+use crate::sql::{
     AggregateFunc, AggregateRef, CompareOp, Direction, FieldPath, IdentRole, JoinKind, NullOrder,
     Operand, OrderKey, Predicate, RowLimit, RowOffset,
 };
@@ -77,8 +77,8 @@ fn operand(value: &Value) -> Result<Operand, DbError> {
     }
     keys(value, &["value"])?;
     let value = required(value, "value")?;
-    let parsed = zeroship_data_sql::filter::decode(
-        &zeroship_data_sql::value!({"value":{"$eq":value.clone()}}),
+    let parsed = crate::sql::filter::decode(
+        &crate::value!({"value":{"$eq":value.clone()}}),
     )?;
     let Predicate::And(mut children) = parsed else {
         return Err(read::invalid("invalid literal"));
@@ -90,8 +90,8 @@ fn operand(value: &Value) -> Result<Operand, DbError> {
 }
 fn predicate(value: &Value, depth: usize, nodes: &mut usize) -> Result<Predicate, DbError> {
     *nodes += 1;
-    if depth > zeroship_data_sql::MAX_PREDICATE_DEPTH
-        || *nodes > zeroship_data_sql::joins::MAX_READ_PREDICATE_NODES
+    if depth > crate::sql::MAX_PREDICATE_DEPTH
+        || *nodes > crate::sql::joins::MAX_READ_PREDICATE_NODES
     {
         return Err(read::invalid(
             "read predicate exceeds its complexity budget",
@@ -101,7 +101,7 @@ fn predicate(value: &Value, depth: usize, nodes: &mut usize) -> Result<Predicate
         "and" | "or" => {
             keys(value, &["op", "args"])?;
             let args = array(value, "args")?;
-            if args.len() > zeroship_data_sql::joins::MAX_READ_PREDICATE_NODES {
+            if args.len() > crate::sql::joins::MAX_READ_PREDICATE_NODES {
                 return Err(read::invalid(
                     "read predicate exceeds its complexity budget",
                 ));
@@ -161,7 +161,7 @@ impl ReadQuery {
         )?;
         let mut query = Self::new(source(required(&value, "from")?)?);
         let joins = array(&value, "joins")?;
-        if joins.len() >= zeroship_data_sql::MAX_READ_SOURCES {
+        if joins.len() >= crate::sql::MAX_READ_SOURCES {
             return Err(read::invalid("read exceeds its source budget"));
         }
         let mut nodes = 0;
@@ -257,5 +257,41 @@ impl ReadQuery {
             .map_err(|e| read::invalid(e.to_string()))?;
         }
         Ok(query)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::value;
+    use crate::sql::Literal;
+
+    fn query() -> Value {
+        value!({"from":{"collection":"records", "alias":"r"}, "select":{"record":{"row":"r"}}})
+    }
+
+    #[test]
+    fn adapter_predicates_preserve_native_bytes() {
+        let bytes = vec![0, 128, 255];
+        let mut input = query();
+        input["where"] = value!({"op":"eq", "left":{"source":"r", "field":"payload"}, "right":{"value":Value::Bytes(bytes.clone())}});
+        let query = ReadQuery::decode(input).unwrap();
+        assert!(
+            matches!(query.filter, Predicate::Compare { rhs: Operand::Lit(Literal::Bytes(actual)), .. } if actual == bytes)
+        );
+    }
+
+    #[test]
+    fn unknown_stages_and_excessive_predicates_fail_during_decode() {
+        let mut input = query();
+        input["sql"] = value!("SELECT * FROM records");
+        assert!(ReadQuery::decode(input).is_err());
+        let mut input = query();
+        let mut condition = value!({"op":"isNull", "arg":{"source":"r", "field":"payload"}});
+        for _ in 0..crate::sql::MAX_PREDICATE_DEPTH {
+            condition = value!({"op":"not", "arg":condition});
+        }
+        input["where"] = condition;
+        assert!(ReadQuery::decode(input).is_err());
     }
 }

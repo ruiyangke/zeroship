@@ -1,3 +1,4 @@
+import { isIdValue } from "../identity.js";
 import {
   ValidationError,
   OptimisticLockError,
@@ -27,7 +28,9 @@ import {
 import {
   type Actor,
   type Filter,
-  type Id,
+  type FieldDef,
+  type IdValue,
+  type RowId,
   type NamedIndexSpec,
   type PlainObject,
   type Result,
@@ -42,7 +45,6 @@ import {
 } from "../types";
 import { validateEncryptedFieldsInFilter } from "./encryption-fence";
 import { _maybeWarnUnindexedFilter } from "./index-warnings";
-import { CONFINED_SYSTEM_SHAPE_ASSIGNMENTS } from "../generated/confined-system-shape.generated";
 
 export interface CrudCollectionInternals<
   S = PlainObject,
@@ -55,11 +57,11 @@ export interface CrudCollectionInternals<
   _versioning: boolean;
   _indexes: readonly NamedIndexSpec[];
   _knownFields: Set<string>;
-  _idLoader: IdLoader<Row<S>> | null;
+  _idLoader: IdLoader<Row<S>, IdValue> | null;
   _txDepth: number;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _toResultError(e: unknown): Error;
-  _loadById(id: string, txDepthAtCall: number): Promise<Row<S> | null>;
+  _loadById(id: IdValue, txDepthAtCall: number): Promise<Row<S> | null>;
   _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
@@ -136,46 +138,15 @@ export function validateArrayPushOps(
  * `null` otherwise so callers can short-circuit to the non-CAS path.
  */
 export function extractCasVersion(
-  versioning: boolean,
+  schema: Record<string, FieldDef>,
   filter: PlainObject,
 ): number | null {
-  if (!versioning) return null;
+  const column = Object.keys(schema).find((key) => schema[key].concurrency === true);
+  if (column === undefined) return null;
   if (filter === null || typeof filter !== "object") return null;
-  const v = filter.version;
+  const v = filter[column];
   if (typeof v === "number" && Number.isFinite(v)) return v;
   return null;
-}
-
-/**
- * D4 — when a CAS version is in play, layer `{ $inc: { version: 1 } }`
- * on top of the user-supplied update so the bump happens atomically
- * inside the same SQL statement as the SET.
- *
- * **P7 PR 4** — the platform now auto-bumps `version` on every UPDATE
- * server-side. To avoid double-bumping when the SDK and the runtime
- * both add `$inc: 1`, this helper is now a no-op.
- */
-export function augmentUpdateWithVersion(
-  update: PlainObject,
-  _casVersion: number | null,
-): PlainObject {
-  return update;
-}
-
-/**
- * Merges the soft-delete condition into a user-supplied filter.
- * When soft delete is enabled, adds `{ deleted_at: null }` so that
- * soft-deleted documents are invisible to all read operations.
- */
-export function mergeFilter(
-  softDelete: boolean,
-  toColumn: (field: string) => string,
-  filter: ZeroshipDbFilter,
-): ZeroshipDbFilter {
-  if (!softDelete) return filter;
-  const softFilter: ZeroshipDbFilter = { [toColumn("deleted_at")]: null };
-  const hasKeys = Object.keys(filter).length > 0;
-  return hasKeys ? ({ $and: [filter, softFilter] } as ZeroshipDbFilter) : softFilter;
 }
 
 export function insertCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
@@ -219,7 +190,7 @@ export function getCollection<
   AllSchemas extends Record<string, unknown>,
 >(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Id<N> | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
   opts: {
     actor?: Actor;
     select?: (string & keyof Row<S>)[];
@@ -231,7 +202,7 @@ export function getCollection<
 ): Promise<Result<Row<S> | null>> {
   trackCollectionAccess(self._name);
   const txDepthAtCall = self._txDepth;
-  const isBareId = typeof idOrFilter === "string";
+  const isBareId = isIdValue(idOrFilter);
   if (
     isBareId &&
     opts.select === undefined &&
@@ -244,22 +215,18 @@ export function getCollection<
   ) {
     return self._run(() => self._loadById(idOrFilter, txDepthAtCall));
   }
-  const filter = isBareId ? ({ id: idOrFilter } as Filter<S>) : idOrFilter;
-  if (!isBareId) {
-    validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
-    _maybeWarnUnindexedFilter(
-      self._name,
-      self._schema,
-      filter as PlainObject,
-      self._indexes,
-    );
-  }
   return self._run(async () => {
-    const mapped = mergeFilter(
-      self._softDelete,
-      self._toColumn,
-      mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn),
-    );
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    if (!isBareId) {
+      validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
+      _maybeWarnUnindexedFilter(
+        self._name,
+        self._schema,
+        filter as PlainObject,
+        self._indexes,
+      );
+    }
+    const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const nativeOpts: ZeroshipDbFindOpts = { limit: 1 };
     if (opts.select !== undefined) {
       nativeOpts.select = opts.select.map((f) => self._toColumn(f));
@@ -296,25 +263,22 @@ export async function loadByIdCollection<
   AllSchemas extends Record<string, unknown>,
 >(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  id: string,
+  id: IdValue,
   txDepthAtCall: number,
 ): Promise<Row<S> | null> {
   if (self._idLoader === null) {
-    self._idLoader = new IdLoader<Row<S>>(
+    self._idLoader = new IdLoader<Row<S>, IdValue>(
       async (ids) => {
-        const filter: ZeroshipDbFilter = mergeFilter(
-          self._softDelete,
-          self._toColumn,
-          mapFilterOutbound(
+        const filter: ZeroshipDbFilter = mapFilterOutbound(
             { id: { $in: ids } } as unknown as ZeroshipDbFilter,
             self._toColumn,
-          ),
-        );
+          );
         const rows = (await self._nativeCollection().find(filter, {})) ?? [];
-        const map = new Map<string, Row<S>>();
+        const map = new Map<IdValue, Row<S>>();
         for (const r of rows) {
           const mapped = mapResultDoc(r as PlainObject, self._toField) as Row<S>;
-          map.set(String(mapped.id), mapped);
+          const rowId = (mapped as PlainObject)["id"];
+          if (isIdValue(rowId)) map.set(rowId, mapped);
         }
         return map;
       },
@@ -369,11 +333,7 @@ export function findCollection<
     filter as PlainObject,
     self._indexes,
   );
-  const mapped = mergeFilter(
-    self._softDelete,
-    self._toColumn,
-    mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn),
-  );
+  const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
   const q = new Query<S, Row<S>, AllSchemas>(
     self._name,
     mapped,
@@ -388,6 +348,7 @@ export function findCollection<
           unmaskReason: opts.unmaskReason,
         }
       : undefined,
+    self._schema,
   );
   if (opts?.with !== undefined) q.with(opts.with);
   return q;
@@ -410,7 +371,7 @@ export function upsertCollection<S, N extends string, AllSchemas extends Record<
     const conflictCols = fields.map((field) => {
       if (typeof field !== "string") invalid("every conflict field must be a string");
       const column = self._toColumn(field);
-      if (Object.hasOwn(CONFINED_SYSTEM_SHAPE_ASSIGNMENTS, column) || self._schema[field]?.assign !== undefined) {
+      if (self._schema[field]?.assign !== undefined) {
         invalid(`upsert conflict field '${field}' is platform-assigned; use an application-owned unique key`);
       }
       if (!Object.hasOwn(self._schema, field)) invalid(`unknown upsert conflict field '${field}'`);
@@ -433,12 +394,12 @@ export function upsertCollection<S, N extends string, AllSchemas extends Record<
 
 export function updateCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
   patch: UpdateExpression<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ id: idOrFilter } as Filter<S>) : idOrFilter;
+    const isBareId = isIdValue(idOrFilter);
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -446,13 +407,12 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
     const fields = extractUpdateFields(updateObj);
     checkPartial(fields, self._schema);
     validateArrayPushOps(updateObj, self._schema);
-    const casVersion = extractCasVersion(self._versioning, filter as PlainObject);
-    const augmentedUpdate = augmentUpdateWithVersion(updateObj, casVersion);
+    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
     const mappedFilter = mapFilterOutbound(
       filter as ZeroshipDbFilter,
       self._toColumn,
     );
-    const mappedUpdate = mapUpdateOutbound(augmentedUpdate, self._toColumn);
+    const mappedUpdate = mapUpdateOutbound(updateObj, self._toColumn);
     let result;
     try {
       result = await self._nativeCollection().update(mappedFilter, mappedUpdate);
@@ -483,13 +443,12 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
     const fields = extractUpdateFields(updateObj);
     checkPartial(fields, self._schema);
     validateArrayPushOps(updateObj, self._schema);
-    const casVersion = extractCasVersion(self._versioning, filter as PlainObject);
-    const augmentedUpdate = augmentUpdateWithVersion(updateObj, casVersion);
+    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
     const mappedFilter = mapFilterOutbound(
       filter as ZeroshipDbFilter,
       self._toColumn,
     );
-    const mappedUpdate = mapUpdateOutbound(augmentedUpdate, self._toColumn);
+    const mappedUpdate = mapUpdateOutbound(updateObj, self._toColumn);
     let n: number;
     try {
       n = await self._nativeCollection().updateMany(mappedFilter, mappedUpdate);
@@ -508,35 +467,16 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
 
 export function deleteCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ id: idOrFilter } as Filter<S>) : idOrFilter;
+    const isBareId = isIdValue(idOrFilter);
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
-    const casVersion = extractCasVersion(self._versioning, filter as PlainObject);
-    if (self._softDelete) {
-      const mapped = mergeFilter(
-        self._softDelete,
-        self._toColumn,
-        mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn),
-      );
-      const col = self._toColumn("deleted_at");
-      const patch = augmentUpdateWithVersion(
-        { [col]: Date.now() } as PlainObject,
-        casVersion,
-      );
-      const result = await self
-        ._nativeCollection()
-        .update(mapped, patch as ZeroshipDbUpdate);
-      if (result === null) {
-        if (casVersion !== null) throw new OptimisticLockError(casVersion, self._name);
-        return null;
-      }
-      return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
-    }
+    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const result = await self._nativeCollection().delete(mapped);
     if (result === null) {
@@ -559,26 +499,8 @@ export function deleteManyCollection<S, N extends string, AllSchemas extends Rec
     self._indexes,
   );
   return self._run(async () => {
-    const casVersion = extractCasVersion(self._versioning, filter as PlainObject);
-    if (self._softDelete) {
-      const mapped = mergeFilter(
-        self._softDelete,
-        self._toColumn,
-        mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn),
-      );
-      const col = self._toColumn("deleted_at");
-      const patch = augmentUpdateWithVersion(
-        { [col]: Date.now() } as PlainObject,
-        casVersion,
-      );
-      const n = await self
-        ._nativeCollection()
-        .updateMany(mapped, patch as ZeroshipDbUpdate);
-      if (n === 0 && casVersion !== null) {
-        throw new OptimisticLockError(casVersion, self._name);
-      }
-      return { deletedCount: n };
-    }
+    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const n = await self._nativeCollection().deleteMany(mapped);
     if (n === 0 && casVersion !== null) {
@@ -590,11 +512,11 @@ export function deleteManyCollection<S, N extends string, AllSchemas extends Rec
 
 export function purgeCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ id: idOrFilter } as Filter<S>) : idOrFilter;
+    const isBareId = isIdValue(idOrFilter);
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -641,11 +563,11 @@ export function purgeManyCollection<S, N extends string, AllSchemas extends Reco
 
 export function restoreCollection<S, N extends string, AllSchemas extends Record<string, unknown>>(
   self: CrudCollectionInternals<S, N, AllSchemas>,
-  idOrFilter: string | Filter<S>,
+  idOrFilter: RowId<S> | Filter<S>,
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
-    const isBareId = typeof idOrFilter === "string";
-    const filter = isBareId ? ({ id: idOrFilter } as Filter<S>) : idOrFilter;
+    const isBareId = isIdValue(idOrFilter);
+    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -697,11 +619,7 @@ export function countCollection<S, N extends string, AllSchemas extends Record<s
   trackCollectionAccess(self._name);
   validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
   return self._run(async () => {
-    const mapped = mergeFilter(
-      self._softDelete,
-      self._toColumn,
-      mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn),
-    );
+    const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const n = await self._nativeCollection().count(mapped);
     return typeof n === "number" ? n : 0;
   });
@@ -731,11 +649,7 @@ export function distinctCollection<S, N extends string, AllSchemas extends Recor
         [field]: { path: field, message: `unknown field: ${field}` },
       });
     }
-    const mapped = mergeFilter(
-      self._softDelete,
-      self._toColumn,
-      mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn),
-    );
+    const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const column = self._toColumn(field);
     const result = await self._nativeCollection().distinct(mapped, { field: column });
     return result ?? [];
@@ -748,24 +662,8 @@ export function aggregateCollection<S, N extends string, AllSchemas extends Reco
 ): Promise<Result<PlainObject[]>> {
   trackCollectionAccess(self._name);
   return self._run(async () => {
-    let effectivePipeline: ZeroshipDbAggregateStage[] = pipeline;
-    if (self._softDelete) {
-      const softFilter: ZeroshipDbFilter = {
-        [self._toColumn("deleted_at")]: null,
-      };
-      const head = pipeline[0] as { $match?: ZeroshipDbFilter } | undefined;
-      if (head && head.$match !== undefined) {
-        const existing = head.$match;
-        effectivePipeline = [
-          { $match: { $and: [existing, softFilter] } as ZeroshipDbFilter },
-          ...pipeline.slice(1),
-        ];
-      } else {
-        effectivePipeline = [{ $match: softFilter }, ...pipeline];
-      }
-    }
     const translated = translateAggregatePipeline(
-      effectivePipeline as unknown as PlainObject[],
+      pipeline as unknown as PlainObject[],
       self._toColumn,
     ) as ZeroshipDbAggregateStage[];
     const results = await self._nativeCollection().aggregate(translated);

@@ -136,7 +136,7 @@ values for one grep, each stated confidently, and the reason is that none of
 them said where the boundary was:
 
 ```
-crates/zeroship-schema/src/query.rs, measured 2026-08-28 (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+crates/zeroship-schema/src/query.rs, measured 2026-08-28 (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
   grep -c "RETURNING \*"                              34
   before `mod tests` at :6035                         20
   of those 20, on comment lines (`//` or ` *`)         8
@@ -707,7 +707,7 @@ Argument and acceptance arm: SC-4.
 ("fix(db): remove full-text search") and its merge `93bc20126` ("Merge branch
 'feat/db-delete-fts'") are both ancestors of HEAD, and
 `to_tsvector|plainto_tsquery|websearch_to_tsquery|tsquery` now occurs **0
-times** across `crates/zeroship-schema/src/` and (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+times** across `crates/zeroship-schema/src/` and (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-data-v8/src/`. The removal is complete in the data plane,
 not merely landed on a side branch.
 

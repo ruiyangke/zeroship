@@ -213,7 +213,7 @@ fn set_column_default_is_replayed() {
 // exists for.
 // ---------------------------------------------------------------------------
 
-const REF_TARGET: &str = r#"{"op":"createTable","name":"b","columns":[{"name":"c0","type":"int","nullable":false}],"primaryKey":["c0"]}"#;
+const REF_TARGET: &str = r#"{"op":"createTable","name":"b","columns":[{"name":"c0","type":"text","nullable":false}],"primaryKey":["c0"]}"#;
 
 fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
     let bytes = format!(r#"{{"ir_version":1,"name":"n","ops":[{REF_TARGET},{a_table}{rest}]}}"#);
@@ -232,9 +232,9 @@ fn folded_ref(a_table: &str, rest: &str) -> serde_json::Value {
 }
 
 /// `a.v` is a ref to `b`, with the FK policy declared INLINE on the createTable.
-const A_REF_INLINE_FK: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":{"ref":{"references":"b"}},"nullable":true}],"primaryKey":["c0"],"constraints":[{"name":"fk1","kind":{"kind":"fk","columns":["v"],"referencesTable":"b","referencesColumns":["c0"],"onDelete":"cascade"}}]}"#;
+const A_REF_INLINE_FK: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":{"ref":{"references":"b"}},"references":{"table":"b","column":"c0"},"nullable":true}],"primaryKey":["c0"],"constraints":[{"name":"fk1","kind":{"kind":"fk","columns":["v"],"referencesTable":"b","referencesColumns":["c0"],"onDelete":"cascade"}}]}"#;
 /// The same ref column with no constraint; the policy arrives via addConstraint.
-const A_REF_ONLY: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":{"ref":{"references":"b"}},"nullable":true}],"primaryKey":["c0"]}"#;
+const A_REF_ONLY: &str = r#"{"op":"createTable","name":"a","columns":[{"name":"c0","type":"int","nullable":false},{"name":"v","type":{"ref":{"references":"b"}},"references":{"table":"b","column":"c0"},"nullable":true}],"primaryKey":["c0"]}"#;
 const ADD_FK: &str = r#",{"op":"addConstraint","table":"a","constraint":{"name":"fk1","kind":{"kind":"fk","columns":["v"],"referencesTable":"b","referencesColumns":["c0"],"onDelete":"cascade"}}}"#;
 const DROP_FK: &str = r#",{"op":"dropConstraint","table":"a","name":"fk1"}"#;
 

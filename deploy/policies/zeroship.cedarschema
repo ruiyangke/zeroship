@@ -74,10 +74,10 @@ entity Resource;
 // ---------------------------------------------------------------------------
 //
 // `eval::build_context` supplies EVERY key below on EVERY request,
-// unconditionally, and supplies nothing else. Both halves are load-bearing and
-// both are gated by `tests/cedar_schema_vocabulary_gate.sh`: a key declared
-// here and not supplied makes every request fail to build, and a key supplied
-// and not declared here does the same.
+// unconditionally, and supplies nothing else. The authz test
+// `every_action_builds_a_schema_bound_request_at_every_resource_type` checks
+// this through the real request builder and schema. Missing or extra keys
+// prevent the request from being constructed.
 //
 //   now             wall-clock seconds. Supplied truthfully; read by no policy
 //                   and no `Condition` lowering today. It is kept - unlike the
@@ -107,20 +107,11 @@ type RequestContext = {
 // THE ACTION VOCABULARY
 // ---------------------------------------------------------------------------
 //
-// This list must be exactly `zeroship_authz::Action::all()`, in both
-// directions. An action here that no `Action` variant spells is a word the
-// platform can never issue; an `Action` variant absent here is a 500 the first
-// time a route asks for it, because `Request::new` refuses an action the schema
-// does not declare. Strict validation cannot see either gap on its own - it
-// only rules on the ids the POLICIES quote - so
-// `tests/cedar_schema_vocabulary_gate.sh` compares this file against
-// `crates/zeroship-authz/src/action.rs` directly.
-//
-// `migrations:approve` is the case that makes that gate necessary rather than
-// decorative: it is operator-only, it appears in NO policy band by design, and
-// `ControlPlaneAuthenticator::authorize` issues it at a real `Resource::App` on
-// every migration go-live. Validation would stay green with it missing; the
-// route would 500.
+// Every action in `zeroship_authz::Action::all()` must build a request against
+// this schema. The authz request-builder tests exercise every action and
+// resource type, including operator-only actions absent from the policy set.
+// Strict policy validation alone cannot detect a missing declaration for an
+// action that no policy mentions.
 
 action "apps:read" appliesTo {
   principal: [User],

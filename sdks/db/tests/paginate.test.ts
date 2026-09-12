@@ -1,6 +1,6 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { Query } from "../src/query.js";
+import { FixtureQuery as Query } from "./_query-fixture.js";
 
 type PlainObject = Record<string, unknown>;
 
@@ -393,7 +393,7 @@ describe("Query.paginate — the seek must cover every ordering key", () => {
   test("multi-key sort does not silently drop rows across a page boundary", async () => {
     // ORDER BY is emitted as the user's sort verbatim - one term per key, with
     // NO primary-key tiebreak appended (build_order_by_with_validator in
-    // crates/zeroship-data-sql/src/compile.rs pushes exactly one term per supplied
+    // crates/zeroship-data-orm/src/sql/compile.rs pushes exactly one term per supplied
     // key and appends nothing). But the seek predicate is built from
     // `keys[0]` plus `id` (`_buildSeekFilter`), i.e. it assumes the order is
     // `(firstKey, id)`.

@@ -1312,7 +1312,7 @@ mod tests {
     fn rs_entry(collection: &str, filter: serde_json::Value) -> ReadSetEntry {
         ReadSetEntry {
             collection: collection.to_string(),
-            predicate: read_set::normalise_filter(&filter.into(), &zeroship_data_sql::value!({})),
+            predicate: read_set::normalise_filter(&filter.into(), &crate::value!({})),
         }
     }
 
@@ -1995,7 +1995,7 @@ mod tests {
         let raw_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
         let masked_text = "***-**-6789";
         let plaintext = "123-45-6789";
-        let raw_col = zeroship_data_sql::compile::raw_column_name("ssn");
+        let raw_col = crate::sql::compile::raw_column_name("ssn");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".into(), "42".into());

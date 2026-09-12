@@ -3,13 +3,13 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_sql::compile::raw_column_name;
+use zeroship_data_orm::sql::compile::raw_column_name;
 
 /// One randomised-encrypted column and no mask - the fast-path fixtures assert
 /// a PLAIN write skips row resolution, so the encrypted column must exist but
 /// stay untouched by the write under test.
-fn users_encrypted_secret_schema() -> zeroship_data_sql::value::Value {
-    zeroship_data_sql::value!({
+fn users_encrypted_secret_schema() -> zeroship_data_orm::value::Value {
+    zeroship_data_orm::value!({
         "email": {"type": "string", "required": true, "unique": true},
         "name": {"type": "string", "required": true},
         "secret": {
@@ -171,19 +171,19 @@ const _procedures = { upsertConflict };
         assert!(
             first
                 .get("created_by")
-                .is_none_or(zeroship_data_sql::value::Value::is_null),
+                .is_none_or(zeroship_data_orm::value::Value::is_null),
             "a supplied created_by must not land on the insert arm: {first:?}"
         );
         assert!(
             second
                 .get("created_by")
-                .is_none_or(zeroship_data_sql::value::Value::is_null),
+                .is_none_or(zeroship_data_orm::value::Value::is_null),
             "a supplied created_by must not land on the conflict arm: {second:?}"
         );
         assert!(
             second
                 .get("updated_by")
-                .is_none_or(zeroship_data_sql::value::Value::is_null),
+                .is_none_or(zeroship_data_orm::value::Value::is_null),
             "a supplied updated_by must not land on the conflict arm: {second:?}"
         );
         assert_eq!(

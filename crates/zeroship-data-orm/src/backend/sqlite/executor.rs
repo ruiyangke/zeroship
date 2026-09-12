@@ -6,7 +6,8 @@ use crate::{
     executor::ScopedExecutor,
 };
 use async_trait::async_trait;
-use zeroship_data_sql::{SchemaName, compile::SqlDialect, value::Value};
+use crate::value::Value;
+use crate::sql::{SchemaName, compile::SqlDialect};
 
 #[async_trait(?Send)]
 impl ScopedExecutor for SqliteBackend {
@@ -32,6 +33,20 @@ impl ScopedExecutor for SqliteBackend {
             .acquire(LeaseKind::Autocommit)
             .await?
             .query(sql, params)
+            .await
+    }
+    async fn exec(
+        &self,
+        app_id: &str,
+        _schema: &SchemaName,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        self.connection_driver(app_id)
+            .await?
+            .acquire(LeaseKind::Autocommit)
+            .await?
+            .exec(sql, params)
             .await
     }
     async fn open_tx_session(

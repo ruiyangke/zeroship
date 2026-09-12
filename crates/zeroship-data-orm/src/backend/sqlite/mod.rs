@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 #[cfg(test)]
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::storage::LockManager;
@@ -155,8 +155,8 @@ impl SqliteBackend {
     pub async fn query_values(
         &self,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+        params: &[crate::value::Value],
+    ) -> Result<Vec<crate::value::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
         crate::backend::sqlite::row_json::typed_rows_to_values(&typed)
     }
@@ -557,7 +557,7 @@ impl SqliteBackend {
 /// Malformed or unattachable sentinels are logged and skipped.
 fn parse_encryption_sentinels(
     create_table_text: &str,
-) -> std::collections::HashMap<String, zeroship_data_sql::catalog::EncryptionMeta> {
+) -> std::collections::HashMap<String, crate::sql::catalog::EncryptionMeta> {
     let mut out = std::collections::HashMap::new();
     // Walk the body, finding each `/* zero-migrate:enc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
@@ -568,7 +568,7 @@ fn parse_encryption_sentinels(
     // DISPATCHES on the marker and then hands the whole body - prefix included -
     // to the codec, so a literal that drifts from the codec's prefix does not
     // fail to parse, it finds nothing, and a column reads back unencrypted.
-    let marker = format!("/* {}", zeroship_data_sql::mask_codec::ENC_SENTINEL_PREFIX);
+    let marker = format!("/* {}", crate::sql::mask_codec::ENC_SENTINEL_PREFIX);
     let marker = marker.as_str();
     let mut search_pos = 0usize;
     while let Some(found) = create_table_text[search_pos..].find(marker) {
@@ -612,7 +612,7 @@ fn parse_encryption_sentinels(
         // sentinel this crate cannot interpret produces the codec's typed error
         // rather than a silent absence. Structured exactly like the mask
         // sibling below, for the same reason: both failure arms are LOUD.
-        match zeroship_data_sql::mask_codec::parse_encryption_sentinel(body) {
+        match crate::sql::mask_codec::parse_encryption_sentinel(body) {
             Ok(meta) => {
                 // Rewind from `abs_marker` to find the column name. The
                 // column name is the most recent `"…"` token before the
@@ -651,12 +651,12 @@ fn parse_encryption_sentinels(
 /// are logged and skipped, matching PostgreSQL catalog recovery.
 fn parse_mask_sentinels(
     create_table_text: &str,
-) -> std::collections::HashMap<String, zeroship_data_sql::catalog::MaskMeta> {
-    use zeroship_data_sql::catalog::MaskMeta;
+) -> std::collections::HashMap<String, crate::sql::catalog::MaskMeta> {
+    use crate::sql::catalog::MaskMeta;
     let mut out = std::collections::HashMap::new();
     // Composed from the shared prefix, for the reason
     // [`parse_encryption_sentinels`] states at its own marker.
-    let marker = format!("/* {}", zeroship_data_sql::mask_codec::MASK_SENTINEL_PREFIX);
+    let marker = format!("/* {}", crate::sql::mask_codec::MASK_SENTINEL_PREFIX);
     let marker = marker.as_str();
     let mut search_pos = 0usize;
     while let Some(found) = create_table_text[search_pos..].find(marker) {
@@ -682,7 +682,7 @@ fn parse_mask_sentinels(
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
         // Reuse the canonical parser so the wire shape is centralised.
-        match zeroship_data_sql::mask_codec::parse_mask_sentinel(body) {
+        match crate::sql::mask_codec::parse_mask_sentinel(body) {
             Ok((kind, classification)) => {
                 let before = &create_table_text[..abs_marker];
                 // The identifier before the sentinel is the visible field column.
@@ -693,7 +693,7 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: zeroship_data_sql::compile::raw_column_name(
+                                sibling_column: crate::sql::compile::raw_column_name(
                                     &column,
                                 ),
                             },
@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn spatial_near_base_query_reads_masked_sibling_when_schema_cached() {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -828,9 +828,9 @@ mod tests {
             "location": { "type": "geoPoint" }
         });
         let bq = search::build_spatial_near_base_query(
-            &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
             "places",
-            &zeroship_data_sql::value!({}),
+            &crate::value!({}),
             &schema,
         )
         .expect("spatial base query");
@@ -848,7 +848,7 @@ mod tests {
         );
         assert!(
             !bq.sql
-                .contains(&zeroship_data_sql::compile::raw_column_name("ssn")),
+                .contains(&crate::sql::compile::raw_column_name("ssn")),
             "spatial base query must never name the raw column: {}",
             bq.sql,
         );
@@ -1047,7 +1047,7 @@ mod tests {
         let m = got.get("ssn").expect("ssn must be parsed");
         assert!(matches!(
             m.wraps,
-            zeroship_data_sql::catalog::WrappedType::String
+            crate::sql::catalog::WrappedType::String
         ));
         assert!(
             !got.contains_key("name"),
@@ -1065,7 +1065,7 @@ mod tests {
         let m = got.get("salary").expect("salary must be parsed");
         assert!(matches!(
             m.wraps,
-            zeroship_data_sql::catalog::WrappedType::Number
+            crate::sql::catalog::WrappedType::Number
         ));
     }
 
@@ -1077,7 +1077,7 @@ mod tests {
         let m = got.get("a").expect("a must be parsed");
         assert!(matches!(
             m.wraps,
-            zeroship_data_sql::catalog::WrappedType::Bytes
+            crate::sql::catalog::WrappedType::Bytes
         ));
     }
 
@@ -1134,21 +1134,21 @@ mod tests {
     /// Every wrapped type the emitter can produce round-trips through the
     /// walker unchanged, and silently.
     ///
-    /// The input is BUILT by `zeroship_data_sql::mask_codec::build_encryption_sentinel`
+    /// The input is BUILT by `crate::sql::mask_codec::build_encryption_sentinel`
     /// rather than hand-written, so this pins walker-against-emitter rather
     /// than walker-against-one-literal: a change to the wire shape moves both
     /// sides and this test keeps passing, which is the point of collapsing the
     /// parse onto the codec.
     #[test]
     fn parse_encryption_sentinel_round_trips_every_built_sentinel() {
-        use zeroship_data_sql::catalog::{EncryptionMeta, WrappedType};
+        use crate::sql::catalog::{EncryptionMeta, WrappedType};
 
         {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
                 let meta = EncryptionMeta {
                     wraps,
                 };
-                let sentinel = zeroship_data_sql::mask_codec::build_encryption_sentinel(&meta);
+                let sentinel = crate::sql::mask_codec::build_encryption_sentinel(&meta);
                 let ddl = format!("CREATE TABLE t (\"ssn\" BYTEA /* {sentinel} */ NOT NULL)");
                 let (got, events) = capture_events(|| parse_encryption_sentinels(&ddl));
                 let parsed = got.get("ssn").unwrap_or_else(|| {
@@ -1271,8 +1271,8 @@ mod tests {
     /// and carries the sentinel.
     #[test]
     fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
-        use zeroship_data_sql::catalog::{Classification, MaskKind};
-        let raw = zeroship_data_sql::compile::raw_column_name("ssn");
+        use crate::sql::catalog::{Classification, MaskKind};
+        let raw = crate::sql::compile::raw_column_name("ssn");
         let ddl = format!(
             "CREATE TABLE \"app\".\"users\" (\n  \
              \"id\" INTEGER PRIMARY KEY,\n  \
@@ -1294,15 +1294,15 @@ mod tests {
     /// Multiple masked columns in one table → one entry per field.
     #[test]
     fn sqlite_introspection_multiple_masked_columns() {
-        use zeroship_data_sql::catalog::{Classification, MaskKind};
+        use crate::sql::catalog::{Classification, MaskKind};
         let ddl = format!(
             "CREATE TABLE t (\n  \
              \"{}\" TEXT,\n  \
              \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
              \"{}\" TEXT,\n  \
              \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */\n)",
-            zeroship_data_sql::compile::raw_column_name("ssn"),
-            zeroship_data_sql::compile::raw_column_name("email"),
+            crate::sql::compile::raw_column_name("ssn"),
+            crate::sql::compile::raw_column_name("email"),
         );
         let got = parse_mask_sentinels(&ddl);
         assert_eq!(got.len(), 2);

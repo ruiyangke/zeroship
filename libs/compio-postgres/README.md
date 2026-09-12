@@ -203,9 +203,7 @@ leans on things that can disagree with it:
 ## Before you push
 
 ```bash
-./tests/clippy_gate.sh    # the workspace lint authority; a bare cargo clippy
-                          # stops at the first failing crate and prints what a
-                          # clean crate prints
+cargo clippy --workspace --all-targets --all-features
 ```
 
 Note it does NOT deny `unused_imports`; a plain `cargo build --tests` is the

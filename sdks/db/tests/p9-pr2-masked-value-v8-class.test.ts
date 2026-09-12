@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * **P9 PR 2** — `MaskedValue` promoted to a native v8_class +
  * Rust-side rehydration.
@@ -229,7 +230,7 @@ describe("P9 PR 2 — MaskedValue declare-class type surface (compile-time)", ()
       ssn: t.encrypted({ of: t.string() }).mask({ kind: "last4", classification: "spi" }).required(),
       name: t.string().required(),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     // `as unknown as` casts because MaskedValue has no runtime constructor.
     const row: R = {
       id: "usr_001",

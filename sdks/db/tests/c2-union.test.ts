@@ -6,7 +6,7 @@
  * expansion that hands off to the Rust DDL emitter.
  *
  * Postgres-side DDL coverage lives in
- * `crates/zeroship-data-sql/src/compile.rs` golden tests.
+ * `crates/zeroship-data-orm/src/sql/compile.rs` golden tests.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -317,17 +317,20 @@ describe("C2 — partial update against a flat-expanded union", () => {
     // enum branch — invalid literals must reject.
     const Events = model(
       "events",
-      t.union(
-        t.object({
-          kind: t.literal("login"),
-          userId: t.number().required(),
-          ip: t.string().required(),
-        }),
-        t.object({
-          kind: t.literal("error"),
-          message: t.string().required(),
-        }),
-      ) as unknown as Record<string, unknown>,
+      {
+        ...normalizeSchema(t.union(
+          t.object({
+            kind: t.literal("login"),
+            userId: t.number().required(),
+            ip: t.string().required(),
+          }),
+          t.object({
+            kind: t.literal("error"),
+            message: t.string().required(),
+          }),
+        )),
+        id: t.string().required().primaryKey(),
+      } as Record<string, unknown>,
       makeMockNative(),
     );
     const { data, error } = await Events.update({ id: "1" }, { kind: "invalidLiteral" });

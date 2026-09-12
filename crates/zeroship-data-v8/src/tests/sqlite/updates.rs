@@ -3,7 +3,67 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_sql::compile::raw_column_name;
+use zeroship_data_orm::sql::compile::raw_column_name;
+
+#[test]
+fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
+        let total = zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 17;
+        let body = r#"
+async function bulk() {
+    const users = env.db.collection(COLLECTION);
+    const total = BULK_TOTAL;
+    for (let start = 0; start < total; start += 100) {
+        await users.insertMany(Array.from({ length: Math.min(100, total - start) }, (_, i) => ({
+            email: `user-${start + i}@example.com`, name: "new"
+        })));
+    }
+    const updated = await users.updateMany({}, { name: "ready" });
+    const missing = await users.updateMany({ name: "absent" }, { name: "unused" });
+    try {
+        await env.db.transaction(async tx => {
+            await tx[COLLECTION].purgeMany({});
+            throw new Error("rollback");
+        });
+    } catch (error) {
+        if (error.message !== "rollback") throw error;
+    }
+    const deleted = await users.deleteMany({});
+    const restored = await users.restoreMany({});
+    const purged = await users.purgeMany({});
+    return { updated, missing, deleted, restored, purged, remaining: await users.count({}) };
+}
+bulk.config = { kind: "action" };
+const _procedures = { bulk };
+"#
+        .replace("BULK_TOTAL", &total.to_string());
+        let mut source = sqlite_runtime_source("users", &users_encrypted_ssn_schema(), &body);
+        source.descriptor = serde_json::to_string(&zeroship_data_orm::value!({
+            "version":2,
+            "collections":{"users":{
+                "fields":crate::tests::fixtures::schema::generated_fields(users_encrypted_ssn_schema()),
+                "options":{"softDelete":true, "versioning":true, "strictness":"strict"},
+                "indexes":[],
+            }},
+        })).unwrap();
+        crate::tests::fixtures::recording::clear();
+        let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "bulk"));
+        assert_eq!(
+            result,
+            zeroship_data_orm::value!({
+                "updated":total, "missing":0, "deleted":total, "restored":total,
+                "purged":total, "remaining":0,
+            })
+        );
+        let statements = crate::tests::fixtures::recording::bulk_statements();
+        assert_eq!(statements.len(), 6);
+        for sql in statements {
+            assert!(!sql.contains(" RETURNING "), "{sql}");
+        }
+    });
+}
 
 #[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
@@ -183,7 +243,7 @@ const _procedures = { seed, updateManyByName };
             !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(" LIMIT {}", zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1);
+        let expected_limit = format!(" LIMIT {}", zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1);
         for sql in &counters {
             assert!(
                 sql.ends_with(&expected_limit),
@@ -256,7 +316,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target_cap = usize::try_from(zeroship_data_sql::compile::MAX_QUERY_LIMIT)
+        let target_cap = usize::try_from(zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT)
             .expect("MAX_QUERY_LIMIT must fit usize");
         let seeded = target_cap + 1;
         let values = (0..seeded)
@@ -418,7 +478,6 @@ async function failBulkInsideTransaction(_input, _ctx) {
             };
         }
         await tx[COLLECTION].insert({
-            id: "control_row",
             email: "control@example.com",
             name: "Blue Team",
             ssn: "111-22-3333"
@@ -562,16 +621,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         }
         let control = client
             .query_typed(
-                // KEYED ON EMAIL, NOT ON THE SUPPLIED id. The procedure inserts
-                // `{ id: "control_row", ... }`, and the write path DISCARDS that
-                // and mints a typed id - the row lands as
-                // `user_034HHQXErG6U2Eb6CiCTu0`. `id` is in
-                // IMMUTABLE_SYSTEM_FIELDS (`crud/system_fields_pass.rs:46`), and
-                // on INSERT a caller-supplied value is replaced silently, where
-                // an UPDATE touching the same field is refused loudly (`:399`,
-                // `:428`). So `WHERE id = 'control_row'` matched nothing and this
-                // assertion read 0 - which looked exactly like the outer
-                // transaction having been rolled back, and was not.
+                // Find the control insert by its unique fixture email.
                 r#"SELECT COUNT(*) FROM "default"."users" WHERE email = 'control@example.com'"#,
                 &[],
             )
@@ -676,7 +726,7 @@ fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let source = sqlite_runtime_source(
+        let mut source = sqlite_runtime_source(
             "users",
             &schema,
             r#"
@@ -708,6 +758,10 @@ nestedCasUpdate.config = { kind: "action" };
 const _procedures = { seed, nestedCasUpdate };
 "#,
         );
+        let mut descriptor: serde_json::Value = serde_json::from_str(&source.descriptor).unwrap();
+        descriptor["collections"]["users"]["options"]["versioning"] = true.into();
+        descriptor["collections"]["users"]["fields"]["version"]["concurrency"] = true.into();
+        source.descriptor = descriptor.to_string();
 
         let seeded = dispatch_sqlite_runtime(&dir, &source, "seed");
         let row = parity::extract_json(&seeded);
@@ -761,7 +815,7 @@ fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let schema = users_encrypted_ssn_schema();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let source = sqlite_runtime_source(
+        let mut source = sqlite_runtime_source(
             "users",
             &schema,
             r#"
@@ -793,6 +847,10 @@ nestedCasUpdateMany.config = { kind: "action" };
 const _procedures = { seed, nestedCasUpdateMany };
 "#,
         );
+        let mut descriptor: serde_json::Value = serde_json::from_str(&source.descriptor).unwrap();
+        descriptor["collections"]["users"]["options"]["versioning"] = true.into();
+        descriptor["collections"]["users"]["fields"]["version"]["concurrency"] = true.into();
+        source.descriptor = descriptor.to_string();
 
         dispatch_sqlite_runtime(&dir, &source, "seed");
 

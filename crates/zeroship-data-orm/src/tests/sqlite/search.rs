@@ -85,7 +85,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             crate::tests::fixtures::cache_schema(
                 "vector_topk",
                 "docs",
-                zeroship_data_sql::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
+                crate::value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
             );
 
             for i in 0..100usize {
@@ -110,7 +110,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                         query: &query,
                         k: 10,
                         metric: VectorMetric::Cosine,
-                        filter: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
                         schema: &zeroship_data_orm::descriptor::collection_schema(
                             &DbBinding::cold_start("vector_topk"),
                             "docs",
@@ -126,7 +126,7 @@ fn vector_search_returns_k_nearest_sqlite() {
                 .iter()
                 .filter_map(|r| {
                     r.get("id")
-                        .and_then(zeroship_data_sql::value::Value::as_i64)
+                        .and_then(crate::value::Value::as_i64)
                 })
                 .collect();
             // SQLite's INTEGER PRIMARY KEY AUTOINCREMENT starts at 1; row
@@ -139,7 +139,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             for r in &rows {
                 let d = r
                     .get("_distance")
-                    .and_then(zeroship_data_sql::value::Value::as_f64)
+                    .and_then(crate::value::Value::as_f64)
                     .expect("row must carry _distance");
                 assert!(d.is_finite(), "_distance must be finite, got {d}");
                 assert!(d >= 0.0, "cosine distance is non-negative, got {d}");
@@ -147,7 +147,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             // Row #1 should be the nearest (distance ~ 0).
             let first_id = rows[0]
                 .get("id")
-                .and_then(zeroship_data_sql::value::Value::as_i64)
+                .and_then(crate::value::Value::as_i64)
                 .expect("first row id");
             assert_eq!(
                 first_id, 1,
@@ -155,7 +155,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             );
             let first_d = rows[0]
                 .get("_distance")
-                .and_then(zeroship_data_sql::value::Value::as_f64)
+                .and_then(crate::value::Value::as_f64)
                 .expect("first row _distance");
             assert!(
                 first_d.abs() < 1e-5,
@@ -238,7 +238,7 @@ fn vector_search_respects_filter_sqlite() {
             crate::tests::fixtures::cache_schema(
                 "vector_filter",
                 "docs",
-                zeroship_data_sql::value!({
+                crate::value!({
                     "tenant": { "type": "string" },
                     "embedding": { "type": "vector", "vectorDims": 4 },
                 }),
@@ -277,7 +277,7 @@ fn vector_search_respects_filter_sqlite() {
             // have tenant='a'. The filter uses the `$eq` operator the
             // SDK already emits.
             let query = mk_unit_vec(0, 4);
-            let filter = zeroship_data_sql::value!({ "tenant": { "$eq": "a" } });
+            let filter = crate::value!({ "tenant": { "$eq": "a" } });
             let rows = backend
                 .vector_search(
                     None,
@@ -308,7 +308,7 @@ fn vector_search_respects_filter_sqlite() {
             for r in &rows {
                 let tenant = r
                     .get("tenant")
-                    .and_then(zeroship_data_sql::value::Value::as_str)
+                    .and_then(crate::value::Value::as_str)
                     .expect("row must carry tenant");
                 assert_eq!(
                     tenant, "a",
@@ -348,7 +348,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             crate::tests::fixtures::cache_schema(
                 "vector_math",
                 "docs",
-                zeroship_data_sql::value!({
+                crate::value!({
                     "emb_cos": { "type": "vector", "vectorDims": 4 },
                     "emb_l2": { "type": "vector", "vectorDims": 4 },
                 }),
@@ -390,7 +390,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                         query: &v1,
                         k: 2,
                         metric: VectorMetric::Cosine,
-                        filter: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
                         schema: &zeroship_data_orm::descriptor::collection_schema(
                             &DbBinding::cold_start("vector_math"),
                             "docs",
@@ -410,7 +410,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                         query: &v1,
                         k: 2,
                         metric: VectorMetric::L2,
-                        filter: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
                         schema: &zeroship_data_orm::descriptor::collection_schema(
                             &DbBinding::cold_start("vector_math"),
                             "docs",
@@ -424,16 +424,16 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             // The row with id=2 (the OTHER unit vector) must appear in
             // both result sets; its cosine and L2 distances must satisfy
             // L2² ≈ 2 * cos_distance.
-            let find = |rows: &[zeroship_data_sql::value::Value], target_id: i64| -> f64 {
+            let find = |rows: &[crate::value::Value], target_id: i64| -> f64 {
                 rows.iter()
                     .find(|r| {
                         r.get("id")
-                            .and_then(zeroship_data_sql::value::Value::as_i64)
+                            .and_then(crate::value::Value::as_i64)
                             == Some(target_id)
                     })
                     .and_then(|r| {
                         r.get("_distance")
-                            .and_then(zeroship_data_sql::value::Value::as_f64)
+                            .and_then(crate::value::Value::as_f64)
                     })
                     .expect("row with target id must be present")
             };
@@ -503,7 +503,7 @@ fn near_returns_within_radius() {
             crate::tests::fixtures::cache_schema(
                 "near_radius",
                 "places",
-                zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
+                crate::value!({ "location": { "type": "geoPoint" } }),
             );
 
             let london = GeoPoint {
@@ -552,7 +552,7 @@ fn near_returns_within_radius() {
                         column: "location",
                         point: london,
                         radius_m: 1000.0,
-                        filter: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
                         limit: None,
                         schema: &zeroship_data_orm::descriptor::collection_schema(
                             &DbBinding::cold_start("near_radius"),
@@ -568,7 +568,7 @@ fn near_returns_within_radius() {
                 .iter()
                 .filter_map(|r| {
                     r.get("id")
-                        .and_then(zeroship_data_sql::value::Value::as_i64)
+                        .and_then(crate::value::Value::as_i64)
                 })
                 .collect();
             let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
@@ -580,7 +580,7 @@ fn near_returns_within_radius() {
             for r in &rows {
                 let d = r
                     .get("_distance_m")
-                    .and_then(zeroship_data_sql::value::Value::as_f64)
+                    .and_then(crate::value::Value::as_f64)
                     .expect("row must carry _distance_m");
                 assert!(d.is_finite(), "_distance_m must be finite, got {d}");
                 assert!(
@@ -591,7 +591,7 @@ fn near_returns_within_radius() {
             // The dead-centre row (id=1) is the closest.
             let first_id = rows[0]
                 .get("id")
-                .and_then(zeroship_data_sql::value::Value::as_i64)
+                .and_then(crate::value::Value::as_i64)
                 .expect("first row id");
             assert_eq!(
                 first_id, 1,
@@ -599,7 +599,7 @@ fn near_returns_within_radius() {
             );
             let first_d = rows[0]
                 .get("_distance_m")
-                .and_then(zeroship_data_sql::value::Value::as_f64)
+                .and_then(crate::value::Value::as_f64)
                 .expect("first row _distance_m");
             assert!(
                 first_d < 1.0,
@@ -651,7 +651,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             crate::tests::fixtures::cache_schema(
                 app,
                 "places",
-                zeroship_data_sql::value!({ "location": { "type": "geoPoint" } }),
+                crate::value!({ "location": { "type": "geoPoint" } }),
             );
 
             let london = GeoPoint {
@@ -666,7 +666,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                 false,
                 None,
                 app,
-                zeroship_data_sql::SchemaName::new(app).unwrap(),
+                crate::sql::SchemaName::new(app).unwrap(),
                 handle.clone(),
             )
             .await
@@ -684,7 +684,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             .expect("write inside the transaction");
 
             let binding = DbBinding::cold_start(app);
-            let args = zeroship_data_sql::value!({
+            let args = crate::value!({
                 "field": "location",
                 "point": { "lat": london.lat, "lng": london.lng },
                 "radius": 1000.0,
@@ -692,7 +692,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let near_on = async |route| {
                 let plan = zeroship_data_orm::crud::plan_near(
                     &binding,
-                    zeroship_data_sql::compile::SqlDialect::Sqlite,
+                    crate::sql::compile::SqlDialect::Sqlite,
                     "places",
                     &args,
                 )
@@ -714,7 +714,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let outside = near_on(
                 zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
                     app,
-                    zeroship_data_sql::compile::SqlDialect::Sqlite,
+                    crate::sql::compile::SqlDialect::Sqlite,
                 )
                 .bind(handle.clone()),
             )
@@ -729,7 +729,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let inside = near_on(
                 zeroship_data_orm::tx_route::CapturedRoute::tx_for_tests(
                     app,
-                    zeroship_data_sql::compile::SqlDialect::Sqlite,
+                    crate::sql::compile::SqlDialect::Sqlite,
                 )
                 .bind(handle.clone()),
             )
@@ -742,12 +742,12 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             );
             assert_eq!(
                 inside[0]["location"],
-                zeroship_data_sql::value!({"lat":london.lat, "lng":london.lng})
+                crate::value!({"lat":london.lat, "lng":london.lng})
             );
             assert!(
                 inside[0]
                     .get("_distance_m")
-                    .and_then(zeroship_data_sql::value::Value::as_f64)
+                    .and_then(crate::value::Value::as_f64)
                     .is_some_and(|d| d < 1.0),
                 "the row must carry its synthetic distance: {inside:?}",
             );

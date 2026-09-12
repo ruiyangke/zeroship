@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use zeroship_data_sql::{
+use crate::sql::{
     FieldPath, Ident, IdentRole, Join, JoinKind, Operand, OrderKey, Predicate, ProjectedField,
     Projection, RowLimit, RowOffset, Select,
 };
@@ -97,19 +97,21 @@ struct SourceLayout {
 }
 #[derive(Debug)]
 pub(super) struct PreparedRead {
-    query: BuiltQuery,
+    query: CompiledQuery,
+    dialect: crate::sql::compile::SqlDialect,
     sources: Vec<SourceLayout>,
     projections: Vec<ReadProjection>,
     scalar_slots: BTreeMap<String, String>,
+    scalar_schema: Value,
 }
 
 impl PreparedRead {
     pub(super) fn new(
         binding: &DbBinding,
-        dialect: crate::compile::SqlDialect,
+        dialect: crate::sql::compile::SqlDialect,
         input: ReadQuery,
     ) -> Result<Self, DbError> {
-        if input.joins.len() >= zeroship_data_sql::MAX_READ_SOURCES {
+        if input.joins.len() >= crate::sql::MAX_READ_SOURCES {
             return Err(invalid("read exceeds its source budget"));
         }
         if input.projection.is_empty() || input.projection.len() > MAX_READ_FIELDS {
@@ -130,10 +132,11 @@ impl PreparedRead {
             {
                 return Err(invalid("duplicate read source alias"));
             }
+            let schema = crate::descriptor::collection_schema(binding, &source.collection)?;
             sources.push(SourceLayout {
                 source: source.clone(),
                 nullable,
-                schema: crate::descriptor::collection_schema(binding, &source.collection)?,
+                schema,
                 fields: BTreeMap::new(),
             });
         }
@@ -143,7 +146,17 @@ impl PreparedRead {
             validate_predicate(&join.on, &sources, true)?;
             let mut on = join.on.clone();
             if !join.source.include_deleted {
-                on = Predicate::And(vec![on, visible(&join.source)?]);
+                on = Predicate::And(vec![
+                    on,
+                    visible(
+                        &join.source,
+                        &sources
+                            .iter()
+                            .find(|s| s.source.alias == join.source.alias)
+                            .unwrap()
+                            .schema,
+                    )?,
+                ]);
             }
             joins.push(Join {
                 kind: join.kind,
@@ -154,12 +167,13 @@ impl PreparedRead {
         }
         validate_predicate(&input.filter, &sources, false)?;
         validate_predicate(&input.having, &sources, false)?;
-        for path in input
-            .group_by
-            .iter()
-            .chain(input.order_by.iter().map(|k| &k.path))
-        {
+        for path in &input.group_by {
             check_field(path, &sources, false)?;
+            check_capability(path, &sources, "filterable")?;
+        }
+        for key in &input.order_by {
+            check_field(&key.path, &sources, false)?;
+            check_capability(&key.path, &sources, "sortable")?;
         }
 
         let aggregating = input.projection.iter().any(|p| {
@@ -174,6 +188,7 @@ impl PreparedRead {
         let mut output_names = BTreeSet::new();
         let mut projected = Vec::new();
         let mut scalar_slots = BTreeMap::new();
+        let mut scalar_schema = Record::new();
         for projection in &input.projection {
             let output = match projection {
                 ReadProjection::Row { output, .. } | ReadProjection::Scalar { output, .. } => {
@@ -203,19 +218,20 @@ impl PreparedRead {
                             "a nullable source requires an optional row projection",
                         ));
                     }
-                    let allowed = zeroship_data_sql::descriptors::readable_fields(&layout.schema);
+                    let allowed = crate::sql::descriptors::readable_fields(&layout.schema);
                     let selected = fields
                         .clone()
                         .unwrap_or_else(|| allowed.iter().cloned().collect());
                     if selected.is_empty() || selected.len() > MAX_READ_FIELDS {
                         return Err(invalid("row projection exceeds its field budget"));
                     }
-                    for field in selected.into_iter().chain(std::iter::once("id".into())) {
+                    for field in selected {
                         if !allowed.contains(&field) {
                             return Err(invalid(format!("unreadable projection field '{field}'")));
                         }
                         add_field(layout, &field, &mut projected)?;
                     }
+                    add_field(layout, "id", &mut projected)?;
                 }
                 ReadProjection::Scalar { expression, .. } => {
                     if !aggregating {
@@ -229,7 +245,7 @@ impl PreparedRead {
                             .find(|s| s.source.alias == alias)
                             .unwrap();
                         let allowed =
-                            zeroship_data_sql::descriptors::readable_fields(&layout.schema);
+                            crate::sql::descriptors::readable_fields(&layout.schema);
                         if !allowed.contains(path.root().as_str()) {
                             return Err(invalid("unreadable scalar projection"));
                         }
@@ -237,6 +253,10 @@ impl PreparedRead {
                         add_field(layout, "id", &mut projected)?;
                     } else {
                         let slot = ident(&format!("v{}", projected.len()), IdentRole::Alias)?;
+                        scalar_schema.insert(
+                            slot.as_str().into(),
+                            scalar_definition(expression, &sources)?,
+                        );
                         projected.push(match expression {
                             Operand::Path(path) => {
                                 check_field(path, &sources, true)?;
@@ -269,7 +289,10 @@ impl PreparedRead {
         let filter = if input.source.include_deleted {
             input.filter
         } else {
-            Predicate::And(vec![input.filter, visible(&input.source)?])
+            Predicate::And(vec![
+                input.filter,
+                visible(&input.source, &sources[0].schema)?,
+            ])
         };
         let mut builder = Select::builder(
             ident(&input.source.collection, IdentRole::Collection)?,
@@ -293,12 +316,12 @@ impl PreparedRead {
         let descriptors = sources
             .iter()
             .zip(&aliases)
-            .map(|(s, alias)| crate::compile::ReadSource {
+            .map(|(s, alias)| crate::sql::compile::ReadSource {
                 alias: Some(alias),
                 schema: &s.schema,
             })
             .collect::<Vec<_>>();
-        let query = crate::compile::build_select(&plan, binding.schema(), &descriptors, dialect)?;
+        let query = crate::sql::compile::build_select(&plan, binding.schema(), &descriptors, dialect)?;
         for source in &sources {
             crate::cdc::read_set::record_if_active(
                 &source.source.collection,
@@ -308,9 +331,11 @@ impl PreparedRead {
         }
         Ok(Self {
             query,
+            dialect,
             sources,
             projections: input.projection,
             scalar_slots,
+            scalar_schema: Value::Object(scalar_schema),
         })
     }
 
@@ -319,10 +344,13 @@ impl PreparedRead {
         binding: &DbBinding,
         route: &crate::tx_route::TxRoute,
     ) -> Result<Output, DbError> {
-        let rows = crate::exec::exec_query(route, self.query).await?;
+        let mut rows = crate::exec::exec_query(route, self.query).await?;
         let mut budget = MAX_READ_RESULT_BYTES;
         for row in &rows {
             consume_budget(row, &mut budget)?;
+        }
+        if !self.scalar_slots.is_empty() {
+            decode_scalars(self.dialect, &self.scalar_schema, &mut rows)?;
         }
         let mut blocks: Vec<Vec<Value>> = Vec::new();
         let mut has_masked = false;
@@ -333,16 +361,16 @@ impl PreparedRead {
                 if source.fields.is_empty() {
                     continue;
                 }
-                let identity = source
+                let slot = source
                     .fields
                     .get("id")
                     .ok_or_else(|| DbError::internal("read layout has no identity"))?;
                 let id = row
-                    .get(identity)
-                    .ok_or_else(|| DbError::internal("read result is missing its identity"))?;
+                    .get(slot)
+                    .ok_or_else(|| DbError::internal("missing read identity"))?;
                 if id.is_null() {
                     if !source.nullable {
-                        return Err(DbError::internal("required read source has no identity"));
+                        return Err(DbError::internal("required source has no identity"));
                     }
                     continue;
                 }
@@ -478,11 +506,15 @@ fn add_field(
     }
     Ok(())
 }
-fn visible(source: &ReadSource) -> Result<Predicate, DbError> {
-    Ok(Predicate::is_null(Operand::Path(
-        source.column("deleted_at")?,
-    )))
+fn visible(source: &ReadSource, schema: &Value) -> Result<Predicate, DbError> {
+    Ok(
+        match crate::sql::lifecycle::soft_delete_column(schema)? {
+            Some(column) => Predicate::is_null(Operand::Path(source.column(column)?)),
+            None => Predicate::always(),
+        },
+    )
 }
+
 fn source_for<'a>(
     path: &FieldPath,
     sources: &'a [SourceLayout],
@@ -501,16 +533,30 @@ fn source_for<'a>(
 fn check_field(path: &FieldPath, sources: &[SourceLayout], plain: bool) -> Result<(), DbError> {
     let source = source_for(path, sources)?;
     let field = path.root().as_str();
-    if !zeroship_data_sql::descriptors::readable_fields(&source.schema).contains(field) {
+    if !crate::sql::descriptors::readable_fields(&source.schema).contains(field) {
         return Err(invalid(format!("unreadable field '{field}'")));
     }
     if source
         .schema
         .get(field)
-        .is_some_and(zeroship_data_sql::descriptors::is_encrypted)
-        || (plain && crate::compile::column_is_masked(field, &source.schema))
+        .is_some_and(crate::sql::descriptors::is_encrypted)
+        || (plain && crate::sql::compile::column_is_masked(field, &source.schema))
     {
         return Err(invalid("protected field is not valid in this expression"));
+    }
+    Ok(())
+}
+fn check_capability(
+    path: &FieldPath,
+    sources: &[SourceLayout],
+    capability: &str,
+) -> Result<(), DbError> {
+    let source = source_for(path, sources)?;
+    if source.schema[path.root().as_str()][capability].as_bool() == Some(false) {
+        return Err(invalid(format!(
+            "field '{}' is not {capability}",
+            path.root().as_str()
+        )));
     }
     Ok(())
 }
@@ -520,9 +566,10 @@ fn validate_predicate(
     join: bool,
 ) -> Result<(), DbError> {
     for path in
-        zeroship_data_sql::joins::predicate_paths(predicate).map_err(|e| invalid(e.to_string()))?
+        crate::sql::joins::predicate_paths(predicate).map_err(|e| invalid(e.to_string()))?
     {
         check_field(path, sources, join)?;
+        check_capability(path, sources, "filterable")?;
     }
     let mut stack = vec![predicate];
     while let Some(predicate) = stack.pop() {
@@ -561,15 +608,80 @@ fn scalar_kind<'a>(path: &FieldPath, sources: &'a [SourceLayout]) -> Result<&'a 
         "integer" | "int" | "bigInt" => Ok("integer"),
         "number" | "float" | "double" => Ok("number"),
         "boolean" | "bool" => Ok("boolean"),
-        "decimal" | "bytes" => Ok(kind),
+        "decimal" | "bytes" | "calendarDate" | "time" => Ok(kind),
         _ => Err(invalid("join keys must be scalar columns")),
     }
+}
+
+fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<Value, DbError> {
+    use crate::sql::AggregateFunc;
+    let path = match expression {
+        Operand::Path(path) => path,
+        Operand::Aggregate(aggregate) => {
+            if aggregate.func() == AggregateFunc::Count {
+                return Ok(crate::value!({"type":"bigInt"}));
+            }
+            let path = aggregate
+                .argument()
+                .ok_or_else(|| invalid("aggregate requires a column"))?;
+            let kind = scalar_kind(path, sources)?;
+            if matches!(aggregate.func(), AggregateFunc::Sum | AggregateFunc::Avg) {
+                if !matches!(kind, "integer" | "number") {
+                    return Err(invalid("sum and avg require an integer or number column"));
+                }
+                return Ok(
+                    crate::value!({"type": if aggregate.func() == AggregateFunc::Avg || kind == "number" { "number" } else { "bigInt" }}),
+                );
+            }
+            if matches!(kind, "boolean" | "bytes" | "decimal") {
+                return Err(invalid(
+                    "min and max require an ordered portable scalar column",
+                ));
+            }
+            path
+        }
+        Operand::Lit(_) => return Err(invalid("literal projections are not supported")),
+    };
+    Ok(source_for(path, sources)?.schema[path.root().as_str()].clone())
+}
+
+fn decode_scalars(
+    dialect: crate::sql::compile::SqlDialect,
+    schema: &Value,
+    rows: &mut [Value],
+) -> Result<(), DbError> {
+    for row in rows.iter_mut() {
+        let Some(fields) = row.as_object_mut() else {
+            continue;
+        };
+        for (slot, value) in fields {
+            if let Value::Decimal(decimal) = value {
+                *value =
+                    match schema[slot]["type"].as_str() {
+                        Some("int" | "integer" | "bigInt") => decimal
+                            .parse::<i64>()
+                            .map(Value::from)
+                            .map_err(|_| invalid("aggregate integer is out of range"))?,
+                        Some("number") => {
+                            let number = decimal
+                                .parse::<f64>()
+                                .map_err(|_| invalid("invalid numeric aggregate"))?;
+                            Value::try_from(number)
+                                .map_err(|_| invalid("aggregate number is out of range"))?
+                        }
+                        _ => continue,
+                    };
+            }
+        }
+    }
+    crate::sql::codecs::decode_rows(dialect, schema, rows)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
 
     fn source(schema: Value) -> SourceLayout {
         SourceLayout {
@@ -602,7 +714,7 @@ mod tests {
             assert!(scalar_kind(&sources[0].source.column(field).unwrap(), &sources).is_err());
         }
         assert_eq!(
-            zeroship_data_sql::descriptors::readable_fields(&sources[0].schema),
+            crate::sql::descriptors::readable_fields(&sources[0].schema),
             ["id", "created_at", "version", "event_time", "missing_type"]
                 .map(String::from)
                 .into()
@@ -619,5 +731,19 @@ mod tests {
                 check_field(&sources[0].source.column(field).unwrap(), &sources, false).is_err()
             );
         }
+    }
+
+    #[test]
+    fn familiar_names_do_not_bypass_expression_flags() {
+        let sources = vec![source(value!({
+            "created_at":{"type":"string", "filterable":false},
+            "version":{"type":"int", "sortable":false}
+        }))];
+        let path = sources[0].source.column("created_at").unwrap();
+        assert!(
+            validate_predicate(&Predicate::is_null(Operand::Path(path)), &sources, false).is_err()
+        );
+        let path = sources[0].source.column("version").unwrap();
+        assert!(check_capability(&path, &sources, "sortable").is_err());
     }
 }

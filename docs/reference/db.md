@@ -254,57 +254,37 @@ All chainable on any field:
 | `.enum(...values)`    | Restricts the value to a fixed set.                          |
 | `.pattern(/regex/)`   | Regex constraint on string values.                           |
 
-### Auto-generated columns
+### Generated columns
 
-You never declare these; every collection has them. They're the
-platform "system fields" — full documentation lives in the
-[System fields](#system-fields) section below:
+Migration policy can supply columns with assignment generators. The resulting
+`schema.runtime.json` declares those fields, their types, primary keys and
+lifecycle roles. Rust and TypeScript use that same descriptor; `Row<S>` contains
+only fields declared by `S`.
 
-- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62(uuidv7)>`), platform-minted. The `<prefix>` is auto-derived from the collection name; see [Typed-id prefixes](#typed-id-prefixes).
-- `created_at: number` — Unix-ms timestamp at INSERT.
-- `updated_at: number` — Unix-ms timestamp at INSERT; bumped on every UPDATE.
-- `created_by: string | null` — session actor at INSERT (`null` for system writes).
-- `updated_by: string | null` — session actor at every UPDATE.
-- `version: number` — `1` at INSERT; auto-bumped on every UPDATE; supports optimistic concurrency.
-- `deleted_at: number | null` — `null` (live) by default; `delete()` stamps the current Unix-ms time.
+Every ORM collection must declare a required `id` field as its sole primary key.
+The descriptor must include it explicitly; collection setup never injects it.
+Generation remains optional and uses the field's assignment metadata. Composite
+business keys use unique constraints. Once inserted, `id` cannot change through
+updates, upsert conflicts, or lifecycle generators. ID generators run on insertion.
+Projections and aggregate results may omit `id`; protected reads retain it internally
+for decryption and unmasking.
 
-These seven columns are added by the platform on every table created
-through the schema DSL. Soft delete and the physical `version` column
-are runtime-owned system-field behavior, not opt-in schema features. See
-[System fields](#system-fields) for the full semantics.
+An assignment names a generator (`typedId`, `actor`, `now`, `increment(N)` or
+`identity`) and an event (`insert`, `write` or `delete`). The ORM supplies typed
+IDs and request actors. Database defaults initialize timestamps, counters and
+identity columns; write expressions update timestamps and counters. Anonymous
+writes assign a null actor. Assigned fields are excluded from typed write inputs.
+Encrypted inserts reserve a database-generated identity before encryption, within
+the write's transaction.
+
+Names such as `created_at`, `version` and `deleted_at` have no intrinsic behavior.
+Without assignment metadata, they are ordinary columns. See [Column assignments](#column-assignments).
 
 ### Typed-id prefixes
 
-Every row's `id` is a **typed_id**: `<prefix>_<base62(uuidv7)>`. The
-22-character body is a UUIDv7 — globally unique and sortable by creation
-time. The prefix is a human-readable type tag; it carries **no**
-uniqueness (uniqueness lives entirely in the UUIDv7 body).
-
-**Default — auto-derived from the collection name.** With no
-declaration, the prefix is computed from the collection name: strip a
-trailing `s` (when the name is longer than one character), lowercase,
-take the first 4 ASCII alphanumerics. An empty result falls back to
-`row`.
-
-| Collection   | Auto prefix | Example id              |
-| ------------ | ----------- | ----------------------- |
-| `posts`      | `post`      | `post_01HXY3Z9PQR2…`    |
-| `users`      | `user`      | `user_01HXY3Z9PQR2…`    |
-| `categories` | `cate`      | `cate_01HXY3Z9PQR2…`    |
-
-**No public system-prefix override.** The canonical migration package does not
-expose the former `t.id(...)` shortcut. Do not declare the injected `id` column.
-`ids.typeId({ prefix })` and `ids.ulid()` are available for ordinary,
-author-owned columns, but they select validated text formats only; they do not
-rename the platform-minted system ID or add a generator, default, or key.
-
-**Ordering.** The UUIDv7 body is encoded as a fixed-width base62 string
-using the runtime's ordered alphabet, so lexicographic `id` order
-preserves creation order. Use `.sort({ id: -1 })` for stable
-newest-first feeds and `.sort({ id: 1 })` for oldest-first pagination.
-`created_at` is still the display/filter timestamp, but SQLite's
-`CURRENT_TIMESTAMP` has second-level granularity and can tie under quick
-dev inserts.
+A field assigned by `typedId` receives a UUIDv7 encoded with a readable prefix.
+The ORM uses the field's `idPrefix` when declared, otherwise derives one from the
+collection name. The scalar `id` type alone does not request generation.
 
 ### Per-collection options
 
@@ -326,21 +306,16 @@ export default {
 };
 ```
 
-- `softDelete: true` — not required for normal CRUD. The
-  runtime creates `deleted_at` on every table, `delete()` soft-deletes,
-  and read paths hide deleted rows through the system-fields layer.
-- `versioning: true` — not required to create or bump the
-  physical `version` field. The runtime creates `version` on every table
-  and treats `update({ id, version: N }, ...)` as a CAS guard. The SDK
-  flag currently controls the higher-level `OptimisticLockError`
-  mapping for wrapper-side CAS helpers while this pre-launch surface is
-  being simplified.
-- `strictness: "strict" | "lenient" | "off"` - metadata for deploy-time
-  data-validation policy. The default is `strict`, and the migration fold
-  preserves the selected value in the runtime descriptor. No deploy-time
-  refusal consumer is wired in this repository today, so the three values do
-  not yet change deployment behavior. The authoring types live in
-  `packages/zero-migrate/src/types.ts`.
+- `softDelete: true` selects the declared `now` generator on `delete` as the
+  visibility marker. Deletes update the marker; reads hide marked rows.
+- `versioning: true` selects the declared write increment generator for
+  optimistic concurrency. A filter containing that field performs a revision check.
+
+- `strictness: "strict" | "lenient" | "off"` records the deploy-time data-validation
+  policy. The descriptor preserves it; deployment enforcement is not wired yet.
+
+The migration renderer rejects enabled lifecycle options without an unambiguous
+matching generator. These options select roles; generators determine assignments.
 
 ### Named indexes
 
@@ -386,8 +361,7 @@ fields, matching Postgres B-tree semantics:
 **Validation at definition time.** `.index(name, fields)` throws with
 `code = "SCHEMA_INVALID"` if `name` is empty or already declared on the
 schema, or if `fields` is empty or references a field absent from the
-schema. The auto-generated columns (`id`, `created_at`, `updated_at`,
-`created_by`, `updated_by`, `version`, `deleted_at`) are accepted.
+schema, including any explicitly declared generated fields.
 
 **Runtime warning.** Outside `NODE_ENV=production`, calling
 `find()` / `get()` / `deleteMany()` with a filter whose keys don't form
@@ -423,8 +397,8 @@ backed by different tables are mutually incompatible at compile time:
 ```ts
 const userId: Id<"users"> = ...;
 const todoId: Id<"todos"> = ...;
-db.todos.get(userId);  // ✗ compile error
-db.todos.get(todoId);  // ✓
+const wrong: Id<"todos"> = userId; // compile error
+const correct: Id<"todos"> = todoId;
 ```
 
 Each collection exposes its own `Id` and `RowInput` type:
@@ -436,16 +410,24 @@ type UserInsert = typeof db.users.RowInput; // = RowInput<usersSchema>
 function addUser(input: UserInsert): Promise<UserId | undefined> { ... }
 ```
 
-The accessors are type-only — at runtime they return `null`.
+The accessors are type-only; do not read them at runtime. `typeof collection.Id`
+and `InferId<typeof collection>` follow the schema's underlying ID type. Numeric
+IDs work with `get`, mutation shorthand, relation loading, and `bulkUnmask`.
+The map returned by `bulkUnmask` uses the caller's ID values as keys.
 
-`t.ref("users")` is also the foreign-key builder. By default it emits a
-same-app FK with NO `ON DELETE`, `ON UPDATE`, or `DEFERRABLE` clause at all,
+For a manual schema, declare the foreign-key target column explicitly:
+`t.ref("users", { column: "account_key" })`. Migration-generated builders carry
+the target column from `schema.runtime.json`. Relation loading without an
+explicit column uses the target collection's `id`.
+
+By default, the builder emits a same-app FK without `ON DELETE`, `ON UPDATE`,
+or `DEFERRABLE` clauses,
 so the database's own defaults apply: `NO ACTION` for both actions, and
 immediate (non-deferred) checking. On Postgres `NO ACTION` rejects a delete
 that would orphan a row, the same as `RESTRICT`, but defers the check to the
 end of the statement rather than firing per row.
 
-Override with `t.ref("users", { onDelete: "cascade" })` for physical cascade,
+Add `onDelete: "cascade"` to the reference options for physical cascade,
 or `{ deferrable: true }` if you need cyclic refs insertable within one
 transaction — that is opt-in, not the default. Cross-app targets are refused;
 FKs stay inside the calling app. See `sdks/db/src/types.ts` for the builder,
@@ -464,8 +446,8 @@ the mechanism this page used to cite. It had **no production call site** -
 only integration tests, calling it directly to pin a refusal nothing reached -
 and it was deleted on 2026-09-02 rather than wired, because the data plane no
 longer emits DDL and so has nowhere to wire it to. Nor is it
-`crates/zeroship-data-sql`; the migration engine validates the same
-renderer and does not depend on the crate.
+`crates/zeroship-data-orm/src/sql`; migration validation belongs to the
+migration engine.
 
 **Schema is applied by the migration engine at deploy**, and that is where the
 answer lives. Four things hold there, in order:
@@ -693,6 +675,12 @@ const { data, error } = await db.products.update(
 // error instanceof OptimisticLockError when stored version != 5
 ```
 
+Bulk update, delete, restore, and purge operations affect all matching rows and
+report database affected-row counts without fetching the changed records.
+They remain atomic; large maintenance jobs should choose explicit bounded
+batches. Updates that encrypt values separately for each target row retain the
+ORM's encrypted-target cap and reject an oversized target set before writing.
+
 #### Retrying CAS updates with `withRetry`
 
 The OCC pattern (read → compute → update with `{ version }` → retry on
@@ -764,6 +752,47 @@ const { data } = await db.orders.aggregate([
 ```
 
 Supported accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`.
+
+## Explicit joins
+
+Alias collections and construct a structured query with `env.db.from`:
+
+```ts
+import { eq } from "@zeroship/db";
+
+const o = env.db.orders.as("o");
+const c = env.db.customers.as("c");
+const { data, error } = await env.db.from(o)
+  .leftJoin(c, eq(o.columns.customerId, c.columns.id))
+  .where(eq(o.columns.status, "paid"))
+  .select({ order: o.row(), customer: c.optionalRow() })
+  .orderBy(o.columns.id.asc())
+  .limit(pageSize)
+  .all();
+```
+
+Each result contains an order and either a customer or `null`. A matched row
+whose selected fields are null still produces an object. Use `innerJoin` when
+only matching combinations should be returned. Joins can be chained and can
+refer to the same collection through distinct aliases. Every source must use
+the same database handle, and each join requires a connecting column equality.
+
+The query preserves matching row combinations, including repeated parents.
+Sorting and pagination apply to those combinations. `with` remains the separate
+relation-loading API. Column names and types come from the generated descriptor;
+the native adapter accepts structured expressions and bound values.
+
+Named scalar projections can select columns or `count`, `sum`, `avg`, `min`,
+and `max` expressions. Use `groupBy` for grouping keys and `having` for aggregate
+predicates. `count(column, true)` counts distinct values; `count()` counts rows.
+`sum` and `avg` accept integer and number columns. `min` and `max` accept ordered
+scalar columns except decimal, bytes, and boolean. Protected columns cannot be
+join keys or aggregate operands.
+
+Inside a transaction use `tx.from(...)`; `.all()` returns the rows directly and
+throws on failure. The query retains the transaction scope and cannot execute
+after the callback has settled. Live queries record every participating
+collection, including those with no matching rows.
 
 ## Vector / Geo
 
@@ -1213,182 +1242,51 @@ SELECT * FROM "<app-uuid>"."users" WHERE ...
 The `app_id` is injected by the runtime from `env_vars`; user code can
 neither read nor override it. `env.db` is frozen.
 
-## System fields
+## Column assignments
 
-Every table the platform creates carries seven platform-managed
-columns. You never declare them — they're prepended to every
-`CREATE TABLE` and populated automatically on INSERT / UPDATE / DELETE.
-Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
-`created_by`) to keep the hot paths cheap.
+The migration renderer preserves effective policy assignments in
+`schema.runtime.json`. The ORM resolves them per collection, without a global
+field-name list or runtime policy copy. Lifecycle columns can be renamed with
+their assignments and roles; the primary key remains `id`.
 
-| Column        | Type (PG)       | Default            | Set by             |
-|---------------|-----------------|--------------------|--------------------|
-| `id`          | `TEXT` PK       | platform-minted    | typed_id (`<prefix>_<base62(uuidv7)>`); prefix auto-derived from the collection name |
-| `created_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT  | DB default         |
-| `updated_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT, bumped on every UPDATE | runtime UPDATE builder |
-| `created_by`  | `TEXT` NULL     | `null` if no actor | session actor at INSERT |
-| `updated_by`  | `TEXT` NULL     | `null` if no actor | session actor at every UPDATE |
-| `version`     | `INTEGER`       | `1` at INSERT      | runtime UPDATE builder bumps by 1 |
-| `deleted_at`  | `TIMESTAMPTZ` NULL | `null` (live)   | `delete()` stamps `NOW()` |
+| Descriptor metadata | Runtime behavior |
+| --- | --- |
+| `assign: { by: "typedId", on: "insert" }` | Generate an identifier on insertion. |
+| `assign: { by: "actor", on: "write" }` | Stamp the request actor on insertion and writes. |
+| `assign: { by: "now", on: "write" }` | Use the database clock on insertion and writes. |
+| `assign: { by: "increment(N)", on: "write" }` | Initialize from the database default, then increment on writes. |
+| `primaryKey: true` | Required on `id`, the collection's sole primary key. |
+| `concurrency: true` | Interpret the field's equality predicate as a revision check. |
+| `softDelete: true` | Use the field as the deletion marker and read-visibility filter. |
 
-The field names are **reserved**. Declaring a user field named `id`,
-`created_at`, `updated_at`, `created_by`, `updated_by`, `version`, or
-`deleted_at` is rejected — but **not at deploy time, and not always with a
-readable error**. Deploy succeeds. What you get instead, measured:
-
-- The app **builds and boots clean**. Nothing warns.
-- Every `env.db` call then fails with a `500`, from schema validation:
-  `collection '<name>' declares field '<field>', which collides with an
-  injected policy column`.
-
-There is a friendlier `code: "RESERVED_SYSTEM_FIELD_NAME"` with a hint listing
-the reserved set, but it is raised by the boot-time schema installer, not by
-deploy, and the validation above can refuse the schema before you ever see it.
-Treat the reserved set as something to avoid up front rather than something the
-platform will tell you about at a useful moment.
-
-Which layer owns this rejection is being reworked: the reserved-name list is
-going away in favour of the injected-column policy as the single authority. The
-names above stay reserved either way — only the mechanism and the error you see
-will change.
-
-### Reading system fields
-
-`Row<S>` includes the system fields automatically — you don't have to
-declare them, and they show up on every row you read:
+For a descriptor with revision `revision` and deletion marker `removed`,
+identity stays `id` while lifecycle operations follow the declared roles:
 
 ```ts
-const { data: user } = await db.users.get(userId);
-user.id;          // string ("usr_…")
-user.created_at;  // number (Unix ms)
-user.updated_at;  // number (Unix ms)
-user.created_by;  // string | null
-user.updated_by;  // string | null
-user.version;     // number  (1 on a freshly-inserted row)
-user.deleted_at;  // number | null  (null = live)
-```
-
-`created_by` / `updated_by` are nullable. The platform stamps them from
-the request's session actor, but background writes and migrations may
-have no actor in scope — in those cases the columns stay `null`.
-
-### Optimistic concurrency via `version`
-
-Every UPDATE auto-bumps `version` by 1 and stamps `updated_at = NOW()`.
-Add `version: N` to the update filter to turn the call into an
-optimistic-concurrency check:
-
-```ts
-const { data: post } = await db.posts.get(postId);
-// post.version === 5
-
-// CAS update — succeeds only if the row's stored version is still 5:
-const { data, error } = await db.posts.update(
-  { id: postId, version: 5 },
-  { title: "edited" },
+const { data: post } = await db.posts.insert({ title: "First post" });
+if (!post) throw new Error("insert failed");
+await db.posts.update(
+  { id: post.id, revision: post.revision },
+  { title: "Edited" },
 );
-if (error instanceof OptimisticLockError) {
-  // Someone else updated the row between our read and our write.
-  // Re-read and retry.
-}
-```
-
-The native dispatch composes `UPDATE … SET title = $1, version =
-version + 1, updated_at = NOW() WHERE id = $id AND version = 5`.
-Affected-rows = 0 surfaces as the runtime's optimistic-concurrency error,
-which the SDK rethrows as `OptimisticLockError` (`code:
-"OPTIMISTIC_CONCURRENCY"`, `retryable: true`) so the standard
-`instanceof OptimisticLockError` check keeps working.
-
-The physical column and native CAS behavior exist on every collection.
-The migration option `setOptions({ versioning: true })` is only an SDK-side hint
-for typed wrapper error mapping; it is not what creates the `version` column.
-
-Omitting `version` from the filter is last-writer-wins — the UPDATE
-still bumps `version` by 1 but doesn't refuse on a concurrent edit.
-Use the [`withRetry`](#retrying-cas-updates-with-withretry) helper to
-wrap the read-compute-update loop.
-
-### Soft delete: `delete` / `purge` / `restore`
-
-`delete()` is a soft-delete. Calling it sets `deleted_at = NOW()`,
-bumps `version`, and leaves the row in storage:
-
-```ts
-await db.posts.delete(postId);
-// row.deleted_at is now a timestamp; row is no longer returned by find()
-```
-
-`find()` / `count()` / `exists()` / `distinct()` / `aggregate()` all
-auto-filter `WHERE deleted_at IS NULL`. The native option for internal
-callers is `include_deleted: true`; the public SDK's include-deleted
-read helper is still being simplified. Use `restore()` and `purge()`
-for explicit lifecycle operations today.
-
-To remove a row from storage permanently (GDPR-erase, compliance), use
-`purge()`:
-
-```ts
-await db.posts.purge(postId);       // single row, returns the row that was removed
-await db.posts.purgeMany({ … });    // bulk; returns { purgedCount: N }
-```
-
-To bring a soft-deleted row back, use `restore()`:
-
-```ts
-await db.posts.restore(postId);     // clears deleted_at, bumps version + updated_at
-await db.posts.restoreMany({ … });  // bulk; returns { restoredCount: N }
-```
-
-`purge()` and `restore()` are CDC events too — subscribers see a
-`delete` event from `purge()` and an `update` event (with `deleted_at`
-flipping back to null) from `restore()`.
-
-### Lifecycle worked example
-
-```ts
-// 1. Create a row. id is platform-minted; the rest is server-side.
-const { data: post } = await db.posts.insert({
-  title: "First post",
-  body:  "…",
-});
-// post.id         === "post_01HXY…"
-// post.created_at === <now>
-// post.updated_at === <now>
-// post.created_by === <session actor id> | null
-// post.version    === 1
-// post.deleted_at === null
-
-// 2. Update with optimistic concurrency.
-const { data: edited } = await db.posts.update(
-  { id: post.id, version: post.version },
-  { title: "Renamed" },
-);
-// edited.updated_at >  post.updated_at
-// edited.updated_by === <session actor id> | null
-// edited.version    === 2
-
-// 3. Soft-delete. The row stays in storage; find() hides it.
 await db.posts.delete(post.id);
-const { data: visible } = await db.posts.get(post.id);
-// visible === null  (filtered out)
-
-// 4. Restore. deleted_at clears; version + updated_at bump again.
-const { data: restored } = await db.posts.restore(post.id);
-// restored.deleted_at === null
-// restored.version    === 4   (delete bumped to 3; restore bumped to 4)
-
-// 5. Purge. Row gone from storage. No restore is possible after this.
+await db.posts.restore(post.id);
 await db.posts.purge(post.id);
 ```
 
-The full design lives in `docs/archive/platform-system-fields.md` (shipped; archived).
+A stale revision returns an optimistic-concurrency error. Omitting the revision
+predicate permits a blind update; declared write generators still run.
+`delete` physically removes rows when no soft-delete role is declared. With that
+role, it applies delete assignments and hides the row. `restore` clears delete
+assignments and runs write assignments. `purge` always removes the row.
 
-Implementation anchors:
+Rust uses these same semantics through `Database` and its typed collections.
+`schema!` reads the deployment descriptor; generated write capabilities exclude
+assigned fields. The V8 bridge forwards operations to this ORM.
 
-- System columns and implicit indexes are emitted by `crates/zeroship-migrate-core/src/schema/query.rs` from the effective migration policy.
-- Read filtering, soft delete, restore, and purge dispatch live in `crates/zeroship-data-orm/src/crud/mod.rs`.
-- Schema revalidation treats platform system fields as desired physical columns before diffing, so persistent dev databases under `.zeroship/` do not look destructive after a restart.
+Implementation: `crates/zeroship-data-orm/src/assignments.rs`,
+`crates/zeroship-data-orm/src/crud/assignment_pass.rs`,
+`crates/zeroship-data-orm/src/sql/lifecycle.rs`.
 
 ## Masking
 
@@ -1638,7 +1536,7 @@ as text and holds no foreign key into them.
 
 ## Encrypted and Masked Fields (Shipped Reference)
 
-This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-sql/src/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
+This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
 
 The migration engine records physical placement in each field's runtime
 `storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
@@ -1649,7 +1547,7 @@ that the raw column is inaccessible to ordinary creator queries.
 `t.encrypted(...)` applies a full mask with `pii` classification by default.
 `.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
 storage. Both operations follow the runtime descriptor rather than naming a
-mask column from a suffix (`crates/zeroship-data-sql/src/compile.rs`,
+mask column from a suffix (`crates/zeroship-data-orm/src/sql/compile.rs`,
 `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
 On writes, `apply_mask_on_write` computes the mask from plaintext, not from a later read-path decrypt, and a separate relocation stage - the ONE stage that owns physical placement, running after the encryption and bytes passes - moves the finished value to the raw column and writes the mask into the field's own. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values relocate nothing and write no mask, and `kind: "none"` skips the field entirely (`crates/zeroship-data-orm/src/protection/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
@@ -1660,7 +1558,7 @@ Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })`
 
 `defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and snapshots a pending role-to-classification map for bootstrap to install. Declarations may be replaced during startup; after the startup flush, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
-Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-sql/src/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
+Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-orm/src/sql/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
 
 Column encryption is always randomised. Each write uses a fresh nonce and
 binds authentication to the app, collection, column and row identity.

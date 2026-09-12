@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn load_registers_platform_exact_create_table_for_structural_attachments() {
         // Platform resolved createTable carries exactly the author fields (no
-        // confined system fields) and may use a composite PK. Ownership is
+        // confined injected columns) and may use a composite PK. Ownership is
         // shape-agnostic: same-file structural attachments must resolve against
         // the table registered by the createTable pre-pass.
         let ops = r#"[
@@ -783,7 +783,7 @@ mod tests {
             &crate::test_fixtures::confined_charter(),
             "app",
         )
-        .expect("confined createTable resolves system fields");
+        .expect("confined createTable resolves injected columns");
         let bytes = serde_json::to_string(&resolved).expect("resolved IR serializes");
         load_ir_document(
             crate::test_fixtures::VENDORS,

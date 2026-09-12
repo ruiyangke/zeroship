@@ -1261,7 +1261,7 @@ async fn a_rebuild_that_renames_one_column_and_drops_another_keeps_only_the_surv
 /// refuses its own input:
 ///
 /// ```text
-/// invalid descriptor: sqlite rebuild emit for 'parts': reserved system field name:
+/// invalid descriptor: sqlite rebuild emit for 'parts': injected column collision:
 ///   Field name 'id' is reserved by the active table-injection policy.
 /// ```
 ///
@@ -1368,7 +1368,7 @@ columns = [
         )
         .to_string();
     assert!(
-        error.contains("rebuild emit") && error.contains("reserved system field name"),
+        error.contains("rebuild emit") && error.contains("injected column collision"),
         "and the refusal comes from the SDK-value arm re-emitting the injected columns \
          it was handed: {error}"
     );

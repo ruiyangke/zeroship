@@ -8,13 +8,10 @@ use crate::{
     tx_route::TxRoute,
 };
 use std::{any::Any, ops::Deref, rc::Rc};
-use zeroship_data_sql::{
-    SchemaName,
-    descriptors::{GeoPoint, VectorMetric},
-    value::Value,
-};
+use crate::value::Value;
+use crate::sql::{SchemaName, descriptors::{GeoPoint, VectorMetric}};
 
-pub use zeroship_data_sql::internal::AUDIT_UNMASK_TABLE;
+pub use crate::sql::internal::AUDIT_UNMASK_TABLE;
 
 /// A registered backend, erased once at the host boundary. Models never name it.
 #[derive(Clone, Debug)]
@@ -63,7 +60,7 @@ impl BackendHandle {
             row.reason.into(),
             row.outcome.into(),
         ];
-        let query = zeroship_data_sql::internal::unmask_audit(namespace, self.dialect(), params);
+        let query = crate::sql::internal::unmask_audit(namespace, self.dialect(), params);
         self.query(attach_alias, schema, &query.sql, &query.params)
             .await?;
         Ok(())
@@ -173,13 +170,27 @@ pub async fn read_raw_column_value(
     collection: &str,
     raw_column: &str,
     row_pk: &str,
+    schema: &Value,
 ) -> Result<ScalarRead<Value>, DbError> {
     let namespace = route.backend().namespace(route.app_id(), route.schema());
-    let query = zeroship_data_sql::internal::raw_column(
+    let key_column = "id";
+    let key_value = match schema[key_column]["type"].as_str() {
+        Some("int" | "integer" | "bigInt" | "bigint") => {
+            Value::from(row_pk.parse::<i64>().map_err(|_| {
+                DbError::validation("invalid_row_identity", "row identity must be an integer")
+            })?)
+        }
+        _ => Value::from(row_pk),
+    };
+    let physical_key = schema[key_column]["storage"]["valueColumn"]
+        .as_str()
+        .unwrap_or(key_column);
+    let query = crate::sql::internal::raw_column(
         namespace,
         collection,
         raw_column,
-        row_pk,
+        physical_key,
+        key_value,
         route.dialect(),
     );
     let rows = crate::exec::run_sql(route, &query.sql, &query.params).await?;
@@ -190,8 +201,9 @@ pub async fn read_raw_column_bytes(
     collection: &str,
     raw_column: &str,
     row_pk: &str,
+    schema: &Value,
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
-    match read_raw_column_value(route, collection, raw_column, row_pk).await? {
+    match read_raw_column_value(route, collection, raw_column, row_pk, schema).await? {
         ScalarRead::NoRow => Ok(ScalarRead::NoRow),
         ScalarRead::Null => Ok(ScalarRead::Null),
         ScalarRead::Value(Value::Bytes(bytes)) => Ok(ScalarRead::Value(bytes)),
@@ -230,8 +242,8 @@ mod routed_read_tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::tx_route::CapturedRoute;
     use crate::tests::fixtures::DatabaseFixture;
+    use crate::tx_route::CapturedRoute;
 
     /// A raw-sibling read inside a transaction must see that transaction's own
     /// write; the same read outside it must not.
@@ -273,7 +285,7 @@ mod routed_read_tests {
 
             let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
             crate::transaction::exec_begin_or_savepoint(false, None, app,
-                zeroship_data_sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
+                crate::sql::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
             admission.handed_to_reducer();
             crate::transaction::driver::run_operation(app,
                 &format!(r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
@@ -281,11 +293,12 @@ mod routed_read_tests {
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_value(
-                &CapturedRoute::pool_for_tests(app, crate::compile::SqlDialect::Sqlite)
+                &CapturedRoute::pool_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
+                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
             )
             .await
             .expect("the pooled read itself must succeed");
@@ -297,11 +310,12 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_value(
-                &CapturedRoute::tx_for_tests(app, crate::compile::SqlDialect::Sqlite)
+                &CapturedRoute::tx_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
+                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
             )
             .await
             .expect("a routed read inside the transaction must reach the row");

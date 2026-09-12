@@ -4,7 +4,7 @@
 //! Timeout policy comes from `crate::budgets`; this module supplies SQL spelling.
 
 use zeroship_core::database_role::per_app_role_name;
-use zeroship_data_sql::SchemaName;
+use crate::sql::SchemaName;
 
 use zeroship_data_orm::budgets::{
     DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS,
@@ -27,7 +27,7 @@ use zeroship_data_orm::error::DbError;
 /// `pg_error::is_missing_per_app_session_role` stops matching - which turns an
 /// actionable SCHEMA_NOT_PROVISIONED into a generic failure.
 fn quoted_per_app_role(schema: &SchemaName) -> Result<String, DbError> {
-    Ok(zeroship_data_sql::compile::quote_ident(&per_app_role_name(
+    Ok(crate::sql::compile::quote_ident(&per_app_role_name(
         schema.as_str(),
     )?))
 }

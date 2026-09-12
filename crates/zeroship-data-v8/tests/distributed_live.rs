@@ -29,9 +29,9 @@
 use std::collections::HashMap;
 #[path = "../../../tests/fixtures/postgres/mod.rs"]
 mod postgres;
+mod relay_fixture;
 #[path = "../../../tests/fixtures/data/tracing.rs"]
 mod test_tracing;
-mod relay_fixture;
 use zeroship_data_orm::cdc::relay::RelayConfig;
 
 use std::sync::Arc;
@@ -47,42 +47,7 @@ use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Settl
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
-/// The deploy's `manifest.runtime_descriptor`, verbatim.
-///
-/// **Why the fixture carries one at all.** The data plane's sole schema
-/// authority is this document: `crate::descriptor::collection_schema`
-/// (`crates/zeroship-data-orm/src/descriptor.rs:66-80`) resolves a collection
-/// out of the thread-local, app-and-deploy-keyed store or refuses it with
-/// `collection_not_declared`.
-/// The runtime validates the deployed descriptor and asks `DbPlugin` to plant
-/// every collection entry natively before creator modules evaluate. A deploy
-/// that ships no descriptor is a schema-less app and gets no `env.db`
-/// collections - see
-/// `docs/reference/zeroship-standard.md`. This target used to reach `events`
-/// anyway, through a live-catalog fallback that no longer exists; shipping the
-/// descriptor is what makes it exercise the documented deploy shape instead.
-///
-/// **Provenance.** These bytes are the migration fold's own output, not a
-/// hand-invented shape that merely parses. They were produced by
-/// `zeroship_migrate::render_artifacts_from_descriptors` for the collection
-/// `events { title: t.string() /* required */ }` on the PostgreSQL dialect
-/// (`zeroship_migrate_postgres::DIALECT`), under the shipped platform charter
-/// (`policies/confined-system-shape.inject.toml` - the same seven system
-/// columns, primary key and three system indexes every creator table gets).
-/// That is why every field carries `readable`/`filterable`/`sortable`/
-/// `projectable` and a `storage` block naming its physical column
-/// (`crates/zeroship-migrate-core/src/render/gen_types.rs:327-360`), and why
-/// `version` is `2`: v1 is refused outright by `assertRuntimeDescriptorV2`
-/// (`sdks/bootstrap/src/install-schema.ts:162-179`) and by
-/// `validate_runtime_descriptor_value`
-/// (`crates/zeroship-runtime/src/core/init.rs:3734-3740`).
-///
-/// **It must agree with [`EVENTS_DDL`], column for column.** Nothing checks the
-/// descriptor against the catalog any more, so a field here that the table does
-/// not have surfaces as a Postgres `42703 column does not exist` at read time:
-/// `implicit_read_projection_parts`
-/// (`crates/zeroship-data-sql/src/compile.rs:3344-3365`) projects the seven system
-/// fields plus every non-system key of this map, by name.
+/// Runtime field map matching `EVENTS_DDL`, including its assignment generators.
 const RUNTIME_DESCRIPTOR: &str = r#"{
   "version": 2,
   "collections": {
@@ -96,7 +61,15 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "id" }
+          "storage": {
+            "valueColumn": "id"
+          },
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false,
+          "primaryKey": true
         },
         "created_at": {
           "type": "date",
@@ -105,7 +78,14 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "created_at" }
+          "storage": {
+            "valueColumn": "created_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_at": {
           "type": "date",
@@ -114,7 +94,14 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "updated_at" }
+          "storage": {
+            "valueColumn": "updated_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
         },
         "created_by": {
           "type": "string",
@@ -123,7 +110,14 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "created_by" }
+          "storage": {
+            "valueColumn": "created_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_by": {
           "type": "string",
@@ -132,7 +126,14 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "updated_by" }
+          "storage": {
+            "valueColumn": "updated_by"
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
         },
         "version": {
           "type": "int",
@@ -142,7 +143,14 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "version" }
+          "storage": {
+            "valueColumn": "version"
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
         },
         "deleted_at": {
           "type": "date",
@@ -150,7 +158,14 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "deleted_at" }
+          "storage": {
+            "valueColumn": "deleted_at"
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
         },
         "title": {
           "type": "string",
@@ -159,7 +174,9 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
           "filterable": true,
           "sortable": true,
           "projectable": true,
-          "storage": { "valueColumn": "title" }
+          "storage": {
+            "valueColumn": "title"
+          }
         }
       },
       "options": {
@@ -168,9 +185,24 @@ const RUNTIME_DESCRIPTOR: &str = r#"{
         "strictness": "strict"
       },
       "indexes": [
-        { "name": "events_deleted_at_idx", "fields": ["deleted_at"] },
-        { "name": "events_updated_at_idx", "fields": ["updated_at"] },
-        { "name": "events_created_by_idx", "fields": ["created_by"] }
+        {
+          "name": "events_deleted_at_idx",
+          "fields": [
+            "deleted_at"
+          ]
+        },
+        {
+          "name": "events_updated_at_idx",
+          "fields": [
+            "updated_at"
+          ]
+        },
+        {
+          "name": "events_created_by_idx",
+          "fields": [
+            "created_by"
+          ]
+        }
       ]
     }
   }
@@ -697,7 +729,7 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
 ///
 /// This is not belt-and-braces. The data plane BELIEVES the descriptor: it
 /// projects `SELECT` lists straight out of the declared field map
-/// (`crates/zeroship-data-sql/src/compile.rs:3344-3365`) and reads no catalog at
+/// (`crates/zeroship-data-orm/src/sql/compile.rs`) and reads no catalog at
 /// all, so a field the table lacks is a Postgres `42703` in the middle of the
 /// stream and a column the descriptor lacks is data silently never read. Either
 /// way the failure lands as a stalled or empty SSE frame, which is exactly what
@@ -846,13 +878,13 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {
-        let (probe, connection) = compio_postgres::connect(&url, NoTls)
-            .await
-            .unwrap_or_else(|error| {
+        let (probe, connection) = compio_postgres::connect(&url, NoTls).await.unwrap_or_else(
+            |error| {
                 panic!(
                     "could not connect to the distributed live PostgreSQL fixture at {url}: {error}"
                 )
-            });
+            },
+        );
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })

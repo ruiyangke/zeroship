@@ -26,6 +26,7 @@ import {
 import { promisify, TextDecoder } from "node:util";
 import { create as tarCreate } from "tar";
 import mime from "mime";
+import { validateCollectionIdentity, type NormalizedSchema } from "@zeroship/db/internal";
 
 import {
   RUNTIME_DESCRIPTOR_FILE,
@@ -963,6 +964,11 @@ function validateRuntimeDescriptorValue(value: unknown): void {
           `zship: runtime_descriptor collection ${JSON.stringify(name)} field ${JSON.stringify(fieldName)} requires object FieldDef with string "type"`
         );
       }
+    }
+    try {
+      validateCollectionIdentity(collection.fields as NormalizedSchema);
+    } catch (error) {
+      throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)}: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (collection.options === null || typeof collection.options !== "object" || Array.isArray(collection.options)) {
       throw new Error(`zship: runtime_descriptor collection ${JSON.stringify(name)} requires object field "options"`);

@@ -7,7 +7,7 @@ error[E0277]: the trait bound `Option<std::string::String>: ChangeInput<nickname
 help: the trait `ChangeInput<C>` is implemented for `zeroship_data_orm::orm::Change<T>`
  --> src/orm/model.rs
   |
-  | impl<C: WritableColumn, T: EncodeValue<C::SqlType>> ChangeInput<C> for Change<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | impl<C: UpdatableColumn, T: EncodeValue<C::SqlType>> ChangeInput<C> for Change<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   = help: see issue #48214
   = note: this error originates in the derive macro `Changeset` (in Nightly builds, run with -Z macro-backtrace for more info)

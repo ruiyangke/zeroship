@@ -106,7 +106,7 @@ function parseSidecar(text) {
 /** The two STRUCTURAL keys of a row. EVERY other key is a dialect id. */
 const STRUCTURAL_KEYS = ["kind", "variant"];
 
-/** The `DialectId` rule from `zero_migrate_ir::dialect`: lowercase `[a-z][a-z0-9_]*`. */
+/** The `DialectId` rule from `zeroship_migrate_ir::dialect`: lowercase `[a-z][a-z0-9_]*`. */
 const DIALECT_ID = /^[a-z][a-z0-9_]*$/;
 
 /** The dialect ids a row declares, sorted by code unit. */
@@ -164,20 +164,7 @@ function validateRows(rows) {
     }
     seen.add(id);
   }
-  // Deterministic order: by (kind, variant) so the generated artifacts are stable
-  // regardless of sidecar row order.
-  //
-  // Compared by CODE UNIT, not `localeCompare`. The comparator has to be a
-  // property of the data alone, because this ordering is baked into committed
-  // artifacts that a drift gate then re-derives: a comparator that consults the
-  // runtime locale or ICU build would let two contributors generate two orderings
-  // from one sidecar and each see the other as drift. `localeCompare` also orders
-  // case differently from code units ("a" before "B", rather than after), which is
-  // exactly the axis camelCase keys vary on.
-  //
-  // Measured on the current 92 rows: locale and code-unit ordering agree, and so
-  // do the `en` and `sv` collations. So this is closing a guarantee rather than
-  // correcting today's output - the generated files do not change.
+  // Code-unit ordering keeps generated artifacts independent of locale and ICU.
   rows.sort((a, b) => (a.kind === b.kind ? compareCodeUnits(a.variant, b.variant) : compareCodeUnits(a.kind, b.kind)));
 }
 
@@ -203,7 +190,7 @@ function emitRust(rows) {
 //! field per vendor. That keying is the point: a fourth backend adds a column to
 //! the sidecar and nothing here, in the generator, or in core changes shape.
 //!
-//! Which test proves what: \`tests/dialect_table_faithfulness.rs\` proves the
+//! Which test proves what: \`crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs\` proves the
 //! corpus ⟷ table bijection and the sidecar ⟷ table transcription. The integration
 //! test below compares all generated cells with the registered backends' required
 //! policies. \`op_support_matrix.rs\` is the behavioural gate;
@@ -215,8 +202,8 @@ function emitRust(rows) {
 `;
 
   const body = `
-pub use zero_migrate_backend::validation::Disposition;
-use zero_migrate_ir::dialect::DialectId;
+pub use zeroship_migrate_backend::validation::Disposition;
+use zeroship_migrate_ir::dialect::DialectId;
 
 /// One row of the generated dialect table: an (op-kind, variant) token and its
 /// per-dialect disposition.
@@ -236,7 +223,7 @@ pub struct DispositionRow {
     pub variant: &'static str,
     /// This token's disposition per dialect, sorted by [\`DialectId\`] and
     /// deduplicated — the same sorted-slice discipline
-    /// [\`zero_migrate_ir::dialect::DialectSet\`] uses — so lookup is a binary
+    /// [\`zeroship_migrate_ir::dialect::DialectSet\`] uses — so lookup is a binary
     /// search and the emitted order is stable.
     pub dispositions: &'static [(DialectId, Disposition)],
 }
@@ -302,14 +289,12 @@ ${rows
 mod tests {
     use super::*;
 
-    /// The generated three-vendor artifact remains a byte-pinned review surface,
-    /// but production asks each registered backend directly. Pin every one of the
-    /// 92 × 3 historical decisions while ownership moves across that boundary.
+    /// Check generated dispositions against the registered backend policies.
     #[test]
     fn generated_cells_match_registered_backend_policies() {
         assert_eq!(
             DIALECT_TABLE.len(),
-            92,
+            ${rows.length},
             "the reviewed operation-shape census moved"
         );
         assert_eq!(
@@ -347,7 +332,7 @@ mod tests {
             }
         }
 
-        assert_eq!(checked, 276, "the reviewed generated-cell census moved");
+        assert_eq!(checked, ${rows.reduce((sum, row) => sum + dialectIdsOf(row).length, 0)}, "the reviewed generated-cell census moved");
     }
 }
 `;

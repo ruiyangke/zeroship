@@ -13,7 +13,13 @@
           "projectable": true,
           "storage": {
             "valueColumn": "id"
-          }
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
         },
         "created_at": {
           "type": "date",
@@ -24,7 +30,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_at": {
           "type": "date",
@@ -35,7 +46,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
         },
         "created_by": {
           "type": "string",
@@ -46,7 +62,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_by": {
           "type": "string",
@@ -57,7 +78,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
         },
         "version": {
           "type": "int",
@@ -69,7 +95,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "version"
-          }
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
         },
         "deleted_at": {
           "type": "date",
@@ -79,7 +110,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "deleted_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
         },
         "workspaceId": {
           "type": "string",
@@ -208,7 +244,13 @@
           "projectable": true,
           "storage": {
             "valueColumn": "id"
-          }
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
         },
         "created_at": {
           "type": "date",
@@ -219,7 +261,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_at": {
           "type": "date",
@@ -230,7 +277,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
         },
         "created_by": {
           "type": "string",
@@ -241,7 +293,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_by": {
           "type": "string",
@@ -252,7 +309,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
         },
         "version": {
           "type": "int",
@@ -264,7 +326,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "version"
-          }
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
         },
         "deleted_at": {
           "type": "date",
@@ -274,7 +341,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "deleted_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
         },
         "workspaceId": {
           "type": "string",
@@ -432,7 +504,13 @@
           "projectable": true,
           "storage": {
             "valueColumn": "id"
-          }
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
         },
         "created_at": {
           "type": "date",
@@ -443,7 +521,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_at": {
           "type": "date",
@@ -454,7 +537,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
         },
         "created_by": {
           "type": "string",
@@ -465,7 +553,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_by": {
           "type": "string",
@@ -476,7 +569,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
         },
         "version": {
           "type": "int",
@@ -488,7 +586,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "version"
-          }
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
         },
         "deleted_at": {
           "type": "date",
@@ -498,7 +601,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "deleted_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
         },
         "workspaceId": {
           "type": "string",
@@ -656,7 +764,13 @@
           "projectable": true,
           "storage": {
             "valueColumn": "id"
-          }
+          },
+          "primaryKey": true,
+          "assign": {
+            "by": "typedId",
+            "on": "insert"
+          },
+          "writable": false
         },
         "created_at": {
           "type": "date",
@@ -667,7 +781,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_at": {
           "type": "date",
@@ -678,7 +797,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "write"
+          },
+          "writable": false
         },
         "created_by": {
           "type": "string",
@@ -689,7 +813,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "created_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "insert"
+          },
+          "writable": false
         },
         "updated_by": {
           "type": "string",
@@ -700,7 +829,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "updated_by"
-          }
+          },
+          "assign": {
+            "by": "actor",
+            "on": "write"
+          },
+          "writable": false
         },
         "version": {
           "type": "int",
@@ -712,7 +846,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "version"
-          }
+          },
+          "assign": {
+            "by": "increment(1)",
+            "on": "write"
+          },
+          "writable": false
         },
         "deleted_at": {
           "type": "date",
@@ -722,7 +861,12 @@
           "projectable": true,
           "storage": {
             "valueColumn": "deleted_at"
-          }
+          },
+          "assign": {
+            "by": "now",
+            "on": "delete"
+          },
+          "writable": false
         },
         "slug": {
           "type": "string",

@@ -2,7 +2,7 @@ import {
   requireBoundNativeCapability,
   type NativeCollection,
 } from "../native";
-import type { Result, Row, Actor } from "../types";
+import type { Result, Row, RowId, Actor } from "../types";
 
 export interface MaskingCollectionInternals<S> {
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
@@ -23,11 +23,11 @@ export interface MaskingCollectionInternals<S> {
 export function bulkUnmaskCollection<S>(
   self: MaskingCollectionInternals<S>,
   items: ReadonlyArray<{
-    id: string;
+    id: RowId<S>;
     columns: readonly (string & keyof Row<S>)[];
   }>,
   opts: { actor: Actor; reason?: string },
-): Promise<Result<Map<string, Record<string, unknown>>>> {
+): Promise<Result<Map<RowId<S>, Record<string, unknown>>>> {
   return self._run(async () => {
     const bulkUnmask = requireBoundNativeCapability(
       self._nativeCollection(),
@@ -47,13 +47,15 @@ export function bulkUnmaskCollection<S>(
       actor: opts.actor,
       reason: opts.reason,
     });
-    const out = new Map<string, Record<string, unknown>>();
-    for (const [rowPk, cols] of Object.entries(result.results ?? {})) {
+    const out = new Map<RowId<S>, Record<string, unknown>>();
+    for (const { id } of items) {
+      const cols = result.results?.[String(id)];
+      if (!cols) continue;
       const mapped: Record<string, unknown> = {};
       for (const [col, plaintext] of Object.entries(cols)) {
         mapped[self._toField(col)] = plaintext;
       }
-      out.set(rowPk, mapped);
+      out.set(id, mapped);
     }
     return out;
   });

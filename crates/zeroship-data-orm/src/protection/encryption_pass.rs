@@ -4,9 +4,9 @@
 //! Mask derivation receives protected plaintext before encryption replaces it.
 
 use zeroize::Zeroizing;
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
-use crate::encryption::{plaintext::PlaintextType, KeyStore};
+use crate::encryption::{KeyStore, plaintext::PlaintextType};
 use zeroship_data_orm::error::DbError;
 
 /// A logical field's encoded plaintext and mask input, staged before key lookup.
@@ -119,10 +119,6 @@ pub async fn decrypt_row_on_read(
         return Ok(());
     };
 
-    // Per Camp A: row_pk arrives in the RETURNING / SELECT result on the
-    // `id` column (typed_id minted SDK-side, always present on rows
-    // produced by INSERT/UPDATE/SELECT *). Allow either string PK or
-    // numeric id (legacy collections); typed_ids serialise as strings.
     let row_pk = match obj.get("id") {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Number(n)) => n.to_string(),
@@ -139,7 +135,7 @@ pub async fn decrypt_row_on_read(
         // Default reads of masked fields contain display values, selected by
         // the runtime descriptor. Authorized unmasking fetches storage.rawColumn
         // separately and records the audit. Only unmasked fields decrypt here.
-        let masked = zeroship_data_sql::descriptors::effective_mask(def).is_some();
+        let masked = crate::sql::descriptors::effective_mask(def).is_some();
         if masked {
             continue;
         }
@@ -199,12 +195,13 @@ mod tests {
     fn write_then_read_round_trip_randomised() {
         let keys = test_key_store();
 
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
+            "id": { "type": "string", "primaryKey": true },
             "ssn": { "type": "string", "encrypted": true },
             "name": { "type": "string" },
         });
         let mut row =
-            zeroship_data_sql::value!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
+            crate::value!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
@@ -221,7 +218,7 @@ mod tests {
         assert_ne!(raw, b"123-45-6789");
         assert_eq!(obj["name"], "alice");
         assert!(!obj.contains_key("__zsbin__ssn"));
-        let mut read_row = zeroship_data_sql::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
+        let mut read_row = crate::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
 
         rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
@@ -235,7 +232,7 @@ mod tests {
         // Same ciphertext under a DIFFERENT row_pk must fail tag check
         // (Camp A defence — the row-swap attack surfaces as
         // `encryption_aead_failed`).
-        let mut wrong_pk_row = zeroship_data_sql::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
+        let mut wrong_pk_row = crate::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
         let err = rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut wrong_pk_row).await
         });
@@ -251,14 +248,14 @@ mod tests {
     fn decrypt_row_on_read_skips_masked_display_values() {
         let keys = test_key_store();
 
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "contactEmail": {
                 "type": "string",
                 "encrypted": true,
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let mut read_row = zeroship_data_sql::value!({
+        let mut read_row = crate::value!({
             "id": "usr_01HX",
             "contactEmail": "a***@example.com"
         });
@@ -278,10 +275,10 @@ mod tests {
         let keys = KeyStore::new(crate::encryption::ProjectKeySource::supplied(
             std::sync::Arc::new(crate::encryption::SuppliedProjectKeys::new()),
         ));
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "secret": {"type":"string", "encrypted":true, "mask":{"classification":"pii"}}
         });
-        let mut row = zeroship_data_sql::value!({"id":"row", "secret":"***"});
+        let mut row = crate::value!({"id":"row", "secret":"***"});
         decrypt_row_on_read(&keys, "app", "records", &schema, &mut row)
             .await
             .unwrap();
@@ -293,12 +290,12 @@ mod tests {
     fn same_plaintext_yields_distinct_ciphertext() {
         let keys = test_key_store();
 
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "ssn": { "type": "string", "encrypted": true },
         });
 
-        let mut row_a = zeroship_data_sql::value!({ "id": "usr_a", "ssn": "shared" });
-        let mut row_b = zeroship_data_sql::value!({ "id": "usr_b", "ssn": "shared" });
+        let mut row_a = crate::value!({ "id": "usr_a", "ssn": "shared" });
+        let mut row_b = crate::value!({ "id": "usr_b", "ssn": "shared" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {

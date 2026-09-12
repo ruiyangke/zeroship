@@ -79,30 +79,10 @@ describe("normalizeSchema — P7 typed-id prefix (id: t.id(prefix))", () => {
     assert.equal(out.title.type, "string");
   });
 
-  test("rejects id declared with a non-id type", () => {
-    assert.throws(
-      () => normalizeSchema({ id: t.string() }),
-      (err: unknown) => {
-        assert.equal(
-          (err as { code?: string }).code,
-          "RESERVED_SYSTEM_FIELD_NAME",
-        );
-        return true;
-      },
-    );
-  });
-
-  test("rejects another reserved system field name (version)", () => {
-    assert.throws(
-      () => normalizeSchema({ version: t.number() }),
-      (err: unknown) => {
-        assert.equal(
-          (err as { code?: string }).code,
-          "RESERVED_SYSTEM_FIELD_NAME",
-        );
-        return true;
-      },
-    );
+  test("familiar names retain their declared types", () => {
+    assert.deepEqual(normalizeSchema({ id: t.string(), version: t.number() }), {
+      id: {type:"string"}, version: {type:"number"},
+    });
   });
 });
 
@@ -196,7 +176,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         posts: {
           fields: {
-            id: { type: "id", idPrefix: "post" },
+            id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
             title: { type: "string", required: true },
             created_at: { type: "date" },
           },
@@ -220,7 +200,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
   });
 
-  test("does not require runtime descriptor system fields in insert input", async () => {
+  test("does not require assigned descriptor fields in insert input", async () => {
     const inserted: unknown[] = [];
     const native = {
       transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
@@ -248,10 +228,10 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         hits: {
           fields: {
-            id: { type: "string", required: true },
-            created_at: { type: "date", required: true },
-            updated_at: { type: "date", required: true },
-            version: { type: "int", required: true },
+            id: { type: "string", required: true, primaryKey:true, assign:{by:"typedId", on:"insert"} },
+            created_at: { type: "date", required: true, assign:{by:"now", on:"insert"} },
+            updated_at: { type: "date", required: true, assign:{by:"now", on:"write"} },
+            version: { type: "int", required: true, assign:{by:"increment(1)", on:"write"} },
             path: { type: "string", required: true },
           },
           options: { softDelete: false, versioning: false, strictness: "strict" },
@@ -344,7 +324,9 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         posts: {
           fields: {
-            id: { type: "id", idPrefix: "post" },
+            id: { type: "id", idPrefix: "post", required: true, primaryKey:true, assign:{by:"typedId", on:"insert"} },
+            revision: {type:"integer", concurrency:true, assign:{by:"increment(1)", on:"write"}},
+            removed: {type:"timestamp", softDelete:true, assign:{by:"now", on:"delete"}},
             title: { type: "string", required: true },
             status: { type: "string", required: true },
           },
@@ -375,11 +357,11 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     await handle.posts.delete("post_abc");
     assert.deepEqual(
       ops,
-      [{ name: "posts", op: "update" }],
-      "descriptor v2 softDelete must route delete through native update",
+      [{ name: "posts", op: "delete" }],
+      "delete dispatches the native lifecycle operation",
     );
 
-    const res = await handle.posts.update({ id: "post_abc", version: 1 }, { title: "x" });
+    const res = await handle.posts.update({ id: "post_abc", revision: 1 }, { title: "x" });
     assert.equal(res.error?.code, "OPTIMISTIC_CONCURRENCY");
   });
 
@@ -388,7 +370,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     const native = makeOpRecordingNative(ops);
     const descriptor = {
       posts: {
-        id: { type: "id", idPrefix: "post" },
+        id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
         title: { type: "string", required: true },
       },
     };

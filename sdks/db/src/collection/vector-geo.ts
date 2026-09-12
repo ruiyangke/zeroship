@@ -35,16 +35,6 @@ export function _validateK(value: number, paramName: string): void {
   }
 }
 
-function _mergeFilter(
-  self: Pick<VectorGeoCollectionInternals<unknown>, "_softDelete" | "_toColumn">,
-  filter: ZeroshipDbFilter,
-): ZeroshipDbFilter {
-  if (!self._softDelete) return filter;
-  const softFilter: ZeroshipDbFilter = { [self._toColumn("deleted_at")]: null };
-  const hasKeys = Object.keys(filter).length > 0;
-  return hasKeys ? ({ $and: [filter, softFilter] } as ZeroshipDbFilter) : softFilter;
-}
-
 /** **P4** - vector-nearest-neighbour search. */
 export function searchCollection<S>(
   self: VectorGeoCollectionInternals<S>,
@@ -92,12 +82,9 @@ export function searchCollection<S>(
       nativeArgs.k = args.k;
     }
     if (args.filter !== undefined) {
-      nativeArgs.filter = _mergeFilter(
-        self,
-        mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn),
-      );
+      nativeArgs.filter = mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn);
     } else if (self._softDelete) {
-      nativeArgs.filter = _mergeFilter(self, {});
+      nativeArgs.filter = {};
     }
     const results = await self._nativeCollection().search(nativeArgs);
     return (results ?? []).map(
@@ -188,12 +175,9 @@ export function nearCollection<S>(
     };
     if (args.limit !== undefined) nativeArgs.limit = args.limit;
     if (args.filter !== undefined) {
-      nativeArgs.filter = _mergeFilter(
-        self,
-        mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn),
-      );
+      nativeArgs.filter = mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn);
     } else if (self._softDelete) {
-      nativeArgs.filter = _mergeFilter(self, {});
+      nativeArgs.filter = {};
     }
 
     const results = await self._nativeCollection().near(nativeArgs);

@@ -10,7 +10,7 @@
 //! create the table; this module performs no DDL.
 
 use crate::encryption::plaintext::PlaintextType;
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::backend::{BackendHandle, ScalarRead};
 use zeroship_data_orm::binding::DbBinding;
@@ -120,7 +120,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
     let canonical_column = resolve_schema_column(schema, column)?;
     let obj = schema.as_object()?;
     let def = obj.get(&canonical_column)?;
-    let mask = zeroship_data_sql::descriptors::effective_mask(def)?;
+    let mask = crate::sql::descriptors::effective_mask(def)?;
     let classification = mask.classification.to_string();
     Some(ColumnMaskMeta {
         canonical_column,
@@ -134,7 +134,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 /// The two fetch helpers below are the only readers of that column in the tree.
 /// They formatted the name themselves until this existed, which was coherent
 /// only while the write side did too: `protection::mask_pass` now places the value
-/// under the name `zeroship_data_sql::compile::declared_raw_column` resolves, so a
+/// under the name `crate::sql::compile::declared_raw_column` resolves, so a
 /// SELECT that kept its own `format!` would miss every row a renamed column
 /// stored - and on SQLite it would MISS QUIETLY, because a double-quoted
 /// identifier that matches no column is taken as a string literal and the
@@ -155,7 +155,7 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
     let def = schema.get(canonical_column).ok_or_else(|| {
         DbError::internal(format!("unmask: column '{canonical_column}' vanished"))
     })?;
-    crate::compile::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
+    crate::sql::compile::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
         DbError::internal(format!(
             "unmask: column '{canonical_column}' has no raw column but passed the mask lookup"
         ))
@@ -342,8 +342,8 @@ pub async fn dispatch_unmask(
     // and the write that placed the value name one column.
     let raw_column = resolve_raw_column(&schema, &args.column)?;
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
-        Some(enc_meta) => fetch_and_decrypt(&raw_column, route, &args, &enc_meta).await?,
-        None => fetch_plaintext_raw(&raw_column, route, &args).await?,
+        Some(enc_meta) => fetch_and_decrypt(&raw_column, route, &args, &enc_meta, &schema).await?,
+        None => fetch_plaintext_raw(&raw_column, route, &args, &schema).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -391,6 +391,7 @@ async fn fetch_and_decrypt(
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
     enc_meta: &PlaintextType,
+    schema: &Value,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
 
@@ -409,6 +410,7 @@ async fn fetch_and_decrypt(
             &args.collection,
             raw_column,
             &args.row_pk,
+            schema,
         )
         .await?
         {
@@ -436,11 +438,7 @@ async fn fetch_and_decrypt(
         };
         // Key sourcing and AEAD are vendor-neutral; only the read above was
         // not, and it now dispatches inside `crate::backend_handle`.
-        let key = route
-            .backend()
-            .key_store()
-            .resolve(app_id)
-            .await?;
+        let key = route.backend().key_store().resolve(app_id).await?;
         let plaintext_bytes =
             zeroize::Zeroizing::new(crate::encryption::aead::decrypt(&key, &bytes, &aad)?);
         enc_meta.decode(&plaintext_bytes)
@@ -452,6 +450,7 @@ async fn fetch_plaintext_raw(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
+    schema: &Value,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
 
@@ -460,6 +459,7 @@ async fn fetch_plaintext_raw(
         &args.collection,
         raw_column,
         &args.row_pk,
+        schema,
     )
     .await?
     {
@@ -483,7 +483,6 @@ async fn fetch_plaintext_raw(
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Audit row writer
 // ---------------------------------------------------------------------------
@@ -496,7 +495,7 @@ async fn write_audit_unmask_row(
     backend: &BackendHandle,
     // SCHEMA: where the audit table lives on PostgreSQL, and what the runtime
     // role the INSERT runs under is derived from.
-    db_schema: &zeroship_data_sql::SchemaName,
+    db_schema: &crate::sql::SchemaName,
     // TENANT: the SQLite ATTACH alias the same table is reached through on the
     // dev tier, and the metering subject.
     app_id: &str,
@@ -772,9 +771,9 @@ pub async fn dispatch_bulk_unmask(
             let raw_column = resolve_raw_column(&schema, canonical_col)?;
             let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
                 Some(enc_meta) => {
-                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
+                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta, &schema).await?
                 }
-                None => fetch_plaintext_raw(&raw_column, route, &single_args).await?,
+                None => fetch_plaintext_raw(&raw_column, route, &single_args, &schema).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -813,7 +812,7 @@ pub async fn dispatch_bulk_unmask(
 /// exactly which pairs caused the refusal.
 async fn write_audit_bulk_row(
     backend: &BackendHandle,
-    db_schema: &zeroship_data_sql::SchemaName,
+    db_schema: &crate::sql::SchemaName,
     app_id: &str,
     args: &BulkUnmaskArgs,
     classifications: &std::collections::HashMap<String, String>,
@@ -1117,9 +1116,9 @@ pub async fn dispatch_unmask_for_query(
             let raw_column = resolve_raw_column(&schema, &canonical)?;
             let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
                 Some(enc_meta) => {
-                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
+                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta, &schema).await?
                 }
-                None => fetch_plaintext_raw(&raw_column, route, &single_args).await?,
+                None => fetch_plaintext_raw(&raw_column, route, &single_args, &schema).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1144,7 +1143,7 @@ pub async fn dispatch_unmask_for_query(
 #[allow(clippy::too_many_arguments)]
 async fn write_audit_query_hint_row(
     backend: &BackendHandle,
-    db_schema: &zeroship_data_sql::SchemaName,
+    db_schema: &crate::sql::SchemaName,
     app_id: &str,
     collection: &str,
     unmask_columns: &[String],
@@ -1209,7 +1208,7 @@ async fn write_audit_query_hint_row(
 // on the production path, so this is the shipped surface, not a test affordance.
 
 /// Decode the JSON args coming from V8 into [`UnmaskFieldArgs`]. The
-/// V8 boundary already converted the JS object to `zeroship_data_sql::value::Value`
+/// V8 boundary already converted the JS object to `crate::value::Value`
 /// via `read_json_arg`; we just pluck the typed fields.
 pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
     let obj = v.as_object().ok_or_else(|| DbError::ValidationFailed {
@@ -1244,7 +1243,7 @@ pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
 }
 
 fn require_string(
-    obj: &zeroship_data_sql::value::Map<String, Value>,
+    obj: &crate::value::Map<String, Value>,
     key: &str,
 ) -> Result<String, DbError> {
     obj.get(key)
@@ -1351,7 +1350,7 @@ pub fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
 }
 
 fn require_string_with_code(
-    obj: &zeroship_data_sql::value::Map<String, Value>,
+    obj: &crate::value::Map<String, Value>,
     key: &str,
     code: &'static str,
     method: &str,
@@ -1369,7 +1368,7 @@ fn require_string_with_code(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
 
     // Every dispatch unit below refuses in the descriptor / validation
     // prologue, or returns on an empty input, BEFORE `prepare_unmask_backend`

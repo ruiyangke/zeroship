@@ -48,15 +48,16 @@ request's actor, read set, and transaction route before execution can yield.
 The ORM database handle is an execution context, separate from the persisted
 Database entity described below.
 
-`zeroship-data-sql` owns runtime query compilation, typed predicates,
-`SchemaName`, catalog metadata, and the sentinel codec used by introspection.
+`zeroship_data_orm::sql` owns runtime query compilation, typed predicates,
+catalog metadata, and the sentinel codec used by introspection. The shared
+physical schema identity lives in `zeroship_core::schema_name::SchemaName`.
 The migration engine owns DDL, schema differencing, and schema changes. Runtime
 code does not contain another schema emitter, and database fixtures use the
 migration engine's emitter.
 
-Writes and reads pass through the existing system-field, masking, encryption,
-and result-decoding stages. Drivers bind binary values from their native type;
-a text value cannot select binary binding by carrying a prefix.
+Writes apply declared assignment generators. Reads and writes use the masking,
+encryption and result-decoding stages. Drivers bind binary values from their
+native type; a text value cannot select binary binding by carrying a prefix.
 Transaction statements report completion to the reducer, which rolls back a
 poisoned transaction. Rust callback transactions use the same protocol as the
 worker, including savepoints and cancellation cleanup. Handles returned from a
@@ -72,7 +73,7 @@ Pool shutdown interrupts pending acquisition without invalidating leases still
 held by callers. The pool contract is documented in `libs/compio-postgres/README.md`.
 
 Implementation: `crates/zeroship-data-orm/src/orm.rs`,
-`crates/zeroship-data-sql/src/filter.rs`, and
+`crates/zeroship-data-orm/src/sql/filter.rs`, and
 `crates/zeroship-data-v8/src/v8_classes/dispatch.rs`.
 
 **What is DESIGNED AND NOT BUILT is marked *(designed)* throughout**: the Datastore/Database/Grant

@@ -252,7 +252,7 @@ citations this entry does not have (`Client::new_with_statement_cache`,
 ### L17 - a partitioned creator table is invisible to introspection, and nothing yet proves the descriptor covers it
 
 `read_live_schema` filters `AND c.relkind = 'r'`
-(`crates/zeroship-schema/src/diff.rs:641`). That predicate **includes physical (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/diff.rs:641`). That predicate **includes physical (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 partitions** (a partition is `relkind = 'r'` with `relispartition = true`) and
 **excludes the partitioned parent**, which is `relkind = 'p'`. So for a
 partitioned creator table the parent is invisible: `build_runtime_schema` returns
@@ -492,38 +492,28 @@ it - a tenant-isolation bypass arriving with no code change and no error, in a
 process that executes creator code. Removing a privilege that currently does
 nothing is free; removing it after something depends on it is a behaviour change.
 
-### L31 - `updateMany`'s row cap guards one of two branches, and its only test is written on the guarded one
+### L31 - Count-only bulk mutations must not materialize returned records
 
-`db.updateMany({}, {...})` on an ordinary collection renders an unbounded
-whole-table rewrite that also materialises every row.
+Status: resolved. Ordinary bulk mutations intentionally affect all matching rows.
 
-- `dispatch_update_many` probes target ids and refuses above `MAX_QUERY_LIMIT`, but
-  that check sits **inside `if per_row_encrypted_update`** (`crud/mod.rs:1233`). An
-  update touching no randomised-encrypted column falls through to
-  `crud/mod.rs:1353+`, which builds the statement straight from the caller's
-  filter - no probe, no cap.
-- `build_update_many_with_system_fields` emits the `WHERE` clause only when the
-  filter is non-empty (`zeroship-schema/src/query.rs:4220-4228`), then appends
-  `RETURNING *`.
+`updateMany`, `deleteMany`, `restoreMany`, and `purgeMany` compile without
+`RETURNING` and use the driver's affected-row count. The
+[shared executor](../../crates/zeroship-data-orm/src/exec.rs) preserves transaction
+routing and metering. SQLite commit capture remains authoritative; PostgreSQL's
+local fallback queues a collection invalidation until commit.
 
-So the rendered statement is `UPDATE "app"."t" SET ... RETURNING *`.
+Per-row encrypted updates still probe target keys and enforce `MAX_QUERY_LIMIT`
+in [CRUD execution](../../crates/zeroship-data-orm/src/crud/mod.rs), because that
+path prepares separate encrypted writes. This safeguard does not define the
+ordinary bulk-write contract. Large maintenance jobs should explicitly select
+bounded batches; ordinary calls do not silently split into separate commits.
 
-**What makes it invisible is the part worth keeping.** The cap has a test and the
-test is green:
-`update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime`
-(`crates/zeroship-data-v8/tests/sqlite_integration.rs`). Its fixture updates `{ ssn: ... }` against
-`users_encrypted_ssn_schema`, and `ssn` is the randomised-encrypted column - which
-is exactly what selects the **guarded** branch. The guard exists, has a passing
-test, and the test's fixture is what routes around the hole. Not a vacuous test and
-not a wrong assertion, but a **fixture that cannot reach the unguarded path**.
-
-`dispatch_purge_many` has the same shape with no cap at all (`crud/mod.rs:1599` ->
-`query.rs:4249-4254`).
-
-**Not fixed, per the standing deferral.** The IR's write family already makes this
-unrepresentable - `RowLimit` is mandatory on `Update` and `Delete` with no "all
-rows" value - so the port closes it by construction rather than by adding a second
-guard to the second branch.
+[Native bulk tests](../../crates/zeroship-data-orm/src/orm/tests/bulk.rs) exercise
+all-match counts beyond the read limit, statement failures, rollback, column
+grants, and commit-only CDC against PostgreSQL and file-backed SQLite. The
+[V8 update tests](../../crates/zeroship-data-v8/src/tests/sqlite/updates.rs) verify
+the adapter's counts and the absence of bulk `RETURNING`, while retaining the
+encrypted target-cap regression.
 
 ### L32 - the migration-freeze guard reports instead of failing, and its data source has no writer
 

@@ -4,6 +4,7 @@
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
 import type { IdLoader } from "./loader";
+import { AliasedCollection } from "./read";
 import {
   requireNativeCollection,
   type NativeCollection,
@@ -15,11 +16,13 @@ import {
   ValidationError,
 } from "./errors";
 import type { Query } from "./query";
-import type { NormalizedSchema } from "./schema";
+import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
 import type {
   Actor,
   Filter,
   Id,
+  IdValue,
+  RowId,
   NamedIndexSpec,
   NamingStrategy,
   PlainObject,
@@ -32,7 +35,6 @@ import type {
   WithSpec,
 } from "./types";
 import { err, naming, ok } from "./types";
-import { CONFINED_SYSTEM_SHAPE_COLUMN_NAMES } from "./generated/confined-system-shape.generated";
 import {
   aggregateCollection,
   countCollection,
@@ -155,7 +157,7 @@ export class Collection<
    */
   private _indexes: readonly NamedIndexSpec[];
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
-  private _idLoader: IdLoader<Row<S>> | null;
+  private _idLoader: IdLoader<Row<S>, IdValue> | null;
   /**
    * Sibling-collection lookup, planted by `installSchema` so `with: { fk: true }`
    * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
@@ -175,8 +177,12 @@ export class Collection<
    */
   private _txDepth: number;
 
-  declare readonly Id: Id<N>;
+  declare readonly Id: Id<N, RowId<S>>;
   declare readonly RowInput: RowInput<S>;
+
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A> {
+    return new AliasedCollection(this._native, this._name, alias, Object.keys(this._schema), this._toColumn, this._toField);
+  }
 
   constructor(
     name: string,
@@ -189,6 +195,7 @@ export class Collection<
       indexes?: readonly NamedIndexSpec[];
     },
   ) {
+    validateCollectionIdentity(schema);
     this._name = name;
     this._schema = schema;
     this._native = native;
@@ -203,19 +210,6 @@ export class Collection<
     const fieldToCol: Record<string, string> = {};
     const colToField: Record<string, string> = {};
     for (const field of Object.keys(schema)) {
-      const col = strategy.toColumn(field);
-      fieldToCol[field] = col;
-      colToField[col] = field;
-    }
-    // The platform columns, from the operator charter rather than restated
-    // here. Adding an eighth is a charter line, not an edit to this loop.
-    //
-    // NOTE this loop OVERWRITES rather than collides: a creator field whose
-    // strategy-mapped column equals one of these silently loses its
-    // `colToField` entry to the platform name, because the platform pass runs
-    // second. That is a real hazard and it is not introduced here - see the
-    // `deletedAt` note in installSchema's model().
-    for (const field of CONFINED_SYSTEM_SHAPE_COLUMN_NAMES) {
       const col = strategy.toColumn(field);
       fieldToCol[field] = col;
       colToField[col] = field;
@@ -291,7 +285,7 @@ export class Collection<
   }
 
   private async _loadById(
-    id: string,
+    id: IdValue,
     txDepthAtCall: number,
   ): Promise<Row<S> | null> {
     return loadByIdCollection(this._crud(), id, txDepthAtCall);
@@ -306,19 +300,19 @@ export class Collection<
   }
 
   async get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
   async get<W extends WithSpec>(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<Row<S> | null>>;
   async get(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: {
       actor?: Actor;
       select?: (string & keyof Row<S>)[];
@@ -362,7 +356,7 @@ export class Collection<
   }
 
   async update(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     patch: UpdateExpression<S>,
   ): Promise<Result<Row<S> | null>> {
     return updateCollection(this._crud(), idOrFilter, patch);
@@ -376,7 +370,7 @@ export class Collection<
   }
 
   async delete(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return deleteCollection(this._crud(), idOrFilter);
   }
@@ -388,7 +382,7 @@ export class Collection<
   }
 
   async purge(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return purgeCollection(this._crud(), idOrFilter);
   }
@@ -400,7 +394,7 @@ export class Collection<
   }
 
   async restore(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return restoreCollection(this._crud(), idOrFilter);
   }
@@ -430,11 +424,11 @@ export class Collection<
 
   async bulkUnmask(
     items: ReadonlyArray<{
-      id: string;
+      id: RowId<S>;
       columns: readonly (string & keyof Row<S>)[];
     }>,
     opts: { actor: Actor; reason?: string },
-  ): Promise<Result<Map<string, Record<string, unknown>>>> {
+  ): Promise<Result<Map<RowId<S>, Record<string, unknown>>>> {
     return bulkUnmaskCollection(this._masking(), items, opts);
   }
 

@@ -1689,20 +1689,10 @@ mod access_identity_tests {
             backchannel_logout_uri: None,
             brokered: false,
         };
-        // PER-PROCESS, not the fixed `[61u8; 32]` this used to be.
-        //
-        // `zeroship.signing_keys` allows one `active` OP key per DATABASE:
-        // `publish_active_key` retires every other active row and refuses to
-        // reactivate a retired one. A constant seed gives every run the same
-        // kid, so two runs sharing a suite database retire each other and the
-        // second dies on its own key. MEASURED 2026-08-20, two auth suites on
-        // one database: 3 failures in each run, both
-        //   publish mint-race signing key: Config("signing key
-        //     L0N3gfnVojR3MCyMbPF6lMf6P9ywvEtOlQe2mLgT18c is terminally
-        //     retired and cannot be reactivated")
-        // naming the same kid in both logs. Same reasoning as
-        // `crates/zeroship-auth/tests/common/mod.rs::op_signing_key`, which cannot be
-        // reached from here because this is a lib test.
+        // These lib tests still share an externally configured database.
+        // Publishing retires other active keys and refuses to reactivate a
+        // retired key, so each process needs its own signing identity. Move
+        // this fixture to an owned database to remove that coordination.
         let issuer = Issuer::from_signing_key(
             &ed25519_dalek::SigningKey::from_bytes(&mint_race_signing_seed()),
             [62_u8; 32],

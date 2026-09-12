@@ -65,19 +65,15 @@ cargo build --workspace
 Rust gates - run them before pushing:
 
 ```
-./tests/clippy_gate.sh
+cargo clippy --workspace --all-targets --all-features
 cargo check --workspace
 cargo test --workspace
 ```
 
-**Lint through `tests/clippy_gate.sh`, which is what CI runs, and NOT through
-`cargo clippy --workspace -- -D warnings`.** The workspace grades its own lints
-in the root `Cargo.toml`; `-D warnings` promotes the pedantic and nursery groups
-it deliberately leaves as warnings, so it reports thousands of errors that are
-not gate failures (measured on one crate alone: 1744). The gate also audits
-cargo's JSON stream to catch packages that were never linted at all, which a
-bare `cargo clippy` cannot do because a deny-level lint in one crate aborts the
-run before the crates after it are scheduled.
+**Use the same Clippy invocation locally and in CI.** The root `Cargo.toml`
+sets lint severity. Preserve those levels; a blanket `-D warnings` would turn
+intentionally warning-level groups into errors. A failed Cargo command means
+the lint run failed; fix the errors and rerun it.
 
 **There is no `cargo fmt` gate.** CI runs no formatting step, and the tree does
 not currently satisfy `cargo fmt --all -- --check` - it reports diffs in 888

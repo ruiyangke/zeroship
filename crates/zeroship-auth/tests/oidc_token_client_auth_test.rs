@@ -13,22 +13,20 @@
 //!   - brokered (per-app broker secret, derived not stored)
 
 use crate::common;
+use common::{auth_server::AuthServer, database::Database};
 
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use compio_postgres::{connect, Client, NoTls};
-use ntex::web;
+use compio_postgres::Client;
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{BrokerSecrets, Issuer};
-use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_core::auth::hash_client_secret;
 
-use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
+use common::{location, pkce_challenge_s256, pkce_verifier};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
@@ -66,32 +64,16 @@ impl ClientKind {
 }
 
 struct Fixture {
-    srv: ntex::web::test::TestServer,
-    auth_base: String,
-    db: Arc<Client>,
+    server: AuthServer,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
     session_cookie: String,
 }
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot(kind: ClientKind) -> Self {
-        let db_url = crate::common::test_database_url();
-        let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(err) = pg_connection.run().await {
-                eprintln!("[oidc_token_client_auth_test] pg connection error: {err}");
-            }
-        })
-        .detach();
-        let db = Arc::new(pg_client);
-
+    async fn boot(database: &Database, kind: ClientKind) -> Self {
+        let db = database.connect().await;
         let issuer = Arc::new(test_issuer());
-        common::publish_op_key_once(&issuer, &db)
-            .await
-            .expect("publish active OP key");
 
         let user_id = Uuid::new_v4();
         let app_id = Uuid::new_v4();
@@ -119,44 +101,13 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        let cfg = Arc::new(test_auth_config(&db_url));
-        let cfg_state = cfg.clone();
-        let db_state = db.clone();
-        let issuer_state = issuer.clone();
-        let refresh_pool_state =
-            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-        let srv = web::test::server(move || {
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            let issuer_state = issuer_state.clone();
-            let refresh_pool_state = refresh_pool_state.clone();
-            async move {
-                web::App::new()
-                    .state(cfg_state)
-                    .state(db_state)
-                    .state(issuer_state)
-                    .state(refresh_pool_state)
-                    .middleware(SecurityHeaders::default())
-                    .configure(server::configure(false, false))
-            }
-        })
-        .await;
+        let server = AuthServer::with_issuer(database, issuer).await;
 
         Self {
-            auth_base: srv.url("").trim_end_matches('/').to_string(),
-            srv,
-            db,
+            server,
             client_id,
-            app_id,
-            user_id,
             session_cookie,
         }
-    }
-
-    #[allow(clippy::future_not_send)]
-    async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, self.user_id, self.app_id, &self.client_id).await;
-        drop(self.srv);
     }
 
     fn basic_auth(&self, secret: &str) -> String {
@@ -173,50 +124,56 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_code_exchange_without_client_auth_is_rejected() {
-    let fx = Fixture::boot(ClientKind::ConfidentialNonBrokered).await;
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, &verifier).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, &verifier).await;
 
-    let resp = token_request(&fx, &code, &verifier, None)
-        .await
-        .expect("token response");
-    assert_eq!(
-        resp.status().as_u16(),
-        401,
-        "a client registered with a secret must authenticate on authorization_code"
-    );
-    let body = resp.json::<Value>().await.expect("oauth error json");
-    assert_eq!(body["error"], "invalid_client");
-    assert!(
-        body.get("access_token").is_none() && body.get("id_token").is_none(),
-        "rejected exchange must not return tokens: {body}"
-    );
-
-    fx.cleanup().await;
+        let resp = token_request(&fx, &code, &verifier, None)
+            .await
+            .expect("token response");
+        assert_eq!(
+            resp.status().as_u16(),
+            401,
+            "a client registered with a secret must authenticate on authorization_code"
+        );
+        let body = resp.json::<Value>().await.expect("oauth error json");
+        assert_eq!(body["error"], "invalid_client");
+        assert!(
+            body.get("access_token").is_none() && body.get("id_token").is_none(),
+            "rejected exchange must not return tokens: {body}"
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_code_exchange_with_basic_credentials_succeeds() {
-    let fx = Fixture::boot(ClientKind::ConfidentialNonBrokered).await;
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, &verifier).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, &verifier).await;
 
-    let resp = token_request(&fx, &code, &verifier, Some(&fx.basic_auth(CLIENT_SECRET)))
-        .await
-        .expect("token response");
-    assert_eq!(resp.status().as_u16(), 200, "correct credentials must exchange");
-    let body = resp.json::<Value>().await.expect("token json");
-    assert!(
-        body["access_token"].as_str().is_some_and(|t| !t.is_empty()),
-        "exchange must return an access token: {body}"
-    );
-    assert!(
-        body["id_token"].as_str().is_some_and(|t| !t.is_empty()),
-        "openid exchange must return an id token: {body}"
-    );
-
-    fx.cleanup().await;
+        let resp = token_request(&fx, &code, &verifier, Some(&fx.basic_auth(CLIENT_SECRET)))
+            .await
+            .expect("token response");
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "correct credentials must exchange"
+        );
+        let body = resp.json::<Value>().await.expect("token json");
+        assert!(
+            body["access_token"].as_str().is_some_and(|t| !t.is_empty()),
+            "exchange must return an access token: {body}"
+        );
+        assert!(
+            body["id_token"].as_str().is_some_and(|t| !t.is_empty()),
+            "openid exchange must return an id token: {body}"
+        );
+    })
+    .await;
 }
 
 /// RFC 6749 5.2: `invalid_client` on a request that carried the `Authorization`
@@ -225,28 +182,29 @@ async fn confidential_client_code_exchange_with_basic_credentials_succeeds() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn confidential_client_bad_secret_is_401_with_www_authenticate() {
-    let fx = Fixture::boot(ClientKind::ConfidentialNonBrokered).await;
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, &verifier).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::ConfidentialNonBrokered).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, &verifier).await;
 
-    let resp = token_request(&fx, &code, &verifier, Some(&fx.basic_auth("wrong-secret")))
-        .await
-        .expect("token response");
-    assert_eq!(resp.status().as_u16(), 401);
-    let challenge = resp
-        .headers()
-        .get("www-authenticate")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        challenge.starts_with("Basic "),
-        "401 must carry a challenge matching the scheme the client used, got {challenge:?}"
-    );
-    let body = resp.json::<Value>().await.expect("oauth error json");
-    assert_eq!(body["error"], "invalid_client");
-
-    fx.cleanup().await;
+        let resp = token_request(&fx, &code, &verifier, Some(&fx.basic_auth("wrong-secret")))
+            .await
+            .expect("token response");
+        assert_eq!(resp.status().as_u16(), 401);
+        let challenge = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            challenge.starts_with("Basic "),
+            "401 must carry a challenge matching the scheme the client used, got {challenge:?}"
+        );
+        let body = resp.json::<Value>().await.expect("oauth error json");
+        assert_eq!(body["error"], "invalid_client");
+    })
+    .await;
 }
 
 /// The intended public path: creator apps hold no secret, so PKCE alone
@@ -254,22 +212,23 @@ async fn confidential_client_bad_secret_is_401_with_www_authenticate() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn public_client_code_exchange_without_client_auth_succeeds() {
-    let fx = Fixture::boot(ClientKind::Public).await;
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, &verifier).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Public).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, &verifier).await;
 
-    let resp = token_request(&fx, &code, &verifier, None)
-        .await
-        .expect("token response");
-    assert_eq!(
-        resp.status().as_u16(),
-        200,
-        "a public client is PKCE-only and must still exchange without a secret"
-    );
-    let body = resp.json::<Value>().await.expect("token json");
-    assert!(body["access_token"].as_str().is_some_and(|t| !t.is_empty()));
-
-    fx.cleanup().await;
+        let resp = token_request(&fx, &code, &verifier, None)
+            .await
+            .expect("token response");
+        assert_eq!(
+            resp.status().as_u16(),
+            200,
+            "a public client is PKCE-only and must still exchange without a secret"
+        );
+        let body = resp.json::<Value>().await.expect("token json");
+        assert!(body["access_token"].as_str().is_some_and(|t| !t.is_empty()));
+    })
+    .await;
 }
 
 /// Brokered clients keep their own control: the per-app secret is derived from
@@ -278,36 +237,37 @@ async fn public_client_code_exchange_without_client_auth_succeeds() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_client_still_authenticates_by_broker_secret() {
-    let fx = Fixture::boot(ClientKind::Brokered).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Brokered).await;
 
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, &verifier).await;
-    let missing = token_request(&fx, &code, &verifier, None)
-        .await
-        .expect("token response without broker secret");
-    assert_eq!(missing.status().as_u16(), 401);
-    assert_eq!(
-        missing.json::<Value>().await.expect("oauth error json")["error"],
-        "invalid_client"
-    );
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, &verifier).await;
+        let missing = token_request(&fx, &code, &verifier, None)
+            .await
+            .expect("token response without broker secret");
+        assert_eq!(missing.status().as_u16(), 401);
+        assert_eq!(
+            missing.json::<Value>().await.expect("oauth error json")["error"],
+            "invalid_client"
+        );
 
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, &verifier).await;
-    let secret = zeroship_core::auth::derive_broker_secret(BROKER_MASTER, &fx.client_id);
-    let ok = token_request(&fx, &code, &verifier, Some(&fx.basic_auth(&secret)))
-        .await
-        .expect("token response with broker secret");
-    assert_eq!(
-        ok.status().as_u16(),
-        200,
-        "the derived broker secret must remain the brokered client's credential"
-    );
-
-    fx.cleanup().await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, &verifier).await;
+        let secret = zeroship_core::auth::derive_broker_secret(BROKER_MASTER, &fx.client_id);
+        let ok = token_request(&fx, &code, &verifier, Some(&fx.basic_auth(&secret)))
+            .await
+            .expect("token response with broker secret");
+        assert_eq!(
+            ok.status().as_u16(),
+            200,
+            "the derived broker secret must remain the brokered client's credential"
+        );
+    })
+    .await;
 }
 
 fn test_issuer() -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[15; 32]);
     let broker_secrets = BrokerSecrets::new(BROKER_MASTER.to_vec(), None).expect("broker secrets");
     Issuer::from_signing_key(&signing, [23u8; 32], ISSUER.to_string())
         .expect("issuer")
@@ -345,11 +305,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[
-            &app_id,
-            &app_name,
-            &project_id
-        ],
+        &[&app_id, &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -390,35 +346,6 @@ async fn seed_user_client(
     .expect("seed oauth grant");
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
-    for statement in [
-        "DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1",
-        "DELETE FROM zeroship.oauth_grants WHERE client_id = $1",
-        "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
-        "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
-    ] {
-        let _ = db.execute(statement, &[&client_id]).await;
-    }
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
-        .await;
-}
-
 #[allow(clippy::future_not_send)]
 async fn authorize_code(fx: &Fixture, verifier: &str) -> String {
     let query = url::form_urlencoded::Serializer::new(String::new())
@@ -434,7 +361,7 @@ async fn authorize_code(fx: &Fixture, verifier: &str) -> String {
     let resp = cyper::Client::new()
         .request(
             http::Method::GET,
-            format!("{}/oauth2/authorize?{query}", fx.auth_base),
+            format!("{}/oauth2/authorize?{query}", fx.server.auth_base),
         )
         .expect("build GET /authorize")
         .header("cookie", fx.session_cookie.clone())
@@ -461,7 +388,10 @@ async fn token_request(
         .append_pair("code_verifier", verifier)
         .finish();
     let mut req = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");

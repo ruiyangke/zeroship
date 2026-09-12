@@ -406,7 +406,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use zeroship_data_sql::value::Value;
+    use zeroship_data_orm::value::Value;
     use zeroship_runtime::{Runtime, RuntimeState, SharedState};
 
     use crate::{broker, v8_classes::db::mint_db};

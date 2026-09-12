@@ -355,7 +355,7 @@ Plus the gates, before each move rather than after: `tests/vendor_embedding_gate
 `compio_postgres::Error` in a crate that does not depend on it - that is `E0433`, at compile time,
 for everyone, forever. No lint, no reviewer, no census run. The technique is already load-bearing in
 this tree: `serialize_derive_is_structurally_impossible`
-(`crates/zeroship-data-sql/tests/no_sql_text_escape_hatch.rs`) reads the crate's own
+(`crates/zeroship-data-orm/tests/sql/no_sql_text_escape_hatch.rs`) reads the crate's own
 manifest and asserts the declared dependency set is EMPTY, which is what makes "`DbPlan` must not
 derive `Serialize`" a structural fact rather than a review item.
 

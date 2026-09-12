@@ -1,0 +1,76 @@
+{
+  "valid": {
+    "manual_id": {
+      "fields": {
+        "id": { "type": "string", "required": true, "primaryKey": true },
+        "slug": { "type": "string", "unique": true }
+      }
+    },
+    "generated_id": {
+      "fields": {
+        "id": {
+          "type": "string", "required": true, "primaryKey": true,
+          "assign": { "by": "typedId", "on": "insert" }
+        }
+      }
+    },
+    "integer_id": {
+      "fields": {
+        "id": { "type": "integer", "required": true, "primaryKey": true }
+      }
+    },
+    "non_primary_column": {
+      "fields": {
+        "id": { "type": "string", "required": true, "primaryKey": true },
+        "tenant": { "type": "string", "required": true, "primaryKey": false }
+      }
+    }
+  },
+  "invalid": {
+    "empty_fields": {
+      "fields": {},
+      "error": "collection requires an 'id' primary key"
+    },
+    "renamed_primary_key": {
+      "fields": { "key": { "type": "string", "required": true, "primaryKey": true } },
+      "error": "collection requires an 'id' primary key"
+    },
+    "null_id": {
+      "fields": { "id": null },
+      "error": "collection 'id' must be declared as its primary key"
+    },
+    "missing_primary_key": {
+      "fields": { "id": { "type": "string", "required": true } },
+      "error": "collection 'id' must be declared as its primary key"
+    },
+    "false_primary_key": {
+      "fields": { "id": { "type": "string", "required": true, "primaryKey": false } },
+      "error": "collection 'id' must be declared as its primary key"
+    },
+    "string_primary_key": {
+      "fields": { "id": { "type": "string", "required": true, "primaryKey": "true" } },
+      "error": "collection 'id' must be declared as its primary key"
+    },
+    "missing_required": {
+      "fields": { "id": { "type": "string", "primaryKey": true } },
+      "error": "collection 'id' must be required and non-null"
+    },
+    "optional_id": {
+      "fields": { "id": { "type": "string", "required": false, "primaryKey": true } },
+      "error": "collection 'id' must be required and non-null"
+    },
+    "string_required": {
+      "fields": { "id": { "type": "string", "required": "true", "primaryKey": true } },
+      "error": "collection 'id' must be required and non-null"
+    },
+    "multiple_primary_keys": {
+      "fields": {
+        "id": { "type": "string", "required": true, "primaryKey": true },
+        "tenant": { "type": "string", "required": true, "primaryKey": true }
+      },
+      "error": "collection 'id' must be its sole primary key"
+    },
+    "id_assignment_on_write": {"fields":{"id":{"type":"string","required":true,"primaryKey":true,"assign":{"by":"actor","on":"write"}}},"error":"collection 'id' can only be assigned on insertion"},
+    "id_assignment_on_delete": {"fields":{"id":{"type":"string","required":true,"primaryKey":true,"assign":{"by":"actor","on":"delete"}}},"error":"collection 'id' can only be assigned on insertion"}
+  }
+}

@@ -1,5 +1,5 @@
 use super::*;
-use zeroship_data_sql::{AggregateFunc, AggregateRef, CompareOp, Operand, Predicate};
+use crate::sql::{AggregateFunc, AggregateRef, CompareOp, Operand, Predicate};
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -85,7 +85,7 @@ pub(super) async fn exercise(db: &Database) {
     let child = ReadSource::new("posts", "c");
     let mut grouped = ReadQuery::new(source.clone());
     grouped.joins.push(ReadJoin {
-        kind: zeroship_data_sql::JoinKind::Left,
+        kind: crate::sql::JoinKind::Left,
         source: child.clone(),
         on: on(),
     });
@@ -99,12 +99,32 @@ pub(super) async fn exercise(db: &Database) {
     grouped.having = Predicate::compare(
         Operand::Aggregate(count),
         CompareOp::Eq,
-        Operand::Lit(zeroship_data_sql::Literal::Int(0)),
+        Operand::Lit(crate::sql::Literal::Int(0)),
     );
-    let Output::Rows { rows, .. } = db.read(grouped).await.unwrap() else {
+    let Output::Rows { rows, .. } = db.read(grouped.clone()).await.unwrap() else {
         panic!("expected rows")
     };
     assert_eq!(rows, vec![value!({"matches":0})]);
+
+    grouped.projection = [
+        ("average", AggregateFunc::Avg, "counter"),
+        ("total", AggregateFunc::Sum, "counter"),
+        ("earliest", AggregateFunc::Min, "created_at"),
+    ]
+    .into_iter()
+    .map(|(output, function, field)| ReadProjection::Scalar {
+        output: output.into(),
+        expression: Operand::Aggregate(
+            AggregateRef::over_path(function, source.column(field).unwrap(), false).unwrap(),
+        ),
+    })
+    .collect();
+    let Output::Rows { rows, .. } = db.read(grouped).await.unwrap() else {
+        panic!("expected aggregate rows")
+    };
+    assert_eq!(rows[0]["average"].as_f64(), Some(7.0));
+    assert_eq!(rows[0]["total"], value!(7));
+    assert!(matches!(rows[0]["earliest"], Value::Timestamp(_)));
 
     let tx_result = db
         .transaction(|tx| async move {
@@ -125,7 +145,7 @@ pub(super) async fn exercise(db: &Database) {
                 .all()
                 .await?;
             assert_eq!(rows[0].0.name, rows[0].1.name);
-            Ok(tx.from(&a).select(a.row::<Summary>())?)
+            tx.from(&a).select(a.row::<Summary>())
         })
         .await
         .unwrap();

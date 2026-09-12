@@ -14,6 +14,21 @@ pub(super) struct CollectionFixture {
 }
 
 impl CollectionFixture {
+    pub async fn wait_for_upsert_conflict(&self) {
+        let backend = &self.postgres.as_ref().expect("PostgreSQL fixture").0;
+        let app = self.database.binding.app_id();
+        compio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let rows = backend.pool().query(
+                    "SELECT EXISTS(SELECT FROM pg_stat_activity WHERE wait_event = 'transactionid' AND query LIKE '%ON CONFLICT%' AND query LIKE '%' || $1 || '%')",
+                    &[&app],
+                ).await.unwrap();
+                if rows[0].get::<_, bool>(0) { break; }
+                compio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.expect("upsert must wait for the uncommitted conflicting row");
+    }
+
     pub async fn sqlite(collection: &str, fields: Value) -> Self {
         Self::sqlite_with_keys(collection, fields, ProjectKeySource::unavailable()).await
     }
@@ -28,6 +43,9 @@ impl CollectionFixture {
             .path()
             .join(format!("zs-{}.sqlite", original.binding.app_id()));
         let fixture = rusqlite::Connection::open(&file).unwrap();
+        for statement in zeroship_migrate_sqlite::backend::audit_unmask_ddl("main") {
+            fixture.execute_batch(&statement).unwrap();
+        }
         fixture
             .execute_batch(&table_sql(
                 "main",
@@ -40,7 +58,10 @@ impl CollectionFixture {
         let database = Database::from_schema(
             original.binding.clone(),
             original.backend.clone(),
-            vec![(collection.into(), fields)],
+            vec![(
+                collection.into(),
+                crate::tests::fixtures::schema::generated_fields(fields),
+            )],
         )
         .unwrap();
         Self {
@@ -69,7 +90,7 @@ impl CollectionFixture {
                 .unwrap(),
         );
         let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
-        let schema = crate::compile::quote_ident(&app);
+        let schema = crate::sql::compile::quote_ident(&app);
         backend
             .execute_fixture(&format!("CREATE SCHEMA {schema}"), &[])
             .await
@@ -84,17 +105,22 @@ impl CollectionFixture {
             ))
             .await
             .unwrap();
+        backend
+            .pool()
+            .batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&app))
+            .await
+            .unwrap();
         crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
             .await
             .unwrap();
-        let role = crate::compile::quote_ident(
+        let role = crate::sql::compile::quote_ident(
             &zeroship_core::database_role::per_app_role_name(&app).unwrap(),
         );
         backend
             .execute_fixture(
                 &format!(
                     "GRANT SELECT, INSERT, UPDATE, DELETE ON {schema}.{} TO {role}",
-                    crate::compile::quote_ident(collection)
+                    crate::sql::compile::quote_ident(collection)
                 ),
                 &[],
             )
@@ -103,7 +129,10 @@ impl CollectionFixture {
         let database = Database::from_schema(
             DbBinding::cold_start(&app),
             crate::backend_handle::BackendHandle::new(backend.clone()),
-            vec![(collection.into(), fields)],
+            vec![(
+                collection.into(),
+                crate::tests::fixtures::schema::generated_fields(fields),
+            )],
         )
         .unwrap();
         Self {
@@ -113,6 +142,116 @@ impl CollectionFixture {
             postgres: Some((backend, schema, role)),
             server: Some(server),
         }
+    }
+
+    pub async fn replace_from_migration(&mut self, collection: &str, migration: &str) {
+        let migration: zeroship_migrate::model::ir::MigrationIr =
+            serde_json::from_str(migration).unwrap();
+        let policy = zeroship_migrate::effective_policy_from_charter_toml(
+            zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
+        )
+        .unwrap();
+        let namespace = if self.sqlite_file.is_some() {
+            "main"
+        } else {
+            self.database.binding.schema().as_str()
+        };
+        let dialect = if self.sqlite_file.is_some() {
+            &zeroship_migrate_sqlite::DIALECT
+        } else {
+            &zeroship_migrate_postgres::DIALECT
+        };
+        let artifacts = zeroship_migrate::render_artifacts(
+            zeroship_migrate::shipping_vendors(),
+            &migration.ops,
+            dialect,
+            namespace,
+            &policy,
+        )
+        .unwrap();
+        let (_, statements) = zeroship_migrate::render_ir_envelope_sql_statements(
+            zeroship_migrate::shipping_vendors(),
+            &serde_json::to_string(&migration).unwrap(),
+            dialect,
+            &zeroship_migrate::PreviewOpts {
+                default_schema: namespace.into(),
+                owner_app: namespace.into(),
+                effective_policy: policy,
+            },
+        )
+        .unwrap();
+        let table = format!(
+            "{}.{}",
+            crate::sql::compile::quote_ident(namespace),
+            crate::sql::compile::quote_ident(collection)
+        );
+        let ddl = format!("DROP TABLE {table};{}", statements.join(";"));
+        if let Some(file) = &self.sqlite_file {
+            rusqlite::Connection::open(file)
+                .unwrap()
+                .execute_batch(&ddl)
+                .unwrap();
+        } else {
+            let (backend, _, role) = self.postgres.as_ref().unwrap();
+            backend.pool().batch_execute(&ddl).await.unwrap();
+            backend.pool().batch_execute(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {role}; GRANT USAGE ON ALL SEQUENCES IN SCHEMA {} TO {role}",
+                crate::sql::compile::quote_ident(namespace),
+            )).await.unwrap();
+        }
+        let runtime: Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
+        self.database = Database::from_schema(
+            self.database.binding.clone(),
+            self.database.backend.clone(),
+            vec![(
+                collection.into(),
+                runtime["collections"][collection]["fields"].clone(),
+            )],
+        )
+        .unwrap();
+    }
+
+    pub async fn rename_fields(&mut self, collection: &str, names: &[(&str, &str)]) {
+        let fields = self.database.context.with(|| {
+            crate::descriptor::collection_schema(&self.database.binding, collection).unwrap()
+        });
+        let mut fields = fields.as_ref().clone();
+        for (old, new) in names {
+            let table = crate::sql::compile::quote_ident(collection);
+            let column = crate::sql::compile::quote_ident(old);
+            let renamed = crate::sql::compile::quote_ident(new);
+            if let Some(file) = &self.sqlite_file {
+                rusqlite::Connection::open(file)
+                    .unwrap()
+                    .execute_batch(&format!(
+                        "ALTER TABLE {table} RENAME COLUMN {column} TO {renamed}"
+                    ))
+                    .unwrap();
+            } else {
+                let (backend, namespace, _) = self.postgres.as_ref().unwrap();
+                backend
+                    .execute_fixture(
+                        &format!(
+                            "ALTER TABLE {namespace}.{table} RENAME COLUMN {column} TO {renamed}"
+                        ),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+            }
+            let mut definition = fields.as_object_mut().unwrap().shift_remove(*old).unwrap();
+            definition["storage"] = value!({"valueColumn":new});
+            fields
+                .as_object_mut()
+                .unwrap()
+                .insert((*new).into(), definition);
+        }
+        self.database = Database::from_schema(
+            self.database.binding.clone(),
+            self.database.backend.clone(),
+            vec![(collection.into(), fields)],
+        )
+        .unwrap();
     }
 
     pub async fn close(self) {
@@ -153,7 +292,16 @@ fn table_sql(
         zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
     )
     .unwrap();
-    let fields = serde_json::to_value(fields).unwrap();
+    let authored = Value::Object(
+        fields
+            .as_object()
+            .unwrap()
+            .iter()
+            .filter(|(_, definition)| definition.get("assign").is_none())
+            .map(|(name, definition)| (name.clone(), definition.clone()))
+            .collect(),
+    );
+    let fields = serde_json::to_value(authored).unwrap();
     let mut sql = zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect(
         zeroship_migrate::shipping_vendors(),
         schema,

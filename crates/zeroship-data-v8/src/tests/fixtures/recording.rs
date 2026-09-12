@@ -12,7 +12,8 @@ use zeroship_data_orm::{
     protection::{Catalog, Protection},
     search::{Search, SpatialSearch, VectorSearch},
 };
-use zeroship_data_sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect, value::Value};
+use zeroship_data_orm::value::Value;
+use zeroship_data_orm::sql::{SchemaName, catalog::LiveSchema, compile::SqlDialect};
 
 thread_local! {
     static QUERIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -22,6 +23,15 @@ fn record(sql: &str) {
 }
 pub(crate) fn clear() {
     QUERIES.with_borrow_mut(Vec::clear);
+}
+pub(crate) fn bulk_statements() -> Vec<String> {
+    QUERIES.with_borrow(|queries| {
+        queries
+            .iter()
+            .filter(|sql| sql.starts_with("UPDATE ") || sql.starts_with("DELETE "))
+            .cloned()
+            .collect()
+    })
 }
 /// Identifier-only reads expose target resolution and upsert conflict probes.
 pub(crate) fn id_probes() -> Vec<String> {
@@ -84,6 +94,16 @@ impl ScopedExecutor for RecordingBackend {
     ) -> Result<Vec<Value>, DbError> {
         record(sql);
         self.0.query(app_id, schema, sql, params).await
+    }
+    async fn exec(
+        &self,
+        app_id: &str,
+        schema: &SchemaName,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        record(sql);
+        self.0.exec(app_id, schema, sql, params).await
     }
     async fn open_tx_session(
         &self,

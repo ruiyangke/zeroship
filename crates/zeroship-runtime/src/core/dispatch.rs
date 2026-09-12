@@ -298,8 +298,8 @@ fn is_public_error_code(code: &str) -> bool {
             | "invalid_filter"
             | "invalid_collection"
             | "invalid_identifier"
-            | "reserved_system_field_name"
-            | "immutable_system_field"
+            | "reserved_id_prefix"
+            | "immutable_assigned_field"
             | "filter_nesting_too_deep"
             // The same set as canonicalised by `@zeroship/db`. Note
             // `version_mismatch` becomes `OPTIMISTIC_CONCURRENCY`, not
@@ -312,8 +312,8 @@ fn is_public_error_code(code: &str) -> bool {
             | "INVALID_FILTER"
             | "INVALID_COLLECTION"
             | "INVALID_IDENTIFIER"
-            | "RESERVED_SYSTEM_FIELD_NAME"
-            | "IMMUTABLE_SYSTEM_FIELD"
+            | "RESERVED_ID_PREFIX"
+            | "IMMUTABLE_ASSIGNED_FIELD"
             | "FILTER_NESTING_TOO_DEEP"
     )
 }
@@ -748,7 +748,7 @@ mod tests {
             ("CHECK_VIOLATION", false),
             ("VERSION_FILTER_MUST_BE_TOP_LEVEL", true),
             ("INVALID_FILTER", true),
-            ("RESERVED_SYSTEM_FIELD_NAME", true),
+            ("RESERVED_ID_PREFIX", true),
         ];
         for (code, verbatim) in cases {
             let body =
@@ -863,8 +863,8 @@ mod tests {
             "invalid_filter",
             "invalid_collection",
             "invalid_identifier",
-            "reserved_system_field_name",
-            "immutable_system_field",
+            "reserved_id_prefix",
+            "immutable_assigned_field",
             "filter_nesting_too_deep",
             // The pre-existing P9 capability gate code must still pass.
             "capability_violation",

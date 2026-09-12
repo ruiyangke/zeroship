@@ -185,9 +185,7 @@ pub struct FieldDescriptor {
     /// own `ty` remains the authoritative local storage type.
     #[serde(rename = "ref", default)]
     pub references: Option<String>,
-    /// Referenced target column. Legacy declarative `ref` fields omit this and
-    /// retain their historical `id` target; typed migration references always
-    /// record the explicit target column.
+    /// Target column, required whenever a referenced table is declared.
     #[serde(rename = "refColumn", default)]
     pub reference_column: Option<String>,
     /// Optional explicit foreign-key constraint name for a typed migration
@@ -229,11 +227,7 @@ pub struct FieldDescriptor {
     /// in `def_to_constraints`.
     #[serde(rename = "enum", default)]
     pub enum_values: Option<Vec<serde_json::Value>>,
-    /// For a `{ type: "id", idPrefix }` field, the declared typed-id prefix
-    /// (`idPrefix` on the wire `FieldDef`). A re-declaration of the system `id` PK -
-    /// it FOLDS into the existing `id TEXT PRIMARY KEY` (NOT a second column),
-    /// and the prefix is validated through
-    /// [`crate::schema::query::validate_id_prefix`].
+    /// Prefix declared for a typed-ID column.
     #[serde(rename = "idPrefix", default)]
     pub id_prefix: Option<String>,
 
@@ -276,7 +270,7 @@ pub struct FieldDescriptor {
     pub max_length: Option<i64>,
     /// Render-only marker for a genuine unbounded `t.text()` column (`ColType::Text`
     /// with no value-format / id-prefix facet - NOT a typed-id, and NOT a bounded
-    /// system column, which are `String`). Drives an unbounded `TEXT` spelling on
+    /// injected column, which are `String`). Drives an unbounded `TEXT` spelling on
     /// MySQL via `ddl_type_override`; the base data_type stays `text` so Postgres
     /// and drift are unaffected. Never serialized.
     #[serde(skip)]
@@ -1733,7 +1727,7 @@ pub struct DesiredSchema {
     /// The policy-resolved injection for each table, derived from the same
     /// [`EffectivePolicy`](zeroship_migrate_policy::EffectivePolicy) that built the
     /// table snapshot. Emission paths use this to distinguish injected indexes
-    /// and constraints without a hardcoded system-field vocabulary.
+    /// and constraints without a hardcoded injected-column vocabulary.
     pub resolved_injects: BTreeMap<String, ResolvedInject>,
     /// `table name -> derived index name -> the data plane's spelling of that same
     /// index`, from `derived_index_aliases_for`. Present only for the names where
@@ -1913,7 +1907,7 @@ pub fn desired_snapshot_for_dialect(
 /// per-field column/constraint/index modelling) for a single
 /// [`CollectionDescriptor`].
 ///
-/// This is the single source of truth for the default / system-field / sentinel
+/// This is the single source of truth for the default / injected-column / sentinel
 /// logic. BOTH the declarative differ ([`desired_snapshot_for_dialect`], unchanged
 /// behavior) and the IR path ([`crate::render::lower::IrAuthor`]) call it, so the
 /// per-column/per-index construction exists in exactly ONE place. The
@@ -2061,7 +2055,7 @@ struct SnapshotResolvedShape {
     columns: Vec<ColumnSnapshot>,
     indexes: Vec<IndexSnapshot>,
     primary_key: Option<Vec<String>>,
-    owns_id_primary_key: bool,
+    injected_primary_key_column: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2076,7 +2070,7 @@ impl SnapshotResolvedShape {
             columns: Vec::new(),
             indexes: Vec::new(),
             primary_key: None,
-            owns_id_primary_key: false,
+            injected_primary_key_column: None,
         }
     }
 
@@ -2100,7 +2094,7 @@ impl SnapshotResolvedShape {
             columns,
             indexes,
             primary_key: inject.primary_key().map(<[String]>::to_vec),
-            owns_id_primary_key: inject.owns_id_primary_key(),
+            injected_primary_key_column: inject.primary_key_column().map(str::to_owned),
         })
     }
 }
@@ -2119,7 +2113,7 @@ fn build_table_snapshot_impl(
         .iter()
         .map(|column| column.name.clone())
         .collect::<BTreeSet<_>>();
-    let folds_system_id = resolved_shape.owns_id_primary_key;
+    let injected_primary_key_column = resolved_shape.injected_primary_key_column;
     let mut columns = resolved_shape.columns;
     // Policy-resolved injected indexes are modelled so they round-trip with the
     // migration path that consumes the same `ResolvedInject`.
@@ -2152,41 +2146,16 @@ fn build_table_snapshot_impl(
         if let Some(prefix) = &f.id_prefix {
             validate_id_prefix(prefix)?;
         }
-        // id-fold: a legacy internal `type: "id"` descriptor is a PREFIX
-        // DECLARATION for the
-        // policy-managed `id` PK column already present in `resolved_shape`,
-        // NOT a second column. FOLD it: validate the declared prefix (defense
-        // in depth, through the shared kernel's `validate_id_prefix`, which is
-        // the single source of truth for the rule and the reserved set)
-        // and SKIP it, so we neither duplicate the `id` column nor emit a
-        // bogus second PK. A field NAMED `id` with any OTHER type is rejected
-        // by the field-name fence below (an `id` column may only be the
-        // system PK).
-        if folds_system_id && f.name == "id" {
+        // A prefix or identity declaration refines the policy-owned primary key.
+        if injected_primary_key_column.as_deref() == Some(f.name.as_str()) {
             if f.ty == "id" {
-                // **fail-closed** - the id-fold DISCARDS this field (it is a
-                // prefix declaration for the already-injected system PK, not a
-                // second column), so a column-level modifier carried on it is
-                // SILENTLY LOST. A resolved legacy prefix declaration can carry
-                // modifiers that would otherwise disappear when it folds into the
-                // policy-owned column, so reject those modifiers here.
-                //
-                // NOTE - only `unique` + a user `default` are checked, NOT
-                // nullability: the system PK is ALWAYS NOT NULL irrespective of the
-                // folded field's `required` flag, and the internal platform-ID
-                // descriptor legitimately leaves `required` at its default (`false`)
-                // - the NOT NULL is supplied by the policy-resolved shape, not carried
-                // on the field - so the fold ignoring `nullable` is correct, not a
-                // drop. A legitimate internal ID descriptor carries NO user
-                // `default` and is never a column-level
-                // UNIQUE (the PK implies it), so this never fires for the real id
-                // shape - only for a modifier that would otherwise vanish.
+                // Reject modifiers the prefix declaration cannot preserve.
                 if f.unique || f.default.is_some() {
                     return Err(DeclarativeError::Invalid(format!(
-                        "field 'id' folds into the system primary key, so a \
+                        "field '{}' folds into the injected primary key, so a \
                          column-level modifier on it would be silently discarded: \
-                         {}{}— omit the platform-managed id declaration (the system \
-                         PK is already NOT NULL and unique)",
+                         {}{}— omit modifiers already supplied by the injected primary key",
+                        f.name,
                         if f.unique { "unique " } else { "" },
                         if f.default.is_some() { "default " } else { "" },
                     )));
@@ -2196,23 +2165,23 @@ fn build_table_snapshot_impl(
             if f.identity.is_some() {
                 if !matches!(f.ty.as_str(), "int" | "integer" | "bigInt") {
                     return Err(DeclarativeError::Invalid(format!(
-                        "field 'id' may replace the system primary key only as an \
+                        "field '{}' may replace the injected primary key only as an \
                          integer identity column, not '{}'",
-                        f.ty
+                        f.name, f.ty
                     )));
                 }
                 let replacement =
                     column_snapshot_for_field(vendors, f, dialect, synth_json_defaults)?;
-                if let Some(existing) = columns.iter_mut().find(|c| c.name == "id") {
+                if let Some(existing) = columns.iter_mut().find(|c| c.name == f.name) {
                     *existing = replacement;
                 }
                 continue;
             }
             return Err(DeclarativeError::Invalid(format!(
-                "field 'id' is reserved for the platform system primary key; a \
+                "field '{}' is reserved for the injected primary key; a \
                  re-declaration must be an internal type 'id' descriptor or an integer \
                  identity primary key, not '{}'",
-                f.ty
+                f.name, f.ty
             )));
         }
         if injected_names.contains(&f.name) {
@@ -2322,12 +2291,14 @@ fn build_table_snapshot_impl(
                 indexes.extend(fold_ann_index_for_dialect(vendors, spec, dialect));
             }
         }
-        // A reference facet declares a FOREIGN KEY constraint independently of
-        // the local storage type. Legacy declarative `ref` fields still default
-        // to the target's `id` column; typed migration references carry an exact
-        // target column.
+        // The reference target is independent of the local storage type.
         if let Some(target) = &f.references {
-            let target_column = f.reference_column.as_deref().unwrap_or("id");
+            let target_column = f.reference_column.as_deref().ok_or_else(|| {
+                DeclarativeError::Invalid(format!(
+                    "reference '{}.{}' requires an explicit refColumn",
+                    d.name, f.name
+                ))
+            })?;
             // cross-app: a `<otherApp>.<table>` schema-qualified
             // target is REJECTED here, fail-closed (the runtime plugin
             // enforces the same rule): every FK must stay
@@ -2412,7 +2383,7 @@ fn build_table_snapshot_impl(
 
     // An author-built DESIRED snapshot carries no raw CREATE text (it is
     // introspection-only). It rides as `None` and is excluded from equality.
-    Ok(TableSnapshot {
+    let mut snapshot = TableSnapshot {
         columns,
         indexes,
         constraints,
@@ -2425,7 +2396,10 @@ fn build_table_snapshot_impl(
         partition_by: None,
         comment: None,
         stored_create_sql: None,
-    })
+    };
+    crate::render::fold::apply_fold_rowid_metadata(vendors, &mut snapshot, dialect)
+        .map_err(|error| DeclarativeError::Invalid(error.to_string()))?;
+    Ok(snapshot)
 }
 
 /// Second pass of [`desired_snapshot_for_dialect`] - over the per-table
@@ -5275,7 +5249,7 @@ impl DeclarativeAuthor {
     /// physical column order remains the active policy's inject order followed by
     /// author order. Shapes with facets that require the richer snapshot renderer
     /// stay on that renderer. Both arms receive the already-validated explicit
-    /// policy shape; neither consults an ambient system-field definition.
+    /// policy shape; neither consults an ambient injected-column definition.
     ///
     /// **This is the seam a column rename's constraint rewrite runs at**, and it is
     /// here rather than in the desired snapshot for a reason recorded in full on
@@ -7293,7 +7267,7 @@ mod snapshot_builder_refactor_safety_tests {
     //! `comment_sentinel` / `opclass` fields the drift-`PartialEq` deliberately
     //! ignores) fails here.
     //!
-    //! It freezes the `{:#?}` of a RICH table snapshot (system fields + a unique
+    //! It freezes the `{:#?}` of a RICH table snapshot (injected columns + a unique
     //! field + a ref/FK + an encrypted+masked column + a named index) on BOTH
     //! dialects.
 
@@ -7339,6 +7313,7 @@ mod snapshot_builder_refactor_safety_tests {
                     name: "author".into(),
                     ty: "ref".into(),
                     references: Some("authors".into()),
+                    reference_column: Some("id".into()),
                     ..Default::default()
                 },
                 FieldDescriptor {
@@ -7609,7 +7584,7 @@ columns = [
         .expect_err("a unique modifier on the folded id must be rejected");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("system primary key") && msg.contains("unique"),
+            msg.contains("injected primary key") && msg.contains("unique"),
             "the discarded `unique` on `id` must be a hard error: {msg}"
         );
     }
@@ -7629,7 +7604,7 @@ columns = [
         .expect_err("a user default on the folded id must be rejected");
         let msg = format!("{err:?}");
         assert!(
-            msg.contains("system primary key") && msg.contains("default"),
+            msg.contains("injected primary key") && msg.contains("default"),
             "the discarded `default` on `id` must be a hard error: {msg}"
         );
     }
@@ -7877,7 +7852,7 @@ columns = [
         );
     }
 
-    /// A resolved table carrying the confined system-column prefix is the
+    /// A resolved table carrying the confined policy-column prefix is the
     /// SDK-collection shape, so plugin-db's JSON default synthesis remains intact.
     #[test]
     fn confined_resolved_json_without_default_still_synthesizes_default() {

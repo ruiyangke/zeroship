@@ -11,8 +11,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use zeroship_data_sql::catalog::MaskKind;
-use zeroship_data_sql::value::Value;
+use crate::sql::catalog::MaskKind;
+use crate::value::Value;
 
 use crate::masking::apply_mask_kind;
 
@@ -282,7 +282,7 @@ pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
 /// The mask kind declared for `column`, or `None` when it is unmasked or opted
 /// out with `kind: "none"`.
 fn mask_kind_for_column(schema: &Value, column: &str) -> Option<MaskKind> {
-    let mask = zeroship_data_sql::descriptors::effective_mask(schema.get(column)?)?;
+    let mask = crate::sql::descriptors::effective_mask(schema.get(column)?)?;
     // Unknown kinds widen fanout instead of applying the wrong transform.
     MaskKind::from_sql(mask.kind)
 }
@@ -497,7 +497,7 @@ pub fn record_if_active(collection: &str, filter: &Value, schema: &Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
 
     fn row(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs

@@ -7794,6 +7794,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
+ "testcontainers",
  "thiserror 2.0.18",
  "toml 0.8.23",
  "totp-rs",
@@ -8085,6 +8087,7 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "hmac 0.12.1",
+ "indexmap 2.14.0",
  "rusqlite",
  "rustls",
  "scoped-tls",
@@ -8094,6 +8097,7 @@ dependencies = [
  "sqlite-vec",
  "tempfile",
  "testcontainers",
+ "time",
  "tracing",
  "tracing-subscriber",
  "trybuild",
@@ -8103,30 +8107,14 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-cdc-wire",
  "zeroship-data-macros",
- "zeroship-data-sql",
  "zeroship-metering",
  "zeroship-migrate",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-core",
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
-]
-
-[[package]]
-name = "zeroship-data-sql"
-version = "0.1.0"
-dependencies = [
- "base64",
- "criterion",
- "indexmap 2.14.0",
- "serde",
- "serde_json",
- "time",
- "trybuild",
- "zeroship-core",
- "zeroship-migrate",
- "zeroship-migrate-backend",
- "zeroship-migrate-core",
 ]
 
 [[package]]
@@ -8152,7 +8140,6 @@ dependencies = [
  "v8",
  "zeroship-core",
  "zeroship-data-orm",
- "zeroship-data-sql",
  "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-policy",
@@ -8391,6 +8378,8 @@ dependencies = [
 name = "zeroship-migrate-node"
 version = "0.1.0"
 dependencies = [
+ "compio",
+ "compio-postgres",
  "futures",
  "hex",
  "napi",
@@ -8400,8 +8389,11 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tempfile",
+ "testcontainers",
+ "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "url",
  "zeroship-migrate",
  "zeroship-migrate-mysql",
  "zeroship-migrate-postgres",
@@ -8465,7 +8457,6 @@ dependencies = [
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
- "zeroship-data-sql",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",

@@ -88,7 +88,7 @@ function repoRoot(): string {
   }).trim();
 }
 
-/** Every directory under `dir` that holds a `schema.runtime.json`. */
+/** App artifact pairs; standalone Rust descriptor fixtures have their own producer tests. */
 async function findArtifactDirs(dir: string, out: string[] = []): Promise<string[]> {
   let entries;
   try {
@@ -96,7 +96,8 @@ async function findArtifactDirs(dir: string, out: string[] = []): Promise<string
   } catch {
     return out;
   }
-  if (entries.some((e) => e.isFile() && e.name === RUNTIME_DESCRIPTOR_FILE)) out.push(dir);
+  if ([RUNTIME_DESCRIPTOR_FILE, ENV_DB_FILE].every((name) =>
+    entries.some((e) => e.isFile() && e.name === name))) out.push(dir);
   for (const e of entries) {
     if (!e.isDirectory() || SKIP_DIRS.has(e.name)) continue;
     await findArtifactDirs(join(dir, e.name), out);

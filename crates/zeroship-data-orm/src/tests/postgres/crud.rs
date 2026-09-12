@@ -5,9 +5,9 @@ use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
 
-use zeroship_data_sql::value::value;
+use crate::value::value;
 
-use zeroship_data_sql::compile::*;
+use crate::sql::compile::*;
 
 #[test]
 fn insert_and_find() {
@@ -21,7 +21,7 @@ fn insert_and_find() {
 
             // Insert
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Hello", "body": "World", "category": "tech"}),
@@ -35,7 +35,7 @@ fn insert_and_find() {
 
             // Find
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({}),
                 None,
@@ -69,7 +69,7 @@ fn insert_many_round_trip() {
                 {"title": "C", "body": "three", "category": "tech"}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -80,7 +80,7 @@ fn insert_many_round_trip() {
 
             // Verify all in DB
             let bq = build_count(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({}),
@@ -113,7 +113,7 @@ fn update_one_inc() {
 
             // Insert
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Counter", "category": "tech", "views": 0}),
@@ -123,7 +123,7 @@ fn update_one_inc() {
 
             // $inc views by 5
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Counter"}),
@@ -136,7 +136,7 @@ fn update_one_inc() {
 
             // $inc again
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Counter"}),
@@ -161,7 +161,7 @@ fn update_one_dec_mul() {
             setup(&pool, schema).await;
 
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Math", "category": "tech", "views": 10}),
@@ -171,7 +171,7 @@ fn update_one_dec_mul() {
 
             // $dec
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Math"}),
@@ -183,7 +183,7 @@ fn update_one_dec_mul() {
 
             // $mul
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Math"}),
@@ -208,7 +208,7 @@ fn update_one_jsonb_array_ops() {
             setup(&pool, schema).await;
 
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Tags", "category": "tech"}),
@@ -218,7 +218,7 @@ fn update_one_jsonb_array_ops() {
 
             // $push "rust"
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Tags"}),
@@ -231,7 +231,7 @@ fn update_one_jsonb_array_ops() {
 
             // $push "go"
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Tags"}),
@@ -246,7 +246,7 @@ fn update_one_jsonb_array_ops() {
 
             // $addToSet "rust" (duplicate — should NOT add)
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Tags"}),
@@ -259,7 +259,7 @@ fn update_one_jsonb_array_ops() {
 
             // $addToSet "python" (new — should add)
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Tags"}),
@@ -272,7 +272,7 @@ fn update_one_jsonb_array_ops() {
 
             // $pull "go"
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Tags"}),
@@ -306,7 +306,7 @@ fn update_many_round_trip() {
                 {"title": "D", "category": "food", "views": 0}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -316,19 +316,25 @@ fn update_many_round_trip() {
 
             // Update all tech views +1
             let bq = build_update_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"category": "tech"}),
                 &value!({"views": {"$inc": 1}}),
             )
             .unwrap();
-            let updated = exec_mutation(&pool, bq).await;
-            assert_eq!(updated.len(), 3);
+            let affected = zeroship_data_orm::backend::postgres::params::execute(
+                &pool.acquire().await.unwrap(),
+                &bq.sql,
+                &bq.params,
+            )
+            .await
+            .unwrap();
+            assert_eq!(affected, 3);
 
             // Verify food unchanged
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"category": "food"}),
                 None,
@@ -343,7 +349,7 @@ fn update_many_round_trip() {
 
             // Verify tech updated
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"category": "tech"}),
                 None,
@@ -380,7 +386,7 @@ fn delete_operations() {
                 {"title": "Del3", "category": "food"}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -390,7 +396,7 @@ fn delete_operations() {
 
             // Delete one food
             let bq = build_delete_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"category": "food"}),
@@ -401,7 +407,7 @@ fn delete_operations() {
 
             // 4 remaining
             let bq = build_count(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({}),
@@ -419,19 +425,25 @@ fn delete_operations() {
 
             // Delete many remaining food
             let bq = build_delete_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"category": "food"}),
                 SqlDialect::Postgres,
             )
             .unwrap();
-            let deleted = exec_mutation(&pool, bq).await;
-            assert_eq!(deleted.len(), 2);
+            let affected = zeroship_data_orm::backend::postgres::params::execute(
+                &pool.acquire().await.unwrap(),
+                &bq.sql,
+                &bq.params,
+            )
+            .await
+            .unwrap();
+            assert_eq!(affected, 2);
 
             // 2 tech remaining
             let bq = build_count(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({}),
@@ -462,7 +474,7 @@ fn mixed_update() {
             setup(&pool, schema).await;
 
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Mix", "category": "tech", "views": 10}),
@@ -472,7 +484,7 @@ fn mixed_update() {
 
             // Update: set category + inc views + push tag
             let bq = build_update_one(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Mix"}),

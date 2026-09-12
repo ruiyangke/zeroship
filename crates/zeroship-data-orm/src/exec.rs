@@ -2,10 +2,10 @@
 //! Shared CRUD uses the registered driver for autocommit and the owned session
 //! for transaction work. Successful operations emit usage and queued effects.
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::backend::BackendHandle;
-use crate::compile::BuiltQuery;
+use crate::sql::compiler::CompiledQuery;
 
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
@@ -102,8 +102,29 @@ pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec
         .await
 }
 
+/// Execute without fetching rows on the captured transaction route.
+pub async fn run_statement(route: &TxRoute, sql: &str, params: &[Value]) -> Result<u64, DbError> {
+    if route.in_tx() {
+        route.check_scope()?;
+        return crate::transaction::driver::execute_operation(route.app_id(), async {
+            let lane = take_tx_lane(route)?;
+            route.backend().validate_session(lane.client())?;
+            #[cfg(test)]
+            tests::record_sqlite_tx_route();
+            lane.client().exec(sql, params).await
+        })
+        .await;
+    }
+    #[cfg(test)]
+    tests::record_sqlite_shared_route();
+    route
+        .backend()
+        .exec(route.app_id(), route.schema(), sql, params)
+        .await
+}
+
 /// Execute a compiled read and meter a successful operation.
-pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub async fn exec_query(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
@@ -118,7 +139,7 @@ pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, D
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
 ///
-pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError> {
+pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbError> {
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
@@ -140,12 +161,12 @@ pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError>
 }
 
 /// Execute an insert/update/delete query, returning the affected
-/// rows as `Vec<zeroship_data_sql::value::Value>` (one `Value::Object` per row).
+/// rows as `Vec<crate::value::Value>` (one `Value::Object` per row).
 ///
 /// Native records feed the protection passes and adapters. Broker events
 /// encode their explicit wire contract separately.
 ///
-pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub async fn exec_mutation(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
@@ -175,10 +196,11 @@ pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>
 /// from the RETURNING row. For now this collects what's already in
 /// the result `Value`.
 pub async fn exec_mutation_with_emit(
-    bq: BuiltQuery,
+    bq: CompiledQuery,
     route: &TxRoute,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
+    binding: &crate::binding::DbBinding,
 ) -> Result<Vec<Value>, DbError> {
     // `exec_mutation` returns the typed `Vec<Value>` already decoded
     // from `compio_postgres::Row`. Pre-fix we re-parsed our own JSON
@@ -186,6 +208,7 @@ pub async fn exec_mutation_with_emit(
     // iterate the live `Value`s directly. The CRUD resolver in
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
+    crate::descriptor::collection_schema(binding, collection)?;
     let rows = exec_mutation(route, bq).await?;
     emit_for_rows(
         &rows,
@@ -196,6 +219,35 @@ pub async fn exec_mutation_with_emit(
         op,
     );
     Ok(rows)
+}
+
+/// Execute a count-only mutation and queue a collection invalidation on success.
+pub async fn exec_mutation_count_with_emit(
+    bq: CompiledQuery,
+    route: &TxRoute,
+    collection: &str,
+    op: zeroship_data_orm::cdc::ChangeOp,
+) -> Result<u64, DbError> {
+    let affected = run_statement(route, &bq.sql, &bq.params).await?;
+    let app_id = route.app_id();
+    emit_db_metric(app_id, DB_WRITES, 1);
+    emit_db_metric(app_id, DB_ROWS_WRITTEN, affected);
+    if affected != 0
+        && !backend_publishes_committed_changes(route.backend())
+        && !crate::cdc::broker::is_app_suppressed(app_id)
+        && crate::cdc::broker::has_subscribers(app_id, collection)
+    {
+        queue_or_emit(
+            app_id,
+            route.in_tx(),
+            collection,
+            op,
+            None,
+            Vec::new(),
+            std::collections::HashMap::new(),
+        );
+    }
+    Ok(affected)
 }
 
 /// Does the backend publish committed changes on its own?
@@ -278,24 +330,11 @@ fn emit_for_rows(
         return;
     }
     for row in rows {
-        let pk = row
-            .get("id")
-            .and_then(value_to_logical_id)
-            .or_else(|| row.get("_id").and_then(value_to_logical_id));
-        // changed_columns: the keys present in the returned row,
-        // minus the system columns we never want to report. For
-        // INSERT this is "every declared column" — for UPDATE it's
-        // the post-image, which is a superset of what changed.
-        // Filtering down to "what changed" requires a before/after
-        // diff that we don't have here; a future pass could compute it
-        // from the mutation's SET clause directly.
+        let pk = row.get("id").and_then(value_to_logical_id);
+        // The returned post-image conservatively reports every projected field.
         let (columns, tuple): (Vec<String>, std::collections::HashMap<String, String>) = match row {
             Value::Object(m) => {
-                let cols = m
-                    .keys()
-                    .filter(|k| !matches!(k.as_str(), "created_at" | "updated_at"))
-                    .cloned()
-                    .collect();
+                let cols = m.keys().cloned().collect();
                 // Render the full RETURNING row into a
                 // `column → text` map for the broker's predicate
                 // evaluation. Numbers / bools are stringified to
@@ -413,12 +452,12 @@ pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHan
 mod tests {
     use super::*;
     use crate::driver::Session;
+    use crate::tests::fixtures::DatabaseFixture;
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::rc::Rc;
     use zeroship_data_orm::cdc::ChangeOp;
-    use crate::tests::fixtures::DatabaseFixture;
 
     thread_local! {
         /// Counter incremented every time the production code path
@@ -567,19 +606,19 @@ mod tests {
             let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
             assert_eq!(
                 derived.dialect(),
-                crate::compile::SqlDialect::Sqlite,
+                crate::sql::compile::SqlDialect::Sqlite,
                 "a route bound to a SQLite handle must not claim PostgreSQL: \
                  every builder it reaches would emit the wrong SQL",
             );
 
             let stated = crate::tx_route::CapturedRoute::pool_for_tests(
                 "app_route_dialect",
-                crate::compile::SqlDialect::Postgres,
+                crate::sql::compile::SqlDialect::Postgres,
             )
             .bind(handle);
             assert_eq!(
                 stated.dialect(),
-                crate::compile::SqlDialect::Postgres,
+                crate::sql::compile::SqlDialect::Postgres,
                 "the dialect is the constructor's input; `bind` must not \
                  re-derive it from the handle",
             );
@@ -596,7 +635,7 @@ mod tests {
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
-            .collect::<zeroship_data_sql::value::Map<_, _>>(),
+            .collect::<crate::value::Map<_, _>>(),
         )
     }
 
@@ -607,7 +646,7 @@ mod tests {
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
-            .collect::<zeroship_data_sql::value::Map<_, _>>(),
+            .collect::<crate::value::Map<_, _>>(),
         )
     }
 
@@ -994,7 +1033,7 @@ mod tests {
                 false,
                 None,
                 "app_exec",
-                zeroship_data_sql::SchemaName::new("app_exec").unwrap(),
+                crate::sql::SchemaName::new("app_exec").unwrap(),
                 handle.clone(),
             )
             .await
@@ -1004,7 +1043,7 @@ mod tests {
             reset_sqlite_route();
             let inserted = exec_mutation(
                 &ambient_route_for_tests("app_exec", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"INSERT INTO "app_exec"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
                         .to_string(),
@@ -1026,7 +1065,7 @@ mod tests {
             reset_sqlite_route();
             let count = exec_count(
                 &ambient_route_for_tests("app_exec", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
                     params: vec![],
                 },
@@ -1043,7 +1082,7 @@ mod tests {
             reset_sqlite_route();
             let rows = exec_query(
                 &ambient_route_for_tests("app_exec", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
                     params: vec![],
                 },
@@ -1117,7 +1156,7 @@ mod tests {
             // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
             exec_mutation(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(
                         r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
                     ),
@@ -1130,7 +1169,7 @@ mod tests {
             // 1 query (read) → db_reads +1.
             exec_query(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
@@ -1141,7 +1180,7 @@ mod tests {
             // 1 count (read) → db_reads +1.
             exec_count(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
                     params: vec![],
                 },
@@ -1152,7 +1191,7 @@ mod tests {
             // A FAILED op (bad SQL) must emit NOTHING.
             let bad = exec_query(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
                     params: vec![],
                 },
@@ -1160,17 +1199,47 @@ mod tests {
             .await;
             assert!(bad.is_err(), "the bad query must fail");
 
+            for (filter, expected) in [("id = 1", 1), ("id = 2", 0)] {
+                let affected = exec_mutation_count_with_emit(
+                    CompiledQuery {
+                        sql: format!(
+                            r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#
+                        ),
+                        params: vec![],
+                    },
+                    &ambient_route_for_tests(app_id, handle.clone()),
+                    "notes",
+                    ChangeOp::Update,
+                )
+                .await
+                .expect("count-only update");
+                assert_eq!(affected, expected);
+            }
+            assert!(
+                exec_mutation_count_with_emit(
+                    CompiledQuery {
+                        sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
+                        params: vec![],
+                    },
+                    &ambient_route_for_tests(app_id, handle.clone()),
+                    "missing",
+                    ChangeOp::Delete,
+                )
+                .await
+                .is_err()
+            );
+
             let events = meter.drain();
             let id = uuid::Uuid::parse_str(app_id).unwrap();
             assert_eq!(
                 usage_value(&events, id, "db_writes"),
-                Some(1),
-                "one mutation = 1 db_writes; got {events:?}"
+                Some(3),
+                "successful mutation statements are metered: {events:?}"
             );
             assert_eq!(
                 usage_value(&events, id, "db_rows_written"),
-                Some(1),
-                "the insert returned 1 row; got {events:?}"
+                Some(2),
+                "returned and affected rows are metered: {events:?}"
             );
             assert_eq!(
                 usage_value(&events, id, "db_reads"),
@@ -1246,7 +1315,7 @@ mod tests {
             reset_sqlite_route();
             let rows = exec_query(
                 &ambient_route_for_tests("app_b", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: "SELECT 'b' AS title".to_string(),
                     params: vec![],
                 },
@@ -1328,7 +1397,7 @@ mod tests {
                 false,
                 None,
                 "app_exec_cancel",
-                zeroship_data_sql::SchemaName::new("app_exec_cancel").unwrap(),
+                crate::sql::SchemaName::new("app_exec_cancel").unwrap(),
                 handle.clone(),
             )
             .await
@@ -1340,7 +1409,7 @@ mod tests {
             let task = crate::orm_context::spawn(async move {
                 exec_query(
                     &ambient_route_for_tests("app_exec_cancel", spawned_handle),
-                    BuiltQuery {
+                    CompiledQuery {
                         sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#
                             .to_string(),
                         params: vec![],
@@ -1368,7 +1437,7 @@ mod tests {
 
             let rows = exec_query(
                 &ambient_route_for_tests("app_exec_cancel", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
                     params: vec![],
                 },
@@ -1489,7 +1558,7 @@ mod tests {
             let app_id = "p2c1leak";
             let role = zeroship_core::database_role::per_app_role_name(app_id)
                 .expect("test app role name");
-            let role_ident = crate::compile::quote_ident(&role);
+            let role_ident = crate::sql::compile::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
             // in the app role (required for SET LOCAL ROLE) and (b)
@@ -1515,7 +1584,7 @@ mod tests {
                     .expect("create app role");
                 c.simple_query(&format!(
                     "GRANT {role_ident} TO {}",
-                    crate::compile::quote_ident(&login_user)
+                    crate::sql::compile::quote_ident(&login_user)
                 ))
                 .await
                 .expect("grant membership");
@@ -1529,7 +1598,7 @@ mod tests {
                 Duration::from_millis(100),
                 crate::backend::pg_autocommit::roled_rows(
                     &pool,
-                    &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema"),
+                    &crate::sql::SchemaName::new(app_id).expect("fixture schema"),
                     "SELECT pg_sleep(1)",
                     &[],
                 ),
@@ -1573,7 +1642,7 @@ mod tests {
             let _ = c
                 .simple_query(&format!(
                     "REVOKE {role_ident} FROM {}",
-                    crate::compile::quote_ident(&login_user)
+                    crate::sql::compile::quote_ident(&login_user)
                 ))
                 .await;
             let _ = c

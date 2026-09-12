@@ -2,22 +2,25 @@
 
 use crate::common;
 
+use crate::common::database::Database;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::{connect, Client, NoTls};
-use jsonwebtoken::{decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{
+    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use ntex::web;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::{discovery_metadata, jwks_document};
 use zeroship_auth::oidc::{
-    AccessTokenClaims, AccessTokenMint, IdTokenClaims, IdTokenMint, Issuer,
-    ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
+    AccessTokenClaims, AccessTokenMint, IdTokenClaims, IdTokenMint, Issuer, ACCESS_TOKEN_TYP,
+    ID_TOKEN_TYP,
 };
+use zeroship_core::config::{Secret, SourceKind};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const CLIENT_ID: &str = "oac_testclient";
@@ -26,7 +29,7 @@ const SECTOR_A: &str = "https://app-a.zeroship.test";
 const SECTOR_B: &str = "https://app-b.zeroship.test";
 
 fn test_issuer() -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
@@ -74,13 +77,7 @@ fn verify_access_with_jwks(
     expected_iss: &str,
     expected_aud: &str,
 ) -> Result<AccessTokenClaims, String> {
-    verify_with_jwks::<AccessTokenClaims>(
-        jwks,
-        token,
-        expected_iss,
-        expected_aud,
-        ACCESS_TOKEN_TYP,
-    )
+    verify_with_jwks::<AccessTokenClaims>(jwks, token, expected_iss, expected_aud, ACCESS_TOKEN_TYP)
 }
 
 fn verify_id_with_jwks(
@@ -143,81 +140,80 @@ fn wrong_alg_hs256_token(claims: &Value, kid: &str) -> String {
     let mut header = Header::new(Algorithm::HS256);
     header.typ = Some(ACCESS_TOKEN_TYP.into());
     header.kid = Some(kid.into());
-    encode(&header, claims, &EncodingKey::from_secret(b"wrong-family-secret"))
-        .expect("HS256 token")
-}
-
-fn db_url() -> String {
-    crate::common::test_database_url()
-}
-
-async fn open_conn() -> Client {
-    let (client, connection) = connect(&db_url(), NoTls).await.expect("connect test DB");
-    compio::runtime::spawn(async move {
-        if let Err(err) = connection.run().await {
-            eprintln!("[op_foundation_test] pg connection error: {err}");
-        }
-    })
-    .detach();
-    client
+    encode(
+        &header,
+        claims,
+        &EncodingKey::from_secret(b"wrong-family-secret"),
+    )
+    .expect("HS256 token")
 }
 
 #[compio::test]
 async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency() {
-    let db = open_conn().await;
-    let issuer = test_issuer();
-    common::publish_op_key_once(&issuer, &db)
-        .await
-        .expect("publish active signing key");
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let issuer = test_issuer();
+        issuer
+            .publish_active_key(&db)
+            .await
+            .expect("publish active signing key");
 
-    // The mint takes a `ValidatedSession`, so the subject has to be a person
-    // with a live session rather than a fabricated uuid. That is the fence, not
-    // fixture ceremony: the id below is the one the creating statement returned.
-    let (proof, person_id) = common::validated_session(&db, "oidc-foundation").await;
-    let user_id = person_id.to_string();
-    let scopes = scopes();
-    let token = issuer
-        .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
-        .await
-        .expect("issue access token");
-    let jwks = jwks_document(&db).await.expect("served JWKS document");
-    let header = decode_header(&token).expect("access token header");
-    assert_eq!(header.typ.as_deref(), Some(ACCESS_TOKEN_TYP));
-    assert_eq!(header.kid.as_deref(), Some(issuer.kid()));
+        // The mint takes a `ValidatedSession`, so the subject has to be a person
+        // with a live session rather than a fabricated uuid. That is the fence, not
+        // fixture ceremony: the id below is the one the creating statement returned.
+        let (proof, person_id) = common::validated_session(&db, "oidc-foundation").await;
+        let user_id = person_id.to_string();
+        let scopes = scopes();
+        let token = issuer
+            .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
+            .await
+            .expect("issue access token");
+        let jwks = jwks_document(&db).await.expect("served JWKS document");
+        let header = decode_header(&token).expect("access token header");
+        assert_eq!(header.typ.as_deref(), Some(ACCESS_TOKEN_TYP));
+        assert_eq!(header.kid.as_deref(), Some(issuer.kid()));
 
-    let claims =
-        verify_access_with_jwks(&jwks, &token, issuer.issuer(), RESOURCE_AUD).expect("verify");
-    assert_eq!(claims.iss, issuer.issuer());
-    assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
-    assert_eq!(claims.aud, RESOURCE_AUD);
-    assert_ne!(claims.aud, claims.client_id);
-    assert_eq!(claims.client_id, CLIENT_ID);
-    assert_eq!(claims.scope, scopes.join(" "));
-    assert!(claims.exp > claims.iat);
-    assert!(!claims.jti.is_empty());
+        let claims =
+            verify_access_with_jwks(&jwks, &token, issuer.issuer(), RESOURCE_AUD).expect("verify");
+        assert_eq!(claims.iss, issuer.issuer());
+        assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
+        assert_eq!(claims.aud, RESOURCE_AUD);
+        assert_ne!(claims.aud, claims.client_id);
+        assert_eq!(claims.client_id, CLIENT_ID);
+        assert_eq!(claims.scope, scopes.join(" "));
+        assert!(claims.exp > claims.iat);
+        assert!(!claims.jti.is_empty());
 
-    let key = jwks["keys"]
-        .as_array()
-        .expect("keys array")
-        .iter()
-        .find(|key| key["kid"] == issuer.kid())
-        .expect("published key in JWKS");
-    let key_obj = key.as_object().expect("JWK object");
-    for private_field in ["d", "k", "p", "q", "dp", "dq", "qi", "private_key"] {
-        assert!(
-            !key_obj.contains_key(private_field),
-            "JWKS leaked private field {private_field}"
+        let key = jwks["keys"]
+            .as_array()
+            .expect("keys array")
+            .iter()
+            .find(|key| key["kid"] == issuer.kid())
+            .expect("published key in JWKS");
+        let key_obj = key.as_object().expect("JWK object");
+        for private_field in ["d", "k", "p", "q", "dp", "dq", "qi", "private_key"] {
+            assert!(
+                !key_obj.contains_key(private_field),
+                "JWKS leaked private field {private_field}"
+            );
+        }
+
+        let discovery = discovery_metadata(issuer.issuer());
+        assert_eq!(discovery["issuer"], claims.iss);
+        let issuer_url = url::Url::parse(discovery["issuer"].as_str().unwrap()).unwrap();
+        let jwks_url = url::Url::parse(discovery["jwks_uri"].as_str().unwrap()).unwrap();
+        assert_eq!(jwks_url.host_str(), issuer_url.host_str());
+        assert_eq!(jwks_url.path(), "/oauth2/.well-known/jwks.json");
+        assert_eq!(
+            discovery["id_token_signing_alg_values_supported"],
+            json!(["EdDSA"])
         );
-    }
-
-    let discovery = discovery_metadata(issuer.issuer());
-    assert_eq!(discovery["issuer"], claims.iss);
-    let issuer_url = url::Url::parse(discovery["issuer"].as_str().unwrap()).unwrap();
-    let jwks_url = url::Url::parse(discovery["jwks_uri"].as_str().unwrap()).unwrap();
-    assert_eq!(jwks_url.host_str(), issuer_url.host_str());
-    assert_eq!(jwks_url.path(), "/oauth2/.well-known/jwks.json");
-    assert_eq!(discovery["id_token_signing_alg_values_supported"], json!(["EdDSA"]));
-    assert_eq!(discovery["code_challenge_methods_supported"], json!(["S256"]));
+        assert_eq!(
+            discovery["code_challenge_methods_supported"],
+            json!(["S256"])
+        );
+    })
+    .await;
 }
 
 #[test]
@@ -248,12 +244,9 @@ fn discovery_metadata_advertises_fixed_oauth2_mount() {
 #[ntex::test]
 async fn discovery_is_served_from_oauth2_well_known_path() {
     let cfg = Arc::new(test_config("https://auth.zeroship.test"));
-    let app = web::test::init_service(
-        web::App::new().state(cfg).service(
-            web::scope("/oauth2")
-                .service(zeroship_auth::oidc::metadata::openid_configuration),
-        ),
-    )
+    let app = web::test::init_service(web::App::new().state(cfg).service(
+        web::scope("/oauth2").service(zeroship_auth::oidc::metadata::openid_configuration),
+    ))
     .await;
     let req = web::test::TestRequest::get()
         .uri("/oauth2/.well-known/openid-configuration")
@@ -312,50 +305,66 @@ async fn discovery_is_served_from_rfc8414_host_insertion_path() {
     assert_eq!(host_discovery["token_endpoint"], format!("{issuer}/token"));
 }
 
-#[test]
-fn id_token_has_nonce_and_correct_at_hash() {
-    let issuer = test_issuer();
-    let user_id = Uuid::new_v4().to_string();
-    let scopes = scopes();
-    let access_token = issuer
-        .sign_unregistered_access_token_fixture(&access_mint(&user_id, &scopes))
-        .expect("issue access token");
-    let amr = vec!["pwd".to_string(), "otp".to_string()];
-    let id_token = issuer
-        .sign_unregistered_id_token_fixture(&IdTokenMint {
-            user_id: &user_id,
-            sector: SECTOR_A,
-            client_id: CLIENT_ID,
-            sid: "sid-foundation",
-            nonce: "nonce-123",
-            access_token: &access_token,
-            auth_time: Some(1_700_000_000),
-            amr: Some(&amr),
-            acr: Some("urn:zeroship:aal2"),
-            email: None,
-            email_verified: None,
-            name: None,
-            picture: None,
-            ttl_secs: Some(600),
-        })
-        .expect("issue id token");
+#[compio::test]
+async fn id_token_has_nonce_and_correct_at_hash() {
+    Database::run(async |database| {
+        let issuer = test_issuer();
+        let db = database.connect_as_auth().await;
+        issuer
+            .publish_active_key(&db)
+            .await
+            .expect("publish signing key");
+        let (proof, person_id) = common::validated_session(&db, "oidc-id-token").await;
+        let user_id = person_id.to_string();
+        let scopes = scopes();
+        let access_token = issuer
+            .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
+            .await
+            .expect("issue access token");
+        let amr = vec!["pwd".to_string(), "otp".to_string()];
+        let id_token = issuer
+            .issue_id_token(
+                &db,
+                &IdTokenMint {
+                    user_id: &user_id,
+                    sector: SECTOR_A,
+                    client_id: CLIENT_ID,
+                    sid: "sid-foundation",
+                    nonce: "nonce-123",
+                    access_token: &access_token,
+                    auth_time: Some(1_700_000_000),
+                    amr: Some(&amr),
+                    acr: Some("urn:zeroship:aal2"),
+                    email: None,
+                    email_verified: None,
+                    name: None,
+                    picture: None,
+                    ttl_secs: Some(600),
+                },
+                &proof,
+            )
+            .await
+            .expect("issue id token");
 
-    let claims = verify_id_with_jwks(&local_jwks(&issuer), &id_token, issuer.issuer(), CLIENT_ID)
-        .expect("verify id token");
-    assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
-    assert_eq!(claims.sid, "sid-foundation");
-    assert_eq!(claims.nonce, "nonce-123");
-    assert_eq!(claims.at_hash, oidc_at_hash(&access_token));
-    assert_eq!(claims.auth_time, Some(1_700_000_000));
-    assert_eq!(claims.amr, Some(amr));
-    assert_eq!(claims.acr.as_deref(), Some("urn:zeroship:aal2"));
+        let claims =
+            verify_id_with_jwks(&local_jwks(&issuer), &id_token, issuer.issuer(), CLIENT_ID)
+                .expect("verify id token");
+        assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
+        assert_eq!(claims.sid, "sid-foundation");
+        assert_eq!(claims.nonce, "nonce-123");
+        assert_eq!(claims.at_hash, oidc_at_hash(&access_token));
+        assert_eq!(claims.auth_time, Some(1_700_000_000));
+        assert_eq!(claims.amr, Some(amr));
+        assert_eq!(claims.acr.as_deref(), Some("urn:zeroship:aal2"));
+    })
+    .await;
 }
 
 #[test]
 fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
     let issuer = test_issuer();
     let user_id = Uuid::new_v4().to_string();
-    let now = 1_900_000_000_i64;
+    let now = chrono::Utc::now().timestamp();
     let claims = json!({
         "iss": issuer.issuer(),
         "sub": issuer.pairwise_subject(&user_id, SECTOR_A),
@@ -366,17 +375,26 @@ fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
         "client_id": CLIENT_ID,
         "scope": "openid",
     });
-    let jwks = local_jwks(&issuer);
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
+    let key = signing.to_pkcs8_der().expect("fixture signing key");
+    let mut header = Header::new(Algorithm::EdDSA);
+    header.typ = Some(ACCESS_TOKEN_TYP.into());
+    header.kid = Some(issuer.kid().into());
+    let accepted = encode(&header, &claims, &EncodingKey::from_ed_der(key.as_bytes()))
+        .expect("sign accepted claims");
+    issuer
+        .verify_access_token(&accepted)
+        .expect("production verifier accepts EdDSA");
 
     let alg_none = unsigned_none_token(&claims, issuer.kid());
     assert!(
-        verify_access_with_jwks(&jwks, &alg_none, issuer.issuer(), RESOURCE_AUD).is_err(),
+        issuer.verify_access_token(&alg_none).is_err(),
         "alg:none token must be rejected"
     );
 
     let wrong_alg = wrong_alg_hs256_token(&claims, issuer.kid());
     assert!(
-        verify_access_with_jwks(&jwks, &wrong_alg, issuer.issuer(), RESOURCE_AUD).is_err(),
+        issuer.verify_access_token(&wrong_alg).is_err(),
         "wrong-alg token must be rejected"
     );
 }

@@ -6,7 +6,7 @@ use crate::tests::fixtures::schema::fixture_table_sql;
 
 use zeroship_migrate::schema::query::FkEmission;
 
-use zeroship_data_sql::compile::raw_column_name;
+use crate::sql::compile::raw_column_name;
 
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
@@ -22,7 +22,7 @@ use crate::tests::fixtures::DatabaseFixture;
 #[test]
 fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
     Host::test(|_| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -30,7 +30,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
             "name": { "type": "string" }
         });
         let sql = fixture_table_sql(
-            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+            &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
             &schema,
             &FkEmission::Inline,
@@ -74,7 +74,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 #[test]
 fn dual_write_insert_persists_parent_and_sibling_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -103,7 +103,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
             // the mask pass has populated `ssn_masked`. The SQL builder
             // walks the row map, so the sibling key naturally lands on
             // the INSERT column list (no special-casing needed).
-            let doc = zeroship_data_sql::value!({
+            let doc = crate::value!({
                 "ssn": "123-45-6789",
                 "ssn_masked": "***-**-6789"
             });
@@ -111,9 +111,9 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
             // only: `ssn_masked` is a PHYSICAL column the mask pass writes, never a
             // declared field, so it is on the INSERT column list and not on the
             // projection - which is the shape this test is about.
-            let schema = zeroship_data_sql::value!({ "ssn": { "type": "string" } });
+            let schema = crate::value!({ "ssn": { "type": "string" } });
             let bq = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &schema,
                 &doc,
@@ -163,7 +163,7 @@ fn dual_write_insert_persists_parent_and_sibling_sqlite() {
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_find_with_schema, build_insert_with_dialect,
         };
 
@@ -194,23 +194,23 @@ fn a_select_serves_the_masked_column_sqlite() {
             // here - masking + encryption are orthogonal in
             // `apply_mask_on_write` design), the field's own column stores
             // the masked string.
-            let schema = zeroship_data_sql::value!({
+            let schema = crate::value!({
                 "ssn": {
                     "type": "string",
                     "mask": { "kind": "last4", "classification": "spi" }
                 },
                 "name": { "type": "string" }
             });
-            let mut doc = zeroship_data_sql::value!({
+            let mut doc = crate::value!({
                 "id": "usr_01",
                 "ssn": "***-**-6789",
                 "name": "alice"
             });
             doc.as_object_mut()
                 .expect("doc object")
-                .insert(raw_ssn.clone(), zeroship_data_sql::value!("123-45-6789"));
+                .insert(raw_ssn.clone(), crate::value!("123-45-6789"));
             let bq = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &schema,
                 &doc,
@@ -232,9 +232,9 @@ fn a_select_serves_the_masked_column_sqlite() {
             // raw column at all. Verify the SQL shape BEFORE running the
             // query - this is the load-bearing assertion this test pins.
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
-                &zeroship_data_sql::value!({ "id": "usr_01" }),
+                &crate::value!({ "id": "usr_01" }),
                 None,
                 None,
                 None,
@@ -299,9 +299,9 @@ fn a_select_serves_the_masked_column_sqlite() {
 #[test]
 fn aliased_select_skips_kind_none_sqlite() {
     Host::test(|_| {
-        use zeroship_data_sql::compile::build_find_with_schema;
+        use crate::sql::compile::build_find_with_schema;
 
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "ssn": {
                 "type": "string",
                 "encrypted": true,
@@ -310,9 +310,9 @@ fn aliased_select_skips_kind_none_sqlite() {
             "name": { "type": "string" }
         });
         let bq = build_find_with_schema(
-            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+            &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
-            &zeroship_data_sql::value!({}),
+            &crate::value!({}),
             None,
             None,
             None,
@@ -333,8 +333,7 @@ fn aliased_select_skips_kind_none_sqlite() {
             bq.sql,
         );
         assert!(
-            bq.sql
-                .contains("SELECT \"id\", \"created_at\", \"updated_at\"")
+            bq.sql.contains("SELECT \"ssn\", \"name\"")
                 && bq.sql.contains("\"ssn\"")
                 && bq.sql.contains("\"name\""),
             "schema-backed reads must project the public column set: {}",

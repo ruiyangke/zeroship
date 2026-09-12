@@ -1,4 +1,5 @@
 //! SQLite contracts, grouped by behavior.
+mod assignments;
 mod catalog;
 mod cdc;
 mod codecs;
@@ -10,6 +11,5 @@ mod masking;
 mod schema;
 mod search;
 mod snapshots;
-mod system_fields;
 mod transactions;
 mod unmask;

@@ -56,7 +56,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **How data is stored, reached and isolated** (databases, datastores, grants, schema authority) | `docs/architecture/data-system.md` - read this before changing anything in the data plane |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-data-v8/` (adapter: V8 classes, per-isolate context, CDC) · `crates/zeroship-data-orm/` (engine: CRUD, transactions, exec, lanes) |
 | **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `packages/zero-migrate/` (the one authoring package and recorder) · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
-| **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `tests/platform_migration_corpus_gate.sh` (proves it records and applies the corpus) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
+| **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `cargo xtask test migrations` (native corpus test in `crates/zeroship-migrate-node/tests/platform_corpus.rs`) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
 | **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `sdks/storage/` |
 | **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `sdks/kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
@@ -156,12 +156,11 @@ ORM structure and driver contracts: `docs/architecture/data-orm.md`.
 crates/
 ├── zeroship-core/    Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
 ├── zeroship-bundle/  .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
-├── zeroship-data-sql/ Runtime query grammar and compilation, SchemaName, catalog metadata, sentinel codec. No drivers or V8. DDL and schema differencing belong to the migration engine.
 ├── zeroship-migrate-server/ Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. Its `session.rs` also carries `CompioPgSession`, the newtype bridging the `zeroship-migrate-*` engine crates to compio-postgres over their `SqlSession` seam. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this host is not, and nothing here drives its MySQL or SQLite backends.
 ├── zeroship-runtime/ V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── zeroship-runtime-macros/ #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
 ├── zeroship-data-v8/      env.db.* ADAPTER: V8 classes, per-isolate composition, service lifecycle and CDC. CRUD dispatch prepares and executes the engine's ORM operations, then encodes results for V8.
-├── zeroship-data-orm/    ORM: bound Database and Collection handles, Rust model mapping, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. The shared driver interface registers backend adapters. No V8 or adapter dependency.
+├── zeroship-data-orm/    ORM: bound Database and Collection handles, Rust model mapping, native values, SQL compilation, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. The shared driver interface registers backend adapters. No V8 or adapter dependency.
 ├── zeroship-data-macros/    Migration-derived Rust collection metadata and FromRow, Insertable, Changeset derives. Re-exported through data-orm::orm; no runtime or driver dependency.
 ├── zeroship-kv/         App-scoped KV contract, errors, and Redis/redb backends; no V8
 ├── zeroship-kv-v8/      env.kv binding: V8 conversion, isolate state, dispatch, metering
@@ -178,8 +177,7 @@ crates/
 ├── zeroship-worker/  V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-+-- zeroship-cli/     CLI: serve, deploy, migrate, config, login, logout, whoami, organization, secret, var, dev
-                      (no `build` — builds go through @zeroship/vite-plugin)
++-- zeroship-cli/     Creator CLI; run `zeroship --help` for available commands
 ```
 
 **Database verification is required.** Control, migration-service and worker
@@ -195,17 +193,13 @@ fixtures own test setup and teardown. `cargo xtask test data` runs the data crat
 through nextest and rejects feature-gated test targets. Data fixtures own their
 PostgreSQL containers; Docker is required and no external database URL is used.
 
-**Writing or changing a gate.** Every arm of every gate declares the number of
-items THAT ARM RULED ON and a floor that number must clear
-(`tests/lib/gate_arms.sh`; worked example `tests/ws_subscription_stub_gate.sh`).
-This is not ceremony: on 2026-08-20 four gates were found to be examining
-nothing and printing exactly what a clean tree prints, and a gate-level "3 arms
-ran" guard was green throughout one of them because three arms did run, one over
-an empty set. The floor lives beside the code that produces the number, never in
-a central table - a table of expected counts is a census, and stale censuses are
-how four OTHER gates went red the same week when two new crates landed.
-`tests/gate_arm_census.sh tests` checks that every gate participates; add
-`--run <gate.sh>` and it also rules on the counts those gates emit.
+**Writing or changing a check.** Keep nonempty-input assertions and rejection
+controls beside each check. Do not add or port source-text checks: tests must
+exercise behavior, compiler contracts, parsed artifacts or structured metadata,
+rather than search implementation text for expected spellings. Retire existing
+source scanners as their suites are migrated. Surviving shell gates use
+`tests/lib/gate_arms.sh` for per-arm floors and failure propagation. There is no central script-count
+census or requirement to recreate retired bookkeeping checks in Rust.
 
 Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
 run by `cargo xtask test data-architecture` and the complete data suite.
@@ -213,7 +207,7 @@ Workspace dependency and feature rules run through `cargo xtask test repository`
 in `xtask/tests/repository_architecture.rs`. Driver and storage trait shape is
 checked by the data architecture suite. The ORM and V8 adapter deny
 `private_interfaces` and `private_bounds` during ordinary compilation.
-Keep scan floors and rejection controls beside the checks. Example acceptance
+Keep nonempty-input assertions and rejection controls beside the checks. Example acceptance
 tests live inside each example and use Vitest, TypeScript fixtures and browser
 assertions. Other repository gates remain shell scripts under `tests/` and
 participate in `tests/lib/gate_arms.sh`.
@@ -235,10 +229,34 @@ Per-crate READMEs (where present) carry the responsibility statement and list of
 
 These don't change. If you're about to violate one, stop and ask.
 
-- **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`). The rule holds for code we write: no crate here declares tokio as a normal or build dependency, and every `tokio::` string in the tree is a comment saying what compio replaces. **A `[dev-dependencies]` tokio is ALLOWED, by an operator decision on 2026-08-24.** The invariant is that no tokio runtime drives our I/O in a shipped binary; a test binary is not shipped. It buys the strongest oracle a port can have - running tokio-postgres beside `compio-postgres` in one process and diffing their behaviour against the same server. The exemption is narrow and mechanically enforced: `kind == "dev"` only, declared in the member's own `[dev-dependencies]` with its own version. A normal or build dependency stays a hard red, and so does tokio in the root `[workspace.dependencies]`, which carries no kind and can be inherited into any table. Both directions are mutation-proved in `tests/zero_tokio_gate.sh`. It does NOT yet hold for the dependency graph - `cyper` pulls `hyper`, which pulls tokio, so `libtokio-*.rlib` is built (re-measured 2026-08-21 via `cargo tree -i tokio -e normal`: the third-party carriers are `cyper`, `cyper-core`, `hyper`, `hyper-util`, and NINE of our crates name `cyper` directly. The carrier set is unchanged since 2026-08-20; the entrypoint set went nine to ten and BACK TO NINE on 2026-09-03, when `zeroship-cdc-transport-spike` added a DEV dependency on `cyper` to validate the CDC relay's transport and was deleted the same day, once the four properties it existed to prove were measured and written into `docs/proposals/2026-08-28-cdc-service.md`. It was the only non-normal entry this pin has ever carried. The gate reads every dependency kind, so `dev` is not a way around this pin and was not used as one - it went red on the ADDITION and red again on the DELETION, and the pin and this sentence moved together both times. A pin that only resisted growth would have stayed green while the set shrank). Removing that is the `investigate/cyper-tokio-removal` branch. **That edge is LINKED, NOT DRIVEN, and this paragraph used to omit it** - which is how a task was dispatched on 2026-08-21 to hand-roll an HTTP/1.1 client purely to avoid "adding a tokio edge" that was never a running runtime. No tokio reactor starts on our paths. `cyper` and `cyper-core` contain zero `tokio` occurrences in their own source (`grep -rc tokio ~/.cargo/registry/src/*/cyper{,-core}-*/src/*.rs`), and cyper-core supplies `CompioExecutor` (`hyper::rt::Executor` over `compio::runtime::spawn`) and `CompioTimer` (`hyper::rt::Timer` over `compio::time::sleep`), which `cyper::ClientBuilder::build` installs alongside its own `Connector` - so hyper's spawn, timer and connect hooks all land on compio and hyper-util's tokio-based `HttpConnector` is never constructed. hyper itself declares only `tokio = { features = ["sync"] }`, which needs no reactor. The `net`/`mio` features come from `hyper-util/client` naming `tokio/net` outright, NOT from hyper-util defaults (`default = []` is empty), so `default-features = false` would change nothing and the edge cannot be flagged away without dropping `hyper_util::client::legacy::Client` - which cyper uses. Empirically, a `cyper` GET returns `Ok(200)` inside a bare `#[compio::test]` runtime; a live path touching `tokio::net` or `tokio::time` would panic there instead (that exercises connect plus one request, not pool-idle timers). Read the pinned carrier sets as "compiled in", never as "a second runtime is running". The closure BEHIND those sets can shrink without either set moving, and did: `zeroship-gatekit` dropped its last `zeroship-core` dependency on 2026-08-21 (before the crate itself was deleted), taking the reachable count from 26 to 25. The gate was green either way, because gatekit reached tokio through core rather than by naming a carrier - so treat the two pinned sets as "has the accepted edge moved", never as a count of who is behind it. Do not read the exception as licence: adding a tokio-dependent crate still needs to be raised. **`tests/zero_tokio_gate.sh` now checks both halves** - it bans a non-dev tokio declaration in any manifest we own, and pins those two sets so the accepted edge cannot grow, shrink, or vanish without this paragraph changing in the same commit.
+- **Zero tokio in the stack.** Shipped I/O runs on compio/io_uring. Workspace
+  members must not declare `tokio` or `tokio-*` as normal or build dependencies,
+  including renamed and target-specific declarations. A member-owned
+  `[dev-dependencies]` declaration with its own version is allowed for test
+  oracles such as `tokio-postgres`. The root `[workspace.dependencies]` table
+  must not declare these packages because its entries can be inherited into
+  any dependency kind.
 
-  The workflow HTTP client lives in `zeroship-workflow`; its V8 adapter lives in
-  `zeroship-workflow-v8`. The accepted cyper dependency follows the Rust client.
+  The accepted transitive dependency through `cyper`, `cyper-core`, `hyper`, and
+  `hyper-util` still compiles Tokio. Cyper installs compio executors, timers,
+  and connectors; the dependency graph does not establish which runtime drives
+  I/O. Adding a Tokio-dependent package still needs to be raised.
+
+  Native tests in `xtask/tests/repository/tokio_boundary.rs`, run by
+  `cargo xtask test repository`, enforce declarations and the accepted
+  dependency boundary. Cargo selects normal dependency paths under default
+  and all workspace features for the host platform. The tests compare their
+  union against `CARRIERS` and inspect every dependency kind when comparing
+  direct workspace consumers against `ENTRYPOINTS`. A new dev dependency on
+  a carrier therefore changes the boundary even though direct Tokio dev
+  dependencies are allowed. Internal dependency changes behind those direct
+  consumers need not change either set.
+
+  Update the sets and this invariant together when that accepted boundary
+  changes, including when Tokio is removed. Rejection tests cover dependency
+  aliases, target-specific kinds, TOML spellings, missing input, and optional
+  feature activation. The workflow HTTP client belongs to `zeroship-workflow`;
+  its accepted cyper dependency follows the Rust client.
 
 - **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/zeroship-worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-core/src/typed_id.rs`.
@@ -540,32 +558,9 @@ cargo test -p compio-postgres \
 # see either gap: that is how both suites stayed silently unrun for a whole
 # session of otherwise-green --all-features checks.
 
-# Lint the workspace. NONE of the per-crate runs above invoke clippy, which is
-# why main went red twice in a week without anyone noticing. Run this before you
-# push, not just before you wonder why CI is red.
-#
-# It is not a bare `cargo clippy --workspace`: a deny-level lint in one crate
-# ABORTS the run before the crates downstream of it are ever scheduled, and a
-# crate that was never reached prints exactly what a clean crate prints. The
-# gate audits cargo's own json stream against `cargo metadata` and names any
-# package or target that went unlinted. CI runs this same script.
-#
-# It lints under `--all-features`, and a fourth arm checks that every feature
-# the manifests declare really came out enabled. That arm exists because the
-# first three audit ONE feature resolution: a target whose `required-features`
-# are unmet is not counted as unlinted, it is filtered out of the expectation,
-# so the gate reported 148 of 148 on a workspace declaring 158. The 10 missing
-# ones included zeroship-migrate-adapter's `platform_migrate`, which held eleven
-# standing deny-level `clippy::await_holding_lock` errors the whole time. THAT
-# CRATE IS GONE (deleted 2026-08-28); do not go looking for it. The example is
-# kept because the arm it justifies is live and the failure it describes is the
-# one that arm exists to catch.
-#
-# It needs `pnpm build` and setup-wpt.sh to have run (crates/zeroship-runtime
-# `include_str!`s their output); it refuses, naming them, rather than linting a
-# smaller workspace.
-./tests/clippy_gate.sh
-./tests/clippy_gate.sh --preflight-only   # "can this machine lint at all?" - seconds
+# Lint after building the SDKs and preparing WPT inputs.
+# Workspace lint levels determine which diagnostics fail the command.
+cargo clippy --workspace --all-targets --all-features
 
 # Web Platform Tests (WPT) — fetched on demand by setup-wpt.sh, NOT
 # tracked in git. The script shallow-clones a pinned commit into

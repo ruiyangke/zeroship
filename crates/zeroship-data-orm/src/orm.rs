@@ -5,12 +5,12 @@
 //! execution can then yield without consulting another request's context.
 
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
-use zeroship_data_orm::cdc::ChangeOp;
 use zeroship_data_orm::binding::DbBinding;
+use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
-pub use zeroship_data_sql::value::Value;
+pub use crate::value::Value;
 
-use crate::{backend::BackendHandle, compile::BuiltQuery, crud, tx_route::CapturedRoute};
+use crate::{backend::BackendHandle, sql::compiler::CompiledQuery, crud, tx_route::CapturedRoute};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -28,7 +28,11 @@ impl Database {
     /// Prepare a relational read while the request's transaction and read-set are active.
     pub fn read(&self, query: ReadQuery) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let collection = query.source.collection.clone();
-        Collection { database: self.clone(), name: collection }.execute(Operation::Read(Box::new(query)))
+        Collection {
+            database: self.clone(),
+            name: collection,
+        }
+        .execute(Operation::Read(Box::new(query)))
     }
     /// Open the configured backend and bind the deployment's runtime metadata.
     pub async fn connect(
@@ -87,7 +91,7 @@ impl Database {
 
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
         self.context.with(|| {
-            crate::compile::validate_collection(name)?;
+            crate::sql::compile::validate_collection(name)?;
             crate::descriptor::collection_schema(&self.binding, name)?;
             Ok(Collection {
                 database: self.clone(),
@@ -346,12 +350,12 @@ mod model;
 pub use codecs::{Decimal, Point, Protected, sql_types};
 pub use model::*;
 pub mod read;
-pub use read::{ReadQuery, ReadSource, ReadJoin, ReadProjection};
+pub use read::{ReadJoin, ReadProjection, ReadQuery, ReadSource};
 mod read_builder;
 mod read_input;
 pub use read_builder::*;
 pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
-pub use zeroship_data_sql::value::Record;
+pub use crate::value::Record;
 
 /// Implementation support for generated metadata.
 #[doc(hidden)]
@@ -451,7 +455,7 @@ enum Plan {
         many: bool,
     },
     Mutation {
-        query: BuiltQuery,
+        query: CompiledQuery,
         operation: ChangeOp,
         many: bool,
     },
@@ -459,14 +463,14 @@ enum Plan {
         document: Value,
         conflict_fields: Value,
     },
-    Count(BuiltQuery),
+    Count(CompiledQuery),
     Aggregate {
-        query: BuiltQuery,
+        query: CompiledQuery,
         groups: Vec<String>,
         columns: Option<Vec<String>>,
     },
     Distinct {
-        query: BuiltQuery,
+        query: CompiledQuery,
         masked: bool,
     },
     Search(crud::SearchPlan),
@@ -508,12 +512,18 @@ impl PreparedOperation {
                 "ORM binding does not match the captured database route",
             ));
         }
-        crate::compile::validate_collection(collection)?;
+        crate::sql::compile::validate_collection(collection)?;
         crate::descriptor::collection_schema(&binding, collection)?;
         let plan = match operation {
             Operation::Read(query) => {
-                if query.source.collection != collection { return Err(read::invalid("read root does not match its collection")); }
-                Plan::Read(Box::new(read::PreparedRead::new(&binding, route.dialect(), *query)?))
+                if query.source.collection != collection {
+                    return Err(read::invalid("read root does not match its collection"));
+                }
+                Plan::Read(Box::new(read::PreparedRead::new(
+                    &binding,
+                    route.dialect(),
+                    *query,
+                )?))
             }
             Operation::Find { filter, options } => {
                 let plan = crud::plan_find(&binding, collection, &filter, &options);
@@ -684,14 +694,13 @@ impl PreparedOperation {
                 operation,
                 many: true,
             } => Output::Count(
-                Box::pin(crate::exec::exec_mutation_with_emit(
+                Box::pin(crate::exec::exec_mutation_count_with_emit(
                     query,
                     &route,
                     &collection,
                     operation,
                 ))
-                .await?
-                .len() as i64,
+                .await? as i64,
             ),
             Plan::Upsert {
                 document,

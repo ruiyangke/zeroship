@@ -16,7 +16,7 @@ Rust models                         Worker TypeScript
                         |
              CRUD + protection + search
                         |
-                zeroship-data-sql
+                data-orm::sql
                 SQL + native parameters
                         |
                 ScopedExecutor
@@ -39,8 +39,7 @@ Host Backend = scoped executor + catalog + protection + search
 
 | Crate | Responsibility |
 | --- | --- |
-| `zeroship-data-orm` | Public database API, model codecs, protection, transaction protocol, runtime state, driver contracts, and built-in backend adapters. |
-| `zeroship-data-sql` | Native values and records, identifiers, runtime schema metadata, query plans, predicates, and SQL compilation. Its normal dependencies contain no database driver or runtime. |
+| `zeroship-data-orm` | Public database API, native values, model codecs, SQL compilation, protection, transaction protocol, runtime state, driver contracts, and built-in backend adapters. |
 | `zeroship-data-macros` | Migration-derived collection metadata and Rust model derives. It performs no database I/O. |
 | `zeroship-data-v8` | V8 capture and result encoding, isolate composition, and worker lifecycle integration. |
 
@@ -48,6 +47,8 @@ Host Backend = scoped executor + catalog + protection + search
 crates/
   zeroship-data-orm/
     src/orm/                 Rust models and codecs
+    src/value.rs             native values shared with drivers and V8
+    src/sql/                 query grammar, storage codecs, SQL compilation
     src/connection/          backend factories and shared local initialization
     src/driver.rs            physical acquisition and session contracts
     src/executor.rs          scoped execution contract
@@ -58,7 +59,6 @@ crates/
     src/backend/sqlite/      SQLite adapter
     src/crud/                CRUD orchestration and read/write pipelines
     src/transaction/         shared transaction protocol
-  zeroship-data-sql/          plans, native values, SQL dialects
   zeroship-data-macros/       schema and mapping derives
   zeroship-data-v8/           V8 adapter
 libs/
@@ -67,6 +67,11 @@ libs/
 
 PostgreSQL and SQLite implementations live under the ORM’s `backend` module.
 `compio-postgres` is a standalone library with no dependency on the ORM.
+
+The SQL module does no database I/O and receives no application policy or keys.
+Native values live in `zeroship_data_orm::value`. The physical schema identity
+is `zeroship_core::schema_name::SchemaName`; migration services share that type
+without depending on ORM execution. SQL consumers own identifier quoting.
 
 Migration services and the CDC relay retain their process boundaries. The ORM
 registration contract grants no DDL, backup, replication, or provisioning power.
@@ -112,6 +117,12 @@ Connection configuration contains credentials and is excluded from Debug output.
 Connection setup does not create application tables.
 Migration artifacts supply the descriptor and the physical schema.
 
+Every ORM collection declares a required `id` as its sole primary key. Artifact
+packing, runtime installation and Rust schema generation validate this contract.
+ID values come from the declared generator or explicit input; the ORM injects neither columns
+nor generators. Other column names and lifecycle assignments remain
+schema-driven. Projections and aggregate results may omit `id`.
+
 Worker hosts supply the ORM factory to the V8 service:
 
 ```rust,ignore
@@ -146,6 +157,58 @@ SQLite opens or creates a filesystem database, for example
 `sqlite:.zeroship/dev.sqlite`. Memory selectors, empty paths, and SQLite URI
 options are rejected. Tests provide explicit temporary files; the ORM owns no
 temporary directory and never removes database files when a backend closes.
+
+## Bulk mutations
+
+`updateMany`, `deleteMany`, `restoreMany`, and `purgeMany` return affected-row
+counts. Their SQL omits `RETURNING`; `ScopedExecutor::exec` and
+`DriverSession::exec` expose the database count without decoding records.
+Single-row writes and inserts retain their record-returning paths.
+
+Ordinary bulk operations affect every matching row. The read-query limit does
+not truncate writes, and an operation does not split itself into independently
+committed batches. Per-row encrypted updates retain their target cap and atomic
+write frame. Hosts retain their existing transaction and statement budgets;
+large maintenance jobs should choose explicit batches.
+
+SQLite publishes committed changes through its capture hooks. PostgreSQL's
+local fallback emits a collection invalidation for a successful bulk statement
+that affected rows, deferred until commit inside a transaction. A connected
+relay remains the authoritative PostgreSQL change source. Removing returned
+records avoids result-buffer growth; it does not eliminate database locking,
+WAL work, or SQLite's bounded CDC buffers.
+
+## Explicit joins
+
+`Database::from` builds source-qualified reads from generated entity aliases.
+Model projections reuse `FromRow`; a left-joined model uses `Option`:
+
+```rust,ignore
+let o = db.entity::<schema::orders::Entity>()?.alias("o")?;
+let c = db.entity::<schema::customers::Entity>()?.alias("c")?;
+let rows: Vec<(OrderSummary, Option<CustomerSummary>)> = db
+    .from(&o)
+    .left_join(&c, o.column(schema::orders::customerId)
+        .eq_column(c.column(schema::customers::id))?)?
+    .select((o.row::<OrderSummary>(), c.optional_row::<CustomerSummary>()))?
+    .order_by(o.column(schema::orders::id).asc())
+    .limit(page_size)?
+    .all().await?;
+```
+
+`orm::ReadQuery` is the structured operation beneath the Rust builder and the
+TypeScript adapter. It supports explicit inner and left joins, named scalar
+projections, grouping and aggregates. The ORM resolves every source descriptor,
+captures the transaction route and records collection read dependencies before
+execution yields. Field types and access flags come from the descriptor;
+column names do not select a codec.
+
+The SQL module renders qualified expressions and native parameters for PostgreSQL
+and SQLite. The ORM restores each projected row's source identity before the
+protection and codec passes. An unmatched optional row becomes `None` in Rust
+and `null` in TypeScript, including when the selected fields are nullable.
+Explicit joins preserve row multiplication and paginate joined rows. The SDK's
+existing `with` relation loader remains a separate operation.
 
 ## Driver contract
 
@@ -188,17 +251,27 @@ models remain independent of the backend. Async trait futures are local and
 boxed at that boundary. This preserves compio's thread-local execution model
 without imposing Send or Sync on sessions or V8 state.
 
+Collection compilation returns `sql::compiler::CompiledQuery`. Its Debug output
+includes SQL and native parameter types without parameter contents. Execution
+borrows the bindings or consumes the output through `into_parts`.
+
 Parameters and result records use native `Value` types. Dynamic dispatch does
 not require JSON serialization. Strings and binary buffers remain native;
 JSON encoding is reserved for JSON columns and explicit wire contracts. The
 implementation still allocates records and futures and copies some inputs.
 
-The ORM refuses caller-supplied identities before insert, batch insert, or
+The ORM refuses caller-supplied typed-ID assignments before insert, batch insert, or
 upsert can mutate rows. Upsert conflict keys must be declared, supplied,
 application-owned fields. The SQL compiler rejects malformed or repeated
 conflict columns. A conflicting row keeps its identity; a new row gets a
 platform-generated identity. The assignment pass remains idempotent because
 input validation runs before it.
+
+Collection descriptors carry assignment generators and explicit primary-key,
+concurrency and soft-delete roles. The ORM resolves assignments per collection;
+SQL compiles supplied expressions, and V8 forwards operations. Field names alone
+never select a generator or lifecycle behavior. Both Rust macros and generated
+TypeScript bindings expose declared fields and omit assigned fields from writes.
 
 Native row decoding is fallible. Driver row adapters report `row_decode_failed`
 with column context when they reject a result; they never substitute SQL NULL
@@ -236,9 +309,9 @@ as a complete element; `$pull` removes every structurally equal element;
 `$addToSet` appends only when no equal element exists. Objects compare without
 key order, arrays retain order, and numbers compare by exact decimal value.
 JSON null is an element when used as an operand; null columns remain null.
-The dialect renderer lives in `zeroship-data-sql`.
+The dialect renderer lives in `zeroship_data_orm::sql`.
 
-The SQL crate also owns the shared update grammar. It validates assignments
+The SQL module also owns the shared update grammar. It validates assignments
 before system-field and protection transforms, rejecting conflicting writes and
 nonnumeric arithmetic operands. Normalization moves literal values under `$set`
 so every assigned field passes through the same encryption and masking path.
@@ -249,7 +322,7 @@ document operators or overwriting colliding assignments.
 
 PostgreSQL uses native JSONB equality. SQLite connection setup registers the
 deterministic `zeroship_json_equal` SQL function on ordinary and transaction
-connections, including replacements after recovery. It uses the SQL crate's
+connections, including replacements after recovery. It uses the SQL module's
 `json::comparison_key` and caches the bound operand during an element scan.
 This helper receives only JSON text and knows no schema, policy, or application.
 A custom SQLite backend using this renderer must install the same function;
@@ -272,7 +345,7 @@ requires no new backend enum variant in those paths.
 ```text
 ordinary operation                 explicit transaction
        |                                   |
-ScopedExecutor::query              ScopedExecutor::open_tx_session
+ScopedExecutor::{query,exec}        ScopedExecutor::open_tx_session
        |                                   |
 driver acquires access              owned Session
 executor applies authority          parked in transaction lane
@@ -320,7 +393,7 @@ Adding another SQL language extends the SQL compiler; it does not require
 rewriting application models or shared transaction policy.
 
 Portable behavior is established by tests, including native types, null/default
-handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship-data-sql` with a native byte
+handling, projections, commits, rollback, and nested callbacks. SQLite vector SQL is compiled in `zeroship_data_orm::sql` with a native byte
 parameter. Search strategies
 retain their documented differences in `docs/reference/sqlite-divergences.md`.
 Database versions and installed extensions can make a requested feature
@@ -341,7 +414,7 @@ Compiler tests validate generated schema and Rust model contracts.
 `xtask/tests/data_architecture.rs` checks dependency and plain-driver boundaries,
 concrete driver references, shared execution and SQL placement;
 `cargo xtask test data` runs the required database tests; and
-`tests/clippy_gate.sh` validates the workspace and its declared feature surface.
+`cargo clippy --workspace --all-targets --all-features` lints workspace targets.
 
 ## Context ownership
 
@@ -367,7 +440,7 @@ transaction API.
 
 ## Physical representations
 
-`zeroship-data-sql::codecs` owns schema-aware boolean lowering, SQLite vector
+`zeroship_data_orm::sql::codecs` owns schema-aware boolean lowering, SQLite vector
 and geography encoding, and normalization of native result values. The shared
 CRUD pipeline invokes these conversions at the appropriate points around
 protection transforms without choosing a concrete backend. Namespace selection

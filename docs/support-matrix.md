@@ -16,7 +16,6 @@
 | Table-level foreign key | Yes | Yes | Yes |
 | Foreign key with no local column | No[^4] | No[^4] | No[^4] |
 | Composite foreign key | Yes | Yes | Yes |
-| Foreign key referencing a non-`id` column | Yes | Yes | Yes |
 | Table-level unique constraint | Yes | Yes | No[^5] |
 | Exclusion constraint | Yes | No[^6] | No[^6] |
 | Expression index | Yes | No[^7] | Yes |
@@ -91,7 +90,6 @@
 | `ifNotExists`/`ifExists` enforced at apply | Yes | No[^1] | Yes |
 | Foreign key with no local column | No[^4] | No[^4] | No[^4] |
 | Composite foreign key | Yes | Yes | Yes |
-| Foreign key referencing a non-`id` column | Yes | Yes | Yes |
 | `NOT VALID` constraint | Yes | No[^19] | No[^19] |
 | Table-level check constraint | Yes | No[^3] | No[^3] |
 | Exclusion constraint | Yes | No[^6] | No[^6] |

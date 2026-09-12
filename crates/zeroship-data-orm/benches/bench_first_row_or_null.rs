@@ -8,7 +8,7 @@ use compio_postgres::test_utils::{column_for_test, row_for_test};
 use compio_postgres::types::Type;
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
-use zeroship_data_orm::error;
+use zeroship_data_orm::{error, sql, value};
 #[path = "../src/backend/postgres/pg_row_json.rs"]
 #[allow(dead_code, unused_imports)]
 mod pg_row_json;
@@ -210,9 +210,9 @@ criterion_main!(benches);
 
 fn first_row_or_null_for_bench(
     rows: &[Row],
-) -> Result<zeroship_data_sql::value::Value, error::DbError> {
+) -> Result<zeroship_data_orm::value::Value, error::DbError> {
     rows.first()
         .map(pg_row_json::row_to_value)
         .transpose()
-        .map(|row| row.unwrap_or(zeroship_data_sql::value::Value::Null))
+        .map(|row| row.unwrap_or(zeroship_data_orm::value::Value::Null))
 }

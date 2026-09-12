@@ -1,44 +1,10 @@
-/**
- * Per-collection DataLoader for `get(id)`.
- *
- * Coalesces multiple `Collection.get(idOrFilter)` calls that fire within
- * one microtask into a single `WHERE id IN (...)` query. The pattern is
- * the cohort-standard for AI-builder runtimes (Prisma's `findUnique` is
- * now batched, Convex/Drizzle/GraphQL DataLoader popularised it).
- *
- * The loader is transparent: it lives behind the existing `get(id)` API
- * and emits exactly one underlying `find({id: {$in: [...]}})` per batch.
- * Errors from the underlying call propagate to every queued promise.
- *
- * Scope and limits are enforced by the caller (`Collection.get`):
- *   - typed_id string only (not a Filter object)
- *   - no `opts.select` (would force per-projection bucketing)
- *   - no `opts.orderBy` (irrelevant for id reads; falls through to be safe)
- *   - skipped while a transaction is active on the collection (we don't
- *     want to coalesce reads across mixed tx/non-tx contexts inside one
- *     microtask)
- *
- * Tx-race detection: each queued entry remembers `_txDepth` at the time
- * `load()` was called. At flush time we compare against the current
- * depth (via the `getTxDepth` callback). If a caller enqueued OUTSIDE a
- * tx (snapshot === 0) but a tx opened before flush (current > 0), the
- * batched `find` would route through `TX_CONN` in Rust and leak the
- * non-tx read into the tx scope. We reject those entries with a clear
- * error rather than silently routing them wrong — the drain-before-begin
- * in `db.transaction` closes the common window, but a second-microtask
- * enqueue between the drain and the native `transaction(fn)` opening its
- * BEGIN remains observable.
- *
- * **P7 PR 3** — id keyspace widened from `number` to `string` (typed_id)
- * in lockstep with the Rust-side `id TEXT PRIMARY KEY` + auto-mint
- * pass (`crud::system_fields_pass::apply_system_fields_on_insert`).
- * Dedupe + map lookups now use string keys; the `Map<string, R>` value
- * type is unchanged structurally.
- */
+/** Coalesce key lookups while preserving the transaction scope at enqueue time. */
 
-/** A queued request waiting for the next microtask flush. */
-interface QueuedLoad<R> {
-  id: string;
+import type { IdValue } from "./types.js";
+import { identityKey } from "./identity.js";
+
+interface QueuedLoad<R, K extends IdValue> {
+  id: K;
   resolve: (row: R | null) => void;
   reject: (err: unknown) => void;
   txDepthAtEnqueue: number;
@@ -51,8 +17,8 @@ import { MAX_ID_BATCH } from "./membership-cap.js";
  * fetch. Construct one per Collection and reuse — it's stateless across
  * batches.
  */
-export class IdLoader<R extends { id: string }> {
-  private queue: QueuedLoad<R>[] = [];
+export class IdLoader<R, K extends IdValue = string> {
+  private queue: QueuedLoad<R, K>[] = [];
   private scheduled = false;
 
   /**
@@ -65,7 +31,7 @@ export class IdLoader<R extends { id: string }> {
    *                    time so we can detect a tx opening mid-batch.
    */
   constructor(
-    private flush: (ids: string[]) => Promise<Map<string, R>>,
+    private flush: (ids: K[]) => Promise<Map<K, R>>,
     private getTxDepth: () => number = () => 0,
   ) {}
 
@@ -77,7 +43,7 @@ export class IdLoader<R extends { id: string }> {
    * the entry will be rejected with a clear race error instead of being
    * silently routed onto the tx connection.
    */
-  load(id: string, txDepthSnapshot: number = 0): Promise<R | null> {
+  load(id: K, txDepthSnapshot: number = 0): Promise<R | null> {
     return new Promise<R | null>((resolve, reject) => {
       this.queue.push({ id, resolve, reject, txDepthAtEnqueue: txDepthSnapshot });
       if (!this.scheduled) {
@@ -110,7 +76,7 @@ export class IdLoader<R extends { id: string }> {
     // intent: if the tx already ended, that's the caller's bug, not
     // ours.
     const currentTxDepth = this.getTxDepth();
-    const liveBatch: QueuedLoad<R>[] = [];
+    const liveBatch: QueuedLoad<R, K>[] = [];
     for (const q of batch) {
       if (q.txDepthAtEnqueue === 0 && currentTxDepth > 0) {
         q.reject(
@@ -131,11 +97,11 @@ export class IdLoader<R extends { id: string }> {
 
     // Dedupe ids before the underlying call — N concurrent `get("post_X")`
     // calls resolve from the same row without N copies on the wire.
-    const ids: string[] = [];
+    const ids: K[] = [];
     const seen = new Set<string>();
     for (const q of liveBatch) {
-      if (!seen.has(q.id)) {
-        seen.add(q.id);
+      if (!seen.has(identityKey(q.id))) {
+        seen.add(identityKey(q.id));
         ids.push(q.id);
       }
     }
@@ -153,7 +119,7 @@ export class IdLoader<R extends { id: string }> {
       const map = new Map<string, R>();
       for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
         const part = await this.flush(ids.slice(i, i + MAX_ID_BATCH));
-        for (const [k, v] of part) map.set(k, v);
+        for (const [k, v] of part) map.set(identityKey(k), v);
       }
       for (const q of liveBatch) resolve(q, map);
     } catch (e) {
@@ -162,10 +128,10 @@ export class IdLoader<R extends { id: string }> {
   }
 }
 
-function resolve<R extends { id: string }>(
-  q: QueuedLoad<R>,
+function resolve<R, K extends IdValue>(
+  q: QueuedLoad<R, K>,
   map: Map<string, R>,
 ): void {
-  const row = map.get(q.id);
+  const row = map.get(identityKey(q.id));
   q.resolve(row === undefined ? null : row);
 }

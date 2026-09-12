@@ -124,7 +124,6 @@ pub enum FeatureSupportKey {
     TableLevelCheckExpression,
     CompositeForeignKey,
     ForeignKeyNoLocalColumn,
-    NonIdForeignKey,
     ConstraintNotValid,
     ExclusionConstraint,
     AlterColumnUsing,
