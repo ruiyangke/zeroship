@@ -36,6 +36,7 @@
 
 use compio_postgres::Client;
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::{AuthzError, Resource};
 
@@ -107,7 +108,7 @@ pub fn effective_project_rank(
 /// member with no seat".
 pub async fn resolve(
     pg: &Client,
-    principal_id: Uuid,
+    principal_id: &UserId,
     resource: &Resource,
 ) -> Result<Authority, AuthzError> {
     match resource {
@@ -154,10 +155,10 @@ fn app_uuid_or_refuse(id: &str) -> Result<Uuid, AuthzError> {
 const USER_ATTRS: &str = "u.email_verified_at IS NOT NULL AS email_verified, \
      (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked";
 
-async fn resolve_unranked(pg: &Client, principal_id: Uuid) -> Result<Authority, AuthzError> {
+async fn resolve_unranked(pg: &Client, principal_id: &UserId) -> Result<Authority, AuthzError> {
     let sql = format!("SELECT {USER_ATTRS} FROM zeroship.users u WHERE u.id = $1");
     let rows = pg
-        .query(&sql, &[&principal_id])
+        .query(&sql, &[&principal_id.as_str()])
         .await
         .map_err(|err| AuthzError::Db(format!("resolve authority (unranked): {err}")))?;
     let row = principal_row(rows.first(), principal_id)?;
@@ -169,7 +170,7 @@ async fn resolve_unranked(pg: &Client, principal_id: Uuid) -> Result<Authority, 
 
 async fn resolve_organization(
     pg: &Client,
-    principal_id: Uuid,
+    principal_id: &UserId,
     organization_id: &str,
 ) -> Result<Authority, AuthzError> {
     // Organization scope takes NO minimum: this is the seat itself, not a
@@ -186,7 +187,7 @@ async fn resolve_organization(
           WHERE u.id = $1"
     );
     let rows = pg
-        .query(&sql, &[&principal_id, &organization_id])
+        .query(&sql, &[&principal_id.as_str(), &organization_id])
         .await
         .map_err(|err| AuthzError::Db(format!("resolve organization authority: {err}")))?;
     let row = principal_row(rows.first(), principal_id)?;
@@ -209,7 +210,7 @@ async fn resolve_organization(
 /// narrowing drift between the two paths, so it is written once.
 async fn resolve_narrowed(
     pg: &Client,
-    principal_id: Uuid,
+    principal_id: &UserId,
     project_id: Option<&str>,
     app_id: Option<Uuid>,
 ) -> Result<Authority, AuthzError> {
@@ -235,7 +236,12 @@ async fn resolve_narrowed(
     let rows = pg
         .query(
             &sql,
-            &[&principal_id, &project_id, &app_id, &PROJECT_WIDE_ROLE],
+            &[
+                &principal_id.as_str(),
+                &project_id,
+                &app_id,
+                &PROJECT_WIDE_ROLE,
+            ],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("resolve project authority: {err}")))?;
@@ -253,8 +259,10 @@ async fn resolve_narrowed(
     })
 }
 
-fn principal_row<T>(row: Option<T>, principal_id: Uuid) -> Result<T, AuthzError> {
-    row.ok_or_else(|| AuthzError::Validation(format!("principal not found: {principal_id}")))
+fn principal_row<T>(row: Option<T>, principal_id: &UserId) -> Result<T, AuthzError> {
+    row.ok_or_else(|| {
+        AuthzError::Validation(format!("principal not found: {}", principal_id.as_str()))
+    })
 }
 
 /// Every organization the principal holds a live membership row in.
@@ -269,13 +277,13 @@ fn principal_row<T>(row: Option<T>, principal_id: Uuid) -> Result<T, AuthzError>
 /// alphabet.
 pub async fn organization_resources(
     pg: &Client,
-    principal_id: Uuid,
+    principal_id: &UserId,
 ) -> Result<Vec<Resource>, AuthzError> {
     let rows = pg
         .query(
             "SELECT organization_id FROM zeroship.organization_members WHERE user_id = $1 \
              ORDER BY organization_id",
-            &[&principal_id],
+            &[&principal_id.as_str()],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("load organization memberships: {err}")))?;
@@ -316,7 +324,7 @@ pub async fn organization_resources(
 /// alphabet.
 pub async fn project_probe_resources(
     pg: &Client,
-    principal_id: Uuid,
+    principal_id: &UserId,
 ) -> Result<Vec<Resource>, AuthzError> {
     let rows = pg
         .query(
@@ -336,7 +344,7 @@ pub async fn project_probe_resources(
                   WHERE m.user_id = $1 \
                     AND r.rank >= (SELECT rank FROM zeroship.organization_roles WHERE role = $2) \
              ) probe ORDER BY probe.project_id",
-            &[&principal_id, &PROJECT_WIDE_ROLE],
+            &[&principal_id.as_str(), &PROJECT_WIDE_ROLE],
         )
         .await
         .map_err(|err| AuthzError::Db(format!("load project probe resources: {err}")))?;
