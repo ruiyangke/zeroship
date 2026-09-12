@@ -27,7 +27,7 @@ use crate::sql::literal::Literal;
 /// A full implementation compiles:
 ///
 /// ```
-/// use crate::sql::render::ValueFormat;
+/// use zeroship_data_orm::sql::render::ValueFormat;
 /// struct Whole;
 /// impl ValueFormat for Whole {
 ///     fn dialect_name(&self) -> &'static str { "whole" }
@@ -44,7 +44,7 @@ use crate::sql::literal::Literal;
 /// A partial one does not, which is the property this trait exists for:
 ///
 /// ```compile_fail
-/// use crate::sql::render::ValueFormat;
+/// use zeroship_data_orm::sql::render::ValueFormat;
 /// struct Half;
 /// impl ValueFormat for Half {
 ///     fn dialect_name(&self) -> &'static str { "half" }
@@ -57,7 +57,7 @@ use crate::sql::literal::Literal;
 /// would have let through:
 ///
 /// ```compile_fail
-/// use crate::sql::render::ValueFormat;
+/// use zeroship_data_orm::sql::render::ValueFormat;
 /// struct PlaceholdersOnly;
 /// impl ValueFormat for PlaceholdersOnly {
 ///     fn dialect_name(&self) -> &'static str { "placeholders-only" }
@@ -77,7 +77,7 @@ use crate::sql::literal::Literal;
 /// mechanisms described on [`ValueFormat::vector_placeholder`] came to exist.
 ///
 /// ```compile_fail
-/// use crate::sql::render::ValueFormat;
+/// use zeroship_data_orm::sql::render::ValueFormat;
 /// struct BeforeSearch;
 /// impl ValueFormat for BeforeSearch {
 ///     fn dialect_name(&self) -> &'static str { "before-search" }
@@ -127,7 +127,7 @@ pub trait ValueFormat {
     ///   `&[&str]` and has no binary channel
     ///   (`crates/zeroship-data-orm/src/backend/sqlite/mod.rs`).
     ///
-    /// With [`crate::sql::QueryVector`] a typed parameter, the value is the numbers
+    /// With [`zeroship_data_orm::sql::QueryVector`] a typed parameter, the value is the numbers
     /// and this method is the only place a dialect's spelling of them lives.
     /// `PostgreSQL` still needs the `::vector` cast - the type's OID is
     /// allocated at extension-install time and is not known to the driver, so a
