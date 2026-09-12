@@ -29,29 +29,6 @@ pub fn test_database_url() -> String {
     .clone()
 }
 
-/// A stable process-specific signing key for fixtures using the shared database.
-///
-/// Distinct processes need distinct issuers so a peer cannot retire a key before
-/// its owner publishes it. Memoization keeps the key stable across this process's
-/// fixtures; key-retention tests construct their own issuers in owned databases.
-pub fn op_signing_key() -> ed25519_dalek::SigningKey {
-    static SEED: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
-    let seed = SEED.get_or_init(|| {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        // The pid separates two live processes; the clock separates a reused
-        // pid from the process that held it before. The crate name is kept so
-        // a kid in a log still names the binary that minted it.
-        zeroship_core::crypto::derive_key(&format!(
-            "{}-{}-{nanos}",
-            env!("CARGO_CRATE_NAME"),
-            std::process::id(),
-        ))
-    });
-    ed25519_dalek::SigningKey::from_bytes(seed)
-}
-
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
 // Every test that boots an in-process auth server needs an `AuthConfig`.
@@ -343,24 +320,6 @@ pub async fn cleanup_rate_limits_like(pg: &compio_postgres::Client, patterns: &[
             )
             .await;
     }
-}
-
-/// Publish this process's key for fixtures using the configured shared database.
-///
-/// Only successful publication sets the process flag. Owned database fixtures
-/// call the issuer directly because this flag does not identify a database.
-pub async fn publish_op_key_once(
-    issuer: &zeroship_auth::oidc::Issuer,
-    db: &compio_postgres::Client,
-) -> zeroship_auth::error::Result<()> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static PUBLISHED: AtomicBool = AtomicBool::new(false);
-    if PUBLISHED.load(Ordering::SeqCst) {
-        return Ok(());
-    }
-    issuer.publish_active_key(db).await?;
-    PUBLISHED.store(true, Ordering::SeqCst);
-    Ok(())
 }
 
 /// A `Mailer` that keeps every message instead of transporting it.
