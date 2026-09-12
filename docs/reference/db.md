@@ -555,6 +555,12 @@ const { data: exists } = await db.users.exists({ email: "alice@example.com" });
 const { data: roles } = await db.users.distinct("role");
 ```
 
+Sorting is portable for text, ID/reference, integer, floating-point, and
+temporal fields. Grouping and `distinct` also accept booleans and bytes.
+Decimal and JSON storage do not have the same native equality or ordering on
+PostgreSQL and SQLite, so the ORM refuses to sort, group, or deduplicate those
+fields. JSON filters still use structural equality on both backends.
+
 ### Relations — `with: { fk: true }`
 
 `find()` / `get()` accept an optional `with: { <fkField>: true }` option
@@ -739,7 +745,7 @@ const { data } = await db.orders.aggregate([
 ]);
 ```
 
-Supported accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`, `$first`.
+Supported accumulators: `$count`, `$sum`, `$avg`, `$min`, `$max`.
 
 ## Explicit joins
 
@@ -1314,10 +1320,8 @@ contains. Three consequences, all deliberate:
 - **`find({ ssn: "123-45-6789" })` matches nothing.** Equality by real value is
   not a query any more; it is an `unmask()` call, which is where the
   authorization check and the audit row live.
-- **`find({ ssn: { $gt: v } })` compares masks**, so it cannot narrow the real
-  value. This is the point: a range filter plus `orderBy` plus `limit` used to
-  binary-search a value the caller could not read, with no authorization check
-  on the path and nothing written to `__zeroship_audit_unmask`.
+- **Range filters on a masked field are refused.** Equality and pattern filters
+  compare the visible mask.
 - **`orderBy: { ssn: 1 }` sorts by the mask**, and `aggregate`'s `$group.by`
   buckets by the mask - one bucket per distinct MASK, not per distinct value.
 

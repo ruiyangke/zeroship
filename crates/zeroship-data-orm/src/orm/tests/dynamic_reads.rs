@@ -194,3 +194,69 @@ async fn other_dynamic_reads_reject_malformed_options() {
         .contains("aggregate options must be an object"));
     owner.close().await;
 }
+
+#[compio::test]
+async fn dynamic_reads_reject_non_portable_value_semantics() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({
+            "amount":{"type":"decimal", "precision":18, "scale":2},
+            "document":{"type":"json"},
+            "enabled":{"type":"boolean"},
+            "secret":{"type":"string", "filterable":false}
+        }),
+    )
+    .await;
+    let records = owner.database.collection("records").unwrap();
+
+    let error = records
+        .find(value!({}), value!({"orderBy":{"amount":1}}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no portable sort order"));
+
+    let error = records
+        .execute(Operation::Distinct {
+            field: "document".into(),
+            filter: value!({}),
+            options: value!({}),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no portable distinct equality"));
+
+    let error = records
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"by":"amount","records":{"$count":true}}}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("no portable grouping equality"));
+
+    let error = records
+        .execute(Operation::Aggregate {
+            pipeline: value!([
+                {"$group":{"by":"enabled","records":{"$count":true}}},
+                {"$having":{"enabled":{"$gt":false}}}
+            ]),
+            options: value!({}),
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("predicate operator is not supported"));
+
+    let error = records
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"by":"secret","records":{"$count":true}}}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("field 'secret' is not filterable"));
+    owner.close().await;
+}

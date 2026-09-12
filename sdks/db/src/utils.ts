@@ -151,7 +151,7 @@ type AggregateExpr = PlainObject | string | number | boolean | null;
 /** Accumulator op names recognised by `translateAccumulator`. Used to
  *  detect unknown `$op` names that would silently pass through. */
 const KNOWN_ACCUMULATOR_OPS = new Set([
-  "$sum", "$avg", "$min", "$max", "$first", "$count",
+  "$sum", "$avg", "$min", "$max", "$count",
 ]);
 
 /**
@@ -200,8 +200,6 @@ function translateAccumulator(acc: AggregateExpr): AggregateExpr {
   if ("$avg" in obj && typeof obj.$avg === "string") return { $avg: stripDollar(obj.$avg as string) };
   if ("$min" in obj && typeof obj.$min === "string") return { $min: stripDollar(obj.$min as string) };
   if ("$max" in obj && typeof obj.$max === "string") return { $max: stripDollar(obj.$max as string) };
-  if ("$first" in obj && typeof obj.$first === "string") return { $first: stripDollar(obj.$first as string) };
-
   // Surface unknown `$op`s once per shape — silent pass-through means the
   // operator never reaches Postgres and the user gets a confusingly empty
   // result rather than a hint that the op was unrecognised.

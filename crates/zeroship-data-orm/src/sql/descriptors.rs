@@ -134,35 +134,66 @@ pub(crate) fn supports_predicate_operator(
                     | "union"
             )
         ),
-        PredicateOperator::Ordering => {
-            effective_mask(field).is_none()
-                && matches!(
-                    kind,
-                    Some(
-                        "string"
-                            | "text"
-                            | "id"
-                            | "ref"
-                            | "enum"
-                            | "integer"
-                            | "int"
-                            | "bigint"
-                            | "bigInt"
-                            | "number"
-                            | "float"
-                            | "double"
-                            | "date"
-                            | "timestamp"
-                            | "timestamptz"
-                            | "calendarDate"
-                            | "time"
-                    )
-                )
-        }
+        PredicateOperator::Ordering => effective_mask(field).is_none() && supports_sorting(field),
         PredicateOperator::Pattern => {
             matches!(kind, Some("string" | "text" | "id" | "ref" | "enum"))
         }
     }
+}
+
+pub(crate) fn supports_sorting(field: &crate::value::Value) -> bool {
+    effective_mask(field).is_some()
+        || matches!(
+            field.get("type").and_then(crate::value::Value::as_str),
+            Some(
+                "string"
+                    | "text"
+                    | "id"
+                    | "ref"
+                    | "enum"
+                    | "integer"
+                    | "int"
+                    | "bigint"
+                    | "bigInt"
+                    | "number"
+                    | "float"
+                    | "double"
+                    | "date"
+                    | "timestamp"
+                    | "timestamptz"
+                    | "calendarDate"
+                    | "time"
+            )
+        )
+}
+
+pub(crate) fn supports_grouping(field: &crate::value::Value) -> bool {
+    effective_mask(field).is_some()
+        || matches!(
+            field.get("type").and_then(crate::value::Value::as_str),
+            Some(
+                "string"
+                    | "text"
+                    | "id"
+                    | "ref"
+                    | "enum"
+                    | "boolean"
+                    | "bool"
+                    | "integer"
+                    | "int"
+                    | "bigint"
+                    | "bigInt"
+                    | "number"
+                    | "float"
+                    | "double"
+                    | "bytes"
+                    | "date"
+                    | "timestamp"
+                    | "timestamptz"
+                    | "calendarDate"
+                    | "time"
+            )
+        )
 }
 
 /// Distance metric selected by a vector field descriptor.
@@ -181,4 +212,59 @@ pub enum VectorMetric {
 pub struct GeoPoint {
     pub lat: f64,
     pub lng: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptor_sorting_exposes_only_portable_ordered_values() {
+        for kind in [
+            "string",
+            "id",
+            "ref",
+            "integer",
+            "bigInt",
+            "number",
+            "date",
+            "calendarDate",
+            "time",
+        ] {
+            assert!(supports_sorting(&crate::value!({"type": kind})), "{kind}");
+        }
+        for kind in ["boolean", "decimal", "bytes", "json", "vector", "geoPoint"] {
+            assert!(!supports_sorting(&crate::value!({"type": kind})), "{kind}");
+        }
+        assert!(supports_sorting(
+            &crate::value!({"type":"decimal", "mask":{"kind":"full"}})
+        ));
+    }
+
+    #[test]
+    fn descriptor_grouping_exposes_only_portable_equality_values() {
+        for kind in [
+            "string",
+            "id",
+            "ref",
+            "boolean",
+            "integer",
+            "bigInt",
+            "number",
+            "bytes",
+            "date",
+            "calendarDate",
+            "time",
+        ] {
+            assert!(supports_grouping(&crate::value!({"type": kind})), "{kind}");
+        }
+        for kind in [
+            "decimal", "json", "object", "array", "union", "vector", "geoPoint",
+        ] {
+            assert!(!supports_grouping(&crate::value!({"type": kind})), "{kind}");
+        }
+        assert!(supports_grouping(
+            &crate::value!({"type":"json", "mask":{"kind":"full"}})
+        ));
+    }
 }
