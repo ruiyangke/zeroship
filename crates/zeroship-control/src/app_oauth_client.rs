@@ -58,6 +58,7 @@ use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::Scope;
 use zeroship_bundle::ScopeDef;
 use zeroship_core::typed_id::app_oauth_client_id;
+use zeroship_core::UserId;
 
 /// Per-app custom-domain cap (default 50). With 2 redirect_uris per host
 /// (popup-callback + callback) the redirect_uri array is bounded at
@@ -535,7 +536,8 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
     } = input;
     let scopes: Vec<&str> = scope_allowlist.split_whitespace().collect();
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
-    let created_by: Option<&str> = None;
+    let created_by: Option<&UserId> = None;
+    let created_by_sql = created_by.map(UserId::as_str);
     let client_secret_hash = generate_client_secret_hash();
     let bcl_uri = backchannel_logout_uri(
         sector
@@ -578,7 +580,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
             &client_name,
             &redirect_uris,
             &scopes,
-            &created_by,
+            &created_by_sql,
             &first_party,
             &bcl_uri,
             &client_secret_hash,
