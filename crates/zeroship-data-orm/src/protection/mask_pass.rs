@@ -238,13 +238,9 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
         return Ok(());
     };
 
-    // The unmask round-trip needs the row's PK to identify which
-    // row to fetch plaintext for. We pluck it once up-front; rows that
-    // didn't surface an `id` (composite-PK collections, or rows that
-    // came back via a projection without `id`) get the empty string —
-    // `unmask()` will reject those with a typed error.
-    let row_pk = zeroship_data_sql::lifecycle::primary_key_column(schema)?
-        .and_then(|key| obj.get(key))
+    // Unmasking requires the originating row's identity.
+    let row_pk = obj
+        .get("id")
         .map(|v| match v {
             Value::String(s) => s.clone(),
             Value::Number(n) => n.to_string(),
@@ -608,10 +604,9 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_aliased_select_shape() {
-        // SELECT "ssn_masked" AS "ssn", ... — the parent slot already
-        // contains the masked string; no sibling key is present.
+        // The projected field contains its configured display value.
         let schema = value!({
-            "record_key": { "type": "string", "primaryKey": true },
+            "id": { "type": "string", "primaryKey": true },
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -619,7 +614,7 @@ mod tests {
             "name": { "type": "string" }
         });
         let mut row = value!({
-            "record_key": "usr_01",
+            "id": "usr_01",
             "ssn": "***-**-6789",
             "name": "alice"
         });
@@ -749,14 +744,14 @@ mod tests {
         // typed_id collections use string `id`, but legacy collections
         // can carry numeric PK — `row_pk` must stringify either.
         let schema = value!({
-            "record_number": { "type": "integer", "primaryKey": true },
+            "id": { "type": "integer", "primaryKey": true },
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
         let mut row = value!({
-            "record_number": 42,
+            "id": 42,
             "ssn": "***-**-6789"
         });
 

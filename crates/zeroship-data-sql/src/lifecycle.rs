@@ -9,14 +9,6 @@ fn invalid(message: &str) -> QueryError {
     QueryError::InvalidFilter(message.into())
 }
 
-pub fn primary_key(schema: &Value) -> Result<&str, QueryError> {
-    primary_key_column(schema)?.ok_or_else(|| invalid("operation requires a declared primary key"))
-}
-
-pub fn primary_key_column(schema: &Value) -> Result<Option<&str>, QueryError> {
-    role(schema, "primaryKey")
-}
-
 pub fn soft_delete_column(schema: &Value) -> Result<Option<&str>, QueryError> {
     role(schema, "softDelete")
 }
@@ -96,13 +88,11 @@ mod tests {
     #[test]
     fn roles_follow_metadata_and_never_column_names() {
         let schema = value!({
-            "row_key":{"primaryKey":true}, "removed_on":{"softDelete":true},
+            "removed_on":{"softDelete":true},
             "revision":{"concurrency":true}, "id":{}, "deleted_at":{}, "version":{}
         });
-        assert_eq!(primary_key(&schema).unwrap(), "row_key");
         assert_eq!(soft_delete_column(&schema).unwrap(), Some("removed_on"));
         assert_eq!(concurrency_column(&schema).unwrap(), Some("revision"));
-        assert!(primary_key(&value!({"id":{}})).is_err());
         assert_eq!(
             soft_delete_column(&value!({"deleted_at":{}})).unwrap(),
             None

@@ -94,7 +94,6 @@ struct SourceLayout {
     schema: Arc<Value>,
     nullable: bool,
     fields: BTreeMap<String, String>,
-    identity: Option<String>,
 }
 #[derive(Debug)]
 pub(super) struct PreparedRead {
@@ -134,16 +133,10 @@ impl PreparedRead {
                 return Err(invalid("duplicate read source alias"));
             }
             let schema = crate::descriptor::collection_schema(binding, &source.collection)?;
-            let identity =
-                zeroship_data_sql::lifecycle::primary_key_column(&schema)?.map(String::from);
-            if nullable && identity.is_none() {
-                return Err(invalid("optional rows require a declared primary key"));
-            }
             sources.push(SourceLayout {
                 source: source.clone(),
                 nullable,
                 schema,
-                identity,
                 fields: BTreeMap::new(),
             });
         }
@@ -232,7 +225,7 @@ impl PreparedRead {
                     if selected.is_empty() || selected.len() > MAX_READ_FIELDS {
                         return Err(invalid("row projection exceeds its field budget"));
                     }
-                    for field in selected.into_iter().chain(layout.identity.clone()) {
+                    for field in selected.into_iter().chain(std::iter::once("id".into())) {
                         if !allowed.contains(&field) {
                             return Err(invalid(format!("unreadable projection field '{field}'")));
                         }
@@ -256,9 +249,7 @@ impl PreparedRead {
                             return Err(invalid("unreadable scalar projection"));
                         }
                         add_field(layout, path.root().as_str(), &mut projected)?;
-                        if let Some(identity) = layout.identity.clone() {
-                            add_field(layout, &identity, &mut projected)?;
-                        }
+                        add_field(layout, "id", &mut projected)?;
                     } else {
                         let slot = ident(&format!("v{}", projected.len()), IdentRole::Alias)?;
                         scalar_schema.insert(
@@ -369,20 +360,18 @@ impl PreparedRead {
                 if source.fields.is_empty() {
                     continue;
                 }
-                if let Some(identity) = &source.identity {
-                    let slot = source
-                        .fields
-                        .get(identity)
-                        .ok_or_else(|| DbError::internal("read layout has no identity"))?;
-                    let id = row
-                        .get(slot)
-                        .ok_or_else(|| DbError::internal("missing read identity"))?;
-                    if id.is_null() {
-                        if !source.nullable {
-                            return Err(DbError::internal("required source has no identity"));
-                        }
-                        continue;
+                let slot = source
+                    .fields
+                    .get("id")
+                    .ok_or_else(|| DbError::internal("read layout has no identity"))?;
+                let id = row
+                    .get(slot)
+                    .ok_or_else(|| DbError::internal("missing read identity"))?;
+                if id.is_null() {
+                    if !source.nullable {
+                        return Err(DbError::internal("required source has no identity"));
                     }
+                    continue;
                 }
                 let mut fields = Record::new();
                 for (field, slot) in &source.fields {
@@ -699,7 +688,6 @@ mod tests {
             schema: Arc::new(schema),
             nullable: false,
             fields: BTreeMap::new(),
-            identity: None,
         }
     }
 

@@ -3,8 +3,8 @@
   "collections": {
     "entries": {
       "fields": {
-        "entry_key": { "type": "string", "required": true, "primaryKey": true, "assign": { "by": "typedId", "on": "insert" } },
-        "id": { "type": "string", "required": true },
+        "entry_key": { "type": "string", "required": true, "assign": { "by": "typedId", "on": "insert" } },
+        "id": { "type": "string", "required": true, "primaryKey": true },
         "created_at": { "type": "string", "required": true },
         "version": { "type": "integer", "required": true }
       },

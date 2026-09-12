@@ -5,8 +5,8 @@ use zeroship_data_sql::value;
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
-mod calendar_date;
 mod bulk;
+mod calendar_date;
 mod fixtures;
 mod identity;
 mod joins;
@@ -133,7 +133,10 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
     let db = Database::from_schema(
         db.binding.clone(),
         db.backend.clone(),
-        vec![("places".into(), fields)],
+        vec![(
+            "places".into(),
+            crate::tests::fixtures::schema::generated_fields(fields),
+        )],
     )
     .unwrap();
     let expected = value!({"embedding":[1.0, -0.5], "location":{"lat":37.0, "lng":-122.0}});

@@ -111,6 +111,10 @@ fn generate(
                 syn::Error::new(span, format!("collection '{name}' has no field map"))
             })?;
         let schema = serde_json::to_string(fields).map_err(|error| syn::Error::new(span, error))?;
+        zeroship_data_sql::descriptors::validate_collection_identity(
+            &zeroship_data_sql::value::Value::from(Value::Object(fields.clone())),
+        )
+        .map_err(|message| syn::Error::new(span, format!("{name}: {message}")))?;
         let mut columns = Vec::new();
         let mut constants = Vec::new();
         let mut required = Vec::new();

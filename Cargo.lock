@@ -8062,6 +8062,7 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 2.0.117",
+ "zeroship-data-sql",
 ]
 
 [[package]]

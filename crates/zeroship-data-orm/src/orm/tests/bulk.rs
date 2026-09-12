@@ -13,11 +13,7 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
     fixture
         .rename_fields(
             "entries",
-            &[
-                ("id", "row_key"),
-                ("version", "revision"),
-                ("deleted_at", "removed"),
-            ],
+            &[("version", "revision"), ("deleted_at", "removed")],
         )
         .await;
     let db = fixture.database.clone();

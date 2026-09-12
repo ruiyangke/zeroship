@@ -223,12 +223,11 @@ pub fn extract_cas_version(
     Ok(v.as_i64())
 }
 
-/// Whether the filter directly constrains the collection's declared primary key.
-pub fn filter_has_primary_key_predicate(filter: &Value, schema: &Value) -> Result<bool, DbError> {
-    let key = zeroship_data_sql::lifecycle::primary_key(schema)?;
-    Ok(filter
+/// Whether the filter directly constrains the entity's identity.
+pub fn filter_has_id_predicate(filter: &Value) -> bool {
+    filter
         .as_object()
-        .is_some_and(|object| object.contains_key(key)))
+        .is_some_and(|object| object.contains_key("id"))
 }
 
 fn filter_has_nested_version_predicate(filter: &Value, column: &str) -> bool {
@@ -393,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrency_and_identity_predicates_follow_roles() {
+    fn concurrency_predicates_follow_roles_and_identity_uses_id() {
         let fields = schema();
         assert_eq!(
             extract_cas_version(&value!({"revision":7}), "notes", &fields).unwrap(),
@@ -419,8 +418,8 @@ mod tests {
             )
             .is_err()
         );
-        assert!(filter_has_primary_key_predicate(&value!({"key":"note_x"}), &fields).unwrap());
-        assert!(!filter_has_primary_key_predicate(&value!({"id":"note_x"}), &fields).unwrap());
+        assert!(filter_has_id_predicate(&value!({"id":"note_x"})));
+        assert!(!filter_has_id_predicate(&value!({"key":"note_x"})));
         assert_eq!(
             extract_cas_version(&value!({"version":7}), "notes", &value!({})).unwrap(),
             None
