@@ -639,8 +639,8 @@ mod tests {
         let binding = crate::tests::fixtures::binding("test_app");
         let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
 
-        // None of the legacy `Transaction` methods, nor `transaction` /
-        // `live`, may appear on the view.
+        // The transaction view exposes collections without lifecycle or
+        // subscription methods.
         for forbidden in [
             "commit",
             "rollback",
