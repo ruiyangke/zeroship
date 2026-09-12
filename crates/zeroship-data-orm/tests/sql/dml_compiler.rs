@@ -45,6 +45,7 @@ fn search_table() -> Table {
         [
             ("id", StorageType::Text),
             ("label", StorageType::Text),
+            ("amount", StorageType::Decimal),
             ("embedding", StorageType::Vector),
             ("location", StorageType::GeoPoint),
         ]
@@ -180,6 +181,38 @@ fn search_statements_require_a_positive_limit() {
         radius_m: 1000.0,
         predicate: ResolvedPredicate::Const(true),
         limit: 0,
+        table,
+    })
+    .is_err());
+}
+
+#[test]
+fn search_projection_cannot_shadow_its_distance_output() {
+    let table = search_table();
+    assert!(VectorSearchStatement::new(VectorSearchParts {
+        projection: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: Some(Ident::parse_as("_distance", IdentRole::Alias).unwrap()),
+        }],
+        identity: table.column("id").unwrap(),
+        vector: table.column("embedding").unwrap(),
+        query: Value::Bytes(vec![0; 8]),
+        metric: zeroship_data_orm::sql::descriptors::VectorMetric::Cosine,
+        predicate: ResolvedPredicate::Const(true),
+        limit: 1,
+        table: table.clone(),
+    })
+    .is_err());
+    assert!(SpatialNearStatement::new(SpatialNearParts {
+        projection: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: Some(Ident::parse_as("_distance_m", IdentRole::Alias).unwrap()),
+        }],
+        spatial: table.column("location").unwrap(),
+        point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
+        radius_m: 1000.0,
+        predicate: ResolvedPredicate::Const(true),
+        limit: 1,
         table,
     })
     .is_err());
@@ -368,6 +401,47 @@ fn an_aggregate_select_rejects_an_ungrouped_column() {
         lock: zeroship_data_orm::sql::statement::RowLock::None,
     });
     assert!(statement.is_err());
+}
+
+#[test]
+fn select_rejects_aggregate_shapes_without_portable_sql() {
+    let source = search_table();
+    let statement = |expression| {
+        SelectStatement::new(SelectParts {
+            table: source.clone(),
+            joins: Vec::new(),
+            projection: vec![SelectedExpression {
+                expression,
+                alias: Ident::parse_as("result", IdentRole::Alias).unwrap(),
+            }],
+            predicate: ResolvedPredicate::Const(true),
+            group_by: Vec::new(),
+            having: ResolvedPredicate::Const(true),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            distinct: false,
+            lock: zeroship_data_orm::sql::statement::RowLock::None,
+        })
+    };
+    assert!(statement(ResolvedOperand::Aggregate {
+        function: zeroship_data_orm::sql::AggregateFunc::Count,
+        column: None,
+        distinct: true,
+    })
+    .is_err());
+    assert!(statement(ResolvedOperand::Aggregate {
+        function: zeroship_data_orm::sql::AggregateFunc::Sum,
+        column: Some(source.column("label").unwrap()),
+        distinct: false,
+    })
+    .is_err());
+    assert!(statement(ResolvedOperand::Aggregate {
+        function: zeroship_data_orm::sql::AggregateFunc::Sum,
+        column: Some(source.column("amount").unwrap()),
+        distinct: false,
+    })
+    .is_err());
 }
 
 #[test]

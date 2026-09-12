@@ -243,16 +243,51 @@ impl ResolvedOperand {
             Self::Column(column) => column.storage(),
             Self::Aggregate {
                 function: super::AggregateFunc::Count,
+                column: None,
+                distinct: true,
+            } => return Err(invalid("COUNT(DISTINCT *) is not supported")),
+            Self::Aggregate {
+                function: super::AggregateFunc::Count,
                 ..
             } => StorageType::Integer,
             Self::Aggregate {
                 function: super::AggregateFunc::Avg,
-                ..
-            } => StorageType::Real,
-            Self::Aggregate {
                 column: Some(column),
                 ..
-            } => column.storage(),
+            } if matches!(column.storage(), StorageType::Integer | StorageType::Real) => {
+                StorageType::Real
+            }
+            Self::Aggregate {
+                function: super::AggregateFunc::Sum,
+                column: Some(column),
+                ..
+            } if matches!(column.storage(), StorageType::Integer | StorageType::Real) => {
+                column.storage()
+            }
+            Self::Aggregate {
+                function: super::AggregateFunc::Min | super::AggregateFunc::Max,
+                column: Some(column),
+                ..
+            } if matches!(
+                column.storage(),
+                StorageType::Integer
+                    | StorageType::Real
+                    | StorageType::Text
+                    | StorageType::Timestamp
+            ) =>
+            {
+                column.storage()
+            }
+            Self::Aggregate {
+                function: super::AggregateFunc::Sum | super::AggregateFunc::Avg,
+                column: Some(_),
+                ..
+            } => return Err(invalid("sum and avg require numeric storage")),
+            Self::Aggregate {
+                function: super::AggregateFunc::Min | super::AggregateFunc::Max,
+                column: Some(_),
+                ..
+            } => return Err(invalid("min and max require ordered portable storage")),
             Self::Aggregate { column: None, .. } => {
                 return Err(invalid("aggregate requires a column"));
             }
@@ -683,7 +718,7 @@ fn validate_vector_search(parts: &VectorSearchParts) -> Result<(), CompileError>
     if parts.projection.is_empty() {
         return Err(invalid("vector search requires a projection"));
     }
-    validate_returning(&parts.table, &parts.projection)?;
+    validate_search_projection(&parts.table, &parts.projection, "_distance")?;
     validate_predicate_for_tables(&[&parts.table], &parts.predicate, false)
 }
 
@@ -702,8 +737,26 @@ fn validate_spatial_near(parts: &SpatialNearParts) -> Result<(), CompileError> {
     if parts.projection.is_empty() {
         return Err(invalid("spatial search requires a projection"));
     }
-    validate_returning(&parts.table, &parts.projection)?;
+    validate_search_projection(&parts.table, &parts.projection, "_distance_m")?;
     validate_predicate_for_tables(&[&parts.table], &parts.predicate, false)
+}
+
+fn validate_search_projection(
+    table: &Table,
+    projection: &[ReturnedColumn],
+    synthetic: &str,
+) -> Result<(), CompileError> {
+    validate_returning(table, projection)?;
+    if projection.iter().any(|field| {
+        field
+            .alias
+            .as_ref()
+            .map_or_else(|| field.column.name().as_str(), Ident::as_str)
+            == synthetic
+    }) {
+        return Err(invalid("search projection shadows its distance output"));
+    }
+    Ok(())
 }
 
 fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
