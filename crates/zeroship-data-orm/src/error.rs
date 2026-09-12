@@ -717,9 +717,9 @@ impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
 // boundary. Builder errors are user-input refusals (bad filter, bad
 // collection name, bad identifier) — modelled as `ValidationFailed`
 // with a static code the SDK can branch on.
-impl From<crate::sql::compile::QueryError> for DbError {
-    fn from(e: crate::sql::compile::QueryError) -> Self {
-        use crate::sql::compile::QueryError;
+impl From<crate::sql::mapping::QueryError> for DbError {
+    fn from(e: crate::sql::mapping::QueryError) -> Self {
+        use crate::sql::mapping::QueryError;
         let (code, msg, hint) = match e {
             QueryError::InvalidFilter(m) => ("invalid_filter", m, None),
             QueryError::InvalidCollection(m) => ("invalid_collection", m, None),
@@ -825,6 +825,6 @@ mod isolation_level_tests {
 
 impl From<zeroship_core::schema_name::SchemaNameError> for DbError {
     fn from(error: zeroship_core::schema_name::SchemaNameError) -> Self {
-        crate::sql::compile::QueryError::InvalidCollection(error.to_string()).into()
+        crate::sql::mapping::QueryError::InvalidCollection(error.to_string()).into()
     }
 }

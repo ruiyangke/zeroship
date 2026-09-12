@@ -88,7 +88,7 @@ fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
         "{AUDIT_TABLE} left the reserved platform namespace {RESERVED_PREFIX}",
     );
     assert!(
-        zeroship_data_orm::sql::compile::validate_collection(AUDIT_TABLE).is_err(),
+        zeroship_data_orm::sql::mapping::validate_collection(AUDIT_TABLE).is_err(),
         "the schema authority now ACCEPTS {AUDIT_TABLE} as a creator collection; a \
          creator could declare the relation their own audit log is written into",
     );
@@ -102,7 +102,7 @@ fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
         "the control is the same string as the subject, so it varies nothing",
     );
     assert!(
-        zeroship_data_orm::sql::compile::validate_collection(unreserved).is_ok(),
+        zeroship_data_orm::sql::mapping::validate_collection(unreserved).is_ok(),
         "the control name {unreserved} is refused too, so the arm above says \
          nothing about the reserved prefix",
     );

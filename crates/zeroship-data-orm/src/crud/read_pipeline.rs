@@ -161,7 +161,7 @@ async fn decrypt_rows_on_read(
 /// Restrict the public result after protection consumes internal identity and storage.
 fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
     let allowed = match surface {
-        RowSurface::Declared => crate::sql::compile::read_surface_columns(schema),
+        RowSurface::Declared => crate::sql::mapping::read_surface_columns(schema),
         RowSurface::Projected(names) => names.iter().cloned().collect(),
     };
     for row in rows.iter_mut() {

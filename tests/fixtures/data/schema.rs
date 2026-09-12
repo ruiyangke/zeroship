@@ -89,7 +89,7 @@ pub fn fixture_indexes(
 pub fn fixture_schema_sql(schema: &SchemaName) -> String {
     format!(
         "CREATE SCHEMA IF NOT EXISTS {}",
-        zeroship_data_orm::sql::compile::quote_ident(schema.as_str())
+        zeroship_data_orm::sql::mapping::quote_ident(schema.as_str())
     )
 }
 

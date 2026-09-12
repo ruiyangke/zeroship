@@ -204,7 +204,7 @@ async fn postgres_native_models_round_trip() {
     );
     let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
     let binding = DbBinding::cold_start(&app);
-    let quoted_schema = crate::sql::compile::quote_ident(&app);
+    let quoted_schema = crate::sql::mapping::quote_ident(&app);
     backend
         .execute_fixture(&format!("CREATE SCHEMA {quoted_schema}"), &[])
         .await
@@ -216,7 +216,7 @@ async fn postgres_native_models_round_trip() {
         .await
         .unwrap();
     let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
-    let quoted_role = crate::sql::compile::quote_ident(&role);
+    let quoted_role = crate::sql::mapping::quote_ident(&role);
     backend
         .execute_fixture(
             &format!(

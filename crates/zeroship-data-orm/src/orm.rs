@@ -91,7 +91,7 @@ impl Database {
 
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
         self.context.with(|| {
-            crate::sql::compile::validate_collection(name)?;
+            crate::sql::mapping::validate_collection(name)?;
             crate::descriptor::collection_schema(&self.binding, name)?;
             Ok(Collection {
                 database: self.clone(),
@@ -895,7 +895,7 @@ fn validate_target(
             "ORM binding does not match the captured database route",
         ));
     }
-    crate::sql::compile::validate_collection(collection)?;
+    crate::sql::mapping::validate_collection(collection)?;
     crate::descriptor::collection_schema(binding, collection)?;
     Ok(())
 }

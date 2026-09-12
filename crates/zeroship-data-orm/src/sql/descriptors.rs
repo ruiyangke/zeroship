@@ -36,7 +36,7 @@ pub fn readable_fields(schema: &crate::value::Value) -> std::collections::BTreeS
         .into_iter()
         .flat_map(|fields| fields.iter())
         .filter(|(name, definition)| {
-            !crate::sql::compile::is_schema_metadata_key(name)
+            !crate::sql::mapping::is_schema_metadata_key(name)
                 && definition.is_object()
                 && definition
                     .get("readable")

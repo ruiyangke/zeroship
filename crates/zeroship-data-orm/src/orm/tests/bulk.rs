@@ -268,9 +268,9 @@ async fn postgres_bulk_counts_do_not_require_unrelated_column_reads() {
         .unwrap();
     let table = format!(
         "{}.\"entries\"",
-        crate::sql::compile::quote_ident(db.binding.schema().as_str())
+        crate::sql::mapping::quote_ident(db.binding.schema().as_str())
     );
-    let role = crate::sql::compile::quote_ident(
+    let role = crate::sql::mapping::quote_ident(
         &zeroship_core::database_role::per_app_role_name(db.binding.schema().as_str()).unwrap(),
     );
     backend.pool().batch_execute(&format!(

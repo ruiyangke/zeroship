@@ -692,7 +692,7 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                raw_column: crate::sql::compile::raw_column_name(&column),
+                                raw_column: crate::sql::mapping::raw_column_name(&column),
                             },
                         );
                     }
@@ -1222,7 +1222,7 @@ mod tests {
     #[test]
     fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
         use crate::sql::catalog::{Classification, MaskKind};
-        let raw = crate::sql::compile::raw_column_name("ssn");
+        let raw = crate::sql::mapping::raw_column_name("ssn");
         let ddl = format!(
             "CREATE TABLE \"app\".\"users\" (\n  \
              \"id\" INTEGER PRIMARY KEY,\n  \
@@ -1251,8 +1251,8 @@ mod tests {
              \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
              \"{}\" TEXT,\n  \
              \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */\n)",
-            crate::sql::compile::raw_column_name("ssn"),
-            crate::sql::compile::raw_column_name("email"),
+            crate::sql::mapping::raw_column_name("ssn"),
+            crate::sql::mapping::raw_column_name("email"),
         );
         let got = parse_mask_sentinels(&ddl);
         assert_eq!(got.len(), 2);

@@ -1,6 +1,6 @@
 //! Decode the SDK filter vocabulary into the typed predicate grammar.
 
-use crate::sql::compile::QueryError;
+use crate::sql::mapping::QueryError;
 use crate::sql::{
     CompareOp, Ident, IdentRole, Literal, MembershipOp, Operand, PatternOp, Predicate, TextPattern,
 };
@@ -13,7 +13,7 @@ fn invalid(message: impl Into<String>) -> QueryError {
 /// Parse a filter before any SQL is emitted. The budget walk runs before the
 /// recursive decoder, including for filters supplied directly by native callers.
 pub fn decode(value: &Value) -> Result<Predicate, QueryError> {
-    crate::sql::compile::validate_filter_budget(value)?;
+    crate::sql::mapping::validate_filter_budget(value)?;
     decode_inner(value)
 }
 
@@ -47,7 +47,7 @@ fn decode_inner(value: &Value) -> Result<Predicate, QueryError> {
             continue;
         }
         // Keep the SDK's error vocabulary at the decoding boundary.
-        crate::sql::compile::validate_field_name(field)?;
+        crate::sql::mapping::validate_field_name(field)?;
         let field =
             Ident::parse_as(field, IdentRole::Column).map_err(|e| invalid(e.to_string()))?;
         let operand = Operand::column(field);

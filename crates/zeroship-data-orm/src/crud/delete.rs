@@ -1,7 +1,7 @@
 use super::{predicate, resolved::ResolvedTable, update};
 use crate::{
     sql::{
-        compile::QueryError,
+        mapping::QueryError,
         lifecycle::WriteAssignments,
         registration::SqlRegistration,
         statement::{
@@ -53,7 +53,7 @@ pub(crate) fn build_lifecycle(
     let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
     let marker = resolved
         .table
-        .column(&crate::sql::compile::value_column_for_field(marker, schema))?;
+        .column(&crate::sql::mapping::value_column_for_field(marker, schema))?;
     let predicate = ResolvedPredicate::and(vec![
         filter.resolve(schema, &resolved, registration)?,
         ResolvedPredicate::IsNull {
@@ -88,7 +88,7 @@ fn scope(
         MutationScope::First {
             target: resolved
                 .table
-                .column(&crate::sql::compile::value_column_for_field("id", schema))?,
+                .column(&crate::sql::mapping::value_column_for_field("id", schema))?,
         }
     } else {
         MutationScope::Matching

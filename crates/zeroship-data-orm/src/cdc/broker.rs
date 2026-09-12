@@ -1973,7 +1973,7 @@ mod tests {
         let raw_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
         let masked_text = "***-**-6789";
         let plaintext = "123-45-6789";
-        let raw_col = crate::sql::compile::raw_column_name("ssn");
+        let raw_col = crate::sql::mapping::raw_column_name("ssn");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".into(), "42".into());

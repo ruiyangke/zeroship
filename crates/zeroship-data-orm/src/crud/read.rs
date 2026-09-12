@@ -3,7 +3,7 @@
 use super::{predicate, resolved::ResolvedTable};
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
             ResolvedOperand, ResolvedOrder, ResolvedPredicate, SelectParts, SelectStatement,
@@ -110,13 +110,13 @@ pub(crate) fn distinct(
     filter_soft_deleted: bool,
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
-    compile::validate_field_name(field)?;
+    mapping::validate_field_name(field)?;
     if !crate::sql::descriptors::readable_fields(schema).contains(field) {
         return Err(QueryError::InvalidIdent(format!(
             "field '{field}' is not a readable schema field; readable fields must be declared in the schema"
         )));
     }
-    compile::validate_value_operation(field, schema)?;
+    mapping::validate_value_operation(field, schema)?;
     let table = ResolvedTable::aliased(namespace, collection, SOURCE_ALIAS, schema, registration)?;
     let selected = selected(&table, field)?;
     let order_by = vec![ResolvedOrder {
@@ -180,7 +180,7 @@ fn projection_fields(
         .and_then(Value::as_array)
         .filter(|fields| !fields.is_empty())
     else {
-        return Ok(compile::implicit_read_fields(schema)?
+        return Ok(mapping::implicit_read_fields(schema)?
             .into_iter()
             .map(str::to_owned)
             .collect());
@@ -192,7 +192,7 @@ fn projection_fields(
         let field = field
             .as_str()
             .ok_or_else(|| invalid("select entries must be strings"))?;
-        compile::validate_field_name(field)?;
+        mapping::validate_field_name(field)?;
         if !readable.contains(field) {
             return Err(QueryError::InvalidIdent(format!(
                 "field '{field}' is not a readable schema field; readable fields must be declared in the schema"
@@ -289,13 +289,13 @@ fn parse_order(
     entries
         .into_iter()
         .map(|(field, direction)| {
-            compile::validate_field_name(field)?;
+            mapping::validate_field_name(field)?;
             if !readable.contains(field) {
                 return Err(QueryError::InvalidIdent(format!(
                     "field '{field}' is not a readable schema field; readable fields must be declared in the schema"
                 )));
             }
-            compile::validate_value_operation(field, schema)?;
+            mapping::validate_value_operation(field, schema)?;
             if schema[field]["sortable"].as_bool() == Some(false) {
                 return Err(invalid(format!("field '{field}' is not sortable")));
             }

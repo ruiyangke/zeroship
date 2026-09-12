@@ -49,7 +49,7 @@ pub fn prefix_for_collection(
         .and_then(|p| p.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
-    crate::sql::compile::validate_id_prefix(&prefix)?;
+    crate::sql::mapping::validate_id_prefix(&prefix)?;
     Ok(prefix)
 }
 
@@ -200,7 +200,7 @@ fn refuse_and_strip(
         if obj.contains_key(name) {
             let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
             return Err(
-                crate::sql::compile::QueryError::ImmutableAssignedField(format!(
+                crate::sql::mapping::QueryError::ImmutableAssignedField(format!(
                     "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
                 ))
                 .into(),

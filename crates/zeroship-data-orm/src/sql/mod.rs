@@ -32,8 +32,8 @@ pub use read::{
 
 /// Catalog facts used by runtime protection and decoding.
 pub mod catalog;
-/// Runtime SQL compilation from validated collection operations.
-pub mod compile;
+/// Descriptor validation and physical storage mapping.
+pub mod mapping;
 pub mod compiler;
 pub mod descriptors;
 pub mod lifecycle;

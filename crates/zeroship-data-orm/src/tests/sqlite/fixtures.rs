@@ -31,7 +31,7 @@ pub(super) fn compile_insert(
     collection: &str,
     schema: &crate::value::Value,
     document: &crate::value::Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::insert::build_one(
         namespace,
         collection,
@@ -46,7 +46,7 @@ pub(super) fn compile_insert_many(
     collection: &str,
     schema: &crate::value::Value,
     documents: &crate::value::Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     let mut queries = crate::crud::insert::build_many(
         namespace,
         collection,
@@ -55,7 +55,7 @@ pub(super) fn compile_insert_many(
         &crate::sql::registration::SqlRegistration::sqlite(),
     )?;
     if queries.len() != 1 {
-        return Err(crate::sql::compile::QueryError::InvalidFilter(
+        return Err(crate::sql::mapping::QueryError::InvalidFilter(
             "fixture expected one insert statement".into(),
         ));
     }
@@ -72,7 +72,7 @@ pub(super) fn compile_find(
     order_by: Option<&crate::value::Value>,
     select: Option<&crate::value::Value>,
     schema: &crate::value::Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::read::find(
         namespace,
         collection,

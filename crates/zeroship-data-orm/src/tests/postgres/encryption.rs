@@ -7,7 +7,7 @@ use compio_postgres::Pool;
 
 use crate::value::{value, Value};
 
-use crate::sql::compile::*;
+use crate::sql::mapping::*;
 
 use zeroship_data_orm::error::DbError;
 

@@ -9,7 +9,7 @@ use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
-use crate::sql::compile;
+use crate::sql::mapping;
 use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
@@ -371,7 +371,7 @@ pub async fn run_insert(
     route
         .sql_registration()
         .check(&insert::requirements(&schema))
-        .map_err(compile::QueryError::from)?;
+        .map_err(mapping::QueryError::from)?;
     let frame;
     let route = if identity::requires_allocation(&schema, &doc) {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
@@ -445,7 +445,7 @@ pub async fn run_insert_many(
     route
         .sql_registration()
         .check(&insert::requirements(&schema))
-        .map_err(compile::QueryError::from)?;
+        .map_err(mapping::QueryError::from)?;
     let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
     let route = frame.route();
     let result = async {
@@ -1101,7 +1101,7 @@ pub fn plan_distinct(
     // descriptor entry the builder uses; an undeclared collection rejects
     // before either.
     let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
-    let distinct_reads_masked_value = compile::column_is_masked(field, &schema_hint);
+    let distinct_reads_masked_value = mapping::column_is_masked(field, &schema_hint);
 
     let built = read::distinct(
         binding.schema(),
@@ -1167,7 +1167,7 @@ pub async fn run_upsert(
     route
         .sql_registration()
         .check(&upsert::requirements(&schema, guard_identity))
-        .map_err(compile::QueryError::from)?;
+        .map_err(mapping::QueryError::from)?;
     let frame;
     let route = if guard_identity {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);

@@ -253,7 +253,7 @@ mod tests {
         let schema = crate::sql::SchemaName::new("role_parity").expect("parity fixture");
         let role = zeroship_core::database_role::per_app_role_name(schema.as_str())
             .expect("parity fixture role name");
-        let quoted_role = crate::sql::compile::quote_ident(&role);
+        let quoted_role = crate::sql::mapping::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
             &schema,
@@ -370,7 +370,7 @@ mod tests {
         assert!(
             setup_sql.starts_with(&format!(
                 "SET LOCAL ROLE {};",
-                crate::sql::compile::quote_ident(provisioned.role_name())
+                crate::sql::mapping::quote_ident(provisioned.role_name())
             )),
             "session setup does not name the role the migration service provisioned, so \
              SET LOCAL ROLE names an identifier that was never created.\n  provisioned \

@@ -1532,7 +1532,7 @@ mod tests {
             let app_id = "p2c1leak";
             let role = zeroship_core::database_role::per_app_role_name(app_id)
                 .expect("test app role name");
-            let role_ident = crate::sql::compile::quote_ident(&role);
+            let role_ident = crate::sql::mapping::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
             // in the app role (required for SET LOCAL ROLE) and (b)
@@ -1558,7 +1558,7 @@ mod tests {
                     .expect("create app role");
                 c.simple_query(&format!(
                     "GRANT {role_ident} TO {}",
-                    crate::sql::compile::quote_ident(&login_user)
+                    crate::sql::mapping::quote_ident(&login_user)
                 ))
                 .await
                 .expect("grant membership");
@@ -1616,7 +1616,7 @@ mod tests {
             let _ = c
                 .simple_query(&format!(
                     "REVOKE {role_ident} FROM {}",
-                    crate::sql::compile::quote_ident(&login_user)
+                    crate::sql::mapping::quote_ident(&login_user)
                 ))
                 .await;
             let _ = c

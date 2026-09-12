@@ -81,7 +81,7 @@ fn adapter_boundary_checks_reject_forbidden_controls() {
     }
     for input in [
         "use zeroship_data_orm::cdc::broker;",
-        "pub(crate) use zeroship_data_orm::sql::compile;",
+        "pub(crate) use zeroship_data_orm::sql::mapping;",
     ] {
         assert!(source::parse(input).public_uses.is_empty());
     }

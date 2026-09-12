@@ -15,7 +15,7 @@ pub fn install_collections(
 ) -> Result<(), DbError> {
     let mut names = std::collections::HashSet::new();
     for (name, schema) in &collections {
-        crate::sql::compile::validate_collection(name)?;
+        crate::sql::mapping::validate_collection(name)?;
         if !names.insert(name) {
             return Err(DbError::internal(
                 "duplicate collection in the runtime descriptor",
@@ -66,10 +66,10 @@ pub fn install_collections(
                     ));
                 }
             }
-            if crate::sql::compile::is_schema_metadata_key(name) {
+            if crate::sql::mapping::is_schema_metadata_key(name) {
                 continue;
             }
-            crate::sql::compile::validate_field_name(name)?;
+            crate::sql::mapping::validate_field_name(name)?;
             if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some()
                 && definition.get("unique").and_then(Value::as_bool) == Some(true)
             {

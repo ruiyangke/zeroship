@@ -200,7 +200,7 @@ mod tests {
             mask: Some(MaskMeta {
                 kind: MaskKind::Last4,
                 classification: Classification::Pci,
-                raw_column: crate::sql::compile::raw_column_name("ssn"),
+                raw_column: crate::sql::mapping::raw_column_name("ssn"),
             }),
             ..Default::default()
         }

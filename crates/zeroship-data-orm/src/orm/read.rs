@@ -727,7 +727,7 @@ fn check_field(path: &FieldPath, sources: &[SourceLayout], plain: bool) -> Resul
         .schema
         .get(field)
         .is_some_and(crate::sql::descriptors::is_encrypted)
-        || (plain && crate::sql::compile::column_is_masked(field, &source.schema))
+        || (plain && crate::sql::mapping::column_is_masked(field, &source.schema))
     {
         return Err(invalid("protected field is not valid in this expression"));
     }

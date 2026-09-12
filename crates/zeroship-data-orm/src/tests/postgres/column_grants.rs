@@ -2,7 +2,7 @@
 
 use crate::{
     sql::{
-        compile::{quote_ident, raw_column_name, WriteAssignments},
+        mapping::{quote_ident, raw_column_name, WriteAssignments},
         registration::SqlRegistration,
         SchemaName,
     },
@@ -49,7 +49,7 @@ fn unique_suffix() -> String {
 }
 
 fn readable_columns(schema: &Value) -> Vec<String> {
-    crate::sql::compile::implicit_read_fields(schema)
+    crate::sql::mapping::implicit_read_fields(schema)
         .expect("readable fixture fields")
         .into_iter()
         .map(str::to_owned)

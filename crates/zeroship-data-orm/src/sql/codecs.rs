@@ -1,5 +1,5 @@
 //! Logical values and their database storage representations.
-use crate::sql::compile;
+use crate::sql::mapping;
 use crate::value::Value;
 
 mod typed;
@@ -77,7 +77,7 @@ fn normalize_row_on_read(
         // Protected storage is decoded by the protection pipeline. A mask is
         // stored as text even when its logical field is numeric or binary.
         if def.get("encrypted").and_then(Value::as_bool) == Some(true)
-            || compile::column_is_masked(key, schema)
+            || mapping::column_is_masked(key, schema)
         {
             continue;
         }
@@ -353,7 +353,7 @@ mod tests {
 
         normalize_row_on_read(
             &crate::sql::registration::SqlRegistration::sqlite(),
-            &crate::sql::compile::empty_read_schema(),
+            &crate::sql::mapping::empty_read_schema(),
             &mut row,
         )
         .expect("normalize");

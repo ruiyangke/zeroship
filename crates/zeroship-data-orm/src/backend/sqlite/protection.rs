@@ -55,7 +55,7 @@ impl crate::protection::Catalog for SqliteBackend {
         //    identifier — the dialect's `quote_ident` doubles embedded
         //    `"`s; PRAGMA / sqlite_master both accept the dotted form
         //    `"app_id".sqlite_master`.
-        let q_app = crate::sql::compile::quote_ident(app_id);
+        let q_app = crate::sql::mapping::quote_ident(app_id);
         let tables_sql =
             format!("SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name");
         let table_rows = self.session.query(&tables_sql, &[]).await?;
@@ -70,7 +70,7 @@ impl crate::protection::Catalog for SqliteBackend {
         }
 
         for collection in &user_tables {
-            let q_coll = crate::sql::compile::quote_ident(collection);
+            let q_coll = crate::sql::mapping::quote_ident(collection);
 
             // 2. Columns via `PRAGMA table_info`.
             //
@@ -170,7 +170,7 @@ impl crate::protection::Catalog for SqliteBackend {
 
                 // 4. Columns for this index via `PRAGMA index_info`.
                 //    Returns: 0=seqno, 1=cid, 2=name.
-                let q_idx = crate::sql::compile::quote_ident(&idx_name);
+                let q_idx = crate::sql::mapping::quote_ident(&idx_name);
                 let index_info_sql = format!("PRAGMA {q_app}.index_info({q_idx})");
                 let info_rows = self.session.query(&index_info_sql, &[]).await?;
                 let mut columns = Vec::with_capacity(info_rows.len());
@@ -258,8 +258,8 @@ impl Protection for SqliteBackend {
 
 impl SqliteBackend {
     pub async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError> {
-        let q_app = crate::sql::compile::quote_ident(app_id);
-        let q_coll = crate::sql::compile::quote_ident(collection);
+        let q_app = crate::sql::mapping::quote_ident(app_id);
+        let q_coll = crate::sql::mapping::quote_ident(collection);
         let sql = format!("SELECT COUNT(*) FROM {q_app}.{q_coll}");
         let rows = match self.session.query(&sql, &[]).await {
             Ok(rows) => rows,
