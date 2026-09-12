@@ -219,7 +219,7 @@ impl WorkflowService {
         };
         let remaining = claim
             .task
-            .integer("deadline")?
+            .deadline
             .min(row.integer("expires_at")?)
             - claim.now;
         let written = compio::time::timeout(
