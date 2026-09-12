@@ -15,6 +15,7 @@ use std::{
     },
     thread::JoinHandle,
 };
+use zeroship_bundle::LoadedWorker;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
@@ -23,8 +24,7 @@ use zeroship_workflow::{
         runner::{TaskPayloadLimits, WorkerOptions, WorkflowWorker},
         schema,
         store::HostStorage,
-        AppBackend, AppPolicy, ExecutableSnapshot, HostPolicies, PolicySnapshot, SnapshotStore,
-        WorkerIdentity, WorkflowService,
+        AppBackend, AppPolicy, HostPolicies, PolicySnapshot, WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -35,7 +35,6 @@ use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor, WorkflowBinding};
 pub struct LocalConfig {
     pub max_archive_bytes: usize,
     pub max_source_bytes: usize,
-    pub max_snapshot_bytes: usize,
     pub worker: WorkerOptions,
     pub payloads: TaskPayloadLimits,
 }
@@ -44,7 +43,6 @@ impl Default for LocalConfig {
         Self {
             max_archive_bytes: zeroship_bundle::MAX_COMPRESSED_BYTES,
             max_source_bytes: 32 * 1024 * 1024,
-            max_snapshot_bytes: 64 * 1024 * 1024,
             worker: WorkerOptions::default(),
             payloads: TaskPayloadLimits::default(),
         }
@@ -70,7 +68,6 @@ impl LocalConfig {
         if self.max_archive_bytes == 0
             || self.max_archive_bytes > zeroship_bundle::MAX_COMPRESSED_BYTES
             || self.max_source_bytes == 0
-            || self.max_snapshot_bytes == 0
         {
             return Err("invalid local workflow limits".into());
         }
@@ -84,7 +81,7 @@ impl LocalConfig {
 pub struct LocalHost {
     pub app: AppId,
     pub binding: WorkflowBinding,
-    pub executable: Option<ExecutableSnapshot>,
+    pub executable: Option<LoadedWorker>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
@@ -136,7 +133,7 @@ impl LocalHost {
                             return;
                         }
                     };
-                    let executable = installed.map(|app| app.executable.snapshot().clone());
+                    let executable = installed.map(|app| app.executable.into_executable());
                     if ready.send(Ok((backend, executable))).is_err() {
                         return;
                     }
@@ -239,10 +236,19 @@ async fn initialize(
     let store = storage.open().await?;
     schema::initialize_local(&store).await?;
     let storage = storage.objects;
+    let catalog = deployment.catalog().await?;
+    let client = catalog.for_scope(HoldScope::new(
+        app.clone(),
+        format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid())),
+    )?);
     let service = WorkflowService::open(Rc::new(store), Arc::new(HostPolicies::default()))
         .await?
-        .with_payload_storage(storage.clone())?
-        .with_snapshots(SnapshotStore::new(&storage, config.max_snapshot_bytes)?);
+        .with_payload_storage(storage)?
+        .with_deployments(
+            deployment
+                .artifacts(config.max_source_bytes)?
+                .with_hold_client(Rc::new(client)),
+        );
     service
         .register_app(
             app,
@@ -252,7 +258,6 @@ async fn initialize(
             )?,
         )
         .await?;
-    let catalog = deployment.catalog().await?;
     let installed = install_bundle(config, deployment, &catalog, &service, app).await?;
     let backend = service
         .for_app(app.clone())
@@ -290,17 +295,7 @@ async fn install_bundle(
         return Ok(None);
     };
     let registration = &installed.registration;
-    // The local app journal has a stable host holder across worker restarts.
-    let client = catalog.for_scope(HoldScope::new(
-        app.clone(),
-        format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid())),
-    )?);
-    service
-        .acquire_deployment_hold(app, &registration.id, &registration.hash, &client)
-        .await?;
-    service
-        .activate_deploy(app, registration, installed.executable.snapshot())
-        .await?;
+    service.activate_deploy(app, registration).await?;
     Ok(Some(installed))
 }
 

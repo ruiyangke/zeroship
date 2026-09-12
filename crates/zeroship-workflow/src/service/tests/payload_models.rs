@@ -21,7 +21,7 @@ async fn postgres_payload_quota_uses_exact_scoped_aggregates() {
 }
 
 async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
-    let (service, local, foreign) = registered_service(store).await;
+    let (service, local, foreign, _deployments) = registered_service(store).await;
     let service = service
         .with_payload_storage(StorageStore::from_backend(Arc::new(LocalFs::new(
             directory.join("objects"),

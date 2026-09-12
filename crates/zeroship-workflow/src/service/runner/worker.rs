@@ -90,9 +90,10 @@ impl WorkflowWorker {
         options: WorkerOptions,
     ) -> Result<Self, WorkflowServiceError> {
         options.validate()?;
-        if tasks.service.snapshots.is_none() || tasks.service.payload_storage.is_none() {
+        if tasks.service.deployments.is_none() || tasks.service.payload_storage.is_none() {
             return Err(WorkflowServiceError::InvalidRequest(
-                "workflow worker requires customer payload and executable storage".into(),
+                "workflow worker requires customer payload storage and normal app deployments"
+                    .into(),
             ));
         }
         let service = tasks.service.clone();

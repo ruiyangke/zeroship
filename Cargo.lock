@@ -8712,6 +8712,7 @@ dependencies = [
  "tempfile",
  "uuid",
  "v8",
+ "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-runtime",

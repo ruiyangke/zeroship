@@ -32,12 +32,12 @@ struct LostReceipt {
 }
 #[async_trait(?Send)]
 impl TaskPayloads for LostReceipt {
-    async fn snapshot(
+    async fn executable(
         &self,
         task: &str,
         token: &TaskToken,
-    ) -> Result<crate::service::ExecutableSnapshot, WorkflowServiceError> {
-        TaskPayloads::snapshot(&self.inner, task, token).await
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(&self.inner, task, token).await
     }
     async fn stage(
         &self,
@@ -114,7 +114,7 @@ async fn postgres_output_preparation_and_retryable_uploads() {
 
 async fn output_contract(store: Rc<OrmStore>) {
     let dir = tempfile::tempdir().unwrap();
-    let (service, app, other) = registered_service(store.clone()).await;
+    let (service, app, other, _deployments) = registered_service(store.clone()).await;
     let service = service
         .with_payload_storage(StorageStore::from_backend(Arc::new(LocalFs::new(
             dir.path(),

@@ -36,7 +36,7 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
         )
         .unwrap(),
     );
-    let (service, app, _) = registered_service(store).await;
+    let (service, app, _, _deployments) = registered_service(store).await;
     let started = service
         .for_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())

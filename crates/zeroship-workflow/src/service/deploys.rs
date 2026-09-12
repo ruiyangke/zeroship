@@ -1,169 +1,214 @@
-//! Executable snapshots selected and retained by the trusted customer worker.
+//! Admit pinned deployments through normal app artifacts and durable holds.
+
+#![expect(
+    clippy::future_not_send,
+    reason = "deployment I/O uses its compio host thread"
+)]
 
 use super::{
     app::{decode, encode, lock_app},
-    snapshots::content_hash,
-    DeployRegistration, ExecutableSnapshot, WorkflowService,
+    deployment_retention::admission_generation,
+    deployments::{damaged, unavailable},
+    models::deploys,
+    store::Transaction,
+    DeployRegistration, WorkflowService,
 };
 use crate::{validation, WorkflowServiceError};
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, FromRow, Operation},
+    value,
+};
+
+#[derive(FromRow)]
+#[orm(entity = deploys)]
+pub(super) struct Deployment {
+    pub hash: String,
+    manifest: String,
+    state: String,
+    pub availability_epoch: i64,
+}
+impl Deployment {
+    pub(super) fn available(&self) -> Result<(), WorkflowServiceError> {
+        if self.state != "available" {
+            return Err(unavailable());
+        }
+        Ok(())
+    }
+    pub(super) fn registration(&self) -> Result<DeployRegistration, WorkflowServiceError> {
+        decode(&self.manifest)
+    }
+    fn check(&self, expected: &DeployRegistration) -> Result<(), WorkflowServiceError> {
+        if self.registration()? != *expected
+            || self.hash != expected.hash
+            || self.availability_epoch < 0
+            || !matches!(
+                self.state.as_str(),
+                "available" | "unavailable" | "retiring"
+            )
+        {
+            return Err(conflict());
+        }
+        Ok(())
+    }
+}
+
+pub(super) async fn read(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+) -> Result<Option<Deployment>, WorkflowServiceError> {
+    Ok(tx
+        .database()
+        .entity::<deploys::Entity>()?
+        .find::<Deployment>(
+            deploys::app_id
+                .eq(app.as_str().to_owned())?
+                .and(deploys::id.eq(id.to_owned())?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next())
+}
 
 impl WorkflowService {
-    /// Retain executable bytes before selecting a deployment for new work.
-    /// The host serializes its desired-deployment updates. Failed uploads leave
-    /// a staging record and cannot replace the currently active deployment.
+    /// Verify and hold the normal app artifact before selecting it for new work.
+    /// The host serializes its desired-deployment updates.
     ///
     /// # Errors
-    /// Rejects invalid or conflicting deployments and unavailable storage.
+    /// Rejects conflicting registrations, missing hold authority and unavailable artifacts.
     pub async fn activate_deploy(
         &self,
         app: &AppId,
         deploy: &DeployRegistration,
-        image: &ExecutableSnapshot,
     ) -> Result<(), WorkflowServiceError> {
-        self.retain_deploy(app, deploy, image).await?;
+        let generation = self.prepare_deploy(app, deploy).await?;
+        let client = self
+            .deployments
+            .as_ref()
+            .ok_or_else(unavailable)?
+            .client(app)?;
         let mut tx = self.begin().await?;
         let policy = lock_app(&mut tx, app).await?;
-        let table = tx.table("deploys");
-        let available = tx
-            .query(
-                &format!("SELECT id FROM {table} WHERE app_id=$1 AND id=$2 AND state='available'"),
-                &[app.as_str().into(), deploy.id.clone().into()],
+        if admission_generation(&tx, app, &deploy.id, &deploy.hash, client.scope()).await?
+            != generation
+        {
+            return Err(conflict());
+        }
+        let record = read(&tx, app, &deploy.id).await?.ok_or_else(unavailable)?;
+        record.check(deploy)?;
+        record.available()?;
+        let collection = tx.database().collection(deploys::Entity::COLLECTION)?;
+        collection
+            .execute(Operation::Update {
+                filter: value!({"app_id":app.as_str()}),
+                patch: value!({"active":0}),
+                many: true,
+            })
+            .await?;
+        collection
+            .update(
+                value!({"app_id":app.as_str(), "id":deploy.id}),
+                value!({"active":1}),
             )
             .await?;
-        if available.is_empty() {
-            return Err(WorkflowServiceError::Unavailable(
-                "workflow executable snapshot is unavailable".into(),
-            ));
-        }
-        tx.execute(
-            &format!("UPDATE {table} SET active=0 WHERE app_id=$1"),
-            &[app.as_str().into()],
-        )
-        .await?;
-        tx.execute(
-            &format!("UPDATE {table} SET active=1 WHERE app_id=$1 AND id=$2"),
-            &[app.as_str().into(), deploy.id.clone().into()],
-        )
-        .await?;
         let now = tx.now().await?;
         super::schedules::reconcile(&mut tx, app, deploy, &policy, now).await?;
         tx.commit().await
     }
 
-    /// Retain or repair immutable executable bytes without changing which
-    /// deployment new runs and schedules select.
+    /// Verify or repair a held deployment without changing the active deployment.
+    /// Artifact publication and repair belong to the normal app deployment host.
     ///
     /// # Errors
-    /// Rejects conflicting deployment contents and unavailable storage.
-    #[expect(
-        clippy::future_not_send,
-        reason = "deployment I/O runs on its owning compio thread"
-    )]
+    /// Rejects conflicting registrations, missing hold authority and unavailable artifacts.
     pub async fn retain_deploy(
         &self,
         app: &AppId,
         deploy: &DeployRegistration,
-        image: &ExecutableSnapshot,
     ) -> Result<(), WorkflowServiceError> {
+        self.prepare_deploy(app, deploy).await.map(|_| ())
+    }
+
+    async fn prepare_deploy(
+        &self,
+        app: &AppId,
+        deploy: &DeployRegistration,
+    ) -> Result<i64, WorkflowServiceError> {
         validate(deploy)?;
-        let snapshots = self.snapshots.as_ref().ok_or_else(|| {
-            WorkflowServiceError::Unavailable("workflow snapshot storage is not bound".into())
-        })?;
-        let bytes = snapshots.encode(image)?;
-        let hash = content_hash(&bytes);
-        let size = i64::try_from(bytes.len()).map_err(|_| WorkflowServiceError::PayloadTooLarge)?;
+        let source = self.deployments.as_ref().ok_or_else(unavailable)?;
+        let client = source.client(app)?;
+        let receipt = self
+            .acquire_deployment_hold(app, &deploy.id, &deploy.hash, client.as_ref())
+            .await?;
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
-        let hold_generation =
-            super::deployment_retention::admission_generation(&tx, app, &deploy.id, &deploy.hash)
-                .await?;
-        let now = tx.now().await?;
-        let table = tx.table("deploys");
-        let rows = tx
-            .query(
-                &format!("SELECT * FROM {table} WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), deploy.id.clone().into()],
-            )
-            .await?;
-        if let Some(existing) = rows.first() {
-            check_existing(existing, deploy, &hash, size, hold_generation.is_some())?;
-        } else {
-            tx.execute(&format!("INSERT INTO {table} (app_id,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch) VALUES ($1,$2,$3,$4,$5,0,'staging',$6,$7,0)"),
-                &[app.as_str().into(),deploy.id.clone().into(),deploy.hash.clone().into(),encode(deploy)?.into(),now.into(),hash.clone().into(),size.into()]).await?;
+        let generation =
+            admission_generation(&tx, app, &deploy.id, &deploy.hash, client.scope()).await?;
+        if generation != receipt.generation.get() {
+            return Err(conflict());
+        }
+        let previous = read(&tx, app, &deploy.id).await?;
+        if let Some(record) = &previous {
+            record.check(deploy)?;
         }
         tx.commit().await?;
-        // Object I/O cannot hold the app lock and block execution heartbeats.
-        snapshots.put(app, &deploy.id, bytes, &hash).await?;
+        // Artifact I/O cannot hold the app lock and block execution heartbeats.
+        let result = source.read(app, &deploy.hash).await;
+        if result.as_ref().is_err_and(damaged) {
+            if let Some(previous) = previous {
+                self.park_deployment(app, &deploy.id, &deploy.hash, previous.availability_epoch)
+                    .await?;
+            }
+        }
+        let executable = result?;
+        if executable.registration(deploy.id.clone(), deploy.hash.clone()) != *deploy {
+            return Err(conflict());
+        }
         let mut tx = self.begin().await?;
         lock_app(&mut tx, app).await?;
-        if super::deployment_retention::admission_generation(&tx, app, &deploy.id, &deploy.hash)
-            .await?
-            != hold_generation
+        if admission_generation(&tx, app, &deploy.id, &deploy.hash, client.scope()).await?
+            != generation
         {
             return Err(conflict());
         }
-        let rows = tx
-            .query(
-                &format!("SELECT * FROM {table} WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), deploy.id.clone().into()],
-            )
-            .await?;
-        let existing = rows.first().ok_or_else(conflict)?;
-        check_existing(existing, deploy, &hash, size, hold_generation.is_some())?;
-        let epoch = existing
-            .integer("snapshot_epoch")?
-            .checked_add(1)
-            .ok_or_else(|| {
-                WorkflowServiceError::ResourceExhausted("workflow snapshot epoch exhausted".into())
+        let collection = tx.database().collection(deploys::Entity::COLLECTION)?;
+        if let Some(existing) = read(&tx, app, &deploy.id).await? {
+            existing.check(deploy)?;
+            let epoch = existing.availability_epoch.checked_add(1).ok_or_else(|| {
+                WorkflowServiceError::ResourceExhausted(
+                    "deployment availability epoch exhausted".into(),
+                )
             })?;
-        tx.execute(
-            &format!(
-                "UPDATE {table} SET state='available',snapshot_epoch=$3 WHERE app_id=$1 AND id=$2"
-            ),
-            &[app.as_str().into(), deploy.id.clone().into(), epoch.into()],
-        )
-        .await?;
-        tx.commit().await
+            collection
+                .update(
+                    value!({"app_id":app.as_str(), "id":deploy.id}),
+                    value!({"state":"available", "availability_epoch":epoch}),
+                )
+                .await?;
+        } else {
+            let now = tx.now().await?;
+            collection.insert(value!({"app_id":app.as_str(), "id":deploy.id, "hash":deploy.hash,
+                "manifest":encode(deploy)?, "created_at":now, "active":0, "state":"available", "availability_epoch":1})).await?;
+        }
+        tx.commit().await?;
+        Ok(generation)
     }
 }
 
-fn check_existing(
-    row: &super::store::Row,
-    deploy: &DeployRegistration,
-    hash: &str,
-    size: i64,
-    held: bool,
-) -> Result<(), WorkflowServiceError> {
-    let manifest: DeployRegistration = decode(&row.text("manifest")?)?;
-    if manifest != *deploy
-        || row.text("hash")? != deploy.hash
-        || row.text("snapshot_hash")? != hash
-        || row.integer("snapshot_size")? != size
-        || !(matches!(
-            row.text("state")?.as_str(),
-            "staging" | "available" | "unavailable"
-        ) || (held && row.text("state")? == "retiring"))
-    {
-        return Err(conflict());
-    }
-    Ok(())
-}
 fn conflict() -> WorkflowServiceError {
-    WorkflowServiceError::Conflict("workflow deployment is immutable or being deleted".into())
+    WorkflowServiceError::Conflict("workflow deployment is immutable or being retired".into())
 }
 fn validate(deploy: &DeployRegistration) -> Result<(), WorkflowServiceError> {
-    typed_id::parse_with_prefix(&deploy.id, "dep").map_err(|_| {
-        WorkflowServiceError::InvalidRequest("invalid workflow deploy identity".into())
-    })?;
-    if deploy.hash.len() != 64
-        || !deploy
-            .hash
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
+    typed_id::parse_with_prefix(&deploy.id, "dep")
+        .map_err(|_| WorkflowServiceError::InvalidRequest("invalid deployment identity".into()))?;
+    if !zeroship_bundle::validate_hash_format(&deploy.hash) {
         return Err(WorkflowServiceError::InvalidRequest(
-            "invalid workflow deploy hash".into(),
+            "invalid deployment hash".into(),
         ));
     }
     for name in &deploy.workflows {

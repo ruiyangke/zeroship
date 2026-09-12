@@ -201,7 +201,7 @@ struct Harness {
 }
 impl Harness {
     async fn new(store: Rc<OrmStore>) -> Self {
-        let (service, app, _) = registered_service(store).await;
+        let (service, app, _, _deployments) = registered_service(store).await;
         service
             .register_app(
                 &app,

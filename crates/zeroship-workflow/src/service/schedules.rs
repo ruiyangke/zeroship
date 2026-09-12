@@ -139,7 +139,7 @@ impl ScheduleTiming {
 }
 
 /// Deployment reconciliation shares activation's transaction. Re-delivery of
-/// the active snapshot preserves its due frontier; replacing a snapshot starts
+/// the active deployment preserves its due frontier; replacing a deployment starts
 /// its schedule frontier at activation, without inventing earlier occurrences.
 pub(crate) async fn reconcile(
     tx: &mut Transaction,

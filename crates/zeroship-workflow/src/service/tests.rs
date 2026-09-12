@@ -22,7 +22,10 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
 }
 
 mod background_scope;
+#[path = "../../../../tests/fixtures/workflow_deployments.rs"]
+mod deployment_fixture;
 mod deployment_retention;
+mod deployments;
 mod frontier_models;
 mod ingress_models;
 mod journal_models;
@@ -33,16 +36,15 @@ mod payload_models;
 mod payloads;
 mod policy;
 mod runner;
-mod schedule_models;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
+mod schedule_models;
 mod schema_binding;
 mod schema_metadata;
 mod signal_models;
-mod snapshots;
 mod task_models;
 mod worker;
-use snapshots::{fixture_snapshot_store, test_snapshot};
+use deployment_fixture::{Deployments, Sources};
 
 async fn sqlite_store(path: &Path) -> OrmStore {
     let store = orm_store(
@@ -83,20 +85,20 @@ async fn postgres_app_operations_are_scoped_and_retryable() {
     app_contract(Rc::new(fixture.store.clone())).await;
 }
 
-async fn registered_service(store: Rc<OrmStore>) -> (WorkflowService, AppId, AppId) {
-    registered_with_snapshots(store, fixture_snapshot_store()).await
+async fn registered_service(store: Rc<OrmStore>) -> (WorkflowService, AppId, AppId, Deployments) {
+    registered_with_deployments(store, Deployments::new().await).await
 }
 
-async fn registered_with_snapshots(
+async fn registered_with_deployments(
     store: Rc<OrmStore>,
-    snapshots: super::SnapshotStore,
-) -> (WorkflowService, AppId, AppId) {
+    deployments: Deployments,
+) -> (WorkflowService, AppId, AppId, Deployments) {
+    let a = AppId::mint();
+    let b = AppId::mint();
     let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
         .await
         .unwrap()
-        .with_snapshots(snapshots);
-    let a = AppId::mint();
-    let b = AppId::mint();
+        .with_deployments(deployments.binding(&[&a, &b]));
     for app in [&a, &b] {
         service
             .register_app(app, configured_policy(1, AppPolicy::default()))
@@ -106,8 +108,9 @@ async fn registered_with_snapshots(
             .register_app(app, configured_policy(1, AppPolicy::default()))
             .await
             .unwrap();
-        service
-            .activate_deploy(
+        deployments
+            .activate(
+                &service,
                 app,
                 &DeployRegistration {
                     id: typed_id::generate("dep"),
@@ -115,16 +118,15 @@ async fn registered_with_snapshots(
                     workflows: ["Example".into(), "Child".into()].into(),
                     schedules: Vec::new(),
                 },
-                &test_snapshot(),
             )
             .await
             .unwrap();
     }
-    (service, a, b)
+    (service, a, b, deployments)
 }
 
 async fn app_contract(store: Rc<OrmStore>) {
-    let (service, a, b) = registered_service(store).await;
+    let (service, a, b, _deployments) = registered_service(store).await;
     let a = service.for_app(a);
     let b = service.for_app(b);
     let request = RequestId::mint();
@@ -314,7 +316,7 @@ async fn storage_contract(store: &OrmStore) {
         .await
         .unwrap();
         let deploys = tx.table("deploys");
-        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch) VALUES ($1,$2,$2,'{{}}',0,1,'available','fixture',1,0)"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
+        tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,availability_epoch) VALUES ($1,$2,$2,'{{}}',0,1,'available',0)"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
     }
     let runs = tx.table("runs");
     insert_run(&mut tx, "app_a", "run_a", "deploy_app_a", None)
@@ -459,7 +461,7 @@ fn execution(value: serde_json::Value) -> crate::WorkflowExecution {
 async fn task_contract(store: Rc<OrmStore>) {
     use super::{TaskToken, WorkerIdentity};
     use crate::operations::RunState;
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let worker = WorkerIdentity::new("worker-a".into()).unwrap();
     let other = WorkerIdentity::new("worker-b".into()).unwrap();
@@ -631,7 +633,7 @@ async fn postgres_lifecycle_children_and_restart_share_service_transitions() {
 async fn behavior_contract(store: Rc<OrmStore>) {
     use super::{ControlIntent, WorkerIdentity};
     use crate::operations::{RestartOptions, RestartTarget, RunOperation, RunState};
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, deployments) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let worker = WorkerIdentity::new("worker".into()).unwrap();
     let start = scope
@@ -837,8 +839,8 @@ async fn behavior_contract(store: Rc<OrmStore>) {
         workflows: ["Example".into(), "Child".into()].into(),
         schedules: Vec::new(),
     };
-    service
-        .activate_deploy(&app, &new_deploy, &test_snapshot())
+    deployments
+        .activate(&service, &app, &new_deploy)
         .await
         .unwrap();
     let invalid = execution(json!([
@@ -936,7 +938,7 @@ async fn postgres_concurrent_admission_cycles_and_compensation_retries() {
 async fn review_contract(store: Rc<OrmStore>) {
     use super::WorkerIdentity;
     use crate::operations::{RunOperation, RunState};
-    let (service, app, other_app) = registered_service(store.clone()).await;
+    let (service, app, other_app, _deployments) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let policy = AppPolicy {
         max_running: 1,
@@ -1191,7 +1193,7 @@ async fn postgres_heartbeat_write_that_outlives_its_lease_rolls_back() {
 async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     let fixture = PostgresFixture::start().await;
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -1295,7 +1297,7 @@ async fn postgres_signal_completion_races_do_not_lose_wakeups() {
     signal_race_contract(Rc::new(fixture.store.clone())).await;
 }
 async fn signal_race_contract(store: Rc<OrmStore>) {
-    let (service, app, _) = registered_service(store).await;
+    let (service, app, _, _deployments) = registered_service(store).await;
     let scope = service.for_app(app);
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
     let run = scope
@@ -1394,7 +1396,7 @@ async fn schedule_contract(store: Rc<OrmStore>) {
     use super::{
         IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
     };
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, deployments) = registered_service(store.clone()).await;
     let deploy = DeployRegistration {
         id: typed_id::generate("dep"),
         hash: "c".repeat(64),
@@ -1411,10 +1413,7 @@ async fn schedule_contract(store: Rc<OrmStore>) {
             catch_up: ScheduleCatchUp::Backfill { max: 3 },
         }],
     };
-    service
-        .activate_deploy(&app, &deploy, &test_snapshot())
-        .await
-        .unwrap();
+    deployments.activate(&service, &app, &deploy).await.unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
     let mut tx = store.begin().await.unwrap();
     let now = tx.now().await.unwrap();
@@ -1428,10 +1427,7 @@ async fn schedule_contract(store: Rc<OrmStore>) {
     .unwrap();
     tx.commit().await.unwrap();
     // Activation notification retries must not move a persisted due frontier.
-    service
-        .activate_deploy(&app, &deploy, &test_snapshot())
-        .await
-        .unwrap();
+    deployments.activate(&service, &app, &deploy).await.unwrap();
     let mut ticks = Vec::new();
     for _ in 0..3 {
         let service = service.clone();
@@ -1482,10 +1478,7 @@ async fn schedule_contract(store: Rc<OrmStore>) {
     skip.id = typed_id::generate("dep");
     skip.hash = "d".repeat(64);
     skip.schedules[0].overlap = ScheduleOverlap::SkipIfRunning;
-    service
-        .activate_deploy(&app, &skip, &test_snapshot())
-        .await
-        .unwrap();
+    deployments.activate(&service, &app, &skip).await.unwrap();
     let mut tx = store.begin().await.unwrap();
     let later = tx.now().await.unwrap();
     let first = at + 180_000 + 10;
@@ -1549,8 +1542,8 @@ async fn schedule_contract(store: Rc<OrmStore>) {
     disabled.id = typed_id::generate("dep");
     disabled.hash = "e".repeat(64);
     disabled.schedules.clear();
-    service
-        .activate_deploy(&app, &disabled, &test_snapshot())
+    deployments
+        .activate(&service, &app, &disabled)
         .await
         .unwrap();
     let mut tx = store.begin().await.unwrap();
@@ -1601,7 +1594,7 @@ async fn wait_on_topic(
     run.id
 }
 async fn broadcast_contract(store: Rc<OrmStore>) {
-    let (service, app, other) = registered_service(store.clone()).await;
+    let (service, app, other, _deployments) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let other_scope = service.for_app(other);
     let worker = super::WorkerIdentity::new("fanout-worker".into()).unwrap();
@@ -1739,7 +1732,7 @@ async fn ingress_contract(store: Rc<OrmStore>) {
         IngressReceipt, SignalAuthority, SignalTokenRequest,
     };
     use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
-    let (service, app, other) = registered_service(store.clone()).await;
+    let (service, app, other, _deployments) = registered_service(store.clone()).await;
     let worker = super::WorkerIdentity::new("ingress-worker".into()).unwrap();
     let scope = service.for_app(app.clone());
     let run = wait_on_topic(&service, &scope, &worker).await;

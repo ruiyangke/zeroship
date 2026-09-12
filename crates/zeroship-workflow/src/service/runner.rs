@@ -51,17 +51,17 @@ impl WorkerTasks {
     /// Read the deployment retained for this task's live execution claim.
     ///
     /// # Errors
-    /// Rejects stale claims and unavailable or corrupt snapshots.
+    /// Rejects stale claims and unavailable or corrupt artifacts.
     #[expect(
         clippy::future_not_send,
-        reason = "snapshot I/O runs on its owning compio thread"
+        reason = "executable I/O runs on its owning compio thread"
     )]
-    pub async fn snapshot(
+    pub async fn executable(
         &self,
         task: &TaskAssignment,
-    ) -> Result<super::ExecutableSnapshot, WorkflowServiceError> {
+    ) -> Result<zeroship_bundle::LoadedWorker, WorkflowServiceError> {
         self.service
-            .task_snapshot(&self.worker, &task.id, &task.token)
+            .task_executable(&self.worker, &task.id, &task.token)
             .await
     }
 }

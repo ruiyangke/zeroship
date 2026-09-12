@@ -83,26 +83,27 @@ extending an existing task lease. History and completion under an already live
 claim remain available. Deploy selection also comes from the trusted host,
 through `activate_deploy`, without querying platform tables.
 
-The [worker design](../../docs/proposals/2026-09-11-workflow-worker.md) requires
-workflow execution to reuse the app's existing deployed bundle, protected by
-durable platform retention metadata. The executable snapshot copies described
-below are being replaced. Local hosts already load the app's normal archive for
-HTTP and workflow execution; there is no separate workflow artifact input.
+Workflow execution reuses the app's existing deployed bundle under a durable
+deployment hold. `with_deployments` binds `AppDeployments`: the normal app blob
+store, a source budget and scoped retention clients supplied by the trusted host.
+The [worker design](../../docs/proposals/2026-09-11-workflow-worker.md) describes
+production composition and the remaining platform retention cutover.
 
-`activate_deploy` currently requires an `ExecutableSnapshot`: the built entry module,
-dependency sources and runtime schema descriptor. `with_snapshots` binds a
-`SnapshotStore` in customer object storage. Activation verifies the retained
-bytes before selecting the deployment; upload failure preserves the previous
-selection. A deployment identity cannot change its executable contents. The
-host serializes deployment selection updates. `retain_deploy` repairs retained
-code independently, preserving which deployment new runs and schedules select.
+`activate_deploy` accepts an immutable deployment registration. It acquires or
+reconciles a durable hold, verifies the app-scoped manifest and its referenced
+modules and descriptor, then selects the deployment under the customer app lock.
+Failed preparation preserves the previous selection. The host serializes
+deployment selection updates. `retain_deploy` verifies repaired artifacts
+without changing which deployment new runs and schedules select. Publication
+and repair use the normal app deployment store.
 
-Task snapshot reads resolve the deployment from the live customer journal claim,
-verify its recorded content hash and size, and recheck the lease after storage
-I/O. Missing or corrupt code parks that deployment; ordinary storage outages
-remain retryable. Repair advances a journal epoch so a stale failed read cannot
-revoke the repair. Snapshot I/O releases the app lock, allowing concurrent
-heartbeats and lifecycle operations. Missing code also leaves cancellation and
+Task executable reads resolve the deployment from a live journal claim, verify
+its canonical manifest identity and content-addressed blobs, and recheck the
+claim and hold after I/O. Missing or corrupt code parks that deployment;
+ordinary storage outages remain retryable. Repair advances an availability
+epoch so a stale failed read cannot revoke the repair. Artifact I/O releases
+the app lock, allowing concurrent heartbeats and lifecycle operations. Missing
+code also leaves cancellation and
 expired-lease cleanup available; compensation execution still needs its code.
 Schedules for unavailable code keep their due frontier without admitting runs
 or consuming occurrences. Repair resumes the configured catch-up behavior;
@@ -112,9 +113,9 @@ The Vite plugin's `dev-bundle.ts` builds local app archives through
 the deployment compiler and `.zship` packer, retaining static and dynamic module
 dependencies and the captured runtime descriptor. Each build discovers fresh
 declarations. The dev server publishes complete archives atomically; the CLI
-ingests them into its app bundle store. The engine currently also retains
-executable bytes before activation. Replacing that copy with app deployment
-reads, production worker composition and metadata bundle retention remain unfinished.
+ingests them into its app bundle store. HTTP and workflow execution load that
+same deployment. Production worker composition, background hold reconciliation
+and the platform retention cutover remain unfinished.
 
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,

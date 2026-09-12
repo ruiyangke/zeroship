@@ -6,6 +6,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use zeroship_bundle::LoadedWorker;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 use zeroship_runtime::{runtime::InnerProbe, EnvSnapshot, ModuleEntry, Runtime};
@@ -13,9 +14,9 @@ use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
         runner::{RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads, WorkerTasks},
-        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, ExecutableSnapshot,
-        HostPolicies, PayloadRead, PayloadSlot, PolicySnapshot, RequestId, SnapshotStore,
-        StagedPayload, TaskAssignment, TaskToken, WorkerIdentity, WorkflowService,
+        AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, HostPolicies, PayloadRead,
+        PayloadSlot, PolicySnapshot, RequestId, StagedPayload, TaskAssignment, TaskToken,
+        WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
@@ -74,7 +75,7 @@ impl WorkflowRuntimeLoader for Loader {
     async fn load(
         &self,
         assignment: &TaskAssignment,
-        snapshot: &ExecutableSnapshot,
+        executable: &LoadedWorker,
     ) -> Result<LoadedWorkflow, WorkflowServiceError> {
         assert!(!serde_json::to_string(&assignment.invocation)
             .unwrap()
@@ -83,17 +84,17 @@ impl WorkflowRuntimeLoader for Loader {
         zeroship_runtime::init_v8();
         let mut builder = Runtime::builder()
             .modules(
-                std::iter::once(snapshot.entry())
+                std::iter::once(executable.entry())
                     .chain(
-                        snapshot
+                        executable
                             .modules()
                             .keys()
                             .map(String::as_str)
-                            .filter(|name| *name != snapshot.entry()),
+                            .filter(|name| *name != executable.entry()),
                     )
                     .map(|specifier| ModuleEntry {
                         specifier: specifier.into(),
-                        source: snapshot.modules()[specifier].clone(),
+                        source: executable.modules()[specifier].clone(),
                     })
                     .collect(),
             )
@@ -117,6 +118,7 @@ impl WorkflowRuntimeLoader for Loader {
 }
 struct Fixture {
     directory: tempfile::TempDir,
+    deployments: deployment_fixture::Deployments,
     service: WorkflowService,
     app: AppWorkflows,
     loader: Rc<Loader>,
@@ -142,16 +144,9 @@ impl Fixture {
             zeroship_storage::LocalFs::new(dir.path().join("payloads")),
         )))
         .unwrap();
-        let service = service.with_snapshots(
-            SnapshotStore::new(
-                &zeroship_storage::StorageStore::from_backend(Arc::new(
-                    zeroship_storage::LocalFs::new(dir.path().join("snapshots")),
-                )),
-                1024 * 1024,
-            )
-            .unwrap(),
-        );
+        let deployments = deployment_fixture::Deployments::new().await;
         let app = AppId::mint();
+        let service = service.with_deployments(deployments.binding(&[&app]));
         service
             .register_app(
                 &app,
@@ -159,8 +154,8 @@ impl Fixture {
             )
             .await
             .unwrap();
-        service
-            .activate_deploy(
+        let declaration = deployments
+            .publish(
                 &app,
                 &DeployRegistration {
                     id: typed_id::generate("dep"),
@@ -168,17 +163,14 @@ impl Fixture {
                     workflows: ["Example".into()].into(),
                     schedules: Vec::new(),
                 },
-                &ExecutableSnapshot::new(
-                    "index.js".into(),
-                    [("index.js".into(), source.into())].into(),
-                    None,
-                )
-                .unwrap(),
+                &deployment_fixture::Sources::single(source),
             )
             .await
             .unwrap();
+        service.activate_deploy(&app, &declaration).await.unwrap();
         Self {
             directory: dir,
+            deployments,
             app: service.for_app(app),
             service: service.clone(),
             loader: Rc::new(Loader {
@@ -341,12 +333,12 @@ async fn oversized_input_never_initializes_the_creator_module() {
 struct UnavailablePayloads(Rc<WorkerTasks>);
 #[async_trait(?Send)]
 impl zeroship_workflow::service::runner::TaskPayloads for UnavailablePayloads {
-    async fn snapshot(
+    async fn executable(
         &self,
         task: &str,
         token: &TaskToken,
-    ) -> Result<ExecutableSnapshot, WorkflowServiceError> {
-        TaskPayloads::snapshot(self.0.as_ref(), task, token).await
+    ) -> Result<LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(self.0.as_ref(), task, token).await
     }
     async fn stage(
         &self,
@@ -437,12 +429,12 @@ struct UploadProbe {
 }
 #[async_trait(?Send)]
 impl TaskPayloads for UploadProbe {
-    async fn snapshot(
+    async fn executable(
         &self,
         task: &str,
         token: &TaskToken,
-    ) -> Result<ExecutableSnapshot, WorkflowServiceError> {
-        TaskPayloads::snapshot(&self.tasks, task, token).await
+    ) -> Result<LoadedWorker, WorkflowServiceError> {
+        TaskPayloads::executable(&self.tasks, task, token).await
     }
     async fn stage(
         &self,
@@ -826,11 +818,16 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     let mut fixture = Fixture::new("export default {};").await;
     let app = fixture.app.app_id().clone();
     let graph = |value: &str| {
-        ExecutableSnapshot::new(
-            "entry.js".into(),
-            [
-                ("dependency.js".into(), format!("export default {};", serde_json::to_string(value).unwrap())),
-                ("entry.js".into(), r"
+        deployment_fixture::Sources {
+        entry: "entry.js".into(),
+        modules: [
+            (
+                "dependency.js".into(),
+                format!("export default {};", serde_json::to_string(value).unwrap()),
+            ),
+            (
+                "entry.js".into(),
+                r"
                     import version from './dependency.js';
                     export class Example {
                         async run(trigger, step) {
@@ -839,16 +836,17 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
                             return { before, after: version };
                         }
                     }
-                ".into()),
-            ].into(),
-            None,
-        ).unwrap()
+                ".into(),
+            ),
+        ].into(),
+        descriptor: None,
+    }
     };
     let mut old_run = None;
     for (version, hash, wait) in [("original", 'b', true), ("replacement", 'c', false)] {
-        fixture
-            .service
-            .activate_deploy(
+        let declaration = fixture
+            .deployments
+            .publish(
                 &app,
                 &DeployRegistration {
                     id: typed_id::generate("dep"),
@@ -858,6 +856,11 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
                 },
                 &graph(version),
             )
+            .await
+            .unwrap();
+        fixture
+            .service
+            .activate_deploy(&app, &declaration)
             .await
             .unwrap();
         let run = fixture
@@ -893,15 +896,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     )
     .await
     .unwrap()
-    .with_snapshots(
-        SnapshotStore::new(
-            &zeroship_storage::StorageStore::from_backend(Arc::new(
-                zeroship_storage::LocalFs::new(fixture.directory.path().join("snapshots")),
-            )),
-            1024 * 1024,
-        )
-        .unwrap(),
-    );
+    .with_deployments(fixture.deployments.binding(&[&app]));
     service
         .register_app(
             &app,
@@ -951,14 +946,12 @@ async fn missing_executable_never_constructs_an_app_isolate() {
         .unwrap();
     let tasks = fixture
         .service
-        .tasks(WorkerIdentity::new("inspect-snapshot".into()).unwrap());
+        .tasks(WorkerIdentity::new("inspect-executable".into()).unwrap());
     let task = tasks.poll().await.unwrap().unwrap();
-    let objects = zeroship_storage::StorageStore::from_backend(Arc::new(
-        zeroship_storage::LocalFs::new(fixture.directory.path().join("snapshots")),
-    ))
-    .namespace(zeroship_storage::Namespace::platform("workflow-snapshots").unwrap());
-    assert!(objects
-        .delete(fixture.app.app_id().as_str(), &task.invocation.deploy_id)
+    assert!(fixture
+        .deployments
+        .source
+        .delete_manifest(&fixture.app.app_id().uuid(), &task.invocation.deploy_hash)
         .await
         .unwrap());
     tasks.release(&task.id, &task.token).await.unwrap();
@@ -1237,3 +1230,6 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
 
 #[path = "support/orm.rs"]
 mod orm_fixture;
+
+#[path = "../../../tests/fixtures/workflow_deployments.rs"]
+mod deployment_fixture;

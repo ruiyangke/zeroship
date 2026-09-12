@@ -1,0 +1,253 @@
+//! Real normal app artifacts and an independent ORM deployment catalog.
+
+#![allow(
+    dead_code,
+    reason = "fixture consumers exercise different deployment contracts"
+)]
+#![expect(
+    clippy::future_not_send,
+    reason = "fixtures use their owning compio thread"
+)]
+
+use std::{collections::BTreeMap, rc::Rc, sync::Arc};
+use zeroship_bundle::{
+    BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry, WorkerCode,
+};
+use zeroship_core::{app_id::AppId, schema_name::SchemaName, typed_id};
+use zeroship_data_orm::{
+    binding::DbBinding,
+    encryption::ProjectKeySource,
+    orm::{Database, Output},
+    value, ConnectOptions, Value,
+};
+use zeroship_workflow::{
+    deployment_holds::{
+        self, DeploymentHoldClient, DeploymentHolds, HoldGeneration, HoldReceipt, HoldScope,
+        ScopedDeploymentHolds,
+    },
+    service::{AppDeployments, DeployRegistration, WorkflowService},
+    WorkflowServiceError,
+};
+
+#[derive(Clone, Debug)]
+pub struct Sources {
+    pub entry: String,
+    pub modules: BTreeMap<String, String>,
+    pub descriptor: Option<serde_json::Value>,
+}
+impl Default for Sources {
+    fn default() -> Self {
+        Self {
+            entry: "index.js".into(),
+            modules: [("index.js".into(), "export default {};".into())].into(),
+            descriptor: None,
+        }
+    }
+}
+impl Sources {
+    pub fn single(source: &str) -> Self {
+        Self {
+            modules: [("index.js".into(), source.to_owned())].into(),
+            ..Self::default()
+        }
+    }
+    pub fn assert_loaded(&self, loaded: &zeroship_bundle::LoadedWorker) {
+        assert_eq!(loaded.entry(), self.entry);
+        assert_eq!(loaded.modules(), &self.modules);
+        assert_eq!(loaded.runtime_descriptor(), self.descriptor.as_ref());
+    }
+}
+
+pub struct Deployments {
+    directory: Arc<tempfile::TempDir>,
+    pub source: Arc<dyn BlobStore>,
+    pub database: Database,
+    pub ledger: DeploymentHolds,
+}
+impl Deployments {
+    pub async fn new() -> Self {
+        let directory = Arc::new(tempfile::tempdir().unwrap());
+        let source = Arc::new(LocalDiskBlobStore::new(directory.path().join("artifacts")).unwrap());
+        Self::with_source(directory, source).await
+    }
+    pub async fn with_source(
+        directory: Arc<tempfile::TempDir>,
+        source: Arc<dyn BlobStore>,
+    ) -> Self {
+        let path = directory.path().join("index.sqlite");
+        let ledger = DeploymentHolds::open_local(&path).await.unwrap();
+        let database = Database::connect(
+            DbBinding::new(
+                "platform",
+                "fixture-catalog",
+                SchemaName::new("main").unwrap(),
+            ),
+            ConnectOptions::new(
+                format!("sqlite:{}", path.display()),
+                ProjectKeySource::unavailable(),
+            ),
+            deployment_holds::collections().unwrap(),
+        )
+        .await
+        .unwrap();
+        Self {
+            directory,
+            source,
+            database,
+            ledger,
+        }
+    }
+    pub fn client(&self, app: &AppId) -> OwnedClient {
+        OwnedClient {
+            inner: self.ledger.for_scope(
+                HoldScope::new(
+                    app.clone(),
+                    format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid())),
+                )
+                .unwrap(),
+            ),
+            _directory: self.directory.clone(),
+        }
+    }
+    pub fn binding(&self, apps: &[&AppId]) -> AppDeployments {
+        apps.iter().fold(
+            AppDeployments::new(self.source.clone(), 1024 * 1024).unwrap(),
+            |binding, app| binding.with_hold_client(Rc::new(self.client(app))),
+        )
+    }
+    pub async fn publish(
+        &self,
+        app: &AppId,
+        declaration: &DeployRegistration,
+        sources: &Sources,
+    ) -> Result<DeployRegistration, WorkflowServiceError> {
+        let mut modules = std::collections::HashMap::new();
+        for (path, source) in &sources.modules {
+            let hash = zeroship_bundle::sha256_hex(source.as_bytes());
+            self.source
+                .put_blob(&hash, source.as_bytes())
+                .await
+                .unwrap();
+            modules.insert(path.clone(), hash);
+        }
+        let descriptor = if let Some(value) = &sources.descriptor {
+            let bytes = serde_json::to_vec(value).unwrap();
+            let hash = zeroship_bundle::sha256_hex(&bytes);
+            self.source.put_blob(&hash, &bytes).await.unwrap();
+            Some(RuntimeDescriptorEntry { hash })
+        } else {
+            None
+        };
+        let manifest = Manifest {
+            worker: Some(WorkerCode {
+                entry: sources.entry.clone(),
+                modules,
+            }),
+            runtime_descriptor: descriptor,
+            workflows: Some(serde_json::to_value(&declaration.workflows).unwrap()),
+            schedules: declaration
+                .schedules
+                .iter()
+                .map(|s| serde_json::to_value(s).unwrap())
+                .collect(),
+            ..Manifest::default()
+        };
+        let mut raw = serde_json::to_value(manifest).unwrap();
+        raw["fixture_deployment"] = serde_json::json!(declaration.id);
+        let hash =
+            zeroship_bundle::deployment_manifest_hash(&serde_json::to_vec(&raw).unwrap()).unwrap();
+        raw["deploy_hash"] = serde_json::json!(hash);
+        let encoded = serde_json::to_string(&raw).unwrap();
+        let records = self.database.collection("app_deploys").unwrap();
+        let Output::Rows { rows, .. } = records
+            .find(value!({"id":declaration.id}), value!({}))
+            .await
+            .unwrap()
+        else {
+            panic!("catalog rows");
+        };
+        if let Some(record) = rows.first() {
+            if record["app_id"] != value!(app.uuid().to_string())
+                || record["deploy_hash"] != value!(hash)
+            {
+                return Err(WorkflowServiceError::Conflict(
+                    "fixture deployment is immutable".into(),
+                ));
+            }
+        } else {
+            let mut document = value!({"id":declaration.id, "app_id":app.uuid().to_string(), "deploy_hash":hash,
+                "manifest_json":encoded, "activated_at":null, "retention_state":"available", "retention_lock":0});
+            document["created_at"] = Value::Timestamp(0);
+            records.insert(document).await.unwrap();
+        }
+        self.source
+            .put_manifest(&app.uuid(), &hash, encoded.as_bytes())
+            .await
+            .unwrap();
+        let mut registration = DeployRegistration {
+            hash,
+            ..declaration.clone()
+        };
+        registration
+            .schedules
+            .sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(registration)
+    }
+    pub async fn activate(
+        &self,
+        service: &WorkflowService,
+        app: &AppId,
+        declaration: &DeployRegistration,
+    ) -> Result<(), WorkflowServiceError> {
+        let deployment = self.publish(app, declaration, &Sources::default()).await?;
+        service.activate_deploy(app, &deployment).await
+    }
+    pub async fn deploy(&self, app: &AppId) -> DeployRegistration {
+        self.publish(
+            app,
+            &DeployRegistration {
+                id: typed_id::generate("dep"),
+                hash: String::new(),
+                workflows: ["Example".into()].into(),
+                schedules: vec![],
+            },
+            &Sources::default(),
+        )
+        .await
+        .unwrap()
+    }
+    pub async fn assert_held(&self, app: &AppId, deployment: &str) {
+        let tx = self.database.begin_transaction().await.unwrap();
+        assert!(matches!(
+            deployment_holds::fence_reclamation(&tx, app, deployment).await,
+            Err(WorkflowServiceError::Conflict(_))
+        ));
+        tx.rollback().await.unwrap();
+    }
+}
+
+#[derive(Clone)]
+pub struct OwnedClient {
+    inner: ScopedDeploymentHolds,
+    _directory: Arc<tempfile::TempDir>,
+}
+#[async_trait::async_trait(?Send)]
+impl DeploymentHoldClient for OwnedClient {
+    fn scope(&self) -> &HoldScope {
+        self.inner.scope()
+    }
+    async fn acquire(
+        &self,
+        deployment: &str,
+        generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.inner.acquire(deployment, generation).await
+    }
+    async fn release(
+        &self,
+        deployment: &str,
+        generation: HoldGeneration,
+    ) -> Result<HoldReceipt, WorkflowServiceError> {
+        self.inner.release(deployment, generation).await
+    }
+}

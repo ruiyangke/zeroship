@@ -3,9 +3,10 @@
 use crate::{LoadedWorkflow, WorkflowBinding, WorkflowRuntimeLoader};
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
+use zeroship_bundle::LoadedWorker;
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NativePlugin, Runtime, RuntimeLimits};
 use zeroship_workflow::{
-    service::{AppBackend, ExecutableSnapshot, TaskAssignment},
+    service::{AppBackend, TaskAssignment},
     WorkflowServiceError,
 };
 
@@ -58,25 +59,25 @@ impl WorkflowRuntimeLoader for AppRuntimeLoader {
     async fn load(
         &self,
         assignment: &TaskAssignment,
-        snapshot: &ExecutableSnapshot,
+        executable: &LoadedWorker,
     ) -> Result<LoadedWorkflow, WorkflowServiceError> {
         if assignment.invocation.app_id != self.backend.app_id().as_str() {
             return Err(WorkflowServiceError::PermissionDenied);
         }
-        let modules = std::iter::once(snapshot.entry())
+        let modules = std::iter::once(executable.entry())
             .chain(
-                snapshot
+                executable
                     .modules()
                     .keys()
                     .map(String::as_str)
-                    .filter(|name| *name != snapshot.entry()),
+                    .filter(|name| *name != executable.entry()),
             )
             .map(|name| ModuleEntry {
                 specifier: name.into(),
-                source: snapshot.modules()[name].clone(),
+                source: executable.modules()[name].clone(),
             })
             .collect();
-        let descriptor = snapshot
+        let descriptor = executable
             .runtime_descriptor()
             .map(serde_json::to_string)
             .transpose()

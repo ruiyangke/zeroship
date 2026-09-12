@@ -26,11 +26,11 @@ async fn postgres_independent_orm_hosts_serialize_admission_and_claims() {
 }
 
 async fn independent_hosts(first: OrmStore, second: OrmStore) {
-    let (first, app, _) = registered_service(Rc::new(first)).await;
+    let (first, app, _, _deployments) = registered_service(Rc::new(first)).await;
     let second = WorkflowService::open(Rc::new(second), first.policies.clone())
         .await
         .unwrap()
-        .with_snapshots(first.snapshots.clone().unwrap());
+        .with_deployments(first.deployments.clone().unwrap());
     let first_app = first.for_app(app.clone());
     let second_app = second.for_app(app);
     let request = RequestId::mint();
@@ -60,7 +60,7 @@ async fn independent_hosts(first: OrmStore, second: OrmStore) {
 async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
-    let (service, app, other) = registered_service(store).await;
+    let (service, app, other, _deployments) = registered_service(store).await;
     let client = service.for_app(app.clone()).into_backend(1024).unwrap();
     let other_client = service.for_app(other).into_backend(1024).unwrap();
     let (reply, result) = oneshot::channel();
@@ -97,7 +97,7 @@ async fn native_client_crosses_runtime_threads_without_losing_app_scope() {
 async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let store = Rc::new(sqlite_store(&directory.path().join("zs-workflow.sqlite")).await);
-    let (service, app, _) = registered_service(store.clone()).await;
+    let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let client = service.for_app(app).into_backend(1024).unwrap();
     let mut waiting = Vec::new();
     // Do not yield to the engine until the request queue rejects admission.
@@ -144,7 +144,7 @@ async fn cancelled_queued_requests_do_not_mutate_and_overload_is_bounded() {
 #[compio::test]
 async fn cancelling_a_database_wait_rolls_back_before_the_next_request() {
     let fixture = PostgresFixture::start().await;
-    let (service, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
+    let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let client = service.for_app(app.clone()).into_backend(1024).unwrap();
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();

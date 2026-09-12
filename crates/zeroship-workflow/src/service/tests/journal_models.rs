@@ -30,7 +30,7 @@ async fn postgres_model_journal_reads_preserve_scope_and_complete_history() {
 }
 
 async fn read_contract(store: Rc<OrmStore>) {
-    let (service, first_app, second_app) = registered_service(store).await;
+    let (service, first_app, second_app, _deployments) = registered_service(store).await;
     let shared_run = typed_id::new_workflow_run_id();
     let other_run = typed_id::new_workflow_run_id();
     let scopes = [

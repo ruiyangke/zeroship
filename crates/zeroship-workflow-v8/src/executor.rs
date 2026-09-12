@@ -2,6 +2,7 @@
 
 use async_trait::async_trait;
 use std::{future::Future, rc::Rc, task::Poll, time::Duration};
+use zeroship_bundle::LoadedWorker;
 use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
 use zeroship_workflow::{
     service::{
@@ -9,21 +10,21 @@ use zeroship_workflow::{
             ExecutionBudget, PreparedExecution, TaskExecution, TaskExecutor, TaskPayloadLimits,
             TaskPayloadReader, TaskPayloads,
         },
-        ExecutableSnapshot, TaskAssignment,
+        TaskAssignment,
     },
     WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
 };
 
 /// A trusted host binds the retained executable and the assignment's app context.
 ///
-/// The module graph and runtime descriptor must come from the supplied snapshot;
+/// The module graph and runtime descriptor must come from the supplied executable;
 /// runtime variables and native handles come from the host's trusted app binding.
 #[async_trait(?Send)]
 pub trait WorkflowRuntimeLoader {
     async fn load(
         &self,
         assignment: &TaskAssignment,
-        snapshot: &ExecutableSnapshot,
+        executable: &LoadedWorker,
     ) -> Result<LoadedWorkflow, WorkflowServiceError>;
 }
 
@@ -131,9 +132,9 @@ impl TaskExecution for V8Execution {
             self.invocation.trigger.input_ref = None;
         }
         let (factory, assignment) = &self.loader;
-        let snapshot = self.payloads.snapshot().await?;
+        let executable = self.payloads.executable().await?;
         self.budget.check()?;
-        self.loaded = Some(factory.load(assignment, &snapshot).await?);
+        self.loaded = Some(factory.load(assignment, &executable).await?);
         let loaded = self.loaded.as_ref().expect("loaded workflow runtime");
         let interrupt = loaded.runtime.interrupt_handle();
         self.budget.on_interrupt(move || interrupt.cancel())?;

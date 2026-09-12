@@ -101,8 +101,14 @@ fn options() -> WorkerOptions {
 async fn host(
     store: Rc<OrmStore>,
     dir: &Path,
-) -> (WorkflowService, AppWorkflows, Rc<Probe>, WorkflowWorker) {
-    let (service, app, _) = registered_service(store).await;
+) -> (
+    WorkflowService,
+    AppWorkflows,
+    Rc<Probe>,
+    WorkflowWorker,
+    Deployments,
+) {
+    let (service, app, _, deployments) = registered_service(store).await;
     let service = service
         .with_payload_storage(zeroship_storage::StorageStore::from_backend(Arc::new(
             zeroship_storage::LocalFs::new(dir),
@@ -116,7 +122,7 @@ async fn host(
     )
     .unwrap();
     let app = service.for_app(app);
-    (service, app, probe, worker)
+    (service, app, probe, worker, deployments)
 }
 async fn wait_for(mut condition: impl FnMut() -> bool) {
     compio::time::timeout(Duration::from_secs(5), async {
@@ -142,7 +148,7 @@ async fn postgres_worker_runs_bounded_slots_and_retries_without_request_isolates
     capacity_contract(Rc::new(fixture.store.clone()), dir.path()).await;
 }
 async fn capacity_contract(store: Rc<OrmStore>, dir: &Path) {
-    let (service, app, probe, mut worker) = host(store, dir).await;
+    let (service, app, probe, mut worker, deployments) = host(store, dir).await;
     let mut runs = Vec::new();
     for _ in 0..6 {
         runs.push(
@@ -173,7 +179,7 @@ async fn capacity_contract(store: Rc<OrmStore>, dir: &Path) {
     assert_eq!(probe.maximum.get(), options().task_slots);
     assert_eq!(probe.active.get(), 0);
     assert_eq!(probe.started.borrow().len(), runs.len());
-    maintenance_while_busy(&service, &app, &probe, &mut worker).await;
+    maintenance_while_busy(&deployments, &service, &app, &probe, &mut worker).await;
 }
 
 #[expect(
@@ -181,6 +187,7 @@ async fn capacity_contract(store: Rc<OrmStore>, dir: &Path) {
     reason = "the contract follows staging and scheduling through concurrent execution"
 )]
 async fn maintenance_while_busy(
+    deployments: &Deployments,
     service: &WorkflowService,
     app: &AppWorkflows,
     probe: &Probe,
@@ -191,8 +198,9 @@ async fn maintenance_while_busy(
         IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
         WorkerIdentity,
     };
-    service
-        .activate_deploy(
+    deployments
+        .activate(
+            service,
             app.app_id(),
             &DeployRegistration {
                 id: typed_id::generate("dep"),
@@ -210,7 +218,6 @@ async fn maintenance_while_busy(
                     catch_up: ScheduleCatchUp::default(),
                 }],
             },
-            &test_snapshot(),
         )
         .await
         .unwrap();
@@ -314,7 +321,7 @@ async fn worker_shutdown_joins_executions_before_releasing_claims() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, probe, mut worker) =
+    let (service, app, probe, mut worker, _deployments) =
         host(Rc::new(sqlite_store(&path).await), dir.path()).await;
     for _ in 0..3 {
         app.start(&RequestId::mint(), "Example", StartOptions::default())
@@ -383,7 +390,8 @@ async fn stopped_worker_does_not_claim_new_work() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (_, app, probe, mut worker) = host(Rc::new(sqlite_store(&path).await), dir.path()).await;
+    let (_, app, probe, mut worker, _deployments) =
+        host(Rc::new(sqlite_store(&path).await), dir.path()).await;
     let run = app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -398,7 +406,8 @@ async fn worker_refuses_missing_storage_and_invalid_capacity_before_claiming() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _) = registered_service(Rc::new(sqlite_store(&path).await)).await;
+    let (service, app, _, _deployments) =
+        registered_service(Rc::new(sqlite_store(&path).await)).await;
     let identity = WorkerIdentity::new("invalid-host".into()).unwrap();
     let executor = Rc::new(Executor(Rc::new(Probe::default())));
     assert!(WorkflowWorker::new(

@@ -3,7 +3,7 @@ CREATE TABLE "__zeroship_workflow_schema_version" ("id" TEXT PRIMARY KEY NOT NUL
 
 CREATE TABLE "__zeroship_workflow_app_state" ("app_id" TEXT PRIMARY KEY NOT NULL, "signal_epoch" INTEGER NOT NULL, "last_polled_at" INTEGER NOT NULL DEFAULT 0, "subscription_sequence" INTEGER NOT NULL DEFAULT 0);
 
-CREATE TABLE "__zeroship_workflow_deploys" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "hash" TEXT NOT NULL, "manifest" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "active" INTEGER NOT NULL, "state" TEXT NOT NULL, "snapshot_hash" TEXT NOT NULL, "snapshot_size" INTEGER NOT NULL, "snapshot_epoch" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_deploys_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_deploys_pkey" PRIMARY KEY (app_id, id));
+CREATE TABLE "__zeroship_workflow_deploys" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "hash" TEXT NOT NULL, "manifest" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "active" INTEGER NOT NULL, "state" TEXT NOT NULL, "availability_epoch" INTEGER NOT NULL, CONSTRAINT "__zeroship_workflow_deploys_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_deploys_pkey" PRIMARY KEY (app_id, id));
 
 CREATE UNIQUE INDEX IF NOT EXISTS "__zeroship_workflow_deploy_hash_identity" ON "__zeroship_workflow_deploys" ("app_id", "hash");
 
@@ -110,4 +110,4 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_payload_ref_idx" ON "__zeroship_
 CREATE TABLE "__zeroship_workflow_outbox" ("app_id" TEXT NOT NULL, "id" TEXT NOT NULL, "kind" TEXT NOT NULL, "payload" TEXT NOT NULL, "created_at" INTEGER NOT NULL, "delivered_at" INTEGER, CONSTRAINT "__zeroship_workflow_outbox_app" FOREIGN KEY (app_id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT, CONSTRAINT "__zeroship_workflow_outbox_pkey" PRIMARY KEY (app_id, id));
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_outbox_delivery_idx" ON "__zeroship_workflow_outbox" ("delivered_at", "created_at");
-INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '456781ffc924ede4260a83e086ddb3260a23716c5df5924f57c5f20fa5d004c4');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '8e643225d49614a2e0997021e62ffe35be5d02e21ded37d65e7dc9a5305e11d5');

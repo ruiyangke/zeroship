@@ -3,12 +3,14 @@
 mod app;
 mod backend;
 mod bundle;
-pub use bundle::BundleExecutable;
 pub use backend::AppBackend;
+pub use bundle::BundleExecutable;
 pub mod capability;
 mod control;
-mod deploys;
 mod deployment_retention;
+mod deployments;
+mod deploys;
+pub use deployments::AppDeployments;
 mod frontier;
 mod ingress;
 pub use ingress::{IngressReceipt, RevokedSignals, SignalAuthority, SignalTokenRequest};
@@ -21,12 +23,10 @@ pub use policy::{HostPolicies, PolicySnapshot};
 pub mod runner;
 mod schedules;
 mod signals;
-mod snapshots;
 pub use schedules::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
 };
 pub use signals::AcceptedBroadcast;
-pub use snapshots::{ExecutableSnapshot, SnapshotStore};
 mod tasks;
 pub use app::{AppWorkflows, WorkflowService};
 pub mod schema;

@@ -5,6 +5,7 @@ edition = "2021"
 description = "V8 binding and local executor for zeroship workflows"
 
 [dependencies]
+zeroship-bundle = { workspace = true }
 zeroship-workflow = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
