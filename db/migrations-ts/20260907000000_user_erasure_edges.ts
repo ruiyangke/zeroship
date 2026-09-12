@@ -41,7 +41,7 @@ import { table } from "@zeroship/migrate";
 //   identity_links      (provider, provider_subject) -> principal. This IS the
 //                       human's external identity. It cannot outlive them, and
 //                       leaving it would let a later sign-in through the same
-//                       provider subject resolve to a deleted uuid. CASCADE.
+//                       provider subject resolve to a deleted user. CASCADE.
 //
 //   principal_grants    (principal_id, grant_name) is the scope ceiling the CLI
 //                       is issued against. A grant with no holder is authority
@@ -77,11 +77,8 @@ import { table } from "@zeroship/migrate";
 // sole owner of a live one -- a refusal the person who asked can act on, ahead
 // of the window rather than inside it.
 //
-// NO COLLATION REGISTRATION. Every typed-id text column and every foreign-key
-// copy of one needs bytewise ordering
-// (db/migrations-ts/20260831000001_sortable_entity_id_collations.ts). Every
-// column this migration touches is a `uuid`, and `submitted_by` is altered in
-// nullability only -- no text column is added, retyped or newly referenced.
+// NO COLLATION REGISTRATION. These columns already carry their internal `usr`
+// storage contract; this migration changes only constraints and nullability.
 export default {
   name: "user_erasure_edges",
   schema() {

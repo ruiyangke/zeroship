@@ -36,7 +36,7 @@ import { createFunction, grant, now, raw, t, table, uuidV4 } from "@zeroship/mig
 //
 // ---- the billing subject stops being a human ----
 //
-// `creator_id` was a `users.id` uuid: the billing and Connect roots pointed at
+// `creator_id` was a `users.id` value: the billing and Connect roots pointed at
 // it directly and every child reached it through one of them. The subject is
 // now `organizations.id`, which is TEXT, so this is a retarget, a rename AND a
 // type change all at once. What it buys immediately:
