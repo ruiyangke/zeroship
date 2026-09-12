@@ -90,7 +90,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
                 &slug,
                 &"Shared",
                 &format!("billing-{tag}@zeroship.test"),
-                &victim.id,
+                &victim.id.as_str(),
             ],
         )
         .await
@@ -98,16 +98,16 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
         db.execute(
             "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
          VALUES ($1, $2, 'owner'), ($1, $3, 'owner')",
-            &[&organization_id, &victim.id, &co_owner.id],
+            &[&organization_id, &victim.id.as_str(), &co_owner.id.as_str()],
         )
         .await
         .expect("seat two owners");
 
-        users::request_deletion(&mut db, victim.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &victim.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, victim.id).await;
+        backdate_schedule(&db, &victim.id).await;
 
         // The departure, in the shape `leave_organization` takes it: the
         // organization row lock FIRST, then the delete under its own owners-remain
@@ -130,7 +130,7 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
                 AND (m.role <> 'owner' \
                      OR (SELECT count(*) FROM zeroship.organization_members owners \
                           WHERE owners.organization_id = $1 AND owners.role = 'owner') > 1)",
-                &[&organization_id, &co_owner.id],
+                &[&organization_id, &co_owner.id.as_str()],
             )
             .await
             .expect("the departure runs");
@@ -168,14 +168,17 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
             .await
             .expect("count owners");
         let victim_row = db
-            .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&victim.id])
+            .query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&victim.id.as_str()],
+            )
             .await
             .expect("read the victim");
-        let details = audit_detail(&db, victim.id, "account_erasure_failed").await;
+        let details = audit_detail(&db, &victim.id, "account_erasure_failed").await;
         let asked = mock.asked();
 
         assert!(
-            asked.contains(&victim.id.to_string()),
+            asked.contains(&victim.id.as_str().to_owned()),
             "the preflight really answered, and answered clear, before the erasure"
         );
         assert!(
@@ -272,7 +275,7 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
                 &slug,
                 &"Handover",
                 &format!("billing-{tag}@zeroship.test"),
-                &sitting_owner.id,
+                &sitting_owner.id.as_str(),
             ],
         )
         .await
@@ -282,16 +285,20 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
         db.execute(
             "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
          VALUES ($1, $2, 'developer'), ($1, $3, 'owner')",
-            &[&organization_id, &victim.id, &sitting_owner.id],
+            &[
+                &organization_id,
+                &victim.id.as_str(),
+                &sitting_owner.id.as_str(),
+            ],
         )
         .await
         .expect("seat one owner and one developer");
 
-        users::request_deletion(&mut db, victim.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &victim.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, victim.id).await;
+        backdate_schedule(&db, &victim.id).await;
 
         // The handover, in the shape `transfer_ownership` takes it: the
         // organization row lock FIRST, then promote the incoming owner and step the
@@ -312,7 +319,11 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
                 "UPDATE zeroship.organization_members \
                 SET role = 'owner', changed_at = NOW(), changed_by = $3 \
               WHERE organization_id = $1 AND user_id = $2",
-                &[&organization_id, &victim.id, &sitting_owner.id],
+                &[
+                    &organization_id,
+                    &victim.id.as_str(),
+                    &sitting_owner.id.as_str(),
+                ],
             )
             .await
             .expect("promote the incoming owner");
@@ -322,7 +333,11 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
                 "UPDATE zeroship.organization_members \
                 SET role = 'admin', changed_at = NOW(), changed_by = $3 \
               WHERE organization_id = $1 AND user_id = $2",
-                &[&organization_id, &sitting_owner.id, &sitting_owner.id],
+                &[
+                    &organization_id,
+                    &sitting_owner.id.as_str(),
+                    &sitting_owner.id.as_str(),
+                ],
             )
             .await
             .expect("step the outgoing owner down");
@@ -356,14 +371,17 @@ async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless
             .await
             .expect("count owners");
         let victim_row = db
-            .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&victim.id])
+            .query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&victim.id.as_str()],
+            )
             .await
             .expect("read the victim");
-        let details = audit_detail(&db, victim.id, "account_erasure_failed").await;
+        let details = audit_detail(&db, &victim.id, "account_erasure_failed").await;
         let asked = mock.asked();
 
         assert!(
-            asked.contains(&victim.id.to_string()),
+            asked.contains(&victim.id.as_str().to_owned()),
             "the preflight really answered, and answered clear, before the erasure"
         );
         assert!(

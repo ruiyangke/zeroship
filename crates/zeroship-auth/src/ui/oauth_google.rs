@@ -111,8 +111,7 @@ pub async fn start(
     let mut resp = HttpResponse::Found();
     resp.header(
         LOCATION,
-        HeaderValue::from_str(&auth_start.url)
-            .unwrap_or_else(|_| HeaderValue::from_static("/")),
+        HeaderValue::from_str(&auth_start.url).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
     resp.header(
         SET_COOKIE,
@@ -155,7 +154,10 @@ pub async fn callback(
         .await;
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
-    let Some(stash) = OAuthStash::decode(&stash_blob, cfg.settings.stash_signing_key.expose_str().as_bytes()) else {
+    let Some(stash) = OAuthStash::decode(
+        &stash_blob,
+        cfg.settings.stash_signing_key.expose_str().as_bytes(),
+    ) else {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -216,32 +218,27 @@ pub async fn callback(
     }
 
     // Token exchange + ID-token verify.
-    let id = match google::complete_callback(
-        &cfg,
-        code,
-        &stash.verifier,
-        &stash.nonce,
-        jwks.as_ref(),
-    )
-    .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::warn!(error = %e, "google complete_callback failed");
-            audit::emit(
-                db.as_ref(),
-                &AuditEvent {
-                    event_type: "oauth_callback_failure",
-                    outcome: "failure",
-                    auth_method: Some(PROVIDER),
-                    detail: json!({ "reason": "verify_failed", "error": e.to_string() }),
-                    ..AuditEvent::from_request(&req)
-                },
-            )
-            .await;
-            return render_error_clearing(PublicErrorMessage::PleaseTryAgain, &cfg);
-        }
-    };
+    let id =
+        match google::complete_callback(&cfg, code, &stash.verifier, &stash.nonce, jwks.as_ref())
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::warn!(error = %e, "google complete_callback failed");
+                audit::emit(
+                    db.as_ref(),
+                    &AuditEvent {
+                        event_type: "oauth_callback_failure",
+                        outcome: "failure",
+                        auth_method: Some(PROVIDER),
+                        detail: json!({ "reason": "verify_failed", "error": e.to_string() }),
+                        ..AuditEvent::from_request(&req)
+                    },
+                )
+                .await;
+                return render_error_clearing(PublicErrorMessage::PleaseTryAgain, &cfg);
+            }
+        };
 
     // Build the ResolvedProfile. We trust Google for email verification
     // when the email_verified claim is true AND either the address is a
@@ -309,10 +306,7 @@ pub async fn callback(
             );
             // Clear the stash on the way out — the dance is over from the
             // federation handler's perspective.
-            resp.header(
-                SET_COOKIE,
-                clear_stash_cookie(google_stash_cookie_name()),
-            );
+            resp.header(SET_COOKIE, clear_stash_cookie(google_stash_cookie_name()));
             return resp.finish();
         }
     };
@@ -322,12 +316,12 @@ pub async fn callback(
     // the eligibility gate — otherwise a victim locked by password-guessing
     // could never recover via OAuth. Best-effort; the gate still enforces hard
     // `disabled_at`.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "google clear lockout failed");
+    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "google clear lockout failed");
     }
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %user_id, "google callback eligibility check failed");
+            tracing::error!(error = %e, user_id = user_id.as_str(), "google callback eligibility check failed");
             return render_error_clearing(PublicErrorMessage::ContactSupport, &cfg);
         }
         audit::emit(
@@ -346,8 +340,8 @@ pub async fn callback(
     }
 
     // Best-effort: bump last_login_at on the user row.
-    if let Err(e) = users::touch_last_login(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "touch_last_login failed");
     }
 
     // IdP session row at auth.zeroship.ai. Same lifetime + amr/acr shape
@@ -355,7 +349,7 @@ pub async fn callback(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id,
+            user_id: user_id.clone(),
             auth_method: PROVIDER,
             amr: vec!["oauth".into()],
             acr: Some(ACR_GOOGLE),
@@ -393,14 +387,8 @@ pub async fn callback(
     let native_return_to =
         return_to_after_prompt_interaction(native_return_to, &["login", "select_account"]);
     let mut resp = return_to::see_other(&native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
-    resp.header(
-        SET_COOKIE,
-        clear_stash_cookie(google_stash_cookie_name()),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
+    resp.header(SET_COOKIE, clear_stash_cookie(google_stash_cookie_name()));
     resp.header("cache-control", "no-store");
     resp.finish()
 }
@@ -411,8 +399,8 @@ fn build_resolved_profile<'a>(
     id: &'a GoogleIdentity,
     raw_profile: Option<&serde_json::Value>,
 ) -> ResolvedProfile<'a> {
-    let provider_trusted_for_email = id.email_verified
-        && (id.email.ends_with("@gmail.com") || id.hd.is_some());
+    let provider_trusted_for_email =
+        id.email_verified && (id.email.ends_with("@gmail.com") || id.hd.is_some());
     ResolvedProfile {
         provider: PROVIDER,
         subject: &id.subject,
@@ -440,10 +428,7 @@ fn render_error(message: PublicErrorMessage) -> HttpResponse {
 /// Same as [`render_error`] but also clears the stash cookie. Use on the
 /// callback path so an aborted dance doesn't leave a stale stash on the
 /// browser.
-fn render_error_clearing(
-    message: PublicErrorMessage,
-    _cfg: &AuthConfig,
-) -> HttpResponse {
+fn render_error_clearing(message: PublicErrorMessage, _cfg: &AuthConfig) -> HttpResponse {
     let page = ErrorPage {
         message,
         error_code: message.error_code(),
@@ -453,10 +438,7 @@ fn render_error_clearing(
         .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(
-        SET_COOKIE,
-        clear_stash_cookie(google_stash_cookie_name()),
-    );
+    resp.header(SET_COOKIE, clear_stash_cookie(google_stash_cookie_name()));
     resp.body(body)
 }
 

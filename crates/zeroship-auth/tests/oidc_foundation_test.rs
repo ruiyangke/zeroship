@@ -12,7 +12,6 @@ use ntex::web;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::{discovery_metadata, jwks_document};
@@ -56,7 +55,10 @@ fn test_config(public_url: &str) -> AuthConfig {
     cfg
 }
 
-fn access_mint<'a>(user_id: &'a str, scopes: &'a [String]) -> AccessTokenMint<'a> {
+fn access_mint<'a>(
+    user_id: &'a zeroship_core::UserId,
+    scopes: &'a [String],
+) -> AccessTokenMint<'a> {
     AccessTokenMint {
         user_id,
         sector: SECTOR_A,
@@ -162,10 +164,9 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
         // with a live session rather than a fabricated uuid. That is the fence, not
         // fixture ceremony: the id below is the one the creating statement returned.
         let (proof, person_id) = common::validated_session(&db, "oidc-foundation").await;
-        let user_id = person_id.to_string();
         let scopes = scopes();
         let token = issuer
-            .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
+            .issue_access_token(&db, &access_mint(&person_id, &scopes), &proof)
             .await
             .expect("issue access token");
         let jwks = jwks_document(&db).await.expect("served JWKS document");
@@ -176,7 +177,7 @@ async fn access_token_roundtrip_served_jwks_public_only_and_issuer_consistency()
         let claims =
             verify_access_with_jwks(&jwks, &token, issuer.issuer(), RESOURCE_AUD).expect("verify");
         assert_eq!(claims.iss, issuer.issuer());
-        assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
+        assert_eq!(claims.sub, issuer.pairwise_subject(&person_id, SECTOR_A));
         assert_eq!(claims.aud, RESOURCE_AUD);
         assert_ne!(claims.aud, claims.client_id);
         assert_eq!(claims.client_id, CLIENT_ID);
@@ -315,10 +316,9 @@ async fn id_token_has_nonce_and_correct_at_hash() {
             .await
             .expect("publish signing key");
         let (proof, person_id) = common::validated_session(&db, "oidc-id-token").await;
-        let user_id = person_id.to_string();
         let scopes = scopes();
         let access_token = issuer
-            .issue_access_token(&db, &access_mint(&user_id, &scopes), &proof)
+            .issue_access_token(&db, &access_mint(&person_id, &scopes), &proof)
             .await
             .expect("issue access token");
         let amr = vec!["pwd".to_string(), "otp".to_string()];
@@ -326,7 +326,7 @@ async fn id_token_has_nonce_and_correct_at_hash() {
             .issue_id_token(
                 &db,
                 &IdTokenMint {
-                    user_id: &user_id,
+                    user_id: &person_id,
                     sector: SECTOR_A,
                     client_id: CLIENT_ID,
                     sid: "sid-foundation",
@@ -349,7 +349,7 @@ async fn id_token_has_nonce_and_correct_at_hash() {
         let claims =
             verify_id_with_jwks(&local_jwks(&issuer), &id_token, issuer.issuer(), CLIENT_ID)
                 .expect("verify id token");
-        assert_eq!(claims.sub, issuer.pairwise_subject(&user_id, SECTOR_A));
+        assert_eq!(claims.sub, issuer.pairwise_subject(&person_id, SECTOR_A));
         assert_eq!(claims.sid, "sid-foundation");
         assert_eq!(claims.nonce, "nonce-123");
         assert_eq!(claims.at_hash, oidc_at_hash(&access_token));
@@ -363,7 +363,7 @@ async fn id_token_has_nonce_and_correct_at_hash() {
 #[test]
 fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
     let issuer = test_issuer();
-    let user_id = Uuid::new_v4().to_string();
+    let user_id = zeroship_core::UserId::mint();
     let now = chrono::Utc::now().timestamp();
     let claims = json!({
         "iss": issuer.issuer(),
@@ -402,7 +402,7 @@ fn alg_pin_rejects_alg_none_and_wrong_alg_tokens() {
 #[test]
 fn pairwise_subject_differs_across_sectors_for_same_user() {
     let issuer = test_issuer();
-    let user_id = Uuid::new_v4().to_string();
+    let user_id = zeroship_core::UserId::mint();
     let a = issuer.pairwise_subject(&user_id, SECTOR_A);
     let b = issuer.pairwise_subject(&user_id, SECTOR_B);
     assert_ne!(a, b);

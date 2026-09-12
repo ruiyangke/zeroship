@@ -355,7 +355,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
         let session = session_store::create(
             &pg,
             &session_store::CreateSession {
-                user_id: user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".into()],
                 acr: None,
@@ -666,7 +666,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
         let session = session_store::create(
             &pg,
             &session_store::CreateSession {
-                user_id: user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".into()],
                 acr: None,
@@ -816,7 +816,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
         let session = session_store::create(
             &pg,
             &session_store::CreateSession {
-                user_id: user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".into()],
                 acr: None,
@@ -906,10 +906,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
         assert_eq!(claims.aud, "zeroship");
         assert_eq!(claims.scope, "apps:read");
         assert_eq!(claims.exp - claims.iat, ACCESS_TOKEN_TTL_SECS);
-        assert_eq!(
-            claims.sub,
-            issuer.pairwise_subject(&user.id.to_string(), &client_id)
-        );
+        assert_eq!(claims.sub, issuer.pairwise_subject(&user.id, &client_id));
         assert_eq!(
             jsonwebtoken::decode_header(&token.access_token)
                 .unwrap()
@@ -963,13 +960,18 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
             "UPDATE zeroship.device_grants \
              SET principal_id = $1, sid = $2, auth_credential_version = $3, status = 'approved' \
              WHERE device_code_hash = $4",
-            &[&user.id, &sid, &user.credential_version, &device_code_hash],
+            &[
+                &user.id.as_str(),
+                &sid,
+                &user.credential_version,
+                &device_code_hash,
+            ],
         )
         .await
         .expect("approve native device grant");
 
         let mut deletion = database.connect_as_auth().await;
-        let deletion_request = users::request_deletion(&mut deletion, user.id, 30)
+        let deletion_request = users::request_deletion(&mut deletion, &user.id, 30)
             .await
             .expect("request account deletion")
             .expect("device grant owner exists");
@@ -1074,7 +1076,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
         let session = session_store::create(
             &pg,
             &session_store::CreateSession {
-                user_id: user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".into()],
                 acr: None,
@@ -1121,7 +1123,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
                 "SELECT COUNT(*)::BIGINT AS n \
                  FROM zeroship.audit_events \
                  WHERE actor_user_id = $1 AND event_type = 'device_grant'",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("count device grant audit rows");
@@ -1172,7 +1174,7 @@ async fn device_post_requires_csrf_token() {
         let session = session_store::create(
             &pg,
             &session_store::CreateSession {
-                user_id: user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".into()],
                 acr: None,
@@ -1215,7 +1217,7 @@ async fn device_post_requires_csrf_token() {
                 "SELECT COUNT(*)::BIGINT AS n \
                  FROM zeroship.audit_events \
                  WHERE actor_user_id = $1 AND event_type = 'device_grant'",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("count device grant audit rows after no-csrf attempt");
@@ -1262,7 +1264,7 @@ async fn device_post_requires_csrf_token() {
                 "SELECT COUNT(*)::BIGINT AS n \
                  FROM zeroship.audit_events \
                  WHERE actor_user_id = $1 AND event_type = 'device_grant'",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("count device grant audit rows after csrf attempt");

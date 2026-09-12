@@ -135,7 +135,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
         ]
     );
     assert!(rows[0].get::<_, bool>("skip_consent"));
-    assert!(rows[0].get::<_, Option<Uuid>>("created_by").is_none());
+    assert!(rows[0].get::<_, Option<String>>("created_by").is_none());
     assert!(rows[0].get::<_, bool>("refresh_allowed"));
     assert_eq!(
         rows[0].get::<_, String>("token_endpoint_auth_method"),

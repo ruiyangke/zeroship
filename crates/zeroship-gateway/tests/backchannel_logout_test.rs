@@ -46,6 +46,7 @@ use ntex::web::{self, test, HttpResponse};
 use serde::Serialize;
 use serde_json::json;
 use uuid::Uuid;
+use zeroship_core::UserId;
 use zeroship_gateway::{
     anchors, backchannel_logout,
     blob_cache::{BlobCache, DiskBlobCache},
@@ -92,16 +93,25 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     // revokes ONLY the target app's session — never the other app's (RLS
     // tenant scope; the former cross-tenant `revoke_all_for_user` was removed).
     let target_user_id = insert_user(&client, "gateway-bcl-target").await;
-    let target_user = target_user_id.to_string();
     let app_a = Uuid::new_v4();
     let app_b = Uuid::new_v4();
-    seed_app(&client, app_a, &format!("bcl-a-{}", Uuid::new_v4().simple())).await;
-    seed_app(&client, app_b, &format!("bcl-b-{}", Uuid::new_v4().simple())).await;
+    seed_app(
+        &client,
+        app_a,
+        &format!("bcl-a-{}", Uuid::new_v4().simple()),
+    )
+    .await;
+    seed_app(
+        &client,
+        app_b,
+        &format!("bcl-b-{}", Uuid::new_v4().simple()),
+    )
+    .await;
 
     let s_a = create(
         &mut client,
         &NewSession {
-            user_id: &target_user,
+            user_id: &target_user_id,
             sid: None,
             app_id: app_a,
             email: Some("alice@zeroship.test"),
@@ -119,7 +129,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     let s_b = create(
         &mut client,
         &NewSession {
-            user_id: &target_user,
+            user_id: &target_user_id,
             sid: None,
             app_id: app_b,
             email: Some("alice@zeroship.test"),
@@ -136,11 +146,10 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
 
     // One session for an unrelated user at app_a — must NOT be touched.
     let other_user_id = insert_user(&client, "gateway-bcl-other").await;
-    let other_user = other_user_id.to_string();
     let s_other = create(
         &mut client,
         &NewSession {
-            user_id: &other_user,
+            user_id: &other_user_id,
             sid: None,
             app_id: app_a,
             email: Some("bob@zeroship.test"),
@@ -161,10 +170,13 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     assert!(is_live(&client, s_other.id, app_a).await);
 
     // Revoke the target user's sessions AT app_a only.
-    let count = revoke_app_sessions_for_user(&mut client, app_a, &target_user)
+    let count = revoke_app_sessions_for_user(&mut client, app_a, &target_user_id)
         .await
         .expect("revoke_app_sessions_for_user");
-    assert_eq!(count, 1, "expected exactly 1 session revoked (target user @ app_a), got {count}");
+    assert_eq!(
+        count, 1,
+        "expected exactly 1 session revoked (target user @ app_a), got {count}"
+    );
 
     // The target session at app_a must now fail validation.
     assert!(
@@ -185,38 +197,46 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     );
 
     // Idempotent — running it again touches no rows.
-    let again = revoke_app_sessions_for_user(&mut client, app_a, &target_user)
+    let again = revoke_app_sessions_for_user(&mut client, app_a, &target_user_id)
         .await
         .expect("revoke_app_sessions_for_user idempotent");
-    assert_eq!(again, 0, "second revoke must touch 0 rows (filter on revoked_at IS NULL)");
+    assert_eq!(
+        again, 0,
+        "second revoke must touch 0 rows (filter on revoked_at IS NULL)"
+    );
 
     // Cleanup (best effort).
     for id in [s_a.id, s_b.id, s_other.id] {
         client
-            .execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&id])
+            .execute(
+                "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
+                &[&id],
+            )
             .await
             .ok();
     }
-    for id in [target_user_id, other_user_id] {
+    for id in [&target_user_id, &other_user_id] {
         client
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&id])
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&id.as_str()])
             .await
             .ok();
     }
 }
 
-async fn insert_user(client: &Client, label: &str) -> Uuid {
+async fn insert_user(client: &Client, label: &str) -> UserId {
+    let user_id = UserId::mint();
     let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
     let rows = client
         .query(
-            "INSERT INTO zeroship.users (email, name, email_verified_at)
-             VALUES ($1, $2, NOW())
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at)
+             VALUES ($1, $2, $3, NOW())
              RETURNING id",
-            &[&email, &label],
+            &[&user_id.as_str(), &email, &label],
         )
         .await
         .expect("insert user");
-    rows[0].get("id")
+    let stored = rows[0].get::<_, String>("id");
+    UserId::parse(&stored).expect("database returns the seeded user id")
 }
 
 /// Seed a real `zeroship.apps` row with the given stable UUID so the
@@ -228,11 +248,7 @@ async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
              SELECT $1, $2, 'free', p.id, p.organization_id \
                FROM zeroship.projects p WHERE p.id = $3",
-            &[
-                &app_id,
-                &name,
-                &project_id
-            ],
+            &[&app_id, &name, &project_id],
         )
         .await
         .expect("seed app");
@@ -266,7 +282,12 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
 /// machinery — the ciphertext is opaque here; the OP revoke fan-out the BCL
 /// performs is best-effort and may fail harmlessly in the test). Returns the
 /// new anchor id.
-async fn seed_anchor(client: &Client, app_id: Uuid, client_id: &str, global_user_id: Uuid) -> Uuid {
+async fn seed_anchor(
+    client: &Client,
+    app_id: Uuid,
+    client_id: &str,
+    global_user_id: &UserId,
+) -> Uuid {
     let scopes: Vec<String> = vec!["openid".into()];
     let refresh_enc: Vec<u8> = vec![1, 2, 3, 4];
     let rows = client
@@ -279,7 +300,7 @@ async fn seed_anchor(client: &Client, app_id: Uuid, client_id: &str, global_user
             &[
                 &app_id,
                 &client_id,
-                &global_user_id,
+                &global_user_id.as_str(),
                 &refresh_enc,
                 &format!("fam-{}", Uuid::new_v4().simple()),
                 &scopes,
@@ -363,10 +384,7 @@ impl zeroship_bundle::BlobStore for StubBlobStore {
         Ok(false)
     }
 
-    async fn delete_app_manifests(
-        &self,
-        _app_id: &Uuid,
-    ) -> Result<(), zeroship_bundle::BlobError> {
+    async fn delete_app_manifests(&self, _app_id: &Uuid) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
 }
@@ -505,7 +523,7 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
         session_issuer: None::<Arc<zeroship_gateway::session_token::Issuer>>,
         session_verifier: None::<Arc<zeroship_gateway::session_token::Verifier>>,
         anchor_enc_key: [0u8; 32],
-            pairwise_salt: [0u8; 32],
+        pairwise_salt: [0u8; 32],
         meter: Arc::new(zeroship_metering::Meter::new()),
     })
 }
@@ -547,9 +565,9 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -557,7 +575,6 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-handler-target").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     // Per-app BCL (the only revoking path under RLS): register a route whose
     // `oauth_client_id` matches the logout_token `aud`, so the handler resolves
@@ -570,7 +587,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -587,7 +604,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token =
-        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, target_user.as_str(), &jti);
     let state = build_handler_state_with_route(
         db_cfg.clone(),
         &auth_base,
@@ -597,14 +614,9 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         &sector,
         zeroship_core::auth::derive_pairwise_salt(b"bcl-replay-stash"),
     );
-    let app = test::init_service(
-        web::App::new()
-            .state(state.clone())
-            .service(
-                web::resource("/oidc/backchannel-logout")
-                    .route(web::post().to(backchannel_logout::handle)),
-            ),
-    )
+    let app = test::init_service(web::App::new().state(state.clone()).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
     .await;
 
     let first = test::TestRequest::post()
@@ -652,12 +664,18 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&session.id])
-        .await
-        .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
+        &[&session.id],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
 }
 
 #[ntex::test]
@@ -687,9 +705,9 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -697,7 +715,6 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-concurrent-target").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let app_name = format!("bcl-concurrent-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_bclconcurrent_{}", Uuid::new_v4().simple());
@@ -707,7 +724,7 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -733,7 +750,7 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token =
-        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, target_user.as_str(), &jti);
     let state = build_handler_state_with_route(
         db_cfg.clone(),
         &auth_base,
@@ -743,14 +760,9 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
         &sector,
         zeroship_core::auth::derive_pairwise_salt(b"bcl-concurrent-stash"),
     );
-    let app = test::init_service(
-        web::App::new()
-            .state(state.clone())
-            .service(
-                web::resource("/oidc/backchannel-logout")
-                    .route(web::post().to(backchannel_logout::handle)),
-            ),
-    )
+    let app = test::init_service(web::App::new().state(state.clone()).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
     .await;
 
     let req_a = test::TestRequest::post()
@@ -765,7 +777,10 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
         .to_request();
     let release_lock = async move {
         compio::time::sleep(std::time::Duration::from_millis(75)).await;
-        lock_tx.rollback().await.expect("release target session lock");
+        lock_tx
+            .rollback()
+            .await
+            .expect("release target session lock");
     };
     let (resp_a, resp_b, _) = futures::join!(
         test::call_service(&app, req_a),
@@ -792,12 +807,18 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&session.id])
-        .await
-        .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
+        &[&session.id],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],
@@ -828,9 +849,9 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -838,7 +859,6 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-retry-target").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let app_name = format!("bcl-retry-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_bclretry_{}", Uuid::new_v4().simple());
@@ -848,7 +868,7 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -865,9 +885,8 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token =
-        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
-    let shared_jti_cache =
-        Arc::new(zeroship_core::logout_token::LogoutJtiCache::default());
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, target_user.as_str(), &jti);
+    let shared_jti_cache = Arc::new(zeroship_core::logout_token::LogoutJtiCache::default());
 
     let bad_db = DbConfig::new(
         "postgres://postgres:zeroship@127.0.0.1:1/zeroship_p5d_missing",
@@ -885,14 +904,9 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     Arc::get_mut(&mut failing_state)
         .expect("unique failing state")
         .logout_jti_cache = shared_jti_cache.clone();
-    let failing_app = test::init_service(
-        web::App::new()
-            .state(failing_state)
-            .service(
-                web::resource("/oidc/backchannel-logout")
-                    .route(web::post().to(backchannel_logout::handle)),
-            ),
-    )
+    let failing_app = test::init_service(web::App::new().state(failing_state).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
     .await;
 
     let first = test::TestRequest::post()
@@ -933,14 +947,9 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     Arc::get_mut(&mut retry_state)
         .expect("unique retry state")
         .logout_jti_cache = shared_jti_cache.clone();
-    let retry_app = test::init_service(
-        web::App::new()
-            .state(retry_state)
-            .service(
-                web::resource("/oidc/backchannel-logout")
-                    .route(web::post().to(backchannel_logout::handle)),
-            ),
-    )
+    let retry_app = test::init_service(web::App::new().state(retry_state).service(
+        web::resource("/oidc/backchannel-logout").route(web::post().to(backchannel_logout::handle)),
+    ))
     .await;
 
     let retry = test::TestRequest::post()
@@ -971,12 +980,18 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.gateway_sessions WHERE id = $1", &[&session.id])
-        .await
-        .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.gateway_sessions WHERE id = $1",
+        &[&session.id],
+    )
+    .await
+    .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],
@@ -1007,9 +1022,9 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -1017,7 +1032,6 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-sid-target").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let app_name = format!("bcl-sid-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_bclsid_{}", Uuid::new_v4().simple());
@@ -1030,7 +1044,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let target_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&sid),
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1047,7 +1061,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let other_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&other_sid),
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1067,7 +1081,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
         &key,
         &issuer,
         &oauth_client_id,
-        &target_user_string,
+        target_user.as_str(),
         &jti,
         &sid,
     );
@@ -1109,13 +1123,16 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     .ok();
     db.execute(
         "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-        &[&target_user_string],
+        &[&target_user.as_str()],
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],
@@ -1146,9 +1163,9 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -1156,7 +1173,6 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-sid-fallback").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let other_app_id = Uuid::new_v4();
     let app_name = format!("bcl-sid-fallback-{}", Uuid::new_v4().simple());
@@ -1172,7 +1188,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let target_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&stored_sid),
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1189,7 +1205,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let other_app_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&stored_sid),
             app_id: other_app_id,
             email: Some("alice@zeroship.test"),
@@ -1205,13 +1221,13 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     .expect("create other app session");
 
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-sid-fallback-stash");
-    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user_string, &sector);
+    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user, &sector);
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token = sign_logout_token_with_aud_and_sid(
         &key,
         &issuer,
         &oauth_client_id,
-        &target_user_string,
+        target_user.as_str(),
         &jti,
         &missing_sid,
     );
@@ -1270,13 +1286,16 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     .ok();
     db.execute(
         "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-        &[&target_user_string],
+        &[&target_user.as_str()],
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],
@@ -1310,9 +1329,9 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -1329,8 +1348,7 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
     let sid = format!("sid-{}", Uuid::new_v4().simple());
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token = sign_logout_token_with_aud_sid_only(&key, &issuer, &oauth_client_id, &jti, &sid);
-    let shared_jti_cache =
-        Arc::new(zeroship_core::logout_token::LogoutJtiCache::default());
+    let shared_jti_cache = Arc::new(zeroship_core::logout_token::LogoutJtiCache::default());
     let mut state = build_handler_state_with_route(
         db_cfg,
         &auth_base,
@@ -1370,11 +1388,10 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
     );
 
     let target_user = insert_user(&db, "gateway-bcl-sid-nosub-retry").await;
-    let target_user_string = target_user.to_string();
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&sid),
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1419,13 +1436,16 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
     .ok();
     db.execute(
         "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-        &[&target_user_string],
+        &[&target_user.as_str()],
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],
@@ -1456,9 +1476,9 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     let jwks_server = test::server(move || {
         let jwks_key = jwks_key.clone();
         async move {
-            web::App::new().state(jwks_key).service(
-                web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)),
-            )
+            web::App::new()
+                .state(jwks_key)
+                .service(web::resource("/oauth2/.well-known/jwks.json").route(web::get().to(jwks)))
         }
     })
     .await;
@@ -1466,7 +1486,6 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-invalid-target").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let app_name = format!("bcl-invalid-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_bclinvalid_{}", Uuid::new_v4().simple());
@@ -1476,7 +1495,7 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1509,7 +1528,7 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
         &key,
         &issuer,
         "oac_wrong_audience",
-        &target_user_string,
+        target_user.as_str(),
         &format!("jti-{}", Uuid::new_v4().simple()),
     );
     let mut bad_key = make_key_with_seed(10);
@@ -1518,14 +1537,14 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
         &bad_key,
         &issuer,
         &oauth_client_id,
-        &target_user_string,
+        target_user.as_str(),
         &format!("jti-{}", Uuid::new_v4().simple()),
     );
     let missing_events = sign_logout_token_with(
         &key,
         &issuer,
         &oauth_client_id,
-        &target_user_string,
+        target_user.as_str(),
         &format!("jti-{}", Uuid::new_v4().simple()),
         None,
         false,
@@ -1559,9 +1578,12 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],
@@ -1654,7 +1676,9 @@ fn build_handler_state_with_route(
             account_state: zeroship_core::types::AccountState::Active,
         },
     );
-    state.routes.update(map, &state.rate_limiters, &state.concurrency);
+    state
+        .routes
+        .update(map, &state.rate_limiters, &state.concurrency);
     // `build_handler_state` hard-codes an all-zero salt; rebuild with ours.
     // GateState is in an Arc with refcount 1 here, so get_mut succeeds.
     let mut state = state;
@@ -1697,7 +1721,6 @@ async fn per_app_bcl_writes_token_family_marker() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-perapp").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let app_name = format!("perapp-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_perappbcl_{}", Uuid::new_v4().simple());
@@ -1710,7 +1733,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1726,7 +1749,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     .expect("create session");
 
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-perapp-stash");
-    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user_string, &sector);
+    let pws = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user, &sector);
     let live_token_iat = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1751,7 +1774,7 @@ async fn per_app_bcl_writes_token_family_marker() {
 
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token =
-        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, target_user.as_str(), &jti);
     let state = build_handler_state_with_route(
         db_cfg,
         &auth_base,
@@ -1803,26 +1826,23 @@ async fn per_app_bcl_writes_token_family_marker() {
     .ok();
     db.execute(
         "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-        &[&target_user_string],
+        &[&target_user.as_str()],
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
 }
 
-/// Batch A M1 regression — cross-arm `pws_` derivation must be invariant to the
-/// inbound OP `sub` SPELLING. The per-app BCL writer derives the `pws_` from
-/// the logout_token's `sub` (which OP controls), while a reader / the
-/// `/signout`-style writer derive it from the canonical `Uuid::to_string()`. If
-/// OP ever emits a NON-canonical sub (here: UPPERCASE), the writer's `pws_`
-/// must STILL equal the canonical reader's `pws_`, or the BCL silently fails to
-/// revoke the live token. We sign the logout_token with the user's uppercase
-/// UUID, run the REAL handler (real writer), and assert the reader keyed on the
-/// CANONICAL `pws_` reports the live token revoked. PG-gated.
+/// A logout token must carry the canonical typed user ID. Rejecting malformed
+/// identity at the boundary prevents a second spelling from addressing the
+/// same user.
 #[ntex::test]
-async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
+async fn per_app_bcl_rejects_non_canonical_user_subject() {
     let dsn = common::require_platform_db();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -1847,11 +1867,10 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-noncanon").await;
-    let canonical_sub = target_user.to_string(); // hyphenated lowercase
-    // The NON-canonical spelling OP could put in the logout_token `sub`.
-    let uppercase_sub = canonical_sub.to_uppercase();
+    let uppercase_sub = target_user.as_str().to_uppercase();
     assert_ne!(
-        canonical_sub, uppercase_sub,
+        target_user.as_str(),
+        uppercase_sub,
         "fixture must actually exercise a spelling difference"
     );
     let app_id = Uuid::new_v4();
@@ -1860,10 +1879,10 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     let sector = format!("https://{app_name}.zeroship.localhost");
     seed_app(&db, app_id, &app_name).await;
     seed_oauth_client(&db, &oauth_client_id).await;
-    create(
+    let session = create(
         &mut db,
         &NewSession {
-            user_id: &canonical_sub,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -1879,9 +1898,7 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     .expect("create session");
 
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-noncanon-stash");
-    // The reader / canonical writer derive the `pws_` from the CANONICAL UUID.
-    let pws_canonical =
-        zeroship_core::auth::derive_pairwise(&pairwise_salt, &canonical_sub, &sector);
+    let pws_canonical = zeroship_core::auth::derive_pairwise(&pairwise_salt, &target_user, &sector);
     let live_token_iat = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1903,7 +1920,6 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         "before BCL the live token must NOT be family-revoked"
     );
 
-    // Sign the logout_token with the UPPERCASE (non-canonical) sub.
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token = sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &uppercase_sub, &jti);
     let state = build_handler_state_with_route(
@@ -1925,13 +1941,10 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         .set_payload(format!("logout_token={token}"))
         .to_request();
     let resp = test::call_service(&app, req).await;
-    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 
-    // The writer derived from the UPPERCASE sub; the reader keys on the
-    // CANONICAL `pws_`. With M1 canonicalization the two are byte-identical, so
-    // the live token is rejected. Pre-fix this assertion would FAIL.
     assert!(
-        zeroship_authz::wrapper_revocation::is_family_revoked_since(
+        !zeroship_authz::wrapper_revocation::is_family_revoked_since(
             &db,
             &oauth_client_id,
             &pws_canonical,
@@ -1939,8 +1952,11 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
         )
         .await
         .expect("post-BCL family check"),
-        "BCL marker derived from a non-canonical sub must still match the \
-         canonical reader's pws_ (M1)"
+        "a rejected subject must not write a family-revocation marker"
+    );
+    assert!(
+        is_live(&db, session.id, app_id).await,
+        "a rejected subject must not revoke the user's session"
     );
 
     db.execute(
@@ -1957,13 +1973,16 @@ async fn per_app_bcl_marker_is_invariant_to_non_canonical_sub_spelling() {
     .ok();
     db.execute(
         "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-        &[&canonical_sub],
+        &[&target_user.as_str()],
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
 }
 
 // ─── M1 regression: per-app BCL must DELETE the reload-recovery anchor ───────
@@ -2010,7 +2029,6 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     let issuer = format!("{auth_base}/oauth2");
 
     let target_user = insert_user(&db, "gateway-bcl-anchor").await;
-    let target_user_string = target_user.to_string();
     let app_id = Uuid::new_v4();
     let app_name = format!("anchorbcl-{}", Uuid::new_v4().simple());
     let oauth_client_id = format!("oac_anchorbcl_{}", Uuid::new_v4().simple());
@@ -2024,7 +2042,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id,
             email: Some("alice@zeroship.test"),
@@ -2040,7 +2058,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     .expect("create session");
 
     // The 30-day reload-recovery anchor that `?mint=1` would resurrect from.
-    let anchor_id = seed_anchor(&db, app_id, &oauth_client_id, target_user).await;
+    let anchor_id = seed_anchor(&db, app_id, &oauth_client_id, &target_user).await;
 
     // Pre: the anchor reads LIVE (this is exactly what `?mint=1` reads).
     assert!(
@@ -2054,7 +2072,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     let pairwise_salt = zeroship_core::auth::derive_pairwise_salt(b"bcl-anchor-stash");
     let jti = format!("jti-{}", Uuid::new_v4().simple());
     let token =
-        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, &target_user_string, &jti);
+        sign_logout_token_with_aud(&key, &issuer, &oauth_client_id, target_user.as_str(), &jti);
     let state = build_handler_state_with_route(
         db_cfg.clone(),
         &auth_base,
@@ -2114,13 +2132,16 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     .ok();
     db.execute(
         "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-        &[&target_user_string],
+        &[&target_user.as_str()],
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user])
-        .await
-        .ok();
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
+    .await
+    .ok();
     db.execute(
         "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
         &[&oauth_client_id],

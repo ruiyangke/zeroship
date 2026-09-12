@@ -4,17 +4,17 @@ use std::sync::{Arc, RwLock};
 use compio::buf::BufResult;
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::TcpStream;
-use uuid::Uuid;
 
 use zeroship_core::app_id::AppId;
 use zeroship_core::readiness::SyncFreshness;
 use zeroship_core::types::{GatewaySnapshot, RouteEntry, RouteMap};
+use zeroship_core::UserId;
 
 use zeroship_core::types::SpendState;
 
-use zeroship_bundle::compiled::CompiledManifest;
 use crate::enforce::{ConcurrencyRegistry, RateLimitRegistry};
 use crate::GateState;
+use zeroship_bundle::compiled::CompiledManifest;
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -35,7 +35,7 @@ pub struct CompiledRoute {
 #[derive(Debug, Default)]
 struct AuthenticationSnapshot {
     denied_principals: HashSet<String>,
-    denied_subjects_by_user: HashMap<Uuid, HashSet<String>>,
+    denied_subjects_by_user: HashMap<UserId, HashSet<String>>,
     family_revocations: HashMap<(String, String), i64>,
 }
 
@@ -91,14 +91,14 @@ impl RouteCache {
             .iter()
             .filter(|lifecycle| lifecycle.blocks_authentication())
         {
-            let global = lifecycle.user_id.to_string();
+            let global = lifecycle.user_id.as_str().to_owned();
             let mut subjects = prior_by_user
                 .get(&lifecycle.user_id)
                 .cloned()
                 .unwrap_or_default();
             subjects.insert(global);
             subjects.extend(lifecycle.pairwise_subjects.iter().cloned());
-            denied_by_user.insert(lifecycle.user_id, subjects);
+            denied_by_user.insert(lifecycle.user_id.clone(), subjects);
         }
 
         let denied = denied_by_user
@@ -186,9 +186,7 @@ impl RouteCache {
         let prev_degraded: HashMap<AppId, bool> = {
             let r = self.routes.read().unwrap();
             r.iter()
-                .map(|(id, route)| {
-                    (id.clone(), route.entry.spend_state == SpendState::Degrade)
-                })
+                .map(|(id, route)| (id.clone(), route.entry.spend_state == SpendState::Degrade))
                 .collect()
         };
 
@@ -317,11 +315,9 @@ async fn sync_once(state: &GateState) -> Result<(), String> {
     let response = http_get(&url, &state.config.control_key).await?;
     let snapshot: GatewaySnapshot =
         serde_json::from_str(&response).map_err(|e| format!("parse gateway snapshot: {e}"))?;
-    state.routes.update_snapshot(
-        snapshot,
-        &state.rate_limiters,
-        &state.concurrency,
-    );
+    state
+        .routes
+        .update_snapshot(snapshot, &state.rate_limiters, &state.concurrency);
     Ok(())
 }
 
@@ -414,6 +410,7 @@ async fn http_get_inner(url: &str, auth_key: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
     use zeroship_bundle::Manifest;
     use zeroship_core::types::{
         GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot,
@@ -422,7 +419,10 @@ mod tests {
     #[test]
     fn control_timeout_defaults_to_five_seconds() {
         assert_eq!(CONTROL_REQUEST_TIMEOUT, std::time::Duration::from_secs(5));
-        assert_eq!(control_timeout_error(), "control request timed out after 5s");
+        assert_eq!(
+            control_timeout_error(),
+            "control request timed out after 5s"
+        );
     }
 
     fn route_entry(name: &str, oauth_client_id: Option<&str>, sector: Option<&str>) -> RouteEntry {
@@ -449,26 +449,28 @@ mod tests {
             route_entry("app.zeroship.test", Some("oac_test"), Some(sector)),
         );
 
-        let disabled = Uuid::new_v4();
-        let anonymized = Uuid::new_v4();
-        let requested = Uuid::new_v4();
-        let scheduled = Uuid::new_v4();
-        let lifecycle = |user_id: Uuid,
-                         lifecycle: fn(Uuid, Vec<String>) -> GatewayPrincipalLifecycle| {
-            let pairwise = zeroship_core::auth::derive_pairwise(
-                &salt,
-                &user_id.to_string(),
-                sector,
-            );
-            lifecycle(user_id, vec![pairwise])
-        };
+        let disabled = UserId::mint();
+        let anonymized = UserId::mint();
+        let requested = UserId::mint();
+        let scheduled = UserId::mint();
+        let lifecycle =
+            |user_id: UserId, lifecycle: fn(UserId, Vec<String>) -> GatewayPrincipalLifecycle| {
+                let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
+                lifecycle(user_id, vec![pairwise])
+            };
         let snapshot = GatewaySnapshot {
             routes,
             principal_lifecycle: vec![
-                lifecycle(disabled, GatewayPrincipalLifecycle::disabled),
-                lifecycle(anonymized, GatewayPrincipalLifecycle::anonymized),
-                lifecycle(requested, GatewayPrincipalLifecycle::deletion_requested),
-                lifecycle(scheduled, GatewayPrincipalLifecycle::deletion_scheduled),
+                lifecycle(disabled.clone(), GatewayPrincipalLifecycle::disabled),
+                lifecycle(anonymized.clone(), GatewayPrincipalLifecycle::anonymized),
+                lifecycle(
+                    requested.clone(),
+                    GatewayPrincipalLifecycle::deletion_requested,
+                ),
+                lifecycle(
+                    scheduled.clone(),
+                    GatewayPrincipalLifecycle::deletion_scheduled,
+                ),
             ],
             family_revocations: Vec::new(),
         };
@@ -481,12 +483,11 @@ mod tests {
         );
         let budget = std::time::Duration::from_secs(60);
         for user_id in [disabled, anonymized, requested, scheduled] {
-            let global = user_id.to_string();
-            let pairwise = zeroship_core::auth::derive_pairwise(&salt, &global, sector);
-            assert!(!cache.principal_authentication_allowed(&global, budget));
+            let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
+            assert!(!cache.principal_authentication_allowed(user_id.as_str(), budget));
             assert!(!cache.principal_authentication_allowed(&pairwise, budget));
         }
-        assert!(cache.principal_authentication_allowed(&Uuid::new_v4().to_string(), budget));
+        assert!(cache.principal_authentication_allowed(UserId::mint().as_str(), budget));
     }
 
     #[test]
@@ -516,13 +517,9 @@ mod tests {
     #[test]
     fn route_replacement_retains_persisted_pairwise_denials() {
         let salt = zeroship_core::auth::derive_pairwise_salt(b"route-replacement-denial-salt");
-        let user_id = Uuid::new_v4();
+        let user_id = UserId::mint();
         let sector = "https://retired-route.zeroship.test";
-        let pairwise = zeroship_core::auth::derive_pairwise(
-            &salt,
-            &user_id.to_string(),
-            sector,
-        );
+        let pairwise = zeroship_core::auth::derive_pairwise(&salt, &user_id, sector);
         let app_id = Uuid::new_v4();
         let mut routes = RouteMap::new();
         routes.insert(
@@ -538,7 +535,7 @@ mod tests {
         let concurrency = ConcurrencyRegistry::new(100);
         let lifecycle_with_mapping = || {
             vec![GatewayPrincipalLifecycle {
-                user_id,
+                user_id: user_id.clone(),
                 disabled: true,
                 anonymized: false,
                 deletion_requested: false,
@@ -547,7 +544,10 @@ mod tests {
             }]
         };
         let lifecycle_without_mapping = || {
-            vec![GatewayPrincipalLifecycle::disabled(user_id, Vec::new())]
+            vec![GatewayPrincipalLifecycle::disabled(
+                user_id.clone(),
+                Vec::new(),
+            )]
         };
         let budget = std::time::Duration::from_secs(60);
 
@@ -607,7 +607,7 @@ mod tests {
         let cache = RouteCache::new();
         let rate = RateLimitRegistry::new(1000, 2000);
         let concurrency = ConcurrencyRegistry::new(100);
-        let user_id = Uuid::new_v4();
+        let user_id = UserId::mint();
         let subject = "pws_cancelled_deletion";
         let client_id = "oac_cancelled_deletion";
         let revocation = GatewayFamilyRevocation {
@@ -645,12 +645,7 @@ mod tests {
             1_700_000_000,
             budget,
         ));
-        assert!(cache.credential_authentication_allowed(
-            client_id,
-            subject,
-            1_700_000_200,
-            budget,
-        ));
+        assert!(cache.credential_authentication_allowed(client_id, subject, 1_700_000_200, budget,));
     }
 
     /// The route table is keyed on the CANONICAL rendering of the app id, and
@@ -706,7 +701,11 @@ mod tests {
             .lookup_by_name("keyed.zeroship.ai")
             .expect("the host resolves");
         assert_eq!(by_name, canonical);
-        assert_eq!(by_name.uuid(), stored, "and it still carries the stored bits");
+        assert_eq!(
+            by_name.uuid(),
+            stored,
+            "and it still carries the stored bits"
+        );
     }
 
     #[test]

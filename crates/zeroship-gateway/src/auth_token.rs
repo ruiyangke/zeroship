@@ -55,6 +55,7 @@ use ntex::util::Bytes;
 use ntex::web::{types::State, HttpRequest, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::anchors::{self, RotationError, RotationOk, RotationResult};
 use crate::oidc_rp::TokenSet;
@@ -78,14 +79,17 @@ pub(crate) struct RouteCtx {
     /// The app's stable apex origin used to scope the per-app pairwise
     /// `pws_…` subject (§6.2). `None` until the control plane provisions
     /// it; the identity projection then hard-fails closed (no `pws_`, 503)
-    /// rather than fall back to the global UUID.
+    /// rather than fall back to the global user ID.
     pub(crate) sector_identifier: Option<String>,
 }
 
 /// Resolve the app name (subdomain), Host, and per-app `oauth_client_id`
 /// from the request. Returns `Err(response)` when the host is not a
 /// provisioned app or the app has no OAuth client yet (`503`).
-pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<RouteCtx, HttpResponse> {
+pub(crate) fn resolve_route(
+    req: &HttpRequest,
+    state: &GateState,
+) -> Result<RouteCtx, HttpResponse> {
     let host = req
         .headers()
         .get(http::header::HOST)
@@ -124,15 +128,21 @@ pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<Rout
     // `RouteCtx::app_id` is the DATABASE key for the gateway-session and
     // anchor rows, whose `app_id` columns are UUID and bound natively, so the
     // typed id the route table now carries is unwrapped once, here.
-    Ok(RouteCtx { app_name, app_id: app_id.uuid(), host, client_id, sector_identifier })
+    Ok(RouteCtx {
+        app_name,
+        app_id: app_id.uuid(),
+        host,
+        client_id,
+        sector_identifier,
+    })
 }
 
 /// Derive the per-app pairwise subject (`pws_…`) the identity projection
-/// carries, so the SPA reads a per-app pseudonym, never the global user UUID
+/// carries, so the SPA reads a per-app pseudonym, never the global user ID
 /// (§6.2/G4). Hard-fails (`None`) when the route has no `sector_identifier`
 /// yet — the caller answers `503 client_not_provisioned` rather than ever
-/// project the global UUID to the browser.
-fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Option<String> {
+/// project the global user ID to the browser.
+fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &UserId) -> Option<String> {
     let sector = route.sector_identifier.as_deref()?;
     Some(zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
@@ -158,7 +168,7 @@ fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Op
 pub(crate) async fn relay_alias_for(
     db_cfg: &crate::db::DbConfig,
     client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Option<String> {
     let pool = match crate::db::checkout(db_cfg).await {
         Ok(p) => p,
@@ -499,21 +509,17 @@ pub(crate) async fn mint_session_from_code(
             );
         }
     };
-    if !principal_lifecycle_allows(state, &claims.sub) {
-        return login_required(&route.host);
-    }
-
-    // 3. The global user UUID is the OP sub. It is stored INTERNALLY (the
-    //    anchor + the gateway session `user_id`) and projected to the per-app
-    //    `pws_` for the browser — the global UUID never reaches the browser.
-    let Ok(global_user_id) = Uuid::parse_str(&claims.sub) else {
-        tracing::warn!(sub = %claims.sub, "/token: id_token sub is not a UUID");
+    let Ok(global_user_id) = UserId::parse(&claims.sub) else {
+        tracing::warn!(sub = %claims.sub, "/token: id_token sub is not a canonical user id");
         return error_response(
             HttpResponse::BadRequest(),
             "invalid_token",
             "id_token sub is not a global user id",
         );
     };
+    if !principal_lifecycle_allows(state, global_user_id.as_str()) {
+        return login_required(&route.host);
+    }
 
     // 4. server_anchor mode: keep the refresh family server-side, encrypted.
     let Some(refresh_token) = tokens.refresh_token.as_deref() else {
@@ -523,9 +529,10 @@ pub(crate) async fn mint_session_from_code(
             "no refresh_token in token response (offline_access not granted?)",
         );
     };
-    let aad = anchor_aad(&route.client_id, &claims.sub);
+    let aad = anchor_aad(&route.client_id, global_user_id.as_str());
     let refresh_enc =
-        match zeroship_core::crypto::encrypt(&state.anchor_enc_key, &aad, refresh_token.as_bytes()) {
+        match zeroship_core::crypto::encrypt(&state.anchor_enc_key, &aad, refresh_token.as_bytes())
+        {
             Ok(ct) => ct,
             Err(e) => {
                 tracing::error!(error = %e, "/token: refresh encrypt failed");
@@ -538,10 +545,10 @@ pub(crate) async fn mint_session_from_code(
         };
 
     // 5. Project the per-app pairwise `pws_` subject (§6.2/G4) for the browser
-    //    identity. Derive on the CANONICAL UUID string. Fail closed (503) when
+    //    identity. Fail closed (503) when
     //    the route has no `sector_identifier` yet rather than ever project the
-    //    global UUID to the browser.
-    let Some(pws_sub) = pairwise_sub(state, route, &global_user_id.to_string()) else {
+    //    global user ID to the browser.
+    let Some(pws_sub) = pairwise_sub(state, route, &global_user_id) else {
         return error_response(
             HttpResponse::ServiceUnavailable(),
             "client_not_provisioned",
@@ -552,7 +559,7 @@ pub(crate) async fn mint_session_from_code(
     // never the real `claims.email`. No active alias (not yet minted at
     // consent, or revoked) ⇒ empty email (fail closed) — the real address
     // NEVER reaches the browser.
-    let relay_email = relay_alias_for(db_cfg, &route.client_id, global_user_id).await;
+    let relay_email = relay_alias_for(db_cfg, &route.client_id, &global_user_id).await;
     let scope = tokens.scope.clone().unwrap_or_default();
     let scopes: Vec<String> = scope.split_whitespace().map(str::to_string).collect();
     let amr = claims.amr.clone().unwrap_or_default();
@@ -560,7 +567,7 @@ pub(crate) async fn mint_session_from_code(
     // 6. Write the gateway_sessions ROW (the revocation/audit record + the
     //    auth_time/amr source — BFF R1b: NO LONGER read on the per-request path;
     //    the signed cookie is the live credential) AND the reload-recovery
-    //    anchor, on one pooled connection. The row carries the GLOBAL UUID
+    //    anchor, on one pooled connection. The row carries the GLOBAL user ID
     //    (internal), the consent scopes, and the id-token auth_time/amr; the
     //    anchor carries the encrypted refresh family. NO connection is held
     //    across any outbound call (the OP exchange already completed).
@@ -584,7 +591,7 @@ pub(crate) async fn mint_session_from_code(
         let session = match crate::sessions::create(
             &mut conn,
             &crate::sessions::NewSession {
-                user_id: &global_user_id.to_string(),
+                user_id: &global_user_id,
                 app_id: app_key,
                 // The REAL email is stored on the row (CITEXT); it is
                 // relay-swapped only on the READ path (the `{ user }` body
@@ -621,7 +628,7 @@ pub(crate) async fn mint_session_from_code(
             &anchors::NewAnchor {
                 app_id: app_key,
                 client_id: &route.client_id,
-                global_user_id,
+                global_user_id: &global_user_id,
                 refresh_token_enc: &refresh_enc,
                 refresh_family_id: &family_id,
                 granted_scopes: &scopes,
@@ -659,7 +666,7 @@ pub(crate) async fn mint_session_from_code(
         //     the mint because account deletion and password reset enumerate
         //     these rows to recall access-only and cookie credentials.
         if let Err(e) =
-            crate::identities::upsert(&mut conn, &route.client_id, global_user_id, &pws_sub).await
+            crate::identities::upsert(&mut conn, &route.client_id, &global_user_id, &pws_sub).await
         {
             tracing::error!(
                 error = %e,
@@ -734,9 +741,10 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         Err(resp) => return resp,
     };
 
-    let want_mint = req.query_string().split('&').any(|kv| {
-        matches!(kv.split_once('='), Some(("mint", "1")))
-    });
+    let want_mint = req
+        .query_string()
+        .split('&')
+        .any(|kv| matches!(kv.split_once('='), Some(("mint", "1"))));
 
     if let Err(resp) = session_csrf_guard(&req, &route.host, &state.config, want_mint) {
         return resp;
@@ -853,7 +861,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             }
         }
     };
-    if !principal_lifecycle_allows(&state, &anchor.global_user_id.to_string()) {
+    if !principal_lifecycle_allows(&state, anchor.global_user_id.as_str()) {
         return login_required(&route.host);
     }
 
@@ -862,14 +870,12 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     // from the rotated id-token facts.
     match rotate_family(&state, &route, &anchor).await {
         Ok(rotated) => {
-            if !principal_lifecycle_allows(&state, &rotated.global_user_id.to_string()) {
+            if !principal_lifecycle_allows(&state, rotated.global_user_id.as_str()) {
                 return login_required(&route.host);
             }
             // Project the per-app `pws_` (§6.3) + relay-swap the email. Fail
             // closed if the sector is missing (same posture as /token).
-            let Some(pws_sub) =
-                pairwise_sub(&state, &route, &rotated.global_user_id.to_string())
-            else {
+            let Some(pws_sub) = pairwise_sub(&state, &route, &rotated.global_user_id) else {
                 return error_response(
                     HttpResponse::ServiceUnavailable(),
                     "client_not_provisioned",
@@ -877,7 +883,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 );
             };
             let relay_email =
-                relay_alias_for(db_cfg, &route.client_id, rotated.global_user_id).await;
+                relay_alias_for(db_cfg, &route.client_id, &rotated.global_user_id).await;
 
             // Re-write the gateway_sessions ROW from the rotated facts — KEPT as
             // the revocation/audit record (+ auth_time/amr source), NOT read on
@@ -897,7 +903,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     match crate::sessions::latest_sid_for_user(
                         &mut conn,
                         route.app_id,
-                        &rotated.global_user_id.to_string(),
+                        &rotated.global_user_id,
                     )
                     .await
                     {
@@ -921,7 +927,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 if let Err(e) = crate::sessions::create(
                     &mut conn,
                     &crate::sessions::NewSession {
-                        user_id: &rotated.global_user_id.to_string(),
+                        user_id: &rotated.global_user_id,
                         app_id: route.app_id,
                         // Real email stored on the audit row; never read back to
                         // the browser. The rotated raw access JWT does not always
@@ -1055,12 +1061,13 @@ async fn rotate_family(
     // then skips the marker re-check (it cannot project a `pws_` cookie at all,
     // and the handler already 503s `client_not_provisioned` afterwards) but the
     // anchor-revoked rows-affected gate still fails it closed.
-    let pws_sub = pairwise_sub(state, route, &anchor.global_user_id.to_string());
+    let pws_sub = pairwise_sub(state, route, &anchor.global_user_id);
     let anchor = anchor.clone();
     let fut: anchors::SharedRotationFuture = (Box::pin(async move {
         let _guard = anchors::EntryGuard::new(anchor_id);
         do_refresh(&st, &client_id, pws_sub.as_deref(), &anchor).await
-    }) as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
+    })
+        as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
         .shared();
 
     let shared = anchors::with_single_flight(|sf| sf.insert(anchor_id, fut));
@@ -1095,8 +1102,7 @@ async fn do_refresh(
     let rotation_started_at = now_secs();
 
     // Decrypt the server-held refresh family. AAD binds (client_id, sub).
-    let sub = anchor.global_user_id.to_string();
-    let aad = anchor_aad(client_id, &sub);
+    let aad = anchor_aad(client_id, anchor.global_user_id.as_str());
     let refresh = match zeroship_core::crypto::decrypt(
         &state.anchor_enc_key,
         &aad,
@@ -1107,7 +1113,11 @@ async fn do_refresh(
     };
 
     // OP refresh — NO db connection held here.
-    let tokens: TokenSet = match state.oidc_rp.refresh_token_public(client_id, &refresh).await {
+    let tokens: TokenSet = match state
+        .oidc_rp
+        .refresh_token_public(client_id, &refresh)
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             // Distinguish anchor-dead (invalid_grant → 720h ceiling / family
@@ -1123,9 +1133,17 @@ async fn do_refresh(
     // Verify the rotated RAW access JWT LOCALLY via the gateway JWKS (no
     // per-mint remote validation). The raw JWT stays server-side — it never leaves
     // the gateway and is never handed to the browser.
-    let raw = match state.oidc_rp.verify_access_token(&tokens.access_token).await {
+    let raw = match state
+        .oidc_rp
+        .verify_access_token(&tokens.access_token)
+        .await
+    {
         Ok(c) => c,
-        Err(e) => return Err(RotationError::Upstream(format!("rotated access verify: {e}"))),
+        Err(e) => {
+            return Err(RotationError::Upstream(format!(
+                "rotated access verify: {e}"
+            )))
+        }
     };
     // Bind the rotated raw JWT to THIS app's client (RFC 9068 §3): a token
     // issued to another client must never re-establish this app's session.
@@ -1177,11 +1195,22 @@ async fn do_refresh(
             {
                 Ok(c) => Some(c),
                 Err(e) => {
-                    return Err(RotationError::Upstream(format!("rotated id_token verify: {e}")))
+                    return Err(RotationError::Upstream(format!(
+                        "rotated id_token verify: {e}"
+                    )))
                 }
             },
             None => None,
         };
+    if let Some(claims) = id_claims.as_ref() {
+        let refreshed_user_id = UserId::parse(&claims.sub)
+            .map_err(|err| RotationError::Upstream(format!("rotated id_token subject: {err}")))?;
+        if refreshed_user_id != anchor.global_user_id {
+            return Err(RotationError::Upstream(
+                "rotated id_token subject changed".into(),
+            ));
+        }
+    }
 
     // Project each identity fact: id_token claim when present, else the raw
     // access JWT claim (the prior behavior).
@@ -1189,9 +1218,7 @@ async fn do_refresh(
         .as_ref()
         .and_then(|c| c.name.clone())
         .or_else(|| raw.name.clone());
-    let avatar_url = id_claims
-        .as_ref()
-        .and_then(|c| c.picture.clone());
+    let avatar_url = id_claims.as_ref().and_then(|c| c.picture.clone());
     let email_verified = id_claims
         .as_ref()
         .and_then(|c| c.email_verified)
@@ -1250,7 +1277,8 @@ async fn do_refresh(
         //       `update_rotated_family`'s rows-affected (below): 0 rows ⇒ the
         //       anchor was revoked mid-rotation ⇒ fail closed.
         if let Some(pws) = pws_sub {
-            match zeroship_authz::wrapper_revocation::revoked_after_for(&conn, client_id, pws).await {
+            match zeroship_authz::wrapper_revocation::revoked_after_for(&conn, client_id, pws).await
+            {
                 Ok(Some(revoked_after)) if revoked_after >= rotation_started_at => {
                     // A family marker landed during the rotation — fail closed
                     // (the handler deletes the anchor + clears the breadcrumb).
@@ -1288,7 +1316,7 @@ async fn do_refresh(
     }
 
     Ok(RotationOk {
-        global_user_id: anchor.global_user_id,
+        global_user_id: anchor.global_user_id.clone(),
         credential_iat: raw.iat,
         granted_scopes,
         email_verified,
@@ -1453,7 +1481,7 @@ pub async fn issue_interactive_session_cookie(
     db_cfg: &crate::db::DbConfig,
     client_id: &str,
     sector: Option<&str>,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
     credential_iat: i64,
     name: Option<&str>,
     avatar: Option<&str>,
@@ -1462,17 +1490,14 @@ pub async fn issue_interactive_session_cookie(
     amr: &[String],
     scopes: &[String],
 ) -> Result<String, String> {
-    if !principal_lifecycle_allows(state, &global_user_id.to_string()) {
+    if !principal_lifecycle_allows(state, global_user_id.as_str()) {
         return Err("principal lifecycle rejected authentication".to_string());
     }
     let Some(sector) = sector else {
         return Err("app has no sector_identifier yet".to_string());
     };
-    let pws_sub = zeroship_core::auth::derive_pairwise(
-        &state.pairwise_salt,
-        &global_user_id.to_string(),
-        sector,
-    );
+    let pws_sub =
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, global_user_id, sector);
 
     // Persist the per-app `(client_id, global_user, pws_)` mapping into
     // `app_user_identities`, symmetric with the SDK popup minter
@@ -1737,7 +1762,10 @@ mod session_csrf_tests {
             .to_http_request();
         let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, true);
-        assert!(res.is_ok(), "legitimate same-origin SDK mint must succeed: {res:?}");
+        assert!(
+            res.is_ok(),
+            "legitimate same-origin SDK mint must succeed: {res:?}"
+        );
     }
 
     #[test]
@@ -1795,9 +1823,7 @@ mod session_csrf_tests {
             .header("x-zs-auth", "1")
             .header(http::header::ORIGIN, "https://console.zeroship.example")
             .to_http_request();
-        assert!(
-            session_csrf_guard(&trusted_without_fetch_metadata, HOST, &config, true).is_ok()
-        );
+        assert!(session_csrf_guard(&trusted_without_fetch_metadata, HOST, &config, true).is_ok());
 
         for origin in ["null", "https://foreign.example"] {
             let req = TestRequest::default()
@@ -1841,6 +1867,9 @@ mod session_csrf_tests {
             .to_http_request();
         let config = gate_config(OriginScheme::Https, &[]);
         let res = session_csrf_guard(&req, HOST, &config, false);
-        assert!(res.is_ok(), "non-mint read must not require Origin or X-ZS-Auth: {res:?}");
+        assert!(
+            res.is_ok(),
+            "non-mint read must not require Origin or X-ZS-Auth: {res:?}"
+        );
     }
 }

@@ -28,6 +28,7 @@ pub mod sessions;
 pub mod startup_validation;
 pub mod store;
 pub mod ui;
+pub(crate) mod user_id;
 
 #[cfg(test)]
 #[path = "../../../tests/fixtures/platform_db/mod.rs"]

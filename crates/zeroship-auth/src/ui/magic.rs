@@ -44,17 +44,16 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
 use url::form_urlencoded;
-use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::{AuthError, Result};
-use crate::identity::email as email_validation;
 use crate::identity::eligibility;
+use crate::identity::email as email_validation;
 use crate::identity::magic_link;
 use crate::oidc::auth_request::AuthRequest;
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
@@ -64,6 +63,7 @@ use crate::ui::{
     render_token_interstitial, ErrorPage, MagicAwaitCodePage, MagicCheckEmailPage,
     MagicShowCodePage, PublicErrorMessage, TokenRedeemInterstitial,
 };
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_mailer::templates::{build_email, MagicLinkHtml, MagicLinkText};
 use zeroship_mailer::{Address, Mailer};
 
@@ -81,9 +81,7 @@ pub const MAGIC_CSRF_COOKIE: &str = "__Host-zsidp_magic_csrf";
 /// `/magic/verify`. `Path=/` because the cookie must be present on the
 /// `/magic/verify` and `/magic/complete` paths alike.
 pub(crate) fn magic_csrf_set_cookie(nonce: &str) -> String {
-    format!(
-        "{MAGIC_CSRF_COOKIE}={nonce}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=900"
-    )
+    format!("{MAGIC_CSRF_COOKIE}={nonce}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=900")
 }
 
 /// Build the `Set-Cookie` header value for clearing the magic-link
@@ -126,8 +124,7 @@ enum MagicTarget {
 impl MagicTarget {
     fn from_return_to(raw_return_to: Option<&str>) -> Option<Self> {
         let raw_return_to = non_empty(raw_return_to);
-        let native_return_to =
-            return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
+        let native_return_to = return_to::sanitize(raw_return_to, return_to::SAFE_DEFAULT);
         AuthRequest::parse_return_to(&native_return_to).ok()?;
         Some(Self::ReturnTo(native_return_to))
     }
@@ -374,10 +371,7 @@ pub async fn start(
     resp.header(SET_COOKIE, csrf::set_cookie(&new_csrf));
     // The requesting-device cookie: only set if we actually issued.
     if let Some(ref i) = issued {
-        resp.header(
-            SET_COOKIE,
-            magic_csrf_set_cookie(&i.csrf_nonce),
-        );
+        resp.header(SET_COOKIE, magic_csrf_set_cookie(&i.csrf_nonce));
     }
     resp.body(body)
 }
@@ -553,7 +547,9 @@ pub async fn verify_redeem(
             purpose = %redeemed.purpose,
             "magic_link::redeem_pending returned non-login purpose"
         );
-        if let Err(e) = magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await {
+        if let Err(e) =
+            magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await
+        {
             tracing::warn!(error = %e, "magic_link clear pending after unexpected purpose failed");
         }
         audit::emit(
@@ -584,7 +580,9 @@ pub async fn verify_redeem(
         Ok(id) => id,
         Err(e) => {
             tracing::error!(error = %e, "magic_link find-or-create failed");
-            if let Err(e) = magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await {
+            if let Err(e) =
+                magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await
+            {
                 tracing::warn!(error = %e, "magic_link clear pending after user failure failed");
             }
             return render_error_page(PublicErrorMessage::ContactSupport);
@@ -597,15 +595,17 @@ pub async fn verify_redeem(
     // password-guessing could never recover via magic-link. Best-effort; the
     // gate below still enforces hard `disabled_at`. Must precede the gate so the
     // cleared `locked_until` is what the gate reads.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "magic clear lockout failed");
+    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "magic clear lockout failed");
     }
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
-        if let Err(clear_err) = magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
+        if let Err(clear_err) =
+            magic_link::clear_consume_pending(db.as_ref(), &redeemed.token_hash, None).await
+        {
             tracing::warn!(error = %clear_err, "magic_link clear pending after eligibility failure failed");
         }
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %user_id, "magic verify eligibility check failed");
+            tracing::error!(error = %e, user_id = user_id.as_str(), "magic verify eligibility check failed");
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
         audit::emit(
@@ -629,7 +629,7 @@ pub async fn verify_redeem(
             &cfg,
             &redeemed.token_hash,
             &redeemed.reserved_at,
-            user_id,
+            &user_id,
             &target,
             &req,
         )
@@ -639,7 +639,7 @@ pub async fn verify_redeem(
             db.as_ref(),
             &redeemed.token_hash,
             &redeemed.reserved_at,
-            user_id,
+            &user_id,
             &redeemed.email,
             &redeemed.csrf_nonce,
             &target,
@@ -669,7 +669,7 @@ async fn same_device_finish(
     cfg: &AuthConfig,
     token_hash: &[u8],
     reserved_at: &chrono::DateTime<chrono::Utc>,
-    user_id: Uuid,
+    user_id: &UserId,
     target: &MagicTarget,
     req: &HttpRequest,
 ) -> HttpResponse {
@@ -707,7 +707,7 @@ async fn same_device_finish(
         }
         Ok(false) => {}
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user_id, "magic totp is_enabled check failed");
+            tracing::error!(error = %e, user_id = user_id.as_str(), "magic totp is_enabled check failed");
             if let Err(e) =
                 magic_link::clear_consume_pending(db, token_hash, Some(reserved_at)).await
             {
@@ -720,7 +720,7 @@ async fn same_device_finish(
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
-            user_id,
+            user_id: user_id.clone(),
             auth_method: "magic",
             amr: vec!["magic".into()],
             acr: Some("urn:zeroship:magic"),
@@ -744,7 +744,7 @@ async fn same_device_finish(
     };
 
     if let Err(e) = users::touch_last_login(db, user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "magic touch_last_login failed");
     }
 
     match magic_link::finalize_consume(db, token_hash, reserved_at).await {
@@ -772,10 +772,7 @@ async fn same_device_finish(
     .await;
 
     let mut resp = return_to::see_other(native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header("cache-control", "no-store");
     // Clear the requesting-device cookie so a future stray click can't
     // be replayed in a same-device check.
@@ -792,10 +789,10 @@ async fn same_device_finish(
 async fn magic_challenge(
     cfg: &AuthConfig,
     db: &compio_postgres::Client,
-    user_id: Uuid,
+    user_id: &UserId,
     native_return_to: &str,
 ) -> HttpResponse {
-    let credential_version = match users::find_by_id(db, &user_id.to_string()).await {
+    let credential_version = match users::find_by_id(db, user_id).await {
         Ok(Some(u)) => u.credential_version,
         Ok(None) => return render_error_page(PublicErrorMessage::SessionExpired),
         Err(e) => {
@@ -806,7 +803,7 @@ async fn magic_challenge(
     let mut resp = render_challenge(
         cfg,
         &TotpChallenge::new(
-            user_id,
+            user_id.clone(),
             credential_version,
             native_return_to.to_string(),
             FirstFactor::Magic,
@@ -844,7 +841,7 @@ pub(crate) async fn finish_after_second_factor(
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: user.id.clone(),
             auth_method: "magic",
             amr: vec!["magic".into(), "otp".into()],
             acr: Some("urn:zeroship:magic"),
@@ -862,8 +859,8 @@ pub(crate) async fn finish_after_second_factor(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db, user.id).await {
-        tracing::warn!(error = %e, user_id = %user.id, "magic touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db, &user.id).await {
+        tracing::warn!(error = %e, user_id = user.id.as_str(), "magic touch_last_login failed");
     }
 
     audit::emit(
@@ -879,10 +876,7 @@ pub(crate) async fn finish_after_second_factor(
     .await;
 
     let mut resp = return_to::see_other(&native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header("cache-control", "no-store");
     resp.header(SET_COOKIE, totp_challenge::clear_cookie());
     resp.finish()
@@ -900,7 +894,7 @@ async fn cross_device_show_code(
     db: &compio_postgres::Client,
     token_hash: &[u8],
     reserved_at: &chrono::DateTime<chrono::Utc>,
-    user_id: Uuid,
+    user_id: &UserId,
     email: &str,
     csrf_nonce: &str,
     target: &MagicTarget,
@@ -1137,17 +1131,17 @@ pub async fn complete(
     // strong owner-present evidence, so clear any soft password-guessing lockout
     // before the eligibility gate. Best-effort; the gate still enforces hard
     // `disabled_at`.
-    if let Err(e) = users::reset_login_failures(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "magic complete clear lockout failed");
+    if let Err(e) = users::reset_login_failures(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "magic complete clear lockout failed");
     }
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), user_id).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &user_id).await {
         if let Err(clear_err) =
             magic_completions::clear_consume_pending(db.as_ref(), &form.csrf_nonce, None).await
         {
             tracing::warn!(error = %clear_err, "magic_completions clear pending after eligibility failure failed");
         }
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %user_id, "magic complete eligibility check failed");
+            tracing::error!(error = %e, user_id = user_id.as_str(), "magic complete eligibility check failed");
             return render_error_page(PublicErrorMessage::ContactSupport);
         }
         audit::emit(
@@ -1167,7 +1161,7 @@ pub async fn complete(
 
     // 6. A confirmed second factor gates this mint too. Finalize the completion
     //    row first so an abandoned challenge cannot leave a replayable code.
-    match totp_store::is_enabled(db.as_ref(), user_id).await {
+    match totp_store::is_enabled(db.as_ref(), &user_id).await {
         Ok(true) => {
             match magic_completions::finalize_consume(
                 db.as_ref(),
@@ -1199,11 +1193,11 @@ pub async fn complete(
             )
             .await;
             let MagicTarget::ReturnTo(native_return_to) = &form_target;
-            return magic_challenge(&cfg, db.as_ref(), user_id, native_return_to).await;
+            return magic_challenge(&cfg, db.as_ref(), &user_id, native_return_to).await;
         }
         Ok(false) => {}
         Err(e) => {
-            tracing::error!(error = %e, user_id = %user_id, "magic complete totp is_enabled check failed");
+            tracing::error!(error = %e, user_id = user_id.as_str(), "magic complete totp is_enabled check failed");
             if let Err(e) = magic_completions::clear_consume_pending(
                 db.as_ref(),
                 &form.csrf_nonce,
@@ -1221,7 +1215,7 @@ pub async fn complete(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id,
+            user_id: user_id.clone(),
             auth_method: "magic",
             amr: vec!["magic".into()],
             acr: Some("urn:zeroship:magic"),
@@ -1248,8 +1242,8 @@ pub async fn complete(
         }
     };
 
-    if let Err(e) = users::touch_last_login(db.as_ref(), user_id).await {
-        tracing::warn!(error = %e, user_id = %user_id, "magic touch_last_login failed");
+    if let Err(e) = users::touch_last_login(db.as_ref(), &user_id).await {
+        tracing::warn!(error = %e, user_id = user_id.as_str(), "magic touch_last_login failed");
     }
 
     match magic_completions::finalize_consume(
@@ -1284,10 +1278,7 @@ pub async fn complete(
 
     let MagicTarget::ReturnTo(native_return_to) = &form_target;
     let mut resp = return_to::see_other(native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header("cache-control", "no-store");
     resp.header(SET_COOKIE, magic_csrf_clear_cookie());
     resp.finish()
@@ -1299,10 +1290,7 @@ fn render_error_page(message: PublicErrorMessage) -> HttpResponse {
     render_error_page_with_status(message, StatusCode::OK)
 }
 
-fn render_error_page_with_status(
-    message: PublicErrorMessage,
-    status: StatusCode,
-) -> HttpResponse {
+fn render_error_page_with_status(message: PublicErrorMessage, status: StatusCode) -> HttpResponse {
     let page = ErrorPage {
         message,
         error_code: message.error_code(),
@@ -1318,7 +1306,7 @@ fn render_error_page_with_status(
 /// Find a user by `email`, creating them with `email_verified_at = NOW()`
 /// if absent (clicking the magic link is itself proof of email
 /// ownership).
-async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) -> Result<Uuid> {
+async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) -> Result<UserId> {
     email_validation::validate_email(email)
         .map_err(|_| AuthError::Internal("invalid email".into()))?;
 
@@ -1329,7 +1317,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
             db.execute(
                 "UPDATE zeroship.users SET email_verified_at = NOW() \
                  WHERE id = $1 AND email_verified_at IS NULL",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
@@ -1340,7 +1328,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
     let user = users::create(db, email, name, None).await?;
     db.execute(
         "UPDATE zeroship.users SET email_verified_at = NOW() WHERE id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("set email_verified_at: {e}")))?;
@@ -1356,11 +1344,7 @@ async fn find_or_create_magic_user(db: &compio_postgres::Client, email: &str) ->
 fn user_agent_str(h: Option<&HeaderValue>) -> String {
     h.and_then(|v| v.to_str().ok())
         .map(|s| {
-            let trimmed: String = s
-                .chars()
-                .take(120)
-                .filter(|ch| !ch.is_control())
-                .collect();
+            let trimmed: String = s.chars().take(120).filter(|ch| !ch.is_control()).collect();
             if trimmed.is_empty() {
                 "Unknown device".to_string()
             } else {
@@ -1371,14 +1355,18 @@ fn user_agent_str(h: Option<&HeaderValue>) -> String {
 }
 
 fn email_domain(email: &str) -> &str {
-    email.split_once('@').map(|(_, domain)| domain).unwrap_or("")
+    email
+        .split_once('@')
+        .map(|(_, domain)| domain)
+        .unwrap_or("")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const NATIVE_RETURN_TO: &str = "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
+    const NATIVE_RETURN_TO: &str =
+        "/oauth2/authorize?client_id=oac_123&redirect_uri=https%3A%2F%2Fapp.test%2Fcb&scope=openid";
 
     #[test]
     fn magic_csrf_cookie_is_always_secure_and_host_prefixed() {

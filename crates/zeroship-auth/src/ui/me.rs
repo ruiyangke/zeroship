@@ -41,8 +41,8 @@ use crate::config::AuthConfig;
 use crate::csrf;
 use crate::sessions::login as session_cookie;
 use crate::store::identities::{GuardedUnlink, Identity};
-use crate::store::{identities, sessions, users};
 use crate::store::users::UserRow;
+use crate::store::{identities, sessions, users};
 use crate::ui::{ErrorPage, LinkedIdentity, MePage, PublicErrorMessage};
 
 const MAX_PROVIDER_PATH_BYTES: usize = 64;
@@ -74,7 +74,7 @@ pub async fn get(
         return redirect_to_login();
     };
 
-    let idents = identities::list_for_user(db.as_ref(), user.id)
+    let idents = identities::list_for_user(db.as_ref(), &user.id)
         .await
         .unwrap_or_default();
 
@@ -132,17 +132,16 @@ pub async fn unlink(
     };
 
     // 3. Unlink with the orphan-guard enforced atomically in SQL.
-    let result = match identities::unlink_preserving_credential(db.as_ref(), user.id, &provider)
-        .await
-    {
-        Ok(result) => result,
-        Err(e) => {
-            tracing::error!(error = %e, "identities::unlink_preserving_credential failed");
-            return render_error_page(PublicErrorMessage::ContactSupport);
-        }
-    };
+    let result =
+        match identities::unlink_preserving_credential(db.as_ref(), &user.id, &provider).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!(error = %e, "identities::unlink_preserving_credential failed");
+                return render_error_page(PublicErrorMessage::ContactSupport);
+            }
+        };
 
-    let idents = match identities::list_for_user(db.as_ref(), user.id).await {
+    let idents = match identities::list_for_user(db.as_ref(), &user.id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "identities::list_for_user failed");
@@ -217,10 +216,7 @@ pub async fn unlink(
 /// Resolve the signed-in user from the request, or `None` if the cookie
 /// is missing/invalid/expired or the user row is gone.
 #[allow(clippy::future_not_send)]
-async fn resolve_user(
-    req: &HttpRequest,
-    db: &compio_postgres::Client,
-) -> Option<UserRow> {
+async fn resolve_user(req: &HttpRequest, db: &compio_postgres::Client) -> Option<UserRow> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -229,10 +225,7 @@ async fn resolve_user(
     let session_id = session_cookie::parse_cookie(cookie_header)?;
 
     let session = sessions::validate(db, session_id).await.ok().flatten()?;
-    users::find_by_id(db, &session.user_id.to_string())
-        .await
-        .ok()
-        .flatten()
+    users::find_by_id(db, &session.user_id).await.ok().flatten()
 }
 
 /// Pure predicate — extracted so the unit tests below can assert the
@@ -375,8 +368,14 @@ mod tests {
             avatar_url: None,
             has_password: true,
             identities: vec![
-                LinkedIdentity { provider: "google", email_at_link: "user@example.com" },
-                LinkedIdentity { provider: "github", email_at_link: "user@example.com" },
+                LinkedIdentity {
+                    provider: "google",
+                    email_at_link: "user@example.com",
+                },
+                LinkedIdentity {
+                    provider: "github",
+                    email_at_link: "user@example.com",
+                },
             ],
             csrf: "xyz",
             error: None,

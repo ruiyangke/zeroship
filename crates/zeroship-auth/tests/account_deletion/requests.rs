@@ -22,7 +22,7 @@ async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
             .await
             .unwrap();
 
-        let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let req = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .expect("request_deletion")
             .expect("user existed");
@@ -40,7 +40,7 @@ async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
             .query_one(
                 "SELECT disabled_at, deletion_requested_at, deletion_scheduled_for \
              FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -67,7 +67,7 @@ async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
             .query(
                 "SELECT expires_at FROM zeroship.magic_links \
              WHERE user_id = $1 AND purpose = 'deletion_cancel' AND consumed_at IS NULL",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -92,7 +92,7 @@ async fn the_emailed_token_cancels_within_grace_and_only_once() {
             .await
             .unwrap();
 
-        let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let req = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
@@ -106,7 +106,7 @@ async fn the_emailed_token_cancels_within_grace_and_only_once() {
             .query_one(
                 "SELECT disabled_at, deletion_requested_at, deletion_scheduled_for \
              FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -125,7 +125,7 @@ async fn the_emailed_token_cancels_within_grace_and_only_once() {
         // Single use. The same token presented again is not a second cancel, and
         // (the control that makes this claim mean something) it is refused even
         // though a fresh deletion request is now in flight.
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
@@ -139,7 +139,7 @@ async fn the_emailed_token_cancels_within_grace_and_only_once() {
         let still_pending: bool = db
             .query_one(
                 "SELECT deletion_requested_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -167,11 +167,11 @@ async fn reissuing_a_request_supersedes_the_previous_undo_token() {
         .await
         .unwrap();
 
-        let first = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let first = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        let second = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let second = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
@@ -210,14 +210,14 @@ async fn a_token_past_the_grace_window_is_refused() {
         )
         .await
         .unwrap();
-        let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let req = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
         db.execute(
             "UPDATE zeroship.magic_links SET expires_at = NOW() - INTERVAL '1 minute' \
          WHERE user_id = $1 AND purpose = 'deletion_cancel'",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap();
@@ -232,7 +232,7 @@ async fn a_token_past_the_grace_window_is_refused() {
         let still_pending: bool = db
             .query_one(
                 "SELECT deletion_requested_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -258,12 +258,12 @@ async fn cancellation_preserves_an_independent_administrative_disable() {
         .unwrap();
         db.execute(
             "UPDATE zeroship.users SET disabled_at = NOW() - INTERVAL '1 day' WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap();
 
-        let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let req = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
@@ -275,7 +275,7 @@ async fn cancellation_preserves_an_independent_administrative_disable() {
         let disabled: bool = db
             .query_one(
                 "SELECT disabled_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -309,7 +309,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
         // marker == X" holds for any X - including one no live token carries.
         let pairwise_sub = zeroship_core::auth::derive_pairwise(
             &zeroship_core::crypto::derive_key("account-deletion-test-salt"),
-            &user.id.to_string(),
+            &user.id,
             &format!("https://{client_id}.zeroship.localhost"),
         );
 
@@ -351,7 +351,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
             "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub) \
          VALUES ($1, $2, $3)",
-            &[&client_id, &user.id, &pairwise_sub],
+            &[&client_id, &user.id.as_str(), &pairwise_sub],
         )
         .await
         .unwrap();
@@ -365,7 +365,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
                 &anchor_id,
                 &app_id,
                 &client_id,
-                &user.id,
+                &user.id.as_str(),
                 &b"enc-refresh".to_vec(),
                 &format!("rfam_{tag}"),
             ],
@@ -373,7 +373,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
         .await
         .unwrap();
 
-        let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let req = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
@@ -408,7 +408,7 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
             .query(
                 "SELECT 1 FROM zeroship.token_revocations \
              WHERE client_id = 'zeroship-cli' AND sub = $1",
-                &[&user.id.to_string()],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();

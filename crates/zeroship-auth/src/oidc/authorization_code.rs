@@ -2,16 +2,17 @@
 
 use std::sync::Arc;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, GenericClient, Transaction};
+use ntex::http::header::{HeaderValue, COOKIE, LOCATION, WWW_AUTHENTICATE};
 use ntex::http::StatusCode;
-use ntex::http::header::{COOKIE, HeaderValue, LOCATION, WWW_AUTHENTICATE};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::config::AuthConfig;
 use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
@@ -20,7 +21,7 @@ use crate::oidc::claims::scope_gated_identity_claims;
 use crate::oidc::device_token;
 use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool};
 use crate::oidc::{
-    ACCESS_TOKEN_TTL_SECS, AccessTokenMint, IdTokenMint, Issuer, PrincipalIdTokenMint,
+    AccessTokenMint, IdTokenMint, Issuer, PrincipalIdTokenMint, ACCESS_TOKEN_TTL_SECS,
 };
 use crate::return_to;
 use crate::session_store::{SessionKind, ValidatedSession};
@@ -126,7 +127,7 @@ struct ConsumedCode {
     pkce_method: String,
     granted_scopes: Vec<String>,
     nonce: Option<String>,
-    user_id: Uuid,
+    user_id: UserId,
     auth_credential_version: i64,
     sid: String,
 }
@@ -405,17 +406,19 @@ async fn authorize_inner(
                 return Ok(error_see_other(&redirect));
             }
         };
-        let consent_covers =
-            match consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await {
-                Ok(consent_covers) => consent_covers,
-                Err(_) => {
-                    return prompt_none_error_see_other(
-                        &auth_request,
-                        issuer,
-                        "interaction_required",
-                    );
-                }
-            };
+        let consent_covers = match consent_covers(
+            db,
+            &session.user_id,
+            &client.client_id,
+            &requested_scopes,
+        )
+        .await
+        {
+            Ok(consent_covers) => consent_covers,
+            Err(_) => {
+                return prompt_none_error_see_other(&auth_request, issuer, "interaction_required");
+            }
+        };
         if !consent_covers {
             let redirect = authorization_error_redirect(
                 &auth_request.redirect_uri,
@@ -425,7 +428,7 @@ async fn authorize_inner(
             )?;
             return Ok(error_see_other(&redirect));
         }
-        if touch_consent_grant(db, session.user_id, &client.client_id)
+        if touch_consent_grant(db, &session.user_id, &client.client_id)
             .await
             .is_err()
         {
@@ -458,8 +461,8 @@ async fn authorize_inner(
         return Ok(consent_redirect(req));
     }
 
-    if consent_covers(db, session.user_id, &client.client_id, &requested_scopes).await? {
-        touch_consent_grant(db, session.user_id, &client.client_id).await?;
+    if consent_covers(db, &session.user_id, &client.client_id, &requested_scopes).await? {
+        touch_consent_grant(db, &session.user_id, &client.client_id).await?;
     } else {
         return Ok(consent_redirect(req));
     }
@@ -495,7 +498,7 @@ async fn issue_authorization_code(
             &requested_scopes,
             &granted_scopes,
             &nonce,
-            &session.user_id,
+            &session.user_id.as_str(),
             &session.credential_version,
             &session.id.to_string(),
             &AUTH_CODE_TTL_SECS.to_string(),
@@ -702,7 +705,11 @@ async fn exchange_authorization_code(
         pkce_method: row.get("pkce_method"),
         granted_scopes: row.get("granted_scopes"),
         nonce: row.try_get("nonce").ok().flatten(),
-        user_id: row.get("user_id"),
+        user_id: crate::user_id::from_row(row, "user_id", "authorization code user_id is invalid")
+            .map_err(|err| {
+                tracing::error!(error = %err, "token: authorization code user_id decode failed");
+                OAuthError::server_error("authorization code store unavailable")
+            })?,
         auth_credential_version: row.get("auth_credential_version"),
         sid: row.get("sid"),
     };
@@ -719,7 +726,7 @@ async fn exchange_authorization_code(
     }
     if !consent_covers(
         db,
-        consumed.user_id,
+        &consumed.user_id,
         &client.client_id,
         &consumed.granted_scopes,
     )
@@ -744,7 +751,7 @@ async fn exchange_authorization_code(
         &refresh::session_keys(cfg)?,
         &refresh::Establish {
             client,
-            user_id: consumed.user_id,
+            user_id: &consumed.user_id,
             granted_scopes: &consumed.granted_scopes,
             auth_credential_version: consumed.auth_credential_version,
             kind: SessionKind::Browser,
@@ -759,12 +766,11 @@ async fn exchange_authorization_code(
     let refresh_token = established.secret;
     let proof = &established.proof;
 
-    let user_id = consumed.user_id.to_string();
     let access_token = mint_access_token(
         db,
         issuer,
         client,
-        consumed.user_id,
+        &consumed.user_id,
         &consumed.granted_scopes,
         proof,
     )
@@ -787,18 +793,21 @@ async fn exchange_authorization_code(
         // claims. A bare-`openid` (authentication-only) exchange derives `sub`
         // from the already-in-hand `user_id`, so it needs no row.
         let identity_claims = if wants_identity_claims {
-            let user = users::find_by_id(db, &user_id)
+            let user = users::find_by_id(db, &consumed.user_id)
                 .await
                 .map_err(|err| {
                     tracing::error!(
                         error = %err,
-                        user_id = %user_id,
+                        user_id = consumed.user_id.as_str(),
                         "token: id-token user lookup failed"
                     );
                     OAuthError::server_error("id token user lookup failed")
                 })?
                 .ok_or_else(|| {
-                    tracing::error!(user_id = %user_id, "token: consumed code user is missing");
+                    tracing::error!(
+                        user_id = consumed.user_id.as_str(),
+                        "token: consumed code user is missing"
+                    );
                     OAuthError::server_error("id token user missing")
                 })?;
             Some(scope_gated_identity_claims(
@@ -813,7 +822,7 @@ async fn exchange_authorization_code(
                 .issue_principal_id_token(
                     db,
                     &PrincipalIdTokenMint {
-                        principal_id: &user_id,
+                        principal_id: &consumed.user_id,
                         client_id: &client.client_id,
                         sid: &consumed.sid,
                         nonce,
@@ -843,7 +852,7 @@ async fn exchange_authorization_code(
                 .issue_id_token(
                     db,
                     &IdTokenMint {
-                        user_id: &user_id,
+                        user_id: &consumed.user_id,
                         sector: &client.sector_identifier,
                         client_id: &client.client_id,
                         sid: &consumed.sid,
@@ -885,13 +894,13 @@ async fn exchange_authorization_code(
 
     if id_token.is_some() {
         let subject = if client.brokered {
-            user_id.clone()
+            consumed.user_id.as_str().to_owned()
         } else {
-            issuer.pairwise_subject(&user_id, &client.sector_identifier)
+            issuer.pairwise_subject(&consumed.user_id, &client.sector_identifier)
         };
         backchannel_logout::record_rp_participation(
             db,
-            consumed.user_id,
+            &consumed.user_id,
             &consumed.sid,
             &client.client_id,
             &subject,
@@ -943,9 +952,17 @@ async fn revoke_replayed_authorization_code_lineage(
         return Ok(false);
     };
     let client_id: String = row.get("client_id");
-    let user_id: Uuid = row.get("user_id");
+    let user_id = crate::user_id::from_row(
+        row,
+        "user_id",
+        "authorization code replay user_id is invalid",
+    )
+    .map_err(|err| {
+        tracing::error!(error = %err, "token: authorization code replay user_id decode failed");
+        OAuthError::server_error("authorization code store unavailable")
+    })?;
     let sector_identifier: String = row.get("sector_identifier");
-    let sub = issuer.pairwise_subject(&user_id.to_string(), &sector_identifier);
+    let sub = issuer.pairwise_subject(&user_id, &sector_identifier);
     refresh::revoke_sessions_for_subject_in_transaction(db, &client_id, &sub).await?;
     Ok(true)
 }
@@ -1055,7 +1072,7 @@ pub(super) async fn load_client(
 
 pub(crate) async fn persist_consent_grant(
     db: &Client,
-    user_id: Uuid,
+    user_id: &UserId,
     client_id: &str,
     requested_scopes: &[String],
 ) -> Result<Vec<String>, String> {
@@ -1064,7 +1081,7 @@ pub(crate) async fn persist_consent_grant(
             "SELECT granted_scopes \
              FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2",
-            &[&user_id, &client_id],
+            &[&user_id.as_str(), &client_id],
         )
         .await
         .map_err(|err| format!("oauth grant lookup failed: {err}"))?;
@@ -1083,7 +1100,7 @@ pub(crate) async fn persist_consent_grant(
          SET granted_scopes = EXCLUDED.granted_scopes, \
              updated_at = NOW(), \
              last_used_at = NOW()",
-        &[&user_id, &client_id, &granted],
+        &[&user_id.as_str(), &client_id, &granted],
     )
     .await
     .map_err(|err| format!("oauth grant upsert failed: {err}"))?;
@@ -1092,7 +1109,7 @@ pub(crate) async fn persist_consent_grant(
 
 async fn consent_covers(
     db: &(impl GenericClient + ?Sized),
-    user_id: Uuid,
+    user_id: &UserId,
     client_id: &str,
     granted_scopes: &[String],
 ) -> Result<bool, OAuthError> {
@@ -1101,7 +1118,7 @@ async fn consent_covers(
             "SELECT granted_scopes \
              FROM zeroship.oauth_grants \
              WHERE user_id = $1 AND client_id = $2",
-            &[&user_id, &client_id],
+            &[&user_id.as_str(), &client_id],
         )
         .await
         .map_err(|err| {
@@ -1117,14 +1134,14 @@ async fn consent_covers(
 
 async fn touch_consent_grant(
     db: &Client,
-    user_id: Uuid,
+    user_id: &UserId,
     client_id: &str,
 ) -> Result<(), OAuthError> {
     db.execute(
         "UPDATE zeroship.oauth_grants \
          SET last_used_at = NOW() \
          WHERE user_id = $1 AND client_id = $2",
-        &[&user_id, &client_id],
+        &[&user_id.as_str(), &client_id],
     )
     .await
     .map_err(|err| {
@@ -1472,29 +1489,28 @@ pub(super) async fn mint_access_token(
     db: &Transaction<'_>,
     issuer: &Issuer,
     client: &OAuthClient,
-    user_id: Uuid,
+    user_id: &UserId,
     scopes: &[String],
     proof: &ValidatedSession,
 ) -> Result<String, OAuthError> {
     crate::advisory_lock::lock_refresh_user_xact(db, user_id)
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, user_id = %user_id, "access-token mint user lock failed");
+            tracing::error!(error = %err, user_id = user_id.as_str(), "access-token mint user lock failed");
             OAuthError::server_error("access-token mint unavailable")
         })?;
     let active = db
-        .query(ACCESS_MINT_PRINCIPAL_ACTIVE_SQL, &[&user_id])
+        .query(ACCESS_MINT_PRINCIPAL_ACTIVE_SQL, &[&user_id.as_str()])
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, user_id = %user_id, "access-token mint lifecycle lookup failed");
+            tracing::error!(error = %err, user_id = user_id.as_str(), "access-token mint lifecycle lookup failed");
             OAuthError::server_error("access-token mint unavailable")
         })?;
     if active.is_empty() {
         return Err(OAuthError::invalid_grant("authenticated user is inactive"));
     }
 
-    let user_id_string = user_id.to_string();
-    let pairwise_sub = issuer.pairwise_subject(&user_id_string, &client.sector_identifier);
+    let pairwise_sub = issuer.pairwise_subject(user_id, &client.sector_identifier);
     db.execute(
         "SELECT set_config('zeroship.tenant_client', $1, true)",
         &[&client.client_id],
@@ -1507,14 +1523,14 @@ pub(super) async fn mint_access_token(
     let mapped = db
         .execute(
             access_identity_upsert_sql(),
-            &[&client.client_id, &user_id, &pairwise_sub],
+            &[&client.client_id, &user_id.as_str(), &pairwise_sub],
         )
         .await
         .map_err(|err| {
             tracing::error!(
                 error = %err,
                 client_id = %client.client_id,
-                user_id = %user_id,
+                user_id = user_id.as_str(),
                 "token: pairwise identity mapping failed"
             );
             OAuthError::server_error("pairwise identity store unavailable")
@@ -1522,7 +1538,7 @@ pub(super) async fn mint_access_token(
     if mapped != 1 {
         tracing::error!(
             client_id = %client.client_id,
-            user_id = %user_id,
+            user_id = user_id.as_str(),
             "token: pairwise identity binding changed"
         );
         return Err(OAuthError::server_error(
@@ -1534,7 +1550,7 @@ pub(super) async fn mint_access_token(
         .issue_access_token(
             db,
             &AccessTokenMint {
-                user_id: &user_id_string,
+                user_id,
                 sector: &client.sector_identifier,
                 audience: &audience,
                 client_id: &client.client_id,
@@ -1555,7 +1571,7 @@ mod access_identity_tests {
     use std::time::Duration;
 
     use base64::Engine as _;
-    use compio_postgres::{Client, NoTls, connect};
+    use compio_postgres::{connect, Client, NoTls};
 
     use super::*;
 
@@ -1606,7 +1622,7 @@ mod access_identity_tests {
         tx: &Transaction<'_>,
         issuer: &Issuer,
         client: &OAuthClient,
-        user_id: Uuid,
+        user_id: &UserId,
     ) -> ValidatedSession {
         let tag = Uuid::new_v4().simple().to_string();
         refresh::establish_session(
@@ -1631,7 +1647,7 @@ mod access_identity_tests {
     // the mint-vs-deletion lock race, and a silently skipped run would let
     // that race go unchecked while the suite still read green. Dial it or
     // panic naming the provisioning command.
-    async fn mint_fixture() -> (String, Client, Client, Client, Uuid, OAuthClient, Issuer) {
+    async fn mint_fixture() -> (String, Client, Client, Client, UserId, OAuthClient, Issuer) {
         let dsn = zeroship_core::config::test_database_url();
         // A DATABASE BEHIND THE MIGRATION LEDGER IS REFUSED, NOT REPORTED AS A
         // CODE REGRESSION. `refresh::establish_session` maps every error the
@@ -1654,15 +1670,15 @@ mod access_identity_tests {
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;
         let tag = Uuid::new_v4().simple().to_string();
-        let user_id: Uuid = setup
-            .query_one(
-                "INSERT INTO zeroship.users (email, name, password_hash) \
-                 VALUES ($1::citext, 'Mint Race', 'phc') RETURNING id",
-                &[&format!("mint-race-{tag}@zeroship.test")],
+        let user_id = UserId::mint();
+        setup
+            .execute(
+                "INSERT INTO zeroship.users (id, email, name, password_hash) \
+                 VALUES ($1, $2::citext, 'Mint Race', 'phc')",
+                &[&user_id.as_str(), &format!("mint-race-{tag}@zeroship.test")],
             )
             .await
-            .expect("seed user")
-            .get("id");
+            .expect("seed user");
         let client_id = format!("oac_mint_race_{tag}");
         setup
             .execute(
@@ -1759,9 +1775,12 @@ mod access_identity_tests {
             .expect("iat")
     }
 
-    async fn cleanup_mint_fixture(setup: &Client, user_id: Uuid, client_id: &str) {
+    async fn cleanup_mint_fixture(setup: &Client, user_id: &UserId, client_id: &str) {
         let _ = setup
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user_id.as_str()],
+            )
             .await;
         let _ = setup
             .execute(
@@ -1804,12 +1823,12 @@ mod access_identity_tests {
     async fn access_token_mint_holds_the_user_lock_until_commit() {
         let (_dsn, setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
-        let proof = proof_for(&tx, &issuer, &client, user_id).await;
+        let proof = proof_for(&tx, &issuer, &client, &user_id).await;
         mint_access_token(
             &tx,
             &issuer,
             &client,
-            user_id,
+            &user_id,
             &["openid".to_string()],
             &proof,
         )
@@ -1819,7 +1838,7 @@ mod access_identity_tests {
         let contender_acquired: bool = setup
             .query_one(
                 "SELECT pg_try_advisory_xact_lock($1::INT4, hashtext($2::text))",
-                &[&crate::advisory_lock::NS_USER, &user_id.to_string()],
+                &[&crate::advisory_lock::NS_USER, &user_id.as_str()],
             )
             .await
             .expect("probe mint lock")
@@ -1830,13 +1849,13 @@ mod access_identity_tests {
         );
 
         tx.rollback().await.expect("rollback mint");
-        cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
+        cleanup_mint_fixture(&setup, &user_id, &client.client_id).await;
     }
 
     #[compio::test]
     async fn access_token_mint_rejects_a_deleted_principal_after_locking() {
         let (_dsn, mut setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
-        crate::store::users::request_deletion(&mut setup, user_id, 30)
+        crate::store::users::request_deletion(&mut setup, &user_id, 30)
             .await
             .expect("delete request")
             .expect("user exists");
@@ -1854,7 +1873,7 @@ mod access_identity_tests {
             &test_keys(&tag),
             &refresh::Establish {
                 client: &client,
-                user_id,
+                user_id: &user_id,
                 granted_scopes: &["openid".to_string()],
                 auth_credential_version: 0,
                 kind: SessionKind::Browser,
@@ -1868,14 +1887,14 @@ mod access_identity_tests {
             "a session was established for a deleted principal"
         );
         tx.rollback().await.expect("rollback mint");
-        cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
+        cleanup_mint_fixture(&setup, &user_id, &client.client_id).await;
     }
 
     #[compio::test]
     async fn deletion_marker_uses_a_post_lock_timestamp() {
         let (_dsn, setup, mut mint, mut deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
-        crate::advisory_lock::lock_refresh_user_xact(&tx, user_id)
+        crate::advisory_lock::lock_refresh_user_xact(&tx, &user_id)
             .await
             .expect("hold mint lock");
 
@@ -1887,8 +1906,9 @@ mod access_identity_tests {
             )
             .await
             .expect("name deletion session");
+        let deletion_user_id = user_id.clone();
         let deletion_task = compio::runtime::spawn(async move {
-            crate::store::users::request_deletion(&mut deletion, user_id, 30).await
+            crate::store::users::request_deletion(&mut deletion, &deletion_user_id, 30).await
         });
         let mut observed_wait = false;
         for _ in 0..200 {
@@ -1910,19 +1930,19 @@ mod access_identity_tests {
         }
         assert!(observed_wait, "deletion never reached the held user lock");
         compio::time::sleep(Duration::from_millis(1100)).await;
-        let proof = proof_for(&tx, &issuer, &client, user_id).await;
+        let proof = proof_for(&tx, &issuer, &client, &user_id).await;
         let token = mint_access_token(
             &tx,
             &issuer,
             &client,
-            user_id,
+            &user_id,
             &["openid".to_string()],
             &proof,
         )
         .await
         .expect("mint token while deletion waits");
         let iat = token_iat(&token);
-        let pairwise = issuer.pairwise_subject(&user_id.to_string(), &client.sector_identifier);
+        let pairwise = issuer.pairwise_subject(&user_id, &client.sector_identifier);
         tx.commit().await.expect("commit mint");
         deletion_task
             .await
@@ -1945,6 +1965,6 @@ mod access_identity_tests {
             marker_is_newer,
             "a deletion that waited for mint must revoke the token minted while it waited"
         );
-        cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
+        cleanup_mint_fixture(&setup, &user_id, &client.client_id).await;
     }
 }

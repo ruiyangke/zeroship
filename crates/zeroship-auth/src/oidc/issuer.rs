@@ -14,6 +14,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use zeroship_core::device_grant::PLATFORM_TOKEN_MAX_TTL_SECS;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{with_advisory_lock, OP_SIGNING_KEY_BOOTSTRAP_LOCK};
 use crate::error::{AuthError, Result};
@@ -91,7 +92,7 @@ pub struct LogoutTokenClaims {
 /// Inputs for minting an access token.
 #[derive(Debug, Clone)]
 pub struct AccessTokenMint<'a> {
-    pub user_id: &'a str,
+    pub user_id: &'a UserId,
     pub sector: &'a str,
     pub audience: &'a str,
     pub client_id: &'a str,
@@ -103,7 +104,7 @@ pub struct AccessTokenMint<'a> {
 /// platform principal id instead of an app-sector pairwise subject.
 #[derive(Debug, Clone)]
 pub struct PrincipalAccessTokenMint<'a> {
-    pub principal_id: &'a str,
+    pub principal_id: &'a UserId,
     pub audience: &'a str,
     pub client_id: &'a str,
     pub scopes: &'a [String],
@@ -114,7 +115,7 @@ pub struct PrincipalAccessTokenMint<'a> {
 /// principal id instead of an app-sector pairwise subject.
 #[derive(Debug, Clone)]
 pub struct PrincipalIdTokenMint<'a> {
-    pub principal_id: &'a str,
+    pub principal_id: &'a UserId,
     pub client_id: &'a str,
     pub sid: &'a str,
     pub nonce: &'a str,
@@ -132,7 +133,7 @@ pub struct PrincipalIdTokenMint<'a> {
 /// Inputs for minting an ID token paired to an access token.
 #[derive(Debug, Clone)]
 pub struct IdTokenMint<'a> {
-    pub user_id: &'a str,
+    pub user_id: &'a UserId,
     pub sector: &'a str,
     pub client_id: &'a str,
     pub sid: &'a str,
@@ -177,25 +178,19 @@ impl std::fmt::Debug for BrokerSecrets {
 impl BrokerSecrets {
     /// Construct a validated broker-secret set from raw master-secret bytes.
     pub fn new(current: Vec<u8>, previous: Option<Vec<u8>>) -> Result<Self> {
-        zeroship_core::auth::validate_broker_master(&current)
-            .map_err(AuthError::Config)?;
+        zeroship_core::auth::validate_broker_master(&current).map_err(AuthError::Config)?;
         if let Some(previous) = previous.as_ref() {
-            zeroship_core::auth::validate_broker_master(previous)
-                .map_err(AuthError::Config)?;
+            zeroship_core::auth::validate_broker_master(previous).map_err(AuthError::Config)?;
         }
         Ok(Self { current, previous })
     }
 
     /// Load and validate broker master secrets from owner-only files.
     pub fn from_files(current_file: &Path, previous_file: Option<&Path>) -> Result<Self> {
-        let current =
-            signing::load_broker_master_secret(current_file, "AUTH_BROKER_SECRET_FILE")?;
+        let current = signing::load_broker_master_secret(current_file, "AUTH_BROKER_SECRET_FILE")?;
         let previous = previous_file
             .map(|path| {
-                signing::load_broker_master_secret(
-                    path,
-                    "AUTH_BROKER_SECRET_PREVIOUS_FILE",
-                )
+                signing::load_broker_master_secret(path, "AUTH_BROKER_SECRET_PREVIOUS_FILE")
             })
             .transpose()?;
         Self::new(current, previous)
@@ -264,7 +259,9 @@ impl Issuer {
 
         let issuer = issuer.trim_end_matches('/').to_string();
         if issuer.is_empty() {
-            return Err(AuthError::Config("ZEROSHIP_AUTH_PUBLIC_URL / issuer is empty".into()));
+            return Err(AuthError::Config(
+                "ZEROSHIP_AUTH_PUBLIC_URL / issuer is empty".into(),
+            ));
         }
         let private_der = signing_key
             .to_pkcs8_der()
@@ -313,9 +310,9 @@ impl Issuer {
         let result = self.reconcile_active_key(db).await;
         match result {
             Ok(()) => {
-                db.execute("COMMIT", &[]).await.map_err(|e| {
-                    AuthError::Db(format!("signing_keys bootstrap commit: {e}"))
-                })?;
+                db.execute("COMMIT", &[])
+                    .await
+                    .map_err(|e| AuthError::Db(format!("signing_keys bootstrap commit: {e}")))?;
                 Ok(())
             }
             Err(err) => {
@@ -441,7 +438,7 @@ impl Issuer {
 
     /// Issue an RFC 9068 access token for a platform principal. This is used by
     /// first-party resource servers such as control where `sub` is the global
-    /// principal UUID, not an end-user pairwise app subject.
+    /// principal id, not an end-user pairwise app subject.
     #[allow(clippy::future_not_send)]
     pub async fn issue_principal_access_token(
         &self,
@@ -455,7 +452,7 @@ impl Issuer {
             "principal access token",
         )?;
         let signed = self.build_access_token_with_subject(
-            mint.principal_id,
+            mint.principal_id.as_str(),
             mint.audience,
             mint.client_id,
             mint.scopes,
@@ -557,7 +554,7 @@ impl Issuer {
             "principal ID token",
         )?;
         let signed = self.build_id_token_with_subject(
-            mint.principal_id,
+            mint.principal_id.as_str(),
             mint.client_id,
             mint.sid,
             mint.nonce,
@@ -802,7 +799,7 @@ impl Issuer {
 
     /// Derive the app/sector pairwise subject with the issuer's loaded salt.
     #[must_use]
-    pub fn pairwise_subject(&self, user_id: &str, sector: &str) -> String {
+    pub fn pairwise_subject(&self, user_id: &UserId, sector: &str) -> String {
         zeroship_core::auth::derive_pairwise(&self.pairwise_salt, user_id, sector)
     }
 
@@ -851,8 +848,8 @@ pub fn oidc_at_hash(access_token: &str) -> String {
 /// Every live call site passes the session's own person id, so a failure here
 /// is a programming error rather than a request-shaped one, and it is reported
 /// as an internal error without naming either identifier.
-fn bind_proof_to_person(proof: &ValidatedSession, minting_for: &str) -> Result<()> {
-    if proof.person_id().to_string() == minting_for {
+fn bind_proof_to_person(proof: &ValidatedSession, minting_for: &UserId) -> Result<()> {
+    if proof.person_id() == minting_for {
         return Ok(());
     }
     tracing::error!(

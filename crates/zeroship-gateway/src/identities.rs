@@ -19,7 +19,7 @@
 //! enumerates these rows to revoke access-only and cookie token families.
 
 use compio_postgres::Client;
-use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::error::{GatewayError, Result};
 use crate::rls;
@@ -54,7 +54,7 @@ const fn identity_upsert_sql() -> &'static str {
 pub async fn upsert(
     conn: &mut Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
     pairwise_sub: &str,
 ) -> Result<()> {
     let tx = conn
@@ -64,11 +64,11 @@ pub async fn upsert(
     rls::set_tenant_client(&tx, app_client_id).await?;
     let mapped = tx
         .execute(
-        identity_upsert_sql(),
-        &[&app_client_id, &global_user_id, &pairwise_sub],
-    )
-    .await
-    .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
+            identity_upsert_sql(),
+            &[&app_client_id, &global_user_id.as_str(), &pairwise_sub],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
     if mapped != 1 {
         return Err(GatewayError::Db(
             "app_user_identities pairwise binding changed".to_string(),
@@ -89,7 +89,7 @@ pub async fn upsert(
 pub async fn lookup_pairwise_sub(
     conn: &mut Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Result<Option<String>> {
     let tx = conn
         .transaction()
@@ -100,7 +100,7 @@ pub async fn lookup_pairwise_sub(
         .query(
             "SELECT pairwise_sub FROM zeroship.app_user_identities \
              WHERE app_client_id = $1 AND global_user_id = $2",
-            &[&app_client_id, &global_user_id],
+            &[&app_client_id, &global_user_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities lookup: {e}")))?;
@@ -130,7 +130,7 @@ pub async fn lookup_pairwise_sub(
 pub async fn lookup_relay_email(
     conn: &mut Client,
     app_client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Result<Option<String>> {
     let tx = conn
         .transaction()
@@ -143,7 +143,7 @@ pub async fn lookup_relay_email(
              WHERE app_client_id = $1 AND global_user_id = $2 \
                AND relay_email IS NOT NULL \
                AND revoked_at IS NULL",
-            &[&app_client_id, &global_user_id],
+            &[&app_client_id, &global_user_id.as_str()],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("app_user_identities relay lookup: {e}")))?;
@@ -160,8 +160,7 @@ mod tests {
 
     #[test]
     fn mapping_upsert_refuses_pairwise_subject_rebinding() {
-        assert!(identity_upsert_sql().contains(
-            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
-        ));
+        assert!(identity_upsert_sql()
+            .contains("WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"));
     }
 }

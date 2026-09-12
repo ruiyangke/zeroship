@@ -18,6 +18,7 @@
 
 use compio_postgres::Client;
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::error::{GatewayError, Result};
 use crate::rls;
@@ -25,7 +26,7 @@ use crate::rls;
 #[derive(Debug, Clone)]
 pub struct AppSession {
     pub id: Uuid,
-    pub user_id: String,
+    pub user_id: UserId,
     /// OIDC OP session id (`sid`) from the ID token, used to correlate
     /// Back-Channel Logout tokens to the local RP session.
     pub sid: Option<String>,
@@ -55,7 +56,7 @@ pub struct AppSession {
 
 #[derive(Debug)]
 pub struct NewSession<'a> {
-    pub user_id: &'a str,
+    pub user_id: &'a UserId,
     /// OIDC OP session id (`sid`) from the validated ID token, if present.
     pub sid: Option<&'a str>,
     /// The app's stable UUID (`apps.id`), bound natively into the UUID
@@ -96,8 +97,6 @@ pub const ABSOLUTE_HOURS: i64 = 12;
 ///
 /// [`GatewayError::Db`] on PG failure or empty return.
 pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSession> {
-    let user_id = Uuid::parse_str(params.user_id)
-        .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid user_id: {e}")))?;
     let amr: Vec<String> = params.amr.to_vec();
     let tx = conn
         .transaction()
@@ -119,7 +118,7 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
                        email_verified, granted_scopes, auth_time, amr, sid, \
                        idle_expires_at, abs_expires_at",
             &[
-                &user_id,
+                &params.user_id.as_str(),
                 &params.app_id,
                 &params.email,
                 &params.name,
@@ -140,7 +139,7 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
         let row = rows
             .first()
             .ok_or_else(|| GatewayError::Db("gateway_sessions create: empty return".into()))?;
-        row_to_session(row)
+        row_to_session(row)?
     };
     tx.commit()
         .await
@@ -200,17 +199,12 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
 /// filter.
 ///
 /// # Errors
-/// [`GatewayError::Db`] on PG failure (including an unparseable `user_id`).
+/// [`GatewayError::Db`] on PG failure.
 pub async fn revoke_app_sessions_for_user(
     conn: &mut Client,
     app_id: Uuid,
-    user_id: &str,
+    user_id: &UserId,
 ) -> Result<u64> {
-    let user_id = Uuid::parse_str(user_id).map_err(|e| {
-        GatewayError::Db(format!(
-            "gateway_sessions revoke_app_sessions_for_user: invalid user_id: {e}"
-        ))
-    })?;
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions revoke_app_sessions_for_user begin: {e}"
@@ -221,11 +215,13 @@ pub async fn revoke_app_sessions_for_user(
         .execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() \
              WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL",
-            &[&user_id, &app_id],
+            &[&user_id.as_str(), &app_id],
         )
         .await
         .map_err(|e| {
-            GatewayError::Db(format!("gateway_sessions revoke_app_sessions_for_user: {e}"))
+            GatewayError::Db(format!(
+                "gateway_sessions revoke_app_sessions_for_user: {e}"
+            ))
         })?;
     tx.commit().await.map_err(|e| {
         GatewayError::Db(format!(
@@ -245,13 +241,8 @@ pub async fn revoke_app_sessions_for_user(
 pub async fn latest_sid_for_user(
     conn: &mut Client,
     app_id: Uuid,
-    user_id: &str,
+    user_id: &UserId,
 ) -> Result<Option<String>> {
-    let user_id = Uuid::parse_str(user_id).map_err(|e| {
-        GatewayError::Db(format!(
-            "gateway_sessions latest_sid_for_user: invalid user_id: {e}"
-        ))
-    })?;
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!("gateway_sessions latest_sid_for_user begin: {e}"))
     })?;
@@ -263,15 +254,13 @@ pub async fn latest_sid_for_user(
              WHERE user_id = $1 AND app_id = $2 AND sid IS NOT NULL \
              ORDER BY issued_at DESC \
              LIMIT 1",
-            &[&user_id, &app_id],
+            &[&user_id.as_str(), &app_id],
         )
         .await
         .map_err(|e| GatewayError::Db(format!("gateway_sessions latest_sid_for_user: {e}")))?;
     let sid = rows.first().and_then(|row| row.try_get("sid").ok());
     tx.commit().await.map_err(|e| {
-        GatewayError::Db(format!(
-            "gateway_sessions latest_sid_for_user commit: {e}"
-        ))
+        GatewayError::Db(format!("gateway_sessions latest_sid_for_user commit: {e}"))
     })?;
     Ok(sid)
 }
@@ -284,23 +273,15 @@ pub async fn revoke_app_sessions_for_sid(
     conn: &mut Client,
     app_id: Uuid,
     sid: &str,
-    sub: Option<&str>,
-) -> Result<Vec<Uuid>> {
-    let parsed_sub = match sub {
-        Some(sub) => Some(Uuid::parse_str(sub).map_err(|e| {
-            GatewayError::Db(format!(
-                "gateway_sessions revoke_app_sessions_for_sid: invalid user_id: {e}"
-            ))
-        })?),
-        None => None,
-    };
+    sub: Option<&UserId>,
+) -> Result<Vec<UserId>> {
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions revoke_app_sessions_for_sid begin: {e}"
         ))
     })?;
     rls::set_tenant_app(&tx, app_id).await?;
-    let rows = if let Some(user_id) = parsed_sub {
+    let rows = if let Some(user_id) = sub {
         tx.query(
             "WITH targets AS ( \
                  SELECT DISTINCT user_id \
@@ -315,7 +296,7 @@ pub async fn revoke_app_sessions_for_sid(
              SELECT user_id FROM targets \
              UNION \
              SELECT user_id FROM revoked",
-            &[&app_id, &sid, &user_id],
+            &[&app_id, &sid, &user_id.as_str()],
         )
         .await
     } else {
@@ -337,30 +318,37 @@ pub async fn revoke_app_sessions_for_sid(
         )
         .await
     }
-    .map_err(|e| {
-        GatewayError::Db(format!("gateway_sessions revoke_app_sessions_for_sid: {e}"))
-    })?;
+    .map_err(|e| GatewayError::Db(format!("gateway_sessions revoke_app_sessions_for_sid: {e}")))?;
+    let mut users = Vec::new();
+    for row in rows {
+        let raw = row.get::<_, String>("user_id");
+        let user_id = parse_user_id(&raw)?;
+        if !users.contains(&user_id) {
+            users.push(user_id);
+        }
+    }
     tx.commit().await.map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions revoke_app_sessions_for_sid commit: {e}"
         ))
     })?;
-
-    let mut users = Vec::new();
-    for row in rows {
-        let user_id: Uuid = row.get("user_id");
-        if !users.contains(&user_id) {
-            users.push(user_id);
-        }
-    }
     Ok(users)
 }
 
-fn row_to_session(row: &compio_postgres::Row) -> AppSession {
-    let user_id: Uuid = row.get("user_id");
-    AppSession {
+fn parse_user_id(raw: &str) -> Result<UserId> {
+    UserId::parse(raw).map_err(|err| {
+        GatewayError::Db(format!(
+            "gateway_sessions contains an invalid user_id: {err}"
+        ))
+    })
+}
+
+fn row_to_session(row: &compio_postgres::Row) -> Result<AppSession> {
+    let raw = row.get::<_, String>("user_id");
+    let user_id = parse_user_id(&raw)?;
+    Ok(AppSession {
         id: row.get("id"),
-        user_id: user_id.to_string(),
+        user_id,
         sid: row.try_get("sid").ok().flatten(),
         app_id: row.get("app_id"),
         email: row.try_get("email").ok(),
@@ -372,5 +360,21 @@ fn row_to_session(row: &compio_postgres::Row) -> AppSession {
         amr: row.try_get("amr").unwrap_or_default(),
         idle_expires_at: row.get("idle_expires_at"),
         abs_expires_at: row.get("abs_expires_at"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_user_id;
+    use zeroship_core::UserId;
+
+    #[test]
+    fn stored_user_ids_require_the_canonical_typed_shape() {
+        let id = UserId::mint();
+        assert_eq!(
+            parse_user_id(id.as_str()).expect("canonical user id parses"),
+            id
+        );
+        assert!(parse_user_id("0191e7a2-b3c4-4d5e-8f90-123456789abc").is_err());
     }
 }

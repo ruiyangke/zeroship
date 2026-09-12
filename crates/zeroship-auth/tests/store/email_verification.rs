@@ -17,14 +17,16 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
         let user = users::create(&client, &email, "Test", None)
             .await
             .expect("seed user");
-        let original = verification::issue(&client, user.id, &email).await.unwrap();
+        let original = verification::issue(&client, &user.id, &email)
+            .await
+            .unwrap();
         let mut locker = database.connect().await;
         let transaction = locker.transaction().await.expect("begin token lock");
         transaction
             .query_one(
                 "SELECT token_hash FROM zeroship.email_verifications \
              WHERE user_id = $1 AND consumed_at IS NULL FOR UPDATE",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("hold the token being superseded");
@@ -43,13 +45,14 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
             .get(0);
         let email_a = email.clone();
         let email_b = email.to_ascii_uppercase();
-        let user_id = user.id;
+        let user_id_a = user.id.clone();
+        let user_id_b = user.id.clone();
         let issue_a = compio::runtime::spawn(async move {
-            verification::issue(&client_a, user_id, &email_a).await
+            verification::issue(&client_a, &user_id_a, &email_a).await
         });
         let first_waiting = database.wait_until_blocked(&[pid_a]).await;
         let issue_b = compio::runtime::spawn(async move {
-            verification::issue(&client_b, user_id, &email_b).await
+            verification::issue(&client_b, &user_id_b, &email_b).await
         });
         let both_waiting = database.wait_until_blocked(&[pid_a, pid_b]).await;
         transaction.commit().await.expect("release waiting issuers");
@@ -62,7 +65,7 @@ async fn concurrent_issue_leaves_one_active_verification_token() {
             .query_one(
                 "SELECT COUNT(*) FROM zeroship.email_verifications \
                  WHERE user_id = $1 AND consumed_at IS NULL",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("count active verification links")
@@ -103,7 +106,7 @@ async fn issue_then_redeem_roundtrip() {
             .await
             .expect("seed user");
 
-        let issued = verification::issue(&client, user.id, &email)
+        let issued = verification::issue(&client, &user.id, &email)
             .await
             .expect("issue");
         assert!(!issued.raw.is_empty(), "raw token must be non-empty");
@@ -139,7 +142,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
         let user = users::create(&client, &email, "Test", None)
             .await
             .expect("seed user");
-        let issued = verification::issue(&client, user.id, &email)
+        let issued = verification::issue(&client, &user.id, &email)
             .await
             .expect("issue");
 
@@ -158,7 +161,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
                  FROM zeroship.email_verifications ev \
                  JOIN zeroship.users u ON u.id = ev.user_id \
                  WHERE ev.user_id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("load verification state");
@@ -186,7 +189,7 @@ async fn redeem_and_mark_verified_rolls_back_token_consume_with_transaction() {
         let verified: bool = client
             .query_one(
                 "SELECT email_verified_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -210,10 +213,10 @@ async fn new_issue_supersedes_previous() {
             .await
             .expect("seed user");
 
-        let first = verification::issue(&client, user.id, &email)
+        let first = verification::issue(&client, &user.id, &email)
             .await
             .expect("issue 1");
-        let second = verification::issue(&client, user.id, &email)
+        let second = verification::issue(&client, &user.id, &email)
             .await
             .expect("issue 2");
 

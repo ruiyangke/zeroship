@@ -8,8 +8,8 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use compio_postgres::GenericClient;
-use uuid::Uuid;
 use zeroship_core::device_grant::{PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_PROVIDER};
+use zeroship_core::UserId;
 
 /// Whether this call wrote the first-seen marker and default grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +38,7 @@ mod tests {
     #[test]
     fn only_a_raced_existing_marker_requires_live_entitlement_refresh() {
         assert!(!PlatformCliGrantMaterialization::Materialized.requires_entitlement_refresh());
-        assert!(
-            PlatformCliGrantMaterialization::AlreadyMaterialized
-                .requires_entitlement_refresh()
-        );
+        assert!(PlatformCliGrantMaterialization::AlreadyMaterialized.requires_entitlement_refresh());
     }
 }
 
@@ -121,9 +118,9 @@ fn describe(error: &compio_postgres::Error) -> String {
 #[allow(clippy::future_not_send)]
 pub async fn materialize_default_grants(
     pg: &(impl GenericClient + ?Sized),
-    principal_id: Uuid,
+    principal_id: &UserId,
 ) -> Result<PlatformCliGrantMaterialization, PlatformCliGrantError> {
-    let provider_subject = principal_id.to_string();
+    let provider_subject = principal_id.as_str();
     let grants: Vec<String> = PLATFORM_CLI_ISSUABLE_SCOPES
         .iter()
         .map(|grant| (*grant).to_owned())
@@ -157,7 +154,7 @@ pub async fn materialize_default_grants(
                     EXISTS (SELECT 1 FROM inserted_link) AS materialized, \
                     EXISTS (SELECT 1 FROM inserted_grants) AS grants_written",
             &[
-                &principal_id,
+                &principal_id.as_str(),
                 &PLATFORM_PROVIDER,
                 &provider_subject,
                 &grants,
@@ -166,14 +163,16 @@ pub async fn materialize_default_grants(
         .await
         .map_err(|error| {
             PlatformCliGrantError(format!(
-                "platform CLI grant materialization for {principal_id}: {}",
+                "platform CLI grant materialization for {}: {}",
+                principal_id.as_str(),
                 describe(&error)
             ))
         })?;
 
     if !row.get::<_, bool>("principal_exists") {
         return Err(PlatformCliGrantError(format!(
-            "platform CLI grant materialization principal does not exist: {principal_id}"
+            "platform CLI grant materialization principal does not exist: {}",
+            principal_id.as_str()
         )));
     }
 

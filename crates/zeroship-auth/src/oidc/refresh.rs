@@ -24,8 +24,8 @@ use base64::Engine as _;
 use compio_postgres::{Client, GenericClient, Pool, PoolConfig, Transaction};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde::Deserialize;
-use uuid::Uuid;
 use zeroship_core::auth::validate_client_secret;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
 use crate::config::AuthConfig;
@@ -238,7 +238,7 @@ pub(super) struct EstablishedSession {
 /// The audience and the subject are today's, unchanged. The first-party CLI
 /// client is the PLATFORM audience and its subject is the person's own id,
 /// because the `zeroship.token_revocations` marker a kill writes is looked up
-/// by control under (`zeroship-cli`, principal UUID): a platform family storing
+/// by control under (`zeroship-cli`, principal id): a platform family storing
 /// a pairwise subject would revoke a subject nothing ever presents. Every other
 /// client is an APP audience with the pairwise subject over its sector.
 /// The grant a token exchange is establishing a session for.
@@ -248,7 +248,7 @@ pub(super) struct EstablishedSession {
 /// checker noticing, and the two booleans at the end were the worst of it.
 pub(super) struct Establish<'a> {
     pub client: &'a OAuthClient,
-    pub user_id: Uuid,
+    pub user_id: &'a UserId,
     pub granted_scopes: &'a [String],
     /// The credential epoch the authenticating event observed. The creating
     /// statement pins the session to it.
@@ -275,20 +275,19 @@ pub(super) async fn establish_session(
         with_secret,
     } = *params;
     lock_refresh_user_xact(db, user_id).await.map_err(|err| {
-        tracing::error!(error = %err, user_id = %user_id, "session issuance user lock failed");
+        tracing::error!(error = %err, user_id = user_id.as_str(), "session issuance user lock failed");
         OAuthError::server_error("session issuance unavailable")
     })?;
 
-    let user_id_string = user_id.to_string();
     let (audience, subject) =
         if device_token::platform_cli_policy_selected(db, &client.client_id).await? {
-            (Audience::Platform, user_id_string.clone())
+            (Audience::Platform, user_id.as_str().to_owned())
         } else {
             (
                 Audience::App {
                     client_id: client.client_id.clone(),
                 },
-                issuer.pairwise_subject(&user_id_string, &client.sector_identifier),
+                issuer.pairwise_subject(user_id, &client.sector_identifier),
             )
         };
 
@@ -296,7 +295,7 @@ pub(super) async fn establish_session(
         session_store::upsert_grant(db, user_id, &audience, &subject, granted_scopes, None)
             .await
             .map_err(|err| {
-                tracing::error!(error = %err, user_id = %user_id, "grant upsert failed");
+                tracing::error!(error = %err, user_id = user_id.as_str(), "grant upsert failed");
                 OAuthError::server_error("session issuance unavailable")
             })?;
 
@@ -322,7 +321,7 @@ pub(super) async fn establish_session(
     )
     .await
     .map_err(|err| {
-        tracing::error!(error = %err, user_id = %user_id, "session create failed");
+        tracing::error!(error = %err, user_id = user_id.as_str(), "session create failed");
         OAuthError::server_error("session issuance unavailable")
     })?;
 
@@ -440,12 +439,12 @@ async fn exchange_refresh_token_inner(
 ) -> Result<TokenResponse, OAuthError> {
     let PreauthenticatedRefresh { presented, client } = preauth;
 
-    lock_refresh_user_xact(db, presented.person_id)
+    lock_refresh_user_xact(db, &presented.person_id)
         .await
         .map_err(|err| {
             tracing::error!(
                 error = %err,
-                user_id = %presented.person_id,
+                user_id = presented.person_id.as_str(),
                 "refresh rotation user lock failed"
             );
             OAuthError::server_error("refresh rotation unavailable")
@@ -530,7 +529,7 @@ async fn exchange_refresh_token_inner(
         cfg,
         issuer,
         &client,
-        rotated.person_id,
+        &rotated.person_id,
         &new_scopes,
         &proof,
     )
@@ -584,7 +583,7 @@ async fn replay_or_kill(
         cfg,
         issuer,
         client,
-        replayed_row.person_id,
+        &replayed_row.person_id,
         &scopes,
         &proof,
     )
@@ -609,13 +608,13 @@ const REFRESH_PRINCIPAL_ACTIVE_SQL: &str = "SELECT 1 FROM zeroship.users \
 
 async fn refresh_user_active(
     db: &(impl GenericClient + ?Sized),
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> Result<bool, OAuthError> {
     let rows = db
-        .query(REFRESH_PRINCIPAL_ACTIVE_SQL, &[&user_id])
+        .query(REFRESH_PRINCIPAL_ACTIVE_SQL, &[&user_id.as_str()])
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, user_id = %user_id, "refresh lifecycle lookup failed");
+            tracing::error!(error = %err, user_id = user_id.as_str(), "refresh lifecycle lookup failed");
             OAuthError::server_error("refresh lifecycle unavailable")
         })?;
     Ok(!rows.is_empty())
@@ -730,10 +729,10 @@ async fn revoke_inner(
         OAuthError::server_error("revoke unavailable")
     })?;
     let result = async {
-        lock_refresh_user_xact(&tx, presented.person_id)
+        lock_refresh_user_xact(&tx, &presented.person_id)
             .await
             .map_err(|err| {
-                tracing::error!(error = %err, user_id = %presented.person_id, "revoke user lock failed");
+                tracing::error!(error = %err, user_id = presented.person_id.as_str(), "revoke user lock failed");
                 OAuthError::server_error("revoke unavailable")
             })?;
         lock_refresh_family_xact(&tx, &presented.session_id)
@@ -775,7 +774,7 @@ async fn revoke_inner(
 /// fails.
 pub async fn revoke_person_sessions(
     refresh_pool: &RefreshSessionPool,
-    user_id: Uuid,
+    user_id: &UserId,
     reason: &'static str,
 ) -> Result<(), String> {
     let pool = refresh_pool
@@ -807,7 +806,11 @@ pub async fn revoke_person_sessions(
             return Err(err);
         }
     }
-    tracing::info!(user_id = %user_id, reason, "sessions revoked for user");
+    tracing::info!(
+        user_id = user_id.as_str(),
+        reason,
+        "sessions revoked for user"
+    );
     Ok(())
 }
 
@@ -822,7 +825,7 @@ pub async fn revoke_person_sessions(
 /// A message naming the reason when the statement fails.
 pub(crate) async fn revoke_person_sessions_in_transaction(
     db: &(impl GenericClient + ?Sized),
-    user_id: Uuid,
+    user_id: &UserId,
     reason: &'static str,
 ) -> Result<(), String> {
     session_store::revoke_person_sessions(db, user_id, reason)
@@ -905,7 +908,12 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
     let mut person_ids = Vec::new();
     let mut session_ids = Vec::new();
     for row in rows {
-        person_ids.push(row.get::<_, Uuid>("person_id"));
+        let person_id = crate::user_id::from_row(&row, "person_id", "session person_id is invalid")
+            .map_err(|err| {
+                tracing::error!(error = %err, "access-token revoke: person_id decode failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+        person_ids.push(person_id);
         session_ids.push(row.get::<_, String>("id"));
     }
     person_ids.sort();
@@ -914,14 +922,16 @@ pub(super) async fn revoke_sessions_for_subject_in_transaction(
     session_ids.dedup();
 
     for person_id in person_ids {
-        lock_refresh_user_xact(db, person_id).await.map_err(|err| {
-            tracing::error!(
-                error = %err,
-                user_id = %person_id,
-                "access-token revoke: user lock failed"
-            );
-            OAuthError::server_error("revoke unavailable")
-        })?;
+        lock_refresh_user_xact(db, &person_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    user_id = person_id.as_str(),
+                    "access-token revoke: user lock failed"
+                );
+                OAuthError::server_error("revoke unavailable")
+            })?;
     }
     for session_id in &session_ids {
         lock_refresh_family_xact(db, session_id)
@@ -1111,7 +1121,7 @@ pub(super) async fn introspect_refresh_token(
     if row.revoked_at.is_some() || row.idle_expires_at <= now || row.absolute_expires_at <= now {
         return Ok(None);
     }
-    if !refresh_user_active(db, row.person_id).await? {
+    if !refresh_user_active(db, &row.person_id).await? {
         return Ok(None);
     }
     Ok(Some(ActiveRefreshToken {

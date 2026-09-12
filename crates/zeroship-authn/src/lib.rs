@@ -9,11 +9,11 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use uuid::Uuid;
 use zeroship_authz as authz;
+use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
-use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
+use zeroship_core::UserId;
 
 pub use rejection::AuthnRejection;
 
@@ -34,7 +34,7 @@ pub type HttpRejection = ntex::web::Error;
 /// enforced and never fires.
 #[derive(Debug)]
 pub struct VerifiedPrincipal {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub token_policy: Option<authz::Policy>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
@@ -103,7 +103,8 @@ impl BearerVerifier {
             .oauth_guard_from_bearer(token, request_ip, request_id)
             .await?;
 
-        self.require_active_principal(principal.principal_id).await?;
+        self.require_active_principal(&principal.principal_id)
+            .await?;
 
         Ok(principal)
     }
@@ -154,8 +155,8 @@ impl BearerVerifier {
         let (Some(client_id), Some(iat)) = (client_id, iat) else {
             return Err(AuthnRejection::unauthorized("token_revocation_claims_missing").into());
         };
-        let iat = i64::try_from(iat)
-            .map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
+        let iat =
+            i64::try_from(iat).map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
         let revoked_after = self.platform_revoked_after_for(client_id, sub).await?;
         if family_revoked_at(revoked_after, iat) {
             return Err(AuthnRejection::unauthorized("token_revoked").into());
@@ -176,16 +177,16 @@ impl BearerVerifier {
     /// A lookup failure is a 500 rejection and never authenticates the caller.
     pub async fn require_active_principal(
         &self,
-        principal_id: Uuid,
+        principal_id: &UserId,
     ) -> Result<(), HttpRejection> {
         let rows = self
             .control_pg
-            .query(ACTIVE_PRINCIPAL_SQL, &[&principal_id])
+            .query(ACTIVE_PRINCIPAL_SQL, &[&principal_id.as_str()])
             .await
             .map_err(|err| {
                 tracing::error!(
                     error = %err,
-                    principal_id = %principal_id,
+                    principal_id = principal_id.as_str(),
                     "control: principal eligibility lookup failed"
                 );
                 AuthnRejection::internal("principal_eligibility_lookup_failed")
@@ -229,20 +230,19 @@ impl BearerVerifier {
                 }) {
                     return Err(AuthnRejection::unauthorized("wrong_audience").into());
                 }
+                let principal_id = parse_platform_subject(&verified.provider_subject)?;
                 self.reject_revoked_platform_token(
                     verified.client_id.as_deref(),
-                    &verified.provider_subject,
+                    principal_id.as_str(),
                     verified.iat,
                 )
                 .await?;
 
-                let principal_id = Uuid::parse_str(&verified.provider_subject)
-                    .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_sub"))?;
                 let mut scopes = authz::parse_scope_string(raw_scope)
                     .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_scope"))?;
                 let mut seed = false;
                 if verified.client_id.as_deref() == Some(PLATFORM_CLI_CLIENT_ID) {
-                    let entitlement = self.platform_cli_entitlement(principal_id).await?;
+                    let entitlement = self.platform_cli_entitlement(&principal_id).await?;
                     seed = entitlement.unseeded;
                     scopes.retain(|scope| entitlement.scopes.contains(scope));
                 }
@@ -253,9 +253,10 @@ impl BearerVerifier {
                     return Err(AuthnRejection::unauthorized("unauthenticated_gotrue_role").into());
                 }
 
-                let principal_id =
-                    self.resolve_supabase_principal(&verified.provider_subject).await?;
-                let grants = self.load_principal_grants(principal_id).await?;
+                let principal_id = self
+                    .resolve_supabase_principal(&verified.provider_subject)
+                    .await?;
+                let grants = self.load_principal_grants(&principal_id).await?;
                 let raw_scope = grants.join(" ");
                 let token_policy = policy_from_scope_string(&raw_scope, "invalid_principal_grant")?;
                 (principal_id, token_policy, false)
@@ -274,7 +275,7 @@ impl BearerVerifier {
     async fn resolve_supabase_principal(
         &self,
         provider_subject: &str,
-    ) -> Result<Uuid, HttpRejection> {
+    ) -> Result<UserId, HttpRejection> {
         let rows = self
             .control_pg
             .query(
@@ -294,7 +295,15 @@ impl BearerVerifier {
         let row = rows
             .first()
             .ok_or_else(|| AuthnRejection::unauthorized("unlinked_supabase_principal"))?;
-        Ok(row.get("principal_id"))
+        let raw = row.get::<_, String>("principal_id");
+        UserId::parse(&raw).map_err(|err| {
+            tracing::error!(
+                error = %err,
+                principal_id = raw,
+                "control: identity link contains an invalid principal id"
+            );
+            AuthnRejection::internal("invalid_stored_principal_id").into()
+        })
     }
 
     /// Resolve the live entitlement a platform CLI token is capped to.
@@ -319,7 +328,7 @@ impl BearerVerifier {
     /// the caller triggers on [`PlatformCliEntitlement::unseeded`].
     async fn platform_cli_entitlement(
         &self,
-        principal_id: Uuid,
+        principal_id: &UserId,
     ) -> Result<PlatformCliEntitlement, HttpRejection> {
         let row = self
             .control_pg
@@ -331,7 +340,7 @@ impl BearerVerifier {
                      SELECT string_agg(grant_name, ' ' ORDER BY grant_name) \
                      FROM zeroship.principal_grants WHERE principal_id = $1 \
                  ) AS granted",
-                &[&principal_id],
+                &[&principal_id.as_str()],
             )
             .await
             .map_err(|err| {
@@ -365,7 +374,7 @@ impl BearerVerifier {
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
-                        principal_id = %principal_id,
+                        principal_id = principal_id.as_str(),
                         "control: ignoring unknown principal grant"
                     );
                     None
@@ -378,7 +387,10 @@ impl BearerVerifier {
         })
     }
 
-    async fn load_principal_grants(&self, principal_id: Uuid) -> Result<Vec<String>, HttpRejection> {
+    async fn load_principal_grants(
+        &self,
+        principal_id: &UserId,
+    ) -> Result<Vec<String>, HttpRejection> {
         let rows = self
             .control_pg
             .query(
@@ -386,7 +398,7 @@ impl BearerVerifier {
                  FROM zeroship.principal_grants \
                  WHERE principal_id = $1 \
                  ORDER BY grant_name",
-                &[&principal_id],
+                &[&principal_id.as_str()],
             )
             .await
             .map_err(|err| {
@@ -403,6 +415,10 @@ impl BearerVerifier {
     }
 }
 
+fn parse_platform_subject(raw: &str) -> Result<UserId, HttpRejection> {
+    UserId::parse(raw).map_err(|_| AuthnRejection::unauthorized("invalid_oauth_sub").into())
+}
+
 fn policy_from_scope_string(
     raw_scope: &str,
     code: &'static str,
@@ -412,8 +428,7 @@ fn policy_from_scope_string(
     Ok(authz::scopes_to_policy(&scopes))
 }
 
-const ACTIVE_PRINCIPAL_SQL: &str =
-    "SELECT 1 FROM zeroship.users \
+const ACTIVE_PRINCIPAL_SQL: &str = "SELECT 1 FROM zeroship.users \
      WHERE id = $1 \
        AND disabled_at IS NULL \
        AND deletion_requested_at IS NULL \
@@ -423,6 +438,14 @@ const ACTIVE_PRINCIPAL_SQL: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_subject_requires_a_canonical_user_id() {
+        let canonical = UserId::mint();
+        assert!(parse_platform_subject(canonical.as_str()).is_ok());
+        assert!(parse_platform_subject("0191e7a2-b3c4-4d5e-8f90-123456789abc").is_err());
+        assert!(parse_platform_subject("app_0000000000000000000000").is_err());
+    }
 
     #[test]
     fn active_principal_query_blocks_every_hard_lifecycle_state() {

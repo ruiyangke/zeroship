@@ -17,6 +17,7 @@ mod common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
+use zeroship_core::UserId;
 use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
 
 /// The test's OWN oracle for "is this audit row still live". It replaces the
@@ -72,12 +73,11 @@ async fn create_validate_revoke_roundtrip() {
     let app_id = Uuid::new_v4();
     insert_app(&client, app_id).await;
     let user_id = insert_user(&client, "gateway-session").await;
-    let user_id_text = user_id.to_string();
 
     let session = create(
         &mut client,
         &NewSession {
-            user_id: &user_id_text,
+            user_id: &user_id,
             sid: None,
             app_id,
             email: Some("test@zeroship.test"),
@@ -94,7 +94,7 @@ async fn create_validate_revoke_roundtrip() {
     .await
     .expect("create");
 
-    assert_eq!(session.user_id, user_id_text);
+    assert_eq!(session.user_id, user_id);
     assert_eq!(session.app_id, app_id);
     assert_eq!(session.email.as_deref(), Some("test@zeroship.test"));
     assert_eq!(session.name.as_deref(), Some("Test User"));
@@ -138,16 +138,21 @@ async fn create_validate_revoke_roundtrip() {
 
     // Wrong session id → no row.
     assert!(
-        live_session(&client, Uuid::new_v4(), app_id).await.is_none(),
+        live_session(&client, Uuid::new_v4(), app_id)
+            .await
+            .is_none(),
         "unknown id must not resolve a row"
     );
 
     // Revoke (per-app, the only revoke path under RLS) and confirm the row
     // stops resolving, which is what says `revoked_at` was written.
-    let revoked = revoke_app_sessions_for_user(&mut client, app_id, &user_id_text)
+    let revoked = revoke_app_sessions_for_user(&mut client, app_id, &user_id)
         .await
         .expect("revoke");
-    assert_eq!(revoked, 1, "exactly the one session for (app_id, user) is revoked");
+    assert_eq!(
+        revoked, 1,
+        "exactly the one session for (app_id, user) is revoked"
+    );
     assert!(
         live_session(&client, session.id, app_id).await.is_none(),
         "a revoked session must not resolve as live"
@@ -162,7 +167,10 @@ async fn create_validate_revoke_roundtrip() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await
         .ok();
     client
@@ -191,23 +199,23 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
             &[
                 &app_id,
                 &format!("gateway-session-app-{}", app_id.simple()),
-                &project_id
+                &project_id,
             ],
         )
         .await
         .expect("insert app");
 }
 
-async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
+async fn insert_user(client: &compio_postgres::Client, label: &str) -> UserId {
+    let user_id = UserId::mint();
     let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
-    let rows = client
-        .query(
-            "INSERT INTO zeroship.users (email, name, email_verified_at)
-             VALUES ($1, $2, NOW())
-             RETURNING id",
-            &[&email, &label],
+    client
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at)
+             VALUES ($1, $2, $3, NOW())",
+            &[&user_id.as_str(), &email, &label],
         )
         .await
         .expect("insert user");
-    rows[0].get("id")
+    user_id
 }
