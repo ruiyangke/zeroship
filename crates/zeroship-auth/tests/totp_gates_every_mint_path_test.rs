@@ -28,18 +28,17 @@ use ntex::web;
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::csrf;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::{password, totp};
 use zeroship_auth::server;
 use zeroship_auth::store::{totp as totp_store, users};
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
 /// Hex-encoded 32-byte at-rest key for the TOTP secret. Passed to the booted
 /// config so the test can encrypt a seeded secret the handler can decrypt.
-const TOTP_ENC_KEY_HEX: &str =
-    "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+const TOTP_ENC_KEY_HEX: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
 const STASH_KEY: &str = "test-stash-key-not-for-prod-32bytes!";
 const LINK_PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -197,16 +196,18 @@ async fn seed_user_with_totp(
         .await
         .expect("create user");
     let secret = totp::generate_secret();
-    let encrypted = totp::encrypt_secret(&totp_key(), user.id, &secret).expect("encrypt secret");
-    totp_store::enroll(pg, user.id, &encrypted, false)
+    let encrypted = totp::encrypt_secret(&totp_key(), &user.id, &secret).expect("encrypt secret");
+    totp_store::enroll(pg, &user.id, &encrypted, false)
         .await
         .expect("enroll totp");
     let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-    totp_store::confirm(pg, user.id, &hashes)
+    totp_store::confirm(pg, &user.id, &hashes)
         .await
         .expect("confirm totp");
     assert!(
-        totp_store::is_enabled(pg, user.id).await.expect("is_enabled"),
+        totp_store::is_enabled(pg, &user.id)
+            .await
+            .expect("is_enabled"),
         "seeded credential must be confirmed, else the test proves nothing"
     );
     (user, secret)
@@ -281,12 +282,16 @@ async fn assert_demands_second_factor(resp: cyper::Response, what: &str) -> Stri
         "{what}: a confirmed second factor must block the session mint, \
          but a __Host-zsidp_session cookie was issued (status {status})"
     );
-    assert_eq!(status, 200, "{what}: expected the challenge page, body={body}");
+    assert_eq!(
+        status, 200,
+        "{what}: expected the challenge page, body={body}"
+    );
     assert!(
         body.contains(CHALLENGE_MARKER),
         "{what}: expected the TOTP challenge form, body={body}"
     );
-    let challenge = challenge.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_2fa challenge cookie"));
+    let challenge =
+        challenge.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_2fa challenge cookie"));
     let csrf_cookie = csrf_cookie.unwrap_or_else(|| panic!("{what}: no __Host-zsidp_csrf cookie"));
     format!("__Host-zsidp_2fa={challenge}; __Host-zsidp_csrf={csrf_cookie}")
 }
@@ -295,16 +300,20 @@ async fn assert_demands_second_factor(resp: cyper::Response, what: &str) -> Stri
 #[allow(clippy::future_not_send)]
 async fn session_claims(
     pg: &compio_postgres::Client,
-    user_id: Uuid,
+    user_id: zeroship_core::UserId,
 ) -> (String, Vec<String>, Option<String>) {
     let row = pg
         .query_one(
             "SELECT auth_method, amr, acr FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("load minted session");
-    (row.get("auth_method"), row.get("amr"), row.try_get("acr").ok())
+    (
+        row.get("auth_method"),
+        row.get("amr"),
+        row.try_get("acr").ok(),
+    )
 }
 
 #[allow(clippy::future_not_send)]
@@ -333,7 +342,11 @@ async fn start_magic(fx: &Fixture, email: &str, return_to: &str) -> (String, Str
         .append_pair("return_to", return_to)
         .finish();
     let resp = fx
-        .post_form("/magic/start", &format!("__Host-zsidp_csrf={csrf_token}"), body)
+        .post_form(
+            "/magic/start",
+            &format!("__Host-zsidp_csrf={csrf_token}"),
+            body,
+        )
         .await;
     assert_eq!(resp.status().as_u16(), 200, "magic start");
     let magic_nonce =
@@ -380,8 +393,7 @@ async fn magic_same_device_redeem_demands_second_factor() {
         )
         .await;
 
-    let challenge_cookies =
-        assert_demands_second_factor(redeem, "magic same-device redeem").await;
+    let challenge_cookies = assert_demands_second_factor(redeem, "magic same-device redeem").await;
 
     let csrf_token = challenge_cookies
         .split("__Host-zsidp_csrf=")
@@ -547,7 +559,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
     .expect("unix seconds")
         + 600;
     let pending = PendingLink {
-        user_id: user.id,
+        user_id: user.id.clone(),
         provider: "github".into(),
         subject: subject.clone(),
         email: email.clone(),
@@ -563,7 +575,11 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .append_pair("password", LINK_PASSWORD)
         .finish();
     let resp = fx
-        .post_form("/link", &format!("__Host-zsidp_csrf={csrf_token}"), link_body)
+        .post_form(
+            "/link",
+            &format!("__Host-zsidp_csrf={csrf_token}"),
+            link_body,
+        )
         .await;
 
     let challenge_cookies = assert_demands_second_factor(resp, "/link confirm").await;
@@ -575,7 +591,7 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .pg
         .query_one(
             "SELECT COUNT(*) FROM zeroship.federated_identities WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("count identities")
@@ -598,7 +614,11 @@ async fn link_confirm_demands_second_factor_before_linking() {
     let done = fx
         .post_form("/login/2fa", &challenge_cookies, second_factor_body)
         .await;
-    assert_eq!(done.status().as_u16(), 303, "second factor completes the link");
+    assert_eq!(
+        done.status().as_u16(),
+        303,
+        "second factor completes the link"
+    );
     assert_eq!(location(&done), return_to);
     assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
 
@@ -607,12 +627,15 @@ async fn link_confirm_demands_second_factor_before_linking() {
         .query_one(
             "SELECT COUNT(*) FROM zeroship.federated_identities \
              WHERE user_id = $1 AND provider = 'github' AND subject = $2",
-            &[&user.id, &subject.as_str()],
+            &[&user.id.as_str(), &subject.as_str()],
         )
         .await
         .expect("count identities")
         .get(0);
-    assert_eq!(linked_after, 1, "the link lands once the second factor passes");
+    assert_eq!(
+        linked_after, 1,
+        "the link lands once the second factor passes"
+    );
 
     let (auth_method, amr, acr) = session_claims(&fx.pg, user.id).await;
     assert_eq!(auth_method, "github");

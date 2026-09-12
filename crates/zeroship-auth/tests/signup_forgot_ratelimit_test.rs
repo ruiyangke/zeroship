@@ -11,9 +11,9 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_core::config::{Secret, SourceKind};
+use zeroship_auth::store::users;
 use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
-use zeroship_auth::store::{users};
+use zeroship_core::config::{Secret, SourceKind};
 use zeroship_mailer::{Email, Mailer, MailerError, MessageId};
 
 #[derive(Debug, Default)]
@@ -120,9 +120,12 @@ async fn cleanup_signup_user(pg: &compio_postgres::Client, email: &str) {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE email = $1::citext", &[&email])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE email = $1::citext",
+        &[&email],
+    )
+    .await
+    .ok();
 }
 
 fn unique_loopback() -> IpAddr {
@@ -190,7 +193,11 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
         !loc.contains("login_challenge="),
         "native signup redirect must keep return_to semantics: {loc}"
     );
-    assert_eq!(mailer.count(), 1, "successful signup sends verification mail");
+    assert_eq!(
+        mailer.count(),
+        1,
+        "successful signup sends verification mail"
+    );
 
     cleanup_signup_user(pg.as_ref(), &email).await;
 }
@@ -310,10 +317,9 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     let peer = SocketAddr::new(unique_loopback(), 49152);
     let signup_ip_key = format!("signup_ip:{}", peer.ip());
     for i in 0..10 {
-        let decision =
-            rate_limit::consume(pg.as_ref(), &signup_ip_key, Quota::SIGNUP_IP)
-                .await
-                .expect("pre-drain signup rate-limit bucket");
+        let decision = rate_limit::consume(pg.as_ref(), &signup_ip_key, Quota::SIGNUP_IP)
+            .await
+            .expect("pre-drain signup rate-limit bucket");
         assert!(
             matches!(decision, RateLimitDecision::Allowed),
             "pre-drain consume {i} must be allowed"
@@ -370,9 +376,12 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE email::text LIKE $1", &[&like])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE email::text LIKE $1",
+        &[&like],
+    )
+    .await
+    .ok();
 }
 
 #[compio::test]
@@ -551,11 +560,8 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
     )
     .await;
 
-    let get_resp = test::call_service(
-        &app,
-        test::TestRequest::get().uri("/forgot").to_request(),
-    )
-    .await;
+    let get_resp =
+        test::call_service(&app, test::TestRequest::get().uri("/forgot").to_request()).await;
     assert_eq!(get_resp.status().as_u16(), 200);
     let csrf = read_set_cookie(get_resp.headers(), "__Host-zsidp_csrf")
         .expect("__Host-zsidp_csrf cookie set on GET /forgot");
@@ -594,10 +600,16 @@ async fn forgot_post_throttles_after_email_bucket_capacity() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
-        .await
-        .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.audit_events WHERE actor_user_id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }

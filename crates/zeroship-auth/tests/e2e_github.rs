@@ -25,8 +25,8 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::linker::PendingLink;
 use zeroship_auth::identity::password;
 use zeroship_auth::server;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::store::users;
+use zeroship_core::config::{Secret, SourceKind};
 
 use crate::common;
 use common::mock_provider::{MockProvider, MockUser, ProviderMode};
@@ -78,10 +78,9 @@ impl NativeGithubFixture {
     async fn boot(mock: &MockProvider) -> Self {
         let db_url = crate::common::test_database_url();
 
-        let (pg_client, pg_connection) =
-            compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                .await
-                .expect("connect pg");
+        let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_connection.run().await {
                 eprintln!("[e2e_github native] pg connection driver: {e}");
@@ -243,24 +242,28 @@ async fn github_native_callback_resumes_authorize_with_session_cookie() {
         .await
         .expect("user select");
     assert_eq!(user_rows.len(), 1, "native callback creates one user row");
-    let user_id: uuid::Uuid = user_rows[0].get("id");
+    let user_id = zeroship_core::UserId::parse(&user_rows[0].get::<_, String>("id"))
+        .expect("canonical user id");
 
     fx.pg
         .execute(
             "DELETE FROM zeroship.federated_identities WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .ok();
     fx.pg
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .ok();
     fx.pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await
         .ok();
     fx.cleanup().await;
@@ -360,12 +363,15 @@ async fn github_native_confirmation_bounce_carries_return_to() {
     fx.pg
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&existing.id],
+            &[&existing.id.as_str()],
         )
         .await
         .ok();
     fx.pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&existing.id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&existing.id.as_str()],
+        )
         .await
         .ok();
     fx.cleanup().await;
@@ -465,8 +471,7 @@ async fn github_federation_rejects_noreply_only_email() {
     // the audit log instead (asserted below). So the body carries the
     // generic copy/code, not a github-specific or "sign-in failed" string.
     assert!(
-        body.to_lowercase().contains("please try again")
-            || body.contains("please_try_again"),
+        body.to_lowercase().contains("please try again") || body.contains("please_try_again"),
         "picker-failure path must render the generic please-try-again error page: body={body}"
     );
 
@@ -587,8 +592,7 @@ async fn github_federation_rejects_unverified_primary_email() {
     // not leaked to the browser; it lives in the audit log. See the noreply
     // test for the rationale.
     assert!(
-        body.to_lowercase().contains("please try again")
-            || body.contains("please_try_again"),
+        body.to_lowercase().contains("please try again") || body.contains("please_try_again"),
         "unverified-primary path must render the generic please-try-again error page: body={body}"
     );
 

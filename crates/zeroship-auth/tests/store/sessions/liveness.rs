@@ -3,7 +3,6 @@
 use super::{keys, new_session, seed, tag, IDEM_WINDOW_SECS, IDLE_DAYS};
 use crate::common::database::Database;
 use compio_postgres::Client;
-use uuid::Uuid;
 use zeroship_auth::session_store::{self, SecretSlot};
 
 #[derive(Clone, Copy, Debug)]
@@ -27,7 +26,7 @@ impl Change {
         )
     }
 
-    async fn apply(self, db: &Client, person: Uuid, grant: &str, session: &str) {
+    async fn apply(self, db: &Client, person: &zeroship_core::UserId, grant: &str, session: &str) {
         let sql = match self {
             Self::Revoked => "UPDATE zeroship.sessions SET revoked_at = NOW() WHERE id = $1",
             Self::IdleExpired => "UPDATE zeroship.sessions SET idle_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
@@ -45,7 +44,7 @@ impl Change {
                 db.execute(sql, &[&session]).await
             }
             Self::GrantSuspended => db.execute(sql, &[&grant]).await,
-            _ => db.execute(sql, &[&person]).await,
+            _ => db.execute(sql, &[&person.as_str()]).await,
         }
         .expect("apply the lifecycle change");
         assert_eq!(changed, 1, "{self:?} must change the fixture row");
@@ -68,11 +67,11 @@ async fn check(change: Change, database: &Database) {
     let subject = format!("pws_{tag}");
     let scopes = vec!["openid".into(), "offline_access".into()];
     let amr = vec!["pwd".into()];
-    let mut params = new_session(person, &grant, &subject, &scopes, &amr);
+    let mut params = new_session(&person, &grant, &subject, &scopes, &amr);
     params.expected_credential_epoch = Some(
         db.query_one(
             "SELECT credential_version FROM zeroship.users WHERE id = $1",
-            &[&person],
+            &[&person.as_str()],
         )
         .await
         .unwrap()
@@ -132,7 +131,7 @@ async fn check(change: Change, database: &Database) {
     assert_eq!(replay.0.refresh_token, rotated.secret);
     control.rollback().await.unwrap();
 
-    change.apply(&db, person, &grant, &created.row.id).await;
+    change.apply(&db, &person, &grant, &created.row.id).await;
     if change.blocks_creation() {
         assert!(
             session_store::create(&db, &keys, &params)
