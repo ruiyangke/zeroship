@@ -293,7 +293,6 @@ pub async fn apply(
                 None
             };
             rewrite_upsert_doc_id_to_existing_row_id(
-                dialect,
                 payload,
                 route,
                 collection,
@@ -464,41 +463,75 @@ pub struct TargetRowId {
     pub row_pk: String,
 }
 
-/// Resolve the ids the pending write will touch.
-///
-/// Takes the dispatch's [`TxRoute`] rather than an `app_id`: this read
-/// MUST see the rows the same transaction is about to update, so it has
-/// to run on the same connection the update will. Reading it off the pool
-/// while the update ran in a transaction would resolve pre-transaction
-/// ids.
-///
-/// `schema` is the caller's already-resolved descriptor entry. The probe still
-/// selects only `id`; the declared fields are carried solely so its filter can
-/// lower SQLite booleans and numeric timestamp binds by field type.
-///
-/// `dialect` is the caller's too, and passed in even though this function holds
-/// a [`TxRoute`] it could read one off - the same shape, and the same reason, as
-/// `keys` on [`rewrite_upsert_doc_id_to_existing_row_id`]. The probe and the
-/// UPDATE it precedes must be written in ONE dialect, and that is the one the
-/// caller resolved for the whole operation, not a second derivation here.
+fn compile_target_probe(
+    namespace: &crate::sql::SchemaName,
+    collection: &str,
+    schema: &Value,
+    filter: super::predicate::Input,
+    limit: i64,
+    registration: &crate::sql::registration::SqlRegistration,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    use crate::sql::statement::{
+        ResolvedOperand, ResolvedPredicate, RowLock, SelectParts, SelectStatement,
+        SelectedExpression, Statement,
+    };
+
+    if limit <= 0 {
+        return Err(crate::sql::compile::QueryError::InvalidFilter(
+            "target probe limit must be positive".into(),
+        ));
+    }
+    let resolved = super::resolved::ResolvedTable::aliased(
+        namespace,
+        collection,
+        "target",
+        schema,
+        registration,
+    )?;
+    let identity = resolved.inputs.get("id").ok_or_else(|| {
+        crate::sql::compile::QueryError::InvalidFilter("descriptor requires an id field".into())
+    })?;
+    let identity = resolved.table.column(&identity.column)?;
+    let predicate = filter.resolve(schema, &resolved, registration)?;
+    let statement = SelectStatement::new(SelectParts {
+        table: resolved.table,
+        joins: Vec::new(),
+        projection: vec![SelectedExpression {
+            expression: ResolvedOperand::Column(identity),
+            alias: crate::sql::Ident::parse_as("id", crate::sql::IdentRole::Alias)
+                .map_err(crate::sql::compiler::CompileError::from)?,
+        }],
+        predicate,
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: Some(limit),
+        offset: None,
+        distinct: false,
+        lock: RowLock::Update,
+    })?;
+    registration
+        .compile(Statement::Select(statement))
+        .map_err(Into::into)
+}
+
+/// Resolve and lock the identities a protected write will touch. The captured
+/// route keeps this read on the same transaction connection as the write.
 pub async fn resolve_target_row_ids(
     route: &TxRoute,
-    dialect: compile::SqlDialect,
     collection: &str,
-    filter: &Value,
+    filter: super::predicate::Input,
     limit: i64,
     schema: &Value,
 ) -> Result<Vec<TargetRowId>, DbError> {
     note_target_row_resolution_for_tests();
-    let mut sql_filter = filter.clone();
-    crate::sql::codecs::lower_filter(dialect, schema, &mut sql_filter);
-    let built = compile::build_write_target_probe(
+    let built = compile_target_probe(
         route.schema(),
         collection,
         schema,
-        &sql_filter,
+        filter,
         limit,
-        dialect,
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
     note_target_row_resolution_sql_for_tests(&built.sql);
@@ -598,7 +631,6 @@ fn update_target(patch: &mut Value) -> &mut Value {
 /// Resolve a candidate identity before encryption. The upsert's SQL guard
 /// handles conflicts that become visible after this probe.
 async fn rewrite_upsert_doc_id_to_existing_row_id(
-    dialect: compile::SqlDialect,
     doc: &mut Value,
     route: &TxRoute,
     collection: &str,
@@ -629,15 +661,15 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         return Ok(());
     }
 
-    let mut filter = Value::Object(filter_obj);
+    let filter = Value::Object(filter_obj);
     note_upsert_conflict_probe_for_tests();
-    crate::sql::codecs::lower_filter(dialect, schema, &mut filter);
-    let built = compile::build_conflict_probe_with_dialect(
+    let built = compile_target_probe(
         route.schema(),
         collection,
         schema,
-        &filter,
-        dialect,
+        super::predicate::Input::Dynamic(filter),
+        1,
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
     let rows = exec_query(route, built).await?;
@@ -715,6 +747,55 @@ fn note_upsert_conflict_probe_for_tests() {}
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn target_probes_compile_dynamic_and_model_predicates_with_backend_locking() {
+        use crate::{
+            crud::predicate::Input,
+            orm::ModelPredicate,
+            sql::{
+                compile::SqlDialect, predicate::CompareOp, registration::SqlRegistration,
+                SchemaName,
+            },
+        };
+
+        let namespace = SchemaName::new("app").unwrap();
+        let schema = crate::value!({
+            "id": { "type": "string", "primaryKey": true },
+            "name": { "type": "string" }
+        });
+        let dynamic = Input::Dynamic(crate::value!({ "name": "Ada" }));
+        let model = Input::Model(ModelPredicate::Compare {
+            field: "name",
+            op: CompareOp::Eq,
+            value: Value::from("Ada"),
+        });
+
+        for (dialect, expects_lock) in [(SqlDialect::Postgres, true), (SqlDialect::Sqlite, false)] {
+            let registration = SqlRegistration::builtin(dialect);
+            let dynamic = super::compile_target_probe(
+                &namespace,
+                "people",
+                &schema,
+                dynamic.clone(),
+                1,
+                &registration,
+            )
+            .unwrap();
+            let model = super::compile_target_probe(
+                &namespace,
+                "people",
+                &schema,
+                model.clone(),
+                1,
+                &registration,
+            )
+            .unwrap();
+            assert_eq!(dynamic, model);
+            assert_eq!(dynamic.sql.contains("FOR UPDATE"), expects_lock);
+            assert_eq!(dynamic.params, vec![Value::from("Ada"), Value::from(1_i64)]);
+        }
+    }
+
     /// The direct half of the id fence. The prefix validator closed the
     /// DESCRIPTOR vector; this closes the one an attacker reaches without
     /// touching a generated file, by sending `id` on an ordinary insert.

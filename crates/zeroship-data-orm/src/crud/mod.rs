@@ -23,13 +23,13 @@ mod aggregate;
 mod bytes_pass;
 mod delete;
 mod identity;
-pub(crate) mod internal;
 pub(crate) mod insert;
+pub(crate) mod internal;
 pub(crate) mod predicate;
 mod read;
-pub(crate) mod search;
 pub mod read_pipeline;
 pub(crate) mod resolved;
+pub(crate) mod search;
 mod update;
 mod update_validation;
 pub mod upsert;
@@ -557,16 +557,9 @@ pub(crate) async fn run_update_one(
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
-        let target_filter = filter.model_value();
-        let target_rows = write_pipeline::resolve_target_row_ids(
-            &route,
-            route.dialect(),
-            &coll,
-            &target_filter,
-            1,
-            &schema,
-        )
-        .await?;
+        let target_rows =
+            write_pipeline::resolve_target_row_ids(&route, &coll, filter.clone(), 1, &schema)
+                .await?;
         let Some(target_row) = target_rows.first().cloned() else {
             if let Some(expected_version) = cas_version {
                 let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
@@ -704,12 +697,10 @@ pub(crate) async fn run_update_many(
     if per_row_encrypted_update {
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
         let work_result: Result<u64, DbError> = async {
-            let target_filter = filter.model_value();
             let target_rows = write_pipeline::resolve_target_row_ids(
                 frame.route(),
-                dialect,
                 &coll,
-                &target_filter,
+                filter.clone(),
                 compile::MAX_QUERY_LIMIT + 1,
                 &schema,
             )
