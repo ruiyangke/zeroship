@@ -1028,33 +1028,6 @@ impl SqliteCancelHandle {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SqliteCancelGuard was deleted on 2026-09-04, and the rules it encoded are not
-// ---------------------------------------------------------------------------
-//
-// It was an `Option<SqliteCancelHandle>` whose `Drop` made a caller-side drop
-// cancel. Nothing ever constructed it: SC-2 asked for a drop-cancels guard and
-// SC-1 shipped EXPLICIT cancellation instead, through
-// `backend::cancel::CancellationHandle`. Its own comment said so. Inert in both
-// directions - no constructor, so its `Drop` was unreachable - which is what
-// separates it from the other unwired code in these crates, where a live
-// consumer is waiting on a producer nobody calls.
-//
-// THREE THINGS IT KNEW, for whoever builds SC-2's drop-cancel path:
-//
-//  1. DISARM BEFORE THE REPLY IS DELIVERED (SC-2 case 4). A drop that happens
-//     after the result reached the caller must not retroactively cancel it.
-//     The disarm point is that hand-off, not the end of the scope.
-//  2. A `Drop` cannot await, so the cancel is fire-and-forget: the intent plus
-//     `Interrupts::interrupt` are SYNCHRONOUS and are what actually stops a
-//     running statement. The queued `Command::Cancel` is only what makes the
-//     actor roll back and retire.
-//  3. BOTH terminal verdicts short-circuit, and `AlreadyCancelling` is not the
-//     tidier of the two. Nobody awaits a dropped guard's answer, so a `Cancel`
-//     it queues can only act; queuing a second for a reservation another caller
-//     is already cancelling asks the actor to run cleanup twice on a shared
-//     connection.
-
 async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
     rx.recv_async().await.map_err(|_| {
         DbError::internal("SqliteSession: worker dropped reply channel before producing a result")
@@ -1613,21 +1586,12 @@ impl Actor {
     /// Refuse a command whose reservation does not own the connection it would
     /// run on.
     ///
-    /// **Both lanes, and the two ownership rules are genuinely different.**
-    ///
     /// - `tx_conn` has a long-lived owner: whichever transaction reservation
     ///   the actor last bound. A command naming any other one is refused.
     /// - `op_conn` has no long-lived owner at all - autocommit reservations are
     ///   minted per command and settle at that command's completion. So its
     ///   rule is the *lifetime* one: a reservation that has already run a
     ///   command is spent, and a second command naming it is stale.
-    ///
-    /// The `op_conn` half was missing until 2026-08-27, which made the sentence
-    /// "the actor rejects a command whose reservation does not match the
-    /// connection's current owner" vacuous for half the actor. A stale
-    /// autocommit reservation was still refused - incidentally, by
-    /// `enter_running` finding a non-`PENDING` terminal - and reported as
-    /// `statement_cancelled`: the wrong error naming the wrong reason.
     fn check_owner(&self, reservation: &Reservation) -> Result<(), DbError> {
         let lane = reservation.lane();
         let Some(entry) = self.lane_ref(lane) else {
@@ -2201,20 +2165,10 @@ fn cancelled_before_start(reservation: &Reservation) -> DbError {
 /// is one SQLite rejects inside a transaction (`PRAGMA` that writes, `VACUUM`,
 /// `ATTACH`, `DETACH`) or one that manages transactions itself.
 ///
-/// It is written so that its only failure mode is a **false negative**: it may
+/// Its conservative failure mode is a false negative: it may
 /// refuse to wrap something SQLite would have allowed, and the operation then
-/// runs unwrapped exactly as it did before SC-2. It can never wrongly decide
-/// that a `VACUUM` is safe to wrap.
-///
-/// That property rests on one rule, and the rule is the reason for the
-/// `is_empty` arm below rather than a filter: **a non-empty fragment whose
-/// leading token is not a bare alphabetic keyword is refused, not skipped.**
-/// Skipping it is how the guarantee above was false until 2026-08-27. Trimming
-/// the non-alphabetic edges off a leading `--` or `/*` leaves the empty string,
-/// the old code dropped empty words, and `all` over an empty iterator is
-/// `true`, so `"-- note\nVACUUM"` and `"/* c */ VACUUM"` both reported that a
-/// `VACUUM` was safe to wrap. Refusing an unrecognised leading token costs a
-/// wrap and keeps the direction of every mistake the same.
+/// runs unwrapped. A non-empty fragment without a bare alphabetic leading
+/// keyword is refused so comments cannot hide a transaction-control statement.
 fn permits_explicit_transaction(sql: &str) -> bool {
     const REFUSED: &[&str] = &[
         "PRAGMA",

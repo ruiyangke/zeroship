@@ -784,9 +784,8 @@ mod tests {
 
     #[compio::test]
     async fn a_backfill_guard_dropped_before_drainage_still_suppresses_its_commit() {
-        // The fence for the whole "Delivery-window semantics" section. Sampling
-        // at dequeue time -- what shipped until 2026-09-03 -- publishes this
-        // event, because by the time the publisher looks the guard is gone.
+        // The delivery disposition is captured when the commit is queued, so a
+        // later guard drop cannot publish a suppressed event.
         assert_eq!(
             drive_window(
                 DeliveryDisposition::Suppressed,

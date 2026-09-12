@@ -73,19 +73,8 @@ impl PostgresBackend {
 
     /// Connect a pool and wrap it, in one call.
     ///
-    /// **This exists so that no crate above this one has to name
-    /// `compio_postgres::Pool`.** Until 2026-09-02 the adapter connected the
-    /// pool itself and handed it to [`Self::new`], which put the vendor type in
-    /// `ThreadDbContext::set_pool`'s signature - flagged by
-    /// `tests/lib/tier_signature_census.sh` as the adapter embedding a vendor
-    /// type. Pushing the composer DOWN instead of up is the only direction that
-    /// works: an `open_postgres_backend` in the engine's `backend_selection` was
-    /// tried the same day and refused by `xtask/tests/data_architecture.rs`,
-    /// because taking `Rc<Pool>` names the vendor from a non-vendor crate just
-    /// as surely. Inside this crate the name is simply local.
-    ///
-    /// The key source stays a PARAMETER for the reason [`Self::new`] documents:
-    /// the vendor may not reach up into the engine to look it up.
+    /// Pool construction stays in the PostgreSQL adapter so higher layers do
+    /// not expose the vendor pool type. The trusted host supplies project keys.
     ///
     /// # Errors
     ///
@@ -208,16 +197,8 @@ impl PostgresBackend {
     /// Run `sql` under this app's role and render the rows as JSON, keeping the
     /// `compio_postgres::Row` inside this tier.
     ///
-    /// The missing fifth sibling of the four above until 2026-09-02. Because it
-    /// did not exist, `crate::backend::postgres::exec` fetched the pool itself - an
-    /// `ensure_postgres_pool_for_shared_sql` returning `Rc<Pool>` - and called
-    /// `pg_autocommit::roled_rows` directly, which put two vendor signatures in
-    /// an ENGINE-tiered file for want of a method that every neighbouring call
-    /// already had.
-    ///
-    /// The JSON conversion happens HERE rather than at the caller for the same
-    /// reason: `row_to_value` is this tier's business, and the engine wants
-    /// `Vec<Value>` either way - it is what the SQLite arm has always returned.
+    /// Row conversion belongs here because the engine consumes portable
+    /// [`crate::value::Value`] values and does not expose driver rows.
     ///
     /// # Errors
     ///
@@ -692,17 +673,9 @@ mod terminal_projection_tests {
     use compio_postgres::TransactionStatus;
     use zeroship_data_orm::error::{SettleIntent, TerminalResult};
 
-    /// **L8, without a database.** PostgreSQL answers `COMMIT` with the tag
+    /// PostgreSQL answers `COMMIT` with the tag
     /// `ROLLBACK` when the transaction is in the failed state, and reading that
     /// as success reports discarded writes as durable.
-    ///
-    /// This rule was only reachable through a live server until 2026-09-02,
-    /// when the projection was split out of `terminal`. The live arm that
-    /// covered it - `commit_that_postgres_rolled_back_must_not_report_success_l8`
-    /// in `crates/zeroship-data-v8/src/tests/postgres/transactions.rs` - had ALSO been failing for an unrelated
-    /// reason (it duplicated a platform-assigned `id`, so it never poisoned the
-    /// transaction at all), which means this rule went unbound in practice for
-    /// as long as that test was red. A pure arm cannot rot that way.
     #[test]
     fn a_commit_answered_rollback_is_a_rollback() {
         assert_eq!(

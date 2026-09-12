@@ -5,14 +5,7 @@ use zeroship_data_orm::transaction::reducer::{
     CleanupCause, SessionOwnership, TerminalOutcome, TxState,
 };
 
-/// The backend `probe::begin` takes as a parameter.
-///
-/// It resolved its own through `tx_scope::ensure_backend` until 2026-09-03,
-/// which made an ENGINE file call the ADAPTER - the one direction the crate
-/// split forbids, and a hard cargo error once `transaction/` became
-/// `zeroship-data-orm`. The lookup lives here now, in the caller that
-/// owns the thread context, and it is the same call the V8 dispatcher makes
-/// on this test's behalf in production.
+/// Resolve the backend at the same boundary as the V8 dispatcher.
 /// The physical schema a probe opens its session against.
 ///
 /// Derived from the app id here because these fixtures still mint one

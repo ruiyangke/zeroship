@@ -131,17 +131,8 @@ pub(super) async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str)
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    // The unmask audit table, APPLY-AHEAD. `crud/unmask.rs` created it lazily on
-    // every dispatch until 2026-08-28; it emits no DDL now, so the migration
-    // service creates it and this fixture stands in for that service. These are
-    // the PRODUCTION bytes - `audit_unmask_table_sql` is the same generator
-    // `provision_audit_unmask_table` executes - not a copy of them.
-    //
-    // BEFORE the caller's `ensure_per_app_role`, so this bootstrap recipe can
-    // resolve the exact table and its `BIGSERIAL` sequence from the live catalog
-    // before installing only INSERT and USAGE. The migrate server independently
-    // uses the same provisioning-before-role ordering; it does not call this
-    // helper.
+    // Stand in for the migration service by creating the audit table before
+    // provisioning the app role and its narrow audit grants.
     //
     // `batch_execute`, not `execute`: this is multi-statement DDL and the
     // extended protocol refuses it with "cannot insert multiple commands into a

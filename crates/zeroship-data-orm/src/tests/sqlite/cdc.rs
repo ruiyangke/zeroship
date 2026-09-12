@@ -447,9 +447,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
                 4,
                 "expected 4 events after a 4-statement tx; got {msgs:?}"
             );
-            // Per plan §8: order is `[a, b, c, d]` = INSERT, UPDATE,
-            // DELETE, INSERT. Each msg is a Change variant carrying the
-            // event.
+            // Events retain commit-buffer order.
             let ops: Vec<ChangeOp> = msgs
                 .iter()
                 .map(|m| match m {
@@ -474,12 +472,8 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
 #[test]
 fn subscription_fanout_under_load() {
     Host::test(|host| {
-        // Plan §8 / §9: a single COMMIT of N rows must reach every
-        // active subscriber in INSERT order. Scaled down to 10×100 per the
-        // task spec ("100 subscribers × 1000 rows would saturate dev
-        // hardware; scale down to 10 × 100 for CI sanity"). The default
-        // queue depth is 1024 (`broker::DEFAULT_QUEUE_DEPTH`), so 100 rows
-        // fit comfortably without triggering the overflow-to-Resync path.
+        // A commit reaches every active subscriber in insert order without
+        // crossing the overflow-to-resync path exercised elsewhere.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -522,10 +516,7 @@ fn subscription_fanout_under_load() {
                 .await
                 .expect("COMMIT");
 
-            // Generous drain — 100 publishes × 10 subscribers under the
-            // single-threaded compio runtime + one PRAGMA round-trip on
-            // first touch. 200ms is comfortably above the in-process
-            // upper bound on dev hardware.
+            // Let the publisher deliver the committed batch.
             compio::time::sleep(std::time::Duration::from_millis(200)).await;
 
             for (i, sub) in subs.iter().enumerate() {
@@ -578,13 +569,7 @@ fn subscription_fanout_under_load() {
 #[test]
 fn mv_refresh_does_not_emit_change_events() {
     Host::test(|host| {
-        // Plan §6 + §9: writes to `__zeroship_mv_*` shadow tables
-        // must be filtered upstream of the broker. The plan acknowledges
-        // (§9) that the `db.materializedView(...).refresh()` SDK
-        // primitive does not exist yet, so we exercise the filter directly
-        // by writing to a shadow table whose name matches the filter
-        // prefix — the dispatcher cannot distinguish a "real" MV refresh
-        // from a hand-rolled shadow write.
+        // Shadow-table writes are filtered before broker publication.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -774,11 +759,7 @@ fn audit_table_writes_do_not_emit_events() {
     })
 }
 
-/// Longer drain — the new fences move ~100 events through the
-/// publisher under a paused broker. The 100 ms budget is the same
-/// upper bound `subscription_fanout_under_load` uses (200 ms there
-/// for 100 events × 10 subscribers; halved here because we only have
-/// one subscriber).
+/// Let queued publisher work settle before assertions.
 async fn drain_publisher_long() {
     compio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
@@ -786,26 +767,8 @@ async fn drain_publisher_long() {
 #[test]
 fn backfill_run_pauses_broker_and_emits_one_resync() {
     Host::test(|host| {
-        // Plan §7 + §9 gate - backfill pause rail end-to-end:
-        //
-        // 1. ensure_app_schema + CREATE TABLE.
-        // 2. Subscribe BEFORE the pause window so the subscription is
-        //    visible to `resume_app_with_resync` on guard drop.
-        // 3. Engage `BrokerPauseGuard` — this calls `suppress_app(app_id)`
-        //    on the thread-local rail.
-        // 4. INSERT 100 rows. The preupdate hook still fires + buffers,
-        //    the commit_hook ships packets, BUT the publisher's per-event
-        //    suppression check drops each packet (debug-logged).
-        // 5. Drop the guard. `unsuppress_app` clears the flag +
-        //    `resume_app_with_resync` pushes ONE `Resync` per active
-        //    subscription.
-        // 6. Drain the subscriber → exactly ONE `Resync`, ZERO `Change`
-        //    messages.
-        //
-        // The asymmetry between "INSERT 100 rows" and "one Resync" is the
-        // load-bearing contract: backfill silently drops events; the
-        // single Resync tells the subscriber to refetch + catch up via
-        // the read path, NOT via the event stream.
+        // Subscribers see a resync after a paused backfill, while changes
+        // committed inside the pause window remain suppressed.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -825,18 +788,11 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
             let sub = subscribe_local("app_backfill", "items");
 
-            // Engage backfill pause. `BrokerPauseGuard::new` calls
-            // `broker::suppress_app(app_id)`; the publisher's
-            // per-event check drops every packet for this app until the
-            // guard drops.
+            // Engage the backfill pause before issuing writes.
             let guard =
                 zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_backfill".to_string());
 
-            // INSERT 100 rows under the suppression window. Each statement
-            // routes through the session actor, the preupdate hook fires,
-            // the commit_hook ships a one-event CommitPacket — the
-            // publisher receives the packet, sees `is_app_suppressed`,
-            // drops the event + emits a debug-level trace, moves on.
+            // Queue writes inside the suppression window.
             for i in 0..100 {
                 let sql = format!(
                     "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
@@ -847,20 +803,11 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
                     .expect("INSERT under backfill pause");
             }
 
-            // Drop the guard WITHOUT draining first. This is the exposing order:
-            // the 100 packets are still queued, and the guard that covered their
-            // commits is already gone by the time the publisher dequeues them.
-            //
-            // This test drained first until 2026-09-03, which made the window a
-            // function of publisher scheduling rather than of the guard's scope.
-            // Suppression is stamped in the commit hook now, so the queued packets
-            // stay suppressed and the order below is the one worth pinning.
+            // Drop before draining to prove suppression follows commit scope
+            // rather than publisher scheduling.
             drop(guard);
 
-            // Sentinel: one INSERT *after* the window. The channel is FIFO, so
-            // observing its Change proves the publisher ran past all 100 queued
-            // packets — without it, "no Change events" would also be satisfied by
-            // a publisher that never woke at all.
+            // A later sentinel proves the publisher drained the earlier queue.
             backend
                 .execute_fixture(
                     "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES (1000, 'after')",
@@ -873,7 +820,6 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
             let msgs = drain(&sub);
 
-            // Expected shape: [Resync, Change(1000, 'after')].
             assert_eq!(
                 msgs.len(),
                 2,
@@ -896,9 +842,6 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
                 }
                 other => panic!("expected the sentinel Change; got {other:?}"),
             }
-            // Defensive: NO in-window Change leaked past the suppression stamp.
-            // (Implied by len==2 plus the sentinel match, restated so a future
-            // change that interleaves window events surfaces the intent.)
             let in_window_changes = msgs
                 .iter()
                 .filter_map(|m| match m {
@@ -919,25 +862,8 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 #[test]
 fn schema_pending_decoder_drops_then_resyncs() {
     Host::test(|host| {
-        // Plan §7 + §16.7 + §9 gate - schema-pending decoder rail
-        // end-to-end:
-        //
-        // 1. ensure_app_schema + CREATE TABLE.
-        // 2. Subscribe via the broker BEFORE engaging schema-pending.
-        // 3. Engage `SchemaPendingGuard`. This sets the thread-local
-        //    `schema_pending_apps` flag AND ensures the publisher's
-        //    per-event check drops every packet for the app.
-        // 4. INSERT 50 rows — every packet is dropped at the publisher
-        //    (debug-logged).
-        // 5. While engaged, `broker::try_subscribe(app_id, "other")` MUST
-        //    return `DbError::Coded { code: "schema_pending" }`. This is
-        //    the LOUD rail (vs the silent backfill rail above).
-        // 6. Drop the guard — clears the schema-pending flag + emits one
-        //    `Resync` per active subscription.
-        // 7. Subsequent INSERT publishes normally (the flag is cleared).
-        // 8. Drain: the subscriber observes (a) one Resync from the
-        //    guard's drop, then (b) one Change from the post-disengage
-        //    INSERT. No events from the pre-disengage window.
+        // Schema-pending blocks new subscriptions, suppresses queued changes,
+        // and resyncs existing subscribers when the schema becomes available.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -957,15 +883,11 @@ fn schema_pending_decoder_drops_then_resyncs() {
 
             let sub = subscribe_local("app_pending", "items");
 
-            // Engage schema-pending. `SchemaPendingGuard::new` calls
-            // `broker::engage_schema_pending(app_id)`; both the publisher
-            // suppression check AND the `Broker::try_subscribe` rejection
-            // branch activate.
+            // Engage schema-pending before issuing writes.
             let guard =
                 zeroship_data_orm::cdc::broker::SchemaPendingGuard::new("app_pending".to_string());
 
-            // INSERT 50 rows under the schema-pending window. Same shape
-            // as the backfill test above — packets ship, publisher drops.
+            // Queue writes inside the schema-pending window.
             for i in 0..50 {
                 let sql = format!(
                     "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
@@ -976,13 +898,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
                     .expect("INSERT under schema-pending");
             }
 
-            // The loud-rail invariant: while engaged, a NEW subscribe call
-            // (via `try_subscribe`) MUST return the typed conflict
-            // envelope. We don't use the legacy `subscribe()` here because
-            // it is infallible by design (back-compat with ~40 in-crate
-            // callers); the SDK boundary that lands later wires
-            // `try_subscribe` so the JS layer can branch on
-            // `e.code === "schema_pending"`.
+            // New subscriptions receive the typed schema-pending refusal.
             let attempt =
                 zeroship_data_orm::cdc::broker::try_subscribe("app_pending", "other_collection");
             match &attempt {
@@ -996,13 +912,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
                 other => panic!("expected Err(Coded {{ code: schema_pending }}); got {other:?}"),
             }
 
-            // Drop the guard WITHOUT draining first — the exposing order. The 50
-            // packets are still queued and the guard that covered their commits is
-            // gone before the publisher dequeues them. The post-disengage INSERT
-            // below is the FIFO sentinel that proves the publisher ran past them.
-            //
-            // This test drained first until 2026-09-03, which hid the window
-            // behind publisher scheduling.
+            // Drop before draining to prove suppression follows commit scope.
             drop(guard);
 
             // Post-disengage: a fresh INSERT must publish normally.

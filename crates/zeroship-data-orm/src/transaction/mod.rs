@@ -806,21 +806,8 @@ mod tests {
     /// `ThreadDbContext::clear_pool` nulls `backend` and leaves `tx_conns`
     /// untouched, so a `register` with a changed URL puts the thread in a state
     /// where a live pinned session exists and the ambient backend does not.
-    /// Until 2026-09-02 both the operation path and the settle path read that
-    /// ambient handle to decide which vendor they were talking to:
-    /// `exec_on_session` refused with `not_configured`, and `terminal` returned
-    /// `Indeterminate`, so a transaction on a perfectly healthy connection lost
-    /// its writes and had its session withdrawn.
-    ///
-    /// The session is the authority on how to talk to itself.
-    /// [`crate::driver::Session`]'s two variants ARE the two
-    /// `DatabaseFixture::Client` associated types, so the variant already names the
-    /// vendor and no second handle is consulted.
-    ///
-    /// Restoring either read reddens this: re-add the `not_configured` guard to
-    /// `exec_on_session` and the second insert panics; restore `terminal`'s
-    /// `match (&backend, &client)` with its `_ => mismatch` arm and the commit
-    /// comes back `Indeterminate` with zero rows committed.
+    /// The pinned [`crate::driver::Session`] remains the authority for commands
+    /// and settlement; neither path consults the ambient backend.
     #[test]
     fn an_open_transaction_outlives_the_threads_backend_being_cleared() {
         run(async {

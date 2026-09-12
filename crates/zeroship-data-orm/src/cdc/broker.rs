@@ -322,25 +322,7 @@ impl Subscription {
 /// The routing table.
 ///
 /// Indexed as a two-level map: `app_id → collection → Vec<Subscription>`.
-/// The per-collection list is scanned linearly on each publish
-/// (`O(subscribers_on_this_collection)`); a third-level index by
-/// `ReadSet` fingerprint is the natural next step if that scan ever
-/// becomes hot.
-///
-/// ## Why two levels (not a single `(String, String)` tuple key)
-///
-/// The hot path is the WAL-frame fan-out: every replicated mutation
-/// asks "are there any subscribers on `(app_id, collection)`?" before
-/// doing the more expensive event-shape work. With a tuple key, that
-/// question requires allocating a temporary `(String, String)` per
-/// call — two String heaps per WAL frame, multiplied by the number of
-/// rows per frame, on every multi-tenant worker.
-///
-/// The two-level layout lets the lookup go through `&str` borrows
-/// directly: `self.by_key.get(app)?.get(collection)?` — zero
-/// allocations on the read path. Owned Strings are still produced
-/// exactly once at subscribe-time (for `HashMap::entry`), which is
-/// the rare/cold path.
+/// Borrowed lookups avoid constructing an owned tuple on the publish path.
 pub struct Broker {
     /// Counter for [`Subscription::id`].
     next_id: u64,
@@ -1715,10 +1697,7 @@ mod tests {
 
     #[test]
     fn resume_app_with_resync_is_idempotent_pushes_multiple_resyncs() {
-        // Plan §9: "calling multiple times pushes multiple resyncs;
-        // subscribers dedup." Verify the broker side faithfully pushes
-        // one Resync per call (consumer-side dedup is a Subscription
-        // pop-time concern not exercised here).
+        // Each resume request emits a resync. Consumers may coalesce them.
         let mut b = Broker::new();
         let s = b.subscribe("a", "messages");
         b.resume_app_with_resync("a");

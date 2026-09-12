@@ -143,11 +143,6 @@ async fn backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
 
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
-///
-/// The dialect is STATED, not inherited: the two test constructors stamped
-/// `Postgres` unconditionally until 2026-09-03, which happened to be right here
-/// and was wrong on every SQLite harness. This target is live-PostgreSQL only
-/// (`require_pg`), so `Postgres` is the answer its connection actually speaks.
 async fn tx_route(host: &Host, app: &str) -> TxRoute {
     CapturedRoute::tx_for_tests(app, crate::sql::registration::SqlRegistration::postgres())
         .bind(backend(host).await)
