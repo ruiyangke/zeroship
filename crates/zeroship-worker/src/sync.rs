@@ -11,64 +11,44 @@ use crate::{cache, WorkerConfig};
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Resolve the worker-entry blob hash from a manifest. Returns `None` for
-/// SSG-only deploys (worker missing) and logs+returns `None` if the
-/// manifest is malformed (entry not in modules) so the worker stays
-/// loud rather than silently running stale code.
-pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &Uuid) -> Option<String> {
-    let worker = manifest.worker.as_ref()?;
-    match worker.modules.get(&worker.entry) {
-        Some(h) => Some(h.clone()),
-        None => {
-            tracing::warn!(
-                app_id = %app_id,
-                entry = ?worker.entry,
-                "worker-sync: manifest.worker.entry missing from modules"
-            );
-            None
-        }
-    }
+/// Runtime input from the app's complete, verified module graph.
+pub struct AppExecutable {
+    pub modules: Vec<zeroship_runtime::ModuleEntry>,
+    pub descriptor: Option<String>,
 }
 
-/// Resolve the bundled `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`)
-/// for an app from its `manifest.runtime_descriptor` slot. The descriptor is a
-/// separate content-addressed blob; we read it via `BlobStore` so the runtime
-/// can expose it as `globalThis.__zsRuntimeDescriptor`.
-///
-/// Returns `Ok(None)` when no descriptor is present (schema-less app). A missing
-/// descriptor blob or non-UTF-8 descriptor bytes is a hard load error.
-pub(crate) async fn runtime_descriptor_json(
+#[expect(clippy::future_not_send, reason = "module loading stays on the worker's compio thread")]
+pub async fn load_executable(
     manifest: &Manifest,
     blob_store: &Arc<dyn BlobStore>,
-    app_id: &Uuid,
-) -> Result<Option<String>, String> {
-    let Some(desc) = manifest.runtime_descriptor.as_ref() else {
-        return Ok(None);
-    };
-    let hash = desc.hash.clone();
-    match blob_store.get_blob(&hash).await {
-        Ok(bytes) => match String::from_utf8(bytes.to_vec()) {
-            Ok(s) => Ok(Some(s)),
-            Err(e) => {
-                tracing::error!(
-                    app_id = %app_id,
-                    descriptor_hash = %hash,
-                    error = %e,
-                    "worker-sync: runtime_descriptor blob is not UTF-8; refusing to load app"
-                );
-                Err(format!("runtime_descriptor blob {hash} is not UTF-8: {e}"))
-            }
-        },
-        Err(e) => {
-            tracing::error!(
-                app_id = %app_id,
-                descriptor_hash = %hash,
-                error = %e,
-                "worker-sync: runtime_descriptor blob fetch failed; refusing to load app"
-            );
-            Err(format!("runtime_descriptor blob {hash} fetch failed: {e}"))
-        }
-    }
+) -> Result<AppExecutable, String> {
+    let executable = zeroship_bundle::LoadedWorker::load(
+        manifest,
+        blob_store.as_ref(),
+        usize::try_from(zeroship_bundle::MAX_DECOMPRESSED_BYTES)
+            .map_err(|_| "app executable budget is not representable")?,
+    )
+    .await
+    .map_err(|error| format!("app executable load failed: {error}"))?;
+    let modules = std::iter::once(executable.entry())
+        .chain(
+            executable
+                .modules()
+                .keys()
+                .map(String::as_str)
+                .filter(|name| *name != executable.entry()),
+        )
+        .map(|name| zeroship_runtime::ModuleEntry {
+            specifier: name.into(),
+            source: executable.modules()[name].clone(),
+        })
+        .collect();
+    Ok(AppExecutable {
+        modules,
+        descriptor: executable
+            .runtime_descriptor()
+            .map(serde_json::Value::to_string),
+    })
 }
 
 /// Process-wide snapshot of `/internal/versions`, refreshed by a single
@@ -349,29 +329,16 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                 let loaded = cache::get_loaded_meta(local_id);
                 let local_limits = cache::get_limits(local_id);
                 if needs_reload(loaded.as_ref(), local_limits, info) {
-                    // Resolve the worker-bundle blob hash from the manifest
-                    // shipped in `info`. The platform's invariant is that
-                    // a deployed app has `manifest.worker.modules[entry]` —
-                    // anything else is either an undeployed app (manifest
-                    // is None) or an SSG-only deploy (worker is None);
-                    // neither needs a V8 isolate.
-                    let bundle_hash = match info
-                        .manifest
-                        .as_ref()
-                        .and_then(|m| worker_entry_hash(m, local_id))
-                    {
-                        Some(h) => h,
-                        None => {
-                            // No worker code → drop any cached isolate so
-                            // the LRU slot is freed and on-demand load
-                            // doesn't fall back to a stale runtime.
+                    let manifest = match info.manifest.as_ref() {
+                        Some(manifest) if manifest.worker.is_some() => manifest,
+                        _ => {
                             cache::evict_app(local_id);
                             cache::remove_loaded_meta(local_id);
                             continue;
                         }
                     };
-                    match config.blob_store.get_blob(&bundle_hash).await {
-                        Ok(bytes) => {
+                    match load_executable(manifest, &config.blob_store).await {
+                        Ok(executable) => {
                             // Order: make sure SharedEnvs is current BEFORE
                             // the V8 swap. Otherwise concurrent dispatches
                             // on the same thread between cache::load_app and
@@ -402,40 +369,18 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 }
                             }
 
-                            // Resolve the bundled RuntimeSchemaDescriptor (if
-                            // any) so the runtime sources the schema from the
-                            // migration fold. Absent → schema-less app.
-                            let descriptor_json = match info.manifest.as_ref() {
-                                Some(m) => match runtime_descriptor_json(m, &config.blob_store, local_id).await {
-                                    Ok(json) => json,
-                                    Err(e) => {
-                                        tracing::warn!(app_id = %local_id, error = %e, "worker-sync: descriptor load failed");
-                                        continue;
-                                    }
-                                },
-                                None => None,
-                            };
                             let Some(env_entry) = get_env(envs, local_id) else {
                                 tracing::warn!(app_id = %local_id, "worker-sync: env cache missing before app load");
                                 continue;
                             };
-                            // The manifest is always `Some` here: the
-                            // `worker_entry_hash` resolution above `continue`d
-                            // on `None`, so an app with no manifest never
-                            // reaches this load. The fallback exists so the
-                            // declared policy is EMPTY rather than absent if
-                            // that ever stops holding - an empty tree declares
-                            // nothing and refuses nothing, which is the same
-                            // posture the worker had before it enforced at all.
-                            let declared = info.manifest.clone().unwrap_or_default();
                             match cache::load_app(
                                 *local_id,
-                                &bytes,
+                                executable.modules,
                                 info.runtime.clone(),
                                 info.net_policy.clone(),
                                 info.deploy_hash.as_deref(),
-                                descriptor_json.as_deref(),
-                                &declared,
+                                executable.descriptor.as_deref(),
+                                manifest,
                                 &env_entry.snapshot,
                             ) {
                                 Ok(()) => {
@@ -450,7 +395,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                     tracing::info!(
                                         app_id = %local_id,
                                         plan_id = %info.plan_id,
-                                        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+                                        deploy_hash = ?info.deploy_hash,
                                         "worker-sync: app updated"
                                     );
                                 }
@@ -870,13 +815,11 @@ mod tests {
             let root = tmpdir("descriptor-schema-less");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
-            let app_id = Uuid::new_v4();
-            let manifest = Manifest::default();
-
-            let descriptor = runtime_descriptor_json(&manifest, &blob_store, &app_id)
+            let manifest = executable_manifest(&blob_store).await;
+            let executable = load_executable(&manifest, &blob_store)
                 .await
                 .expect("schema-less manifest must resolve cleanly");
-            assert_eq!(descriptor, None);
+            assert_eq!(executable.descriptor, None);
             std::fs::remove_dir_all(root).ok();
         });
     }
@@ -888,24 +831,36 @@ mod tests {
             let root = tmpdir("descriptor-missing-blob");
             let blob_store: Arc<dyn BlobStore> =
                 Arc::new(LocalDiskBlobStore::new(root.clone()).expect("blob store"));
-            let app_id = Uuid::new_v4();
             let descriptor_hash = "c".repeat(64);
             let manifest = Manifest {
                 runtime_descriptor: Some(RuntimeDescriptorEntry {
                     hash: descriptor_hash.clone(),
                 }),
-                ..Manifest::default()
+                ..executable_manifest(&blob_store).await
             };
 
-            let err = runtime_descriptor_json(&manifest, &blob_store, &app_id)
-                .await
-                .expect_err("missing descriptor blob must fail load");
+            let Err(err) = load_executable(&manifest, &blob_store).await else {
+                panic!("missing descriptor blob must fail load");
+            };
             assert!(
-                err.contains(&descriptor_hash) && err.contains("fetch failed"),
-                "error should name missing descriptor blob, got: {err}"
+                err.contains("app executable storage"),
+                "error should report the missing descriptor, got: {err}"
             );
             std::fs::remove_dir_all(root).ok();
         });
+    }
+
+    async fn executable_manifest(store: &Arc<dyn BlobStore>) -> Manifest {
+        let source = b"export default { fetch() { return new Response('ok'); } };";
+        let hash = zeroship_bundle::sha256_hex(source);
+        store.put_blob(&hash, source).await.unwrap();
+        Manifest {
+            worker: Some(zeroship_bundle::WorkerCode {
+                entry: "index.js".into(),
+                modules: [("index.js".into(), hash)].into(),
+            }),
+            ..Manifest::default()
+        }
     }
 
     fn dispatch_req(app_id: &Uuid) -> ntex::http::Request {
@@ -1010,7 +965,7 @@ mod tests {
             // isolate was hydrated against env version 1.
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 AppRuntimeLimits::default(),
                 AppNetPolicy::default(),
                 None,

@@ -269,8 +269,8 @@ export {
 };
 "#;
 
-/// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
-/// wrapping the user's original entry (renamed internally to `__user__.js`).
+/// Runtime-injected bootstrap module. Becomes the host entry,
+/// wrapping the user's original entry while preserving its module specifier.
 ///
 /// The kernel invokes one of three entry points per request:
 ///   - `user.default.rpc(name, input, ctx)`  for `/__zeroship/v1/<id>` (when set)
@@ -369,8 +369,8 @@ fn zs_db_platform_callback(
     }
 }
 
-/// Schema auto-discovery init script. Spliced into [`BOOTSTRAP_JS`]
-/// immediately after the `import * as user from "./__user__.js"` line so
+/// Schema auto-discovery init script. Spliced into [`bootstrap_js`]
+/// immediately after importing the creator entry module so
 /// the top-level `await import("@zeroship/bootstrap/install-schema")`
 /// runs inside the bootstrap module's evaluation — before the runtime
 /// resolves `default.fetch` / `default.rpc` off the namespace.
@@ -390,7 +390,7 @@ pub(crate) const DB_INIT_JS: &str =
 
 /// Internal capability bridge module source.
 ///
-/// This module is imported before `./__user__.js`, so it captures the native
+/// This module is imported before the creator entry, so it captures the native
 /// kind callbacks and deletes their string-named globals before creator code
 /// can observe or retain them. The import specifier is generated once per
 /// process (see [`BOOTSTRAP_KIND_BRIDGE_SPEC`]) and is not part of the creator
@@ -1586,41 +1586,21 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
 pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
     LazyLock::new(|| format!("__zs_kind_bridge_{}.js", uuid::Uuid::new_v4().simple()));
 
-/// Runtime-injected bootstrap module source. Built once at first use by
-/// splicing [`DB_INIT_JS`] into the otherwise-static bootstrap template.
-///
-/// The template is split into prefix (imports the internal kind bridge before
-/// `./__user__.js`) and main so the init script runs AFTER `user` is bound but
-/// BEFORE the `default.fetch` / `default.rpc` resolution. Order matters:
-///   1. The internal kind bridge evaluates before creator code and removes the
-///      forgeable string-named kind callbacks from `globalThis`.
-///   2. [`DB_INIT_JS`] runs next. Its top-level await imports the framework
-///      installer through V8's microtask checkpoint and plants typed Collection
-///      wrappers on `env.db`. Native plugins already received the validated
-///      descriptor before creator module evaluation.
-///
-/// By the time the kernel reads `default.fetch` / `default.rpc` off the user
-/// namespace, the dispatcher bridge is captured privately and the typed schema
-/// surface is live on `env.db`.
-pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
-    let prefix = bootstrap_prefix_js();
-    let mut s =
-        String::with_capacity(prefix.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len() + 4);
-    s.push_str(&prefix);
-    s.push_str(DB_INIT_JS);
-    s.push_str(BOOTSTRAP_MAIN_JS);
-    s
-});
-
-fn bootstrap_prefix_js() -> String {
-    format!(
-        r#"
-import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from "./{}";
-import * as user from "./__user__.js";
-
-"#,
-        &*BOOTSTRAP_KIND_BRIDGE_SPEC
-    )
+/// Import the private kind bridge before creator code, then install the schema
+/// and bind dispatch from the creator's original module namespace.
+fn bootstrap_js(entry: &str) -> Result<String, String> {
+    let entry = serde_json::to_string(entry)
+        .map_err(|error| format!("Invalid entry specifier: {error}"))?;
+    let prefix = format!(
+        "import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from \"./{}\";\nimport * as user from {entry};\n",
+        &*BOOTSTRAP_KIND_BRIDGE_SPEC,
+    );
+    let mut source =
+        String::with_capacity(prefix.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len());
+    source.push_str(&prefix);
+    source.push_str(DB_INIT_JS);
+    source.push_str(BOOTSTRAP_MAIN_JS);
+    Ok(source)
 }
 
 const BOOTSTRAP_MAIN_JS: &str = r##"
@@ -2343,21 +2323,9 @@ pub fn load_polyfills_and_modules(
     // `manifest.runtime_descriptor`; schema-less apps get no descriptor and the
     // bootstrap installs no env.db collections.
 
-    // Wrap the user's module graph in the bootstrap entry.
-    //
-    // Layout after wrapping:
-    //   entries[0] = "index.js"            — BOOTSTRAP_JS (the new entry)
-    //   entries[1] = "__user__.js"         — user's original entry (source preserved)
-    //   entries[2] = "zeroship"            — env / waitUntil / getRequest facade
-    //   entries[3..] = user's other modules (unchanged specifiers)
-    //
-    // The load_modules walker compiles BOOTSTRAP_JS first, discovers its
-    // import (`./__user__.js`) and transitively the user's `zeroship`
-    // imports, then instantiates + evaluates the bootstrap. The returned
-    // namespace is the bootstrap's, so ensure_initialized reads
-    // `default.fetch` off the bootstrap (not the user module) — exactly the
-    // indirection we want.
-    let wrapped = wrap_with_bootstrap(modules);
+    // The host bootstrap imports the creator entry under its declared name.
+    // Its namespace supplies dispatch while the creator graph keeps its paths.
+    let wrapped = wrap_with_bootstrap(modules)?;
 
     // Load ES modules and return the entry module's namespace object.
     // The kernel reads `default.fetch` directly off the namespace — no more
@@ -2371,80 +2339,43 @@ pub fn load_polyfills_and_modules(
     }
 }
 
-/// Rewrite the user's module list so the bootstrap is the new entry.
-///
-/// The user's declared first module is renamed to `__user__.js`; a synthetic
-/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry, plus the
-/// `zeroship` facade module.
-///
-/// **Collision**: the compiler always emits `index.js` as the user's entry,
-/// so a user entry actually named `__user__.js` is a bug if it happens. A
-/// `debug_assert!` catches this in dev builds; in release it's silently
-/// overwritten (the user module's source wins over our internal specifier
-/// by virtue of ordering in the sources map).
+/// Prepend the host bootstrap without changing creator module identities.
+/// Relative imports and imports back to the entry retain their original base.
 fn wrap_with_bootstrap(
     modules: &[crate::modules::ModuleEntry],
-) -> Vec<crate::modules::ModuleEntry> {
+) -> Result<Vec<crate::modules::ModuleEntry>, String> {
     use crate::modules::ModuleEntry;
-
-    // Empty input preserved as-is — the module loader will return a clean
-    // "No modules to load" error. Don't synthesize a bootstrap pointing at
-    // a non-existent `__user__.js`.
-    if modules.is_empty() {
-        return Vec::new();
+    let Some(user_entry) = modules.first() else {
+        return Ok(Vec::new());
+    };
+    let bootstrap_spec = format!("__zs_bootstrap_{}.js", uuid::Uuid::new_v4().simple());
+    if modules.iter().any(|entry| {
+        entry.specifier == bootstrap_spec || entry.specifier == *BOOTSTRAP_KIND_BRIDGE_SPEC
+    }) {
+        return Err("App module collides with the runtime bootstrap".into());
     }
-
-    let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
-
-    // entry 0: bootstrap becomes the new entrypoint under "index.js".
-    out.push(ModuleEntry {
-        specifier: "index.js".into(),
-        // Keep this host decision in the bootstrap module's lexical scope;
-        // an app-controlled global must not suppress production policy sealing.
-        source: format!(
-            "const __zsAllowDeferredSchemaInstall = {};\n{}",
-            crate::transport::ssrf::dev_mode_enabled(),
-            &*BOOTSTRAP_JS,
-        ),
-    });
-
-    // entry 1: internal kind bridge. The bootstrap imports this before
-    // "__user__.js" so it can remove forgeable kind globals before creator
-    // code evaluates.
-    out.push(ModuleEntry {
-        specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
-        source: KIND_BRIDGE_JS.into(),
-    });
-
-    // entry 2: user's original entry, renamed to "__user__.js". Its own
-    // declared specifier (usually "index.js") is discarded — the bootstrap
-    // imports `./__user__.js` by exact name.
-    let user_entry = &modules[0];
-    debug_assert!(
-        user_entry.specifier != "__user__.js",
-        "User entry collides with bootstrap's internal specifier",
-    );
-    out.push(ModuleEntry {
-        specifier: "__user__.js".into(),
-        source: user_entry.source.clone(),
-    });
-
-    // entry 3: the zeroship facade module. Lives in the module graph
-    // alongside the user's modules so `import ... from "zeroship"`
-    // resolves via the normal lookup path.
-    out.push(ModuleEntry {
-        specifier: "zeroship".into(),
-        source: ZEROSHIP_MODULE_JS.into(),
-    });
-
-    // Remaining user modules — pass through unchanged. Their declared
-    // specifiers (other than "index.js" which can't collide since we moved
-    // the user entry) stay valid for their own cross-module imports.
-    for entry in modules.iter().skip(1) {
-        out.push(entry.clone());
-    }
-
-    out
+    let bootstrap = bootstrap_js(&user_entry.specifier)?;
+    let mut out = vec![
+        ModuleEntry {
+            specifier: bootstrap_spec,
+            // Creator globals cannot disable the host's schema policy sealing.
+            source: format!(
+                "const __zsAllowDeferredSchemaInstall = {};\n{}",
+                crate::transport::ssrf::dev_mode_enabled(),
+                bootstrap
+            ),
+        },
+        ModuleEntry {
+            specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
+            source: KIND_BRIDGE_JS.into(),
+        },
+        ModuleEntry {
+            specifier: "zeroship".into(),
+            source: ZEROSHIP_MODULE_JS.into(),
+        },
+    ];
+    out.extend_from_slice(modules);
+    Ok(out)
 }
 
 // ===========================================================================

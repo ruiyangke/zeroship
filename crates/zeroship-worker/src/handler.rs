@@ -1448,12 +1448,7 @@ fn make_error_msg(status: u16, msg: &str) -> HttpResponse {
 /// stage everything in locals first and only mutate cache at the
 /// end.
 ///
-/// Bytes come from `BlobStore` keyed by
-/// `manifest.worker.modules[manifest.worker.entry]` rather than from a
-/// dedicated control-plane endpoint. The blob store enforces
-/// `sha256(bytes) == hash` on read, so the previous explicit hash
-/// re-check is redundant — `LocalDiskBlobStore::get_blob` already
-/// rejects on mismatch.
+/// The normal app manifest selects its complete module graph and descriptor.
 async fn load_on_demand(
     config: &WorkerConfig,
     envs: &SharedEnvs,
@@ -1465,18 +1460,7 @@ async fn load_on_demand(
         .manifest
         .as_ref()
         .ok_or_else(|| format!("app {app_id} has no manifest yet"))?;
-    let bundle_hash = crate::sync::worker_entry_hash(manifest, app_id)
-        .ok_or_else(|| format!("app {app_id} has no worker code (SSG-only or malformed manifest)"))?;
-
-    let bytes = config
-        .blob_store
-        .get_blob(&bundle_hash)
-        .await
-        .map_err(|e| format!("blob fetch failed: {e}"))?;
-
-    if bytes.is_empty() {
-        return Err("empty bundle".into());
-    }
+    let executable = crate::sync::load_executable(manifest, &config.blob_store).await?;
 
     // Fetch env BEFORE committing the V8 isolate. If env fetch fails
     // we never partially-load.
@@ -1491,29 +1475,13 @@ async fn load_on_demand(
     }
     let env_entry = crate::sync::get_env(envs, app_id)
         .ok_or_else(|| "env cache missing after env insert".to_string())?;
-    // Resolve the bundled RuntimeSchemaDescriptor (if any) so the runtime
-    // sources the schema from the generated descriptor. Absent descriptor means
-    // schema-less app; expected-but-missing/corrupt descriptors are load errors.
-    let descriptor_json = match crate::sync::runtime_descriptor_json(
-        manifest,
-        &config.blob_store,
-        app_id,
-    )
-    .await
-    {
-        Ok(json) => json,
-        Err(e) => {
-            crate::sync::remove_env(envs, app_id);
-            return Err(format!("descriptor load failed: {e}"));
-        }
-    };
     cache::load_app(
         *app_id,
-        &bytes,
+        executable.modules,
         app_version.runtime.clone(),
         app_version.net_policy.clone(),
         app_version.deploy_hash.as_deref(),
-        descriptor_json.as_deref(),
+        executable.descriptor.as_deref(),
         manifest,
         &env_entry.snapshot,
     )
@@ -1535,7 +1503,7 @@ async fn load_on_demand(
     });
     tracing::info!(
         app_id = %app_id,
-        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
+        deploy_hash = ?app_version.deploy_hash,
         "worker: on-demand loaded app"
     );
     Ok(())
@@ -1555,28 +1523,9 @@ async fn load_pinned_workflow_on_demand(
         .get_manifest(app_id, deploy_hash)
         .await
         .map_err(|e| format!("manifest fetch failed: {e}"))?;
-    let manifest: zeroship_bundle::Manifest = serde_json::from_slice(manifest_bytes.as_ref())
-        .map_err(|e| format!("manifest parse failed: {e}"))?;
-    if manifest.deploy_hash.as_deref() != Some(deploy_hash) {
-        return Err(format!(
-            "manifest deploy_hash mismatch: expected {deploy_hash}, got {:?}",
-            manifest.deploy_hash
-        ));
-    }
-    manifest
-        .validate()
-        .map_err(|e| format!("manifest validation failed: {e}"))?;
-
-    let bundle_hash = crate::sync::worker_entry_hash(&manifest, app_id)
-        .ok_or_else(|| format!("app {app_id} deploy {deploy_hash} has no worker code"))?;
-    let bytes = config
-        .blob_store
-        .get_blob(&bundle_hash)
-        .await
-        .map_err(|e| format!("blob fetch failed: {e}"))?;
-    if bytes.is_empty() {
-        return Err("empty bundle".into());
-    }
+    let manifest = zeroship_bundle::verify_deployment_manifest(&manifest_bytes, deploy_hash)
+        .map_err(|error| format!("pinned app manifest validation failed: {error}"))?;
+    let executable = crate::sync::load_executable(&manifest, &config.blob_store).await?;
 
     if crate::sync::get_env(envs, app_id).is_none()
         || app_version
@@ -1593,9 +1542,6 @@ async fn load_pinned_workflow_on_demand(
 
     let env_entry = crate::sync::get_env(envs, app_id)
         .ok_or_else(|| "env unavailable for pinned workflow load".to_string())?;
-    let descriptor_json = crate::sync::runtime_descriptor_json(&manifest, &config.blob_store, app_id)
-        .await
-        .map_err(|e| format!("descriptor load failed: {e}"))?;
     let runtime_limits = app_version
         .as_ref()
         .map_or_else(AppRuntimeLimits::default, |info| info.runtime.clone());
@@ -1606,10 +1552,10 @@ async fn load_pinned_workflow_on_demand(
     cache::load_pinned_workflow_app(
         *app_id,
         deploy_hash,
-        &bytes,
+        executable.modules,
         runtime_limits,
         net_policy,
-        descriptor_json.as_deref(),
+        executable.descriptor.as_deref(),
         &manifest,
         &env_entry.snapshot,
     )
@@ -1618,7 +1564,6 @@ async fn load_pinned_workflow_on_demand(
     tracing::info!(
         app_id = %app_id,
         deploy_hash = %deploy_hash,
-        blob_prefix = &bundle_hash[..bundle_hash.len().min(8)],
         "worker: on-demand loaded pinned workflow app"
     );
     Ok(())
@@ -1831,7 +1776,7 @@ pub(crate) mod tests {
 
     /// A worker config pointed at a dead control plane, so any on-demand load
     /// attempt fails rather than reaching the network.
-    fn test_worker_config(blob_root: &std::path::Path) -> Arc<crate::WorkerConfig> {
+    pub(super) fn test_worker_config(blob_root: &std::path::Path) -> Arc<crate::WorkerConfig> {
         let blob_store: Arc<dyn BlobStore> =
             Arc::new(LocalDiskBlobStore::new(blob_root.to_path_buf()).expect("blob store"));
         let workflow_blob_store: Arc<dyn zeroship_bundle::WorkflowBlobStore> = Arc::new(
@@ -2092,7 +2037,7 @@ pub(crate) mod tests {
             );
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 limits,
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -2569,7 +2514,7 @@ pub(crate) mod tests {
             );
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -2682,7 +2627,7 @@ pub(crate) mod tests {
     // WHAT WAS MISSING, EXACTLY. Not the policy - the manifest already reached
     // this crate. `zeroship_core::types` carries `manifest: Option<Manifest>`
     // in the version feed and `sync.rs` reads it on every reload
-    // (`worker_entry_hash`, `runtime_descriptor_json`). What was missing was
+    // (`sync::load_executable`). What was missing was
     // the hand-off: `cache::load_app` took limits, a net policy, a deploy hash,
     // a runtime descriptor and an env snapshot, and NOT the resource policy -
     // so by the time `dispatch` ran there was nothing to consult. It now takes
@@ -2765,7 +2710,7 @@ pub(crate) mod tests {
         // to, so what the fixture declared above is what `dispatch` rules on.
         crate::cache::load_app(
             app_id,
-            AUTH_OBLIVIOUS_APP,
+            crate::cache::test_modules(AUTH_OBLIVIOUS_APP),
             AppRuntimeLimits::default(),
             zeroship_core::types::AppNetPolicy::default(),
             None,
@@ -3129,7 +3074,7 @@ pub(crate) mod tests {
             );
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -3235,7 +3180,7 @@ pub(crate) mod tests {
             );
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -3356,7 +3301,7 @@ pub(crate) mod tests {
             );
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -3560,7 +3505,7 @@ pub(crate) mod tests {
             );
             crate::cache::load_app(
                 app_id,
-                source,
+                crate::cache::test_modules(source),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -3923,7 +3868,7 @@ pub(crate) mod tests {
 
             crate::cache::load_app(
                 app_a,
-                slow,
+                crate::cache::test_modules(slow),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -3992,7 +3937,7 @@ pub(crate) mod tests {
             // served by destroying A.
             let load_b = crate::cache::load_app(
                 app_b,
-                fast,
+                crate::cache::test_modules(fast),
                 AppRuntimeLimits::default(),
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
@@ -4149,6 +4094,78 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await
             .expect("workflow zship ingest")
             .deploy_hash
+    }
+
+    #[test]
+    fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
+        std::thread::spawn(|| {
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                init_runtime();
+                let root = tempfile::tempdir().unwrap();
+                let config = super::tests::test_worker_config(root.path());
+                let app_id = Uuid::new_v4();
+                crate::cache::init_cache(
+                    4,
+                    4,
+                    crate::cache::KernelConfig {
+                        control_url: config.control_url.clone(),
+                        control_key: String::new(),
+                        db_service: None,
+                        kv_store: None,
+                        storage_backend: None,
+                        meter: Arc::new(zeroship_metering::Meter::new()),
+                    },
+                );
+                let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+                crate::sync::put_env_from_json(
+                    &envs,
+                    app_id,
+                    r#"{"vars":{},"secrets":{},"expose":[]}"#,
+                    0,
+                )
+                .unwrap();
+                let original = deploy_workflow_fixture(&config.blob_store, &app_id, "original").await;
+                let replacement =
+                    deploy_workflow_fixture(&config.blob_store, &app_id, "replacement").await;
+                load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
+                    .await
+                    .unwrap();
+                assert!(crate::cache::has_pinned_workflow_app(&app_id, &original));
+
+                let bytes = config
+                    .blob_store
+                    .get_manifest(&app_id, &replacement)
+                    .await
+                    .unwrap();
+                let mut changed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                changed["deploy_hash"] = serde_json::json!(original);
+                let path = root
+                    .path()
+                    .join("manifests")
+                    .join(app_id.to_string())
+                    .join(format!("{original}.json"));
+                std::fs::write(&path, serde_json::to_vec(&changed).unwrap()).unwrap();
+                let error = load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("manifest validation failed"));
+                assert!(crate::cache::has_pinned_workflow_app(&app_id, &original));
+
+                std::fs::remove_file(path).unwrap();
+                assert!(
+                    load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    load_pinned_workflow_on_demand(&config, &envs, &Uuid::new_v4(), &replacement)
+                        .await
+                        .is_err()
+                );
+            });
+        })
+        .join()
+        .unwrap();
     }
 
     fn workflow_request(app_id: &Uuid) -> serde_json::Value {

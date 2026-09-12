@@ -12,7 +12,7 @@
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 /// A pre-resolved module to be loaded into V8.
@@ -24,6 +24,8 @@ pub struct ModuleEntry {
 
 /// Module registry stored in V8 isolate slot.
 pub struct ModuleRegistry {
+    /// Uncompiled bundle modules remain available to dynamic imports.
+    sources: HashMap<String, String>,
     /// Compiled V8 modules — populated by the lazy compilation loop.
     compiled: HashMap<String, v8::Global<v8::Module>>,
 }
@@ -39,6 +41,7 @@ impl Default for ModuleRegistry {
 impl ModuleRegistry {
     pub fn new() -> Self {
         Self {
+            sources: HashMap::new(),
             compiled: HashMap::new(),
         }
     }
@@ -63,20 +66,32 @@ impl ModuleRegistry {
     }
 }
 
-/// Resolve a specifier against the source map, trying common variants.
-fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Option<String> {
-    let candidates = [
-        specifier.to_string(),
-        specifier.strip_prefix("./").unwrap_or(specifier).to_string(),
-        format!("{specifier}.js"),
-        format!("{}.js", specifier.strip_prefix("./").unwrap_or(specifier)),
-    ];
-    for candidate in &candidates {
-        if sources.contains_key(candidate) {
-            return Some(candidate.clone());
+/// Resolve relative paths against their importing module, with no root fallback.
+fn resolve_specifier(
+    specifier: &str,
+    referrer: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let resolved = if specifier.starts_with("./") || specifier.starts_with("../") {
+        let base = referrer.rsplit_once('/').map_or("", |(base, _)| base);
+        let mut parts = Vec::new();
+        for part in base.split('/').chain(specifier.split('/')) {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop()?;
+                }
+                part => parts.push(part),
+            }
         }
-    }
-    None
+        let prefix = if referrer.starts_with('/') { "/" } else { "" };
+        format!("{prefix}{}", parts.join("/"))
+    } else {
+        specifier.to_owned()
+    };
+    [resolved.clone(), format!("{resolved}.js")]
+        .into_iter()
+        .find(|candidate| exists(candidate))
 }
 
 /// Compile a single module from source.
@@ -109,6 +124,96 @@ pub(crate) fn compile_module(
     Ok(v8::Global::new(scope, module))
 }
 
+/// Compile a module and its static dependency closure without evaluating it.
+/// Register each module before visiting imports so cycles share module records.
+fn compile_graph(
+    scope: &mut v8::PinScope,
+    registry: &SharedRegistry,
+    root: &str,
+) -> Result<v8::Global<v8::Module>, String> {
+    let mut queue = VecDeque::from([root.to_owned()]);
+    let mut visited = HashSet::new();
+    while let Some(spec) = queue.pop_front() {
+        if !visited.insert(spec.clone()) {
+            continue;
+        }
+        let existing = registry.borrow().get(&spec).cloned();
+        let module = if let Some(module) = existing {
+            module
+        } else {
+            let source = registry
+                .borrow()
+                .sources
+                .get(&spec)
+                .cloned()
+                .ok_or_else(|| format!("Source not found for '{spec}'"))?;
+            let module = compile_module(scope, &spec, &source)?;
+            registry.borrow_mut().insert(spec.clone(), module.clone());
+            module
+        };
+        let module = v8::Local::new(scope, &module);
+        if !module.is_source_text_module() {
+            continue;
+        }
+        let requests = module.get_module_requests();
+        for index in 0..requests.length() {
+            let request =
+                v8::Local::<v8::ModuleRequest>::try_from(requests.get(scope, index).unwrap())
+                    .unwrap();
+            let imported = request.get_specifier().to_rust_string_lossy(scope);
+            if super::native_modules::is_native(scope, &imported) {
+                if registry.borrow().get(&imported).is_none() {
+                    let module = super::native_modules::resolve_native(scope, &imported)
+                        .ok_or_else(|| format!("Cannot resolve native module '{imported}'"))?;
+                    registry
+                        .borrow_mut()
+                        .insert(imported, v8::Global::new(scope, module));
+                }
+                continue;
+            }
+            let resolved = {
+                let reg = registry.borrow();
+                resolve_specifier(&imported, &spec, |name| {
+                    reg.sources.contains_key(name) || reg.compiled.contains_key(name)
+                })
+            }
+            .ok_or_else(|| format!("Cannot resolve import '{imported}' from '{spec}'"))?;
+            queue.push_back(resolved);
+        }
+    }
+    registry
+        .borrow()
+        .get(root)
+        .cloned()
+        .ok_or_else(|| format!("Module not compiled: {root}"))
+}
+
+pub(crate) fn dynamic_module(
+    scope: &mut v8::PinScope,
+    specifier: &str,
+    referrer: &str,
+) -> Result<Option<v8::Global<v8::Module>>, String> {
+    let Some(registry) = scope.get_slot::<SharedRegistry>().cloned() else {
+        return Ok(None);
+    };
+    let resolved = {
+        let reg = registry.borrow();
+        resolve_specifier(specifier, referrer, |name| {
+            reg.sources.contains_key(name) || reg.compiled.contains_key(name)
+        })
+    };
+    let Some(root) = resolved else {
+        return Ok(None);
+    };
+    if let Some(module) = registry.borrow().get(&root).cloned() {
+        // Linking has already prepared this module's complete static closure.
+        if v8::Local::new(scope, &module).get_status() != v8::ModuleStatus::Uninstantiated {
+            return Ok(Some(module));
+        }
+    }
+    compile_graph(scope, &registry, &root).map(Some)
+}
+
 /// Load modules with lazy compilation.
 ///
 /// `entries[0]` is the entrypoint. All entries are stored as source strings,
@@ -131,83 +236,10 @@ pub fn load_modules(
 
     let registry: SharedRegistry = Rc::new(RefCell::new(ModuleRegistry::new()));
 
-    // Compile the entry module.
-    let entrypoint = &entries[0].specifier;
-    let entry_source = sources.get(entrypoint)
-        .ok_or_else(|| format!("Entrypoint not found: {entrypoint}"))?;
-    let entry_module = compile_module(scope, entrypoint, entry_source)?;
-
-    // Discover and compile all transitive imports (BFS).
-    //
-    // V8's resolve_callback can't compile modules — it must return
-    // an already-compiled module. So we walk the import graph here,
-    // compiling each discovered module BEFORE calling instantiate_module.
-    {
-        let mut queue: VecDeque<(String, v8::Global<v8::Module>)> = VecDeque::new();
-        queue.push_back((entrypoint.clone(), entry_module));
-
-        while let Some((spec, module_global)) = queue.pop_front() {
-            // Store compiled module in registry
-            let already_registered = registry.borrow().compiled.contains_key(&spec);
-            if !already_registered {
-                registry.borrow_mut().compiled.insert(spec.clone(), module_global.clone());
-            }
-
-            // Discover this module's imports via V8
-            let module_local = v8::Local::new(scope, &module_global);
-            let requests = module_local.get_module_requests();
-            let num_requests = requests.length();
-
-            for i in 0..num_requests {
-                let request = v8::Local::<v8::ModuleRequest>::try_from(
-                    requests.get(scope, i).unwrap()
-                ).unwrap();
-                let import_specifier = request.get_specifier().to_rust_string_lossy(scope);
-
-                // Native synthetic module (e.g. `node:async_hooks`) — minted
-                // here so the resolve callback finds it pre-instantiation.
-                // Synthetic modules have no imports, so we don't queue
-                // them for further discovery.
-                if super::native_modules::is_native(scope, &import_specifier) {
-                    if !registry.borrow().compiled.contains_key(&import_specifier) {
-                        let m = super::native_modules::resolve_native(scope, &import_specifier)
-                            .expect("is_native true but resolve_native returned None");
-                        registry
-                            .borrow_mut()
-                            .compiled
-                            .insert(import_specifier.clone(), v8::Global::new(scope, m));
-                    }
-                    continue;
-                }
-
-                // Resolve to actual source specifier
-                let resolved = match resolve_specifier(&import_specifier, &sources) {
-                    Some(s) => s,
-                    None => return Err(format!(
-                        "Cannot resolve import '{import_specifier}' from '{spec}'"
-                    )),
-                };
-
-                // Skip if already compiled
-                if registry.borrow().compiled.contains_key(&resolved) {
-                    continue;
-                }
-
-                // Compile the imported module
-                let source = sources.get(&resolved)
-                    .ok_or_else(|| format!(
-                        "Source not found for '{resolved}' (imported from '{spec}')"
-                    ))?;
-                let compiled = compile_module(scope, &resolved, source)?;
-
-                // Queue for import discovery (its own imports)
-                queue.push_back((resolved, compiled));
-            }
-        }
-    }
-
-    // Store registry in isolate slot for the resolve callback
+    registry.borrow_mut().sources = sources;
     scope.set_slot(registry.clone());
+    let entrypoint = &entries[0].specifier;
+    compile_graph(scope, &registry, entrypoint)?;
 
     // Instantiate the entrypoint.
     // resolve_callback only does lookups — all modules are pre-compiled.
@@ -323,7 +355,7 @@ pub(crate) fn resolve_callback<'a>(
     context: v8::Local<'a, v8::Context>,
     specifier: v8::Local<'a, v8::String>,
     _import_attributes: v8::Local<'a, v8::FixedArray>,
-    _referrer: v8::Local<'a, v8::Module>,
+    referrer: v8::Local<'a, v8::Module>,
 ) -> Option<v8::Local<'a, v8::Module>> {
     v8::callback_scope!(unsafe scope, context);
 
@@ -337,18 +369,17 @@ pub(crate) fn resolve_callback<'a>(
     {
         let reg = registry.borrow();
 
-        // Try exact, then variants
-        let candidates = [
-            spec.clone(),
-            spec.strip_prefix("./").unwrap_or(&spec).to_string(),
-            format!("{spec}.js"),
-            format!("{}.js", spec.strip_prefix("./").unwrap_or(&spec)),
-        ];
-
-        for candidate in &candidates {
-            if let Some(module_global) = reg.compiled.get(candidate) {
-                return Some(v8::Local::new(scope, module_global));
-            }
+        let referrer_name = reg
+            .compiled
+            .iter()
+            .find(|(_, module)| v8::Local::new(scope, *module) == referrer)
+            .map(|(name, _)| name.as_str())?;
+        if let Some(resolved) =
+            resolve_specifier(&spec, referrer_name, |name| reg.compiled.contains_key(name))
+        {
+            return reg
+                .get(&resolved)
+                .map(|module| v8::Local::new(scope, module));
         }
     }
 

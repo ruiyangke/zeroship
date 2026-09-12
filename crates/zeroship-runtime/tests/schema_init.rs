@@ -319,7 +319,6 @@ fn init_script_runs_install_schema_when_descriptor_and_db_plugin_present() {
     init_v8();
 
     let user_src = r#"
-import * as _zsUser from "./__user__.js";  // not used, just to anchor
 const _procedures = { readCaptured };
 function readCaptured() {
     return globalThis.__zsCapturedSchema ?? null;
@@ -443,7 +442,6 @@ fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     init_v8();
 
     let user_src = r#"
-import * as _zsUser from "./__user__.js";  // anchor
 const _procedures = { readCaptured };
 function readCaptured() {
     return globalThis.__zsCapturedSchema ?? null;
@@ -562,7 +560,6 @@ fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
     init_v8();
 
     let user_src = r#"
-import * as _zsUser from "./__user__.js";  // anchor
 const _procedures = { readCaptured };
 function readCaptured() {
     return globalThis.__zsCapturedSchema ?? null;

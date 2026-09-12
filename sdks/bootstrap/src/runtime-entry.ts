@@ -3,7 +3,7 @@
 // Compiled to `dist/runtime-entry.js` and `include_str!`d by the
 // runtime crate's `crates/zeroship-runtime/src/core/init.rs`, spliced into the
 // bootstrap module so it runs INSIDE the module's top-level evaluation
-// — between `import * as user from "./__user__.js"` and the
+// — between importing the creator's entry module and the
 // `default.fetch` / `default.rpc` resolution. The post-build step
 // (`scripts/post-build.mjs`) strips the `export {};` line so the file
 // content is pure top-level JS suitable for splicing.

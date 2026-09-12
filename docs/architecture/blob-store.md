@@ -72,8 +72,8 @@ paths, hashes, source text and descriptor JSON within a shared source budget.
 The resulting module graph is an in-memory value; the persisted artifact remains
 the normal app manifest and blobs.
 
-The CLI's app deployment path and the replacement workflow engine use this
-loader. Deployment retention and replacement of the workflow engine's existing
+The CLI, active and pinned worker isolates, and the replacement workflow engine
+use this loader. Deployment retention and replacement of the workflow engine's existing
 executable copies remain work in progress in the
 [workflow proposal](../proposals/2026-09-11-workflow-worker.md).
 
@@ -107,7 +107,7 @@ All three services build their store from the SAME `--blob-store` grammar via `z
 - [crates/zeroship-control/src/main.rs](../../crates/zeroship-control/src/main.rs): builds the store; the deploy ingest writes blobs + manifests through it. There is no separate per-app `BundleStore`/VFS. App archive only changes lifecycle state and deliberately leaves the manifest keyspace intact.
 - [crates/zeroship-gateway/src/main.rs](../../crates/zeroship-gateway/src/main.rs): builds the store plus memory/disk caches; refills the disk cache by streaming `get_blob_to_file`.
 - [crates/zeroship-worker/src/main.rs](../../crates/zeroship-worker/src/main.rs): builds the store.
-- [crates/zeroship-worker/src/sync.rs](../../crates/zeroship-worker/src/sync.rs): fetches `manifest.worker.modules[entry]`
+- [crates/zeroship-worker/src/sync.rs](../../crates/zeroship-worker/src/sync.rs): loads the complete worker module graph and runtime descriptor
 
 `s3://` credentials resolve from the standard AWS environment (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / optional `AWS_SESSION_TOKEN`); there is no provider chain.
 

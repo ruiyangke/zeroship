@@ -499,25 +499,13 @@ fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<Stri
 
 fn build_runtime(
     app_id: Uuid,
-    bundle_bytes: &[u8],
+    modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
     env: &EnvSnapshot,
 ) -> Result<(Runtime, String), String> {
-    let source = match std::str::from_utf8(bundle_bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(app_id = %app_id, error = %e, "worker: bundle is not UTF-8");
-            return Err(format!("bundle is not UTF-8: {e}"));
-        }
-    };
-    let modules: Vec<ModuleEntry> = vec![ModuleEntry {
-        specifier: "index.js".to_string(),
-        source: source.to_string(),
-    }];
-
     let plugins = plugin_set();
     let meter = METER.with(|m| m.borrow().clone());
     let app_id_string = app_id.to_string();
@@ -547,15 +535,8 @@ fn build_runtime(
     Ok((runtime, app_id_string))
 }
 
-/// Load an app from bundle bytes. Creates V8 runtime + starts pump task.
-///
-/// Bundle bytes are the raw ES module source (UTF-8). The caller
-/// (`sync::reconcile_once` or `handler::load_on_demand`) resolves the
-/// worker-entry blob hash from the manifest and reads it via
-/// `BlobStore::get_blob` before calling here. Single-module bundles
-/// (today's only shape) become a one-element `modules` vector tagged
-/// `index.js`; multi-module deploys will pass a richer slice once the
-/// V8 module-resolve callback lands.
+/// Load an app from its verified module graph, with the entry module first.
+/// Creates the V8 runtime and starts its pump after initialization succeeds.
 ///
 /// `manifest` is the deploy's own manifest, and it is what makes the worker a
 /// real enforcer of the declared route policy rather than a tier that trusts
@@ -563,14 +544,10 @@ fn build_runtime(
 /// consulted per dispatch by `crate::policy::enforce`. Callers that hold no
 /// manifest pass `&Manifest::default()`, whose empty resource tree declares
 /// nothing and therefore refuses nothing.
-// Eight arguments. Bundling them into a params struct would touch every
-// caller and every test fixture for no behaviour, and the eighth is the one
-// this crate exists to start honouring - so it is named here rather than
-// smuggled in through a struct nobody reads.
 #[allow(clippy::too_many_arguments)]
 pub fn load_app(
     app_id: Uuid,
-    bundle_bytes: &[u8],
+    modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
@@ -580,7 +557,7 @@ pub fn load_app(
 ) -> Result<(), String> {
     let (runtime, app_id_string) = build_runtime(
         app_id,
-        bundle_bytes,
+        modules,
         app_limits,
         app_net_policy,
         deploy_hash,
@@ -652,7 +629,7 @@ pub fn get_declared_policy(app_id: &Uuid) -> Option<Rc<CompiledManifest>> {
 pub fn load_pinned_workflow_app(
     app_id: Uuid,
     deploy_hash: &str,
-    bundle_bytes: &[u8],
+    modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     runtime_descriptor: Option<&str>,
@@ -662,7 +639,7 @@ pub fn load_pinned_workflow_app(
     let key = PinnedWorkflowKey::new(app_id, deploy_hash);
     let (runtime, app_id_string) = build_runtime(
         app_id,
-        bundle_bytes,
+        modules,
         app_limits,
         app_net_policy,
         Some(deploy_hash),
@@ -993,6 +970,14 @@ fn refresh_socket_activity(cache: &mut AppCache) {
 }
 
 #[cfg(test)]
+pub(crate) fn test_modules(source: &[u8]) -> Vec<ModuleEntry> {
+    vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: std::str::from_utf8(source).unwrap().into(),
+    }]
+}
+
+#[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
@@ -1164,7 +1149,7 @@ mod tests {
                 .block_on(async {
                     let (runtime, _app) = build_runtime(
                         Uuid::new_v4(),
-                        br#"export default { fetch() { return new Response("ok"); } }"#,
+                        crate::cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
                         AppRuntimeLimits::default(),
                         AppNetPolicy::default(),
                         Some("deploy_build_runtime_guard"),
@@ -1747,7 +1732,7 @@ mod tests {
                 );
                 load_app(
                     app_id,
-                    br#"export default { fetch() { return new Response("ok"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy {
                         egress: vec![zeroship_core::types::NetEgressEntry {
@@ -1788,6 +1773,65 @@ mod tests {
     }
 
     #[test]
+    fn active_and_pinned_isolates_load_their_complete_module_graph() {
+        std::thread::spawn(|| {
+            let runtime = compio::runtime::Runtime::new().unwrap();
+            runtime.block_on(async {
+                use zeroship_bundle::{BlobStore, LocalDiskBlobStore, RuntimeDescriptorEntry, WorkerCode};
+
+                zeroship_runtime::init::init_v8();
+                let app_id = Uuid::new_v4();
+                init_cache(4, 4, KernelConfig {
+                    control_url: "http://127.0.0.1:1".into(),
+                    control_key: String::new(),
+                    db_service: None,
+                    kv_store: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                });
+                let directory = tempfile::tempdir().unwrap();
+                let blobs: Arc<dyn BlobStore> = Arc::new(LocalDiskBlobStore::new(directory.path().into()).unwrap());
+                let descriptor = r#"{"version":2,"collections":{}}"#;
+                let descriptor_hash = zeroship_bundle::sha256_hex(descriptor.as_bytes());
+                blobs.put_blob(&descriptor_hash, descriptor.as_bytes()).await.unwrap();
+                for deployment in ["original", "replacement"] {
+                    let mut modules = HashMap::new();
+                    for (name, source) in [
+                        ("app/z-entry.js", "import value from './a-part.js'; export default { async fetch() { const { tail } = await import('./lazy.js'); return new Response(value + tail); } };".to_owned()),
+                        ("app/a-part.js", format!("export default '{deployment}';")),
+                        ("app/lazy.js", "export const tail = ':dynamic';".to_owned()),
+                    ] {
+                        let hash = zeroship_bundle::sha256_hex(source.as_bytes());
+                        blobs.put_blob(&hash, source.as_bytes()).await.unwrap();
+                        modules.insert(name.into(), hash);
+                    }
+                    let manifest = Manifest {
+                        worker: Some(WorkerCode { entry: "app/z-entry.js".into(), modules }),
+                        runtime_descriptor: Some(RuntimeDescriptorEntry { hash: descriptor_hash.clone() }),
+                        ..Manifest::default()
+                    };
+                    let executable = crate::sync::load_executable(&manifest, &blobs).await.unwrap();
+                    assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
+                    assert_eq!(serde_json::from_str::<serde_json::Value>(executable.descriptor.as_deref().unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
+                    if deployment == "original" {
+                        load_pinned_workflow_app(app_id, deployment, executable.modules,
+                            AppRuntimeLimits::default(), AppNetPolicy::default(),
+                            executable.descriptor.as_deref(), &manifest, &EnvSnapshot::empty()).unwrap();
+                    } else {
+                        load_app(app_id, executable.modules, AppRuntimeLimits::default(),
+                            AppNetPolicy::default(), Some(deployment), executable.descriptor.as_deref(),
+                            &manifest, &EnvSnapshot::empty()).unwrap();
+                    }
+                }
+                let active = get_runtime(&app_id).unwrap();
+                assert_eq!(fetch_body(&active).await, (200, "replacement:dynamic".into()));
+                let pinned = get_workflow_runtime(&app_id, "original").unwrap();
+                assert_eq!(fetch_body(&pinned).await, (200, "original:dynamic".into()));
+            });
+        }).join().unwrap();
+    }
+
+    #[test]
     fn load_app_preserves_last_good_isolate_when_descriptor_validation_fails() {
         std::thread::spawn(|| {
             let runtime = compio::runtime::Runtime::new().expect("compio runtime");
@@ -1810,7 +1854,7 @@ mod tests {
 
                 load_app(
                     app_id,
-                    br#"export default { fetch() { return new Response("last-good"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("last-good"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-good"),
@@ -1825,7 +1869,7 @@ mod tests {
 
                 let err = load_app(
                     app_id,
-                    br#"export default { fetch() { return new Response("bad-new"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-new"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
@@ -1882,7 +1926,7 @@ mod tests {
 
                 let err = load_app(
                     app_id,
-                    br#"export default { fetch() { return new Response("bad-first"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("bad-first"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     Some("deploy-bad"),
@@ -1933,7 +1977,7 @@ mod tests {
                 );
                 load_app(
                     app_id,
-                    br#"export default { fetch() { return new Response("ok"); } }"#,
+                    crate::cache::test_modules(br#"export default { fetch() { return new Response("ok"); } }"#),
                     AppRuntimeLimits::default(),
                     AppNetPolicy::default(),
                     None,
