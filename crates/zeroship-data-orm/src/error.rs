@@ -441,12 +441,14 @@ pub const GRANT_REVOKED_MESSAGE: &str =
 /// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
 /// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
 /// creator reading the HTTP response only ever sees the message.
-pub const MISSING_ROLE_MESSAGE: &str = "this app's database is not provisioned: its per-app Postgres role does not \
+pub const MISSING_ROLE_MESSAGE: &str =
+    "this app's database is not provisioned: its per-app Postgres role does not \
      exist. Run `zeroship migrate` for this app, then retry.";
 
 /// Operator/`env.db`-caller hint for [`SCHEMA_NOT_PROVISIONED`]. Reaches app
 /// JS as `err.hint` on a direct native throw; does NOT reach the HTTP wire.
-pub const MISSING_ROLE_HINT: &str = "`zeroship migrate` creates the app's schema and per-app role. A deploy \
+pub const MISSING_ROLE_HINT: &str =
+    "`zeroship migrate` creates the app's schema and per-app role. A deploy \
      alone does not: the first `env.db` call is what discovers the role is \
      missing.";
 
@@ -566,70 +568,54 @@ impl DbError {
         }
     }
 
-    /// Optimistic-concurrency check failed. The UPDATE
-    /// filter included `version: N` but the row's current `version`
-    /// no longer matched (another writer won the race; affected-rows
-    /// came back 0).
-    ///
-    /// SDK callers branch on `e.code === "version_mismatch"`. The
-    /// retry advice in the `hint` doubles as the
-    /// `OptimisticLockError` message body in the SDK. The proposal's
-    /// Q-SF-E (§10) settled on retryable semantics — caller is
-    /// expected to re-read the row, observe the bumped `version`,
-    /// and retry with the new value.
-    pub fn version_mismatch(collection: &str, row_id: Option<&str>, expected_version: i64) -> Self {
+    /// A descriptor-declared optimistic-concurrency check failed.
+    pub fn version_mismatch(
+        collection: &str,
+        row_id: Option<&str>,
+        column: &str,
+        expected: i64,
+    ) -> Self {
         let id_part = row_id.map(|id| format!(" {id}")).unwrap_or_default();
         DbError::ValidationFailed {
             code: "version_mismatch",
             message: format!(
                 "Optimistic concurrency check failed for {collection}{id_part}: \
-                 expected version {expected_version}, but the row was modified concurrently."
+                 expected `{column}` value {expected}, but the row was modified concurrently."
             ),
-            hint: Some(
-                "Re-read the row to get the current version and retry the update.".to_string(),
-            ),
+            hint: Some(format!(
+                "Re-read the row to get the current `{column}` value and retry the update."
+            )),
         }
     }
 
-    /// UPDATE filter carried `version: N` but no `id`
-    /// predicate. The CAS semantics don't generalise cleanly to
-    /// multi-row UPDATEs (the affected-rows count conflates "row
-    /// missing", "version mismatched", and "filter matched but version
-    /// matched" — there's no clean per-row mismatch report). This
-    /// refuses the shape eagerly with a typed code so the SDK can
-    /// guide the creator toward an explicit per-id loop.
-    pub fn multi_row_version_filter_unsupported(collection: &str) -> Self {
+    /// A concurrency guard without an identity cannot report per-row conflicts.
+    pub fn multi_row_version_filter_unsupported(collection: &str, column: &str) -> Self {
         DbError::ValidationFailed {
             code: "multi_row_version_filter_unsupported",
             message: format!(
-                "UPDATE on `{collection}` with `version` in the filter requires \
+                "UPDATE on `{collection}` with `{column}` in the filter requires \
                  an `id` predicate; optimistic concurrency is per-row only."
             ),
-            hint: Some(
-                "Either remove `version` from the filter (last-writer-wins \
+            hint: Some(format!(
+                "Either remove `{column}` from the filter (last-writer-wins \
                  bulk update) or scope the UPDATE to a single row with \
-                 `{ id: ..., version: N }`."
-                    .to_string(),
-            ),
+                 `{{ id: ..., {column}: expected }}`."
+            )),
         }
     }
 
-    /// Nested `$and` / `$or` `version` predicates are
-    /// refused because the CAS path only honours a top-level equality
-    /// predicate. Failing closed avoids silently degrading a
-    /// compare-and-swap write into a blind last-writer-wins update.
-    pub fn version_filter_must_be_top_level(collection: &str) -> Self {
+    /// Concurrency guards must be direct equality predicates.
+    pub fn version_filter_must_be_top_level(collection: &str, column: &str) -> Self {
         DbError::ValidationFailed {
             code: "version_filter_must_be_top_level",
             message: format!(
                 "UPDATE on `{collection}` requires optimistic-concurrency \
-                 `version` filters to be top-level."
+                 `{column}` filters to be top-level."
             ),
-            hint: Some(
-                "Use a top-level filter like `{ id: ..., version: N }`; \
-                 nested `$and`/`$or` version predicates are refused."
-                    .to_string(),
-            ),
+            hint: Some(format!(
+                "Use a top-level filter like `{{ id: ..., {column}: expected }}`; \
+                 nested `$and`/`$or` guards are refused."
+            )),
         }
     }
 }

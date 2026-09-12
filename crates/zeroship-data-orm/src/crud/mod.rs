@@ -551,9 +551,14 @@ pub(crate) async fn run_update_one(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
     // A concurrency predicate must identify one row.
-    let cas_version = extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some() && !filter.has_non_null_equality("id") {
-        return Err(DbError::multi_row_version_filter_unsupported(&coll));
+    let concurrency = extract_concurrency_guard(&filter, &coll, &schema)?;
+    if !filter.has_non_null_equality("id") {
+        if let Some(guard) = &concurrency {
+            return Err(DbError::multi_row_version_filter_unsupported(
+                &coll,
+                &guard.column,
+            ));
+        }
     }
 
     update_validation::validate(&schema, &update)?;
@@ -565,9 +570,14 @@ pub(crate) async fn run_update_one(
             write_pipeline::resolve_target_row_ids(&route, &coll, filter.clone(), 1, &schema)
                 .await?;
         let Some(target_row) = target_rows.first().cloned() else {
-            if let Some(expected_version) = cas_version {
+            if let Some(guard) = &concurrency {
                 let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-                return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                return Err(DbError::version_mismatch(
+                    &coll,
+                    row_id,
+                    &guard.column,
+                    guard.expected,
+                ));
             }
             // An absent match has no row to decode or masked value to rehydrate.
             return Ok((Vec::new(), false));
@@ -590,9 +600,8 @@ pub(crate) async fn run_update_one(
     .await?;
     let sql_filter: predicate::Input = if let Some(target_row) = target_row {
         let mut sql_filter = crate::value!({ "id": target_row.id_value });
-        if let Some(expected_version) = cas_version {
-            sql_filter[concurrency_column(&schema)?.expect("CAS column")] =
-                Value::from(expected_version);
+        if let Some(guard) = &concurrency {
+            sql_filter[&guard.column] = Value::from(guard.expected);
         }
         sql_filter.into()
     } else {
@@ -633,10 +642,15 @@ pub(crate) async fn run_update_one(
     )
     .await?;
     // An empty result with a concurrency predicate is a CAS failure.
-    if let Some(expected_version) = cas_version {
+    if let Some(guard) = &concurrency {
         if result.rows.is_empty() {
             let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+            return Err(DbError::version_mismatch(
+                &coll,
+                row_id,
+                &guard.column,
+                guard.expected,
+            ));
         }
         // The required `id` primary key bounds this update to one row.
         if result.rows.len() > 1 {
@@ -667,9 +681,14 @@ pub(crate) async fn run_update_many(
     // move rather than through two different accessors.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
-    let cas_version = extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some() && !filter.has_non_null_equality("id") {
-        return Err(DbError::multi_row_version_filter_unsupported(&coll));
+    let concurrency = extract_concurrency_guard(&filter, &coll, &schema)?;
+    if !filter.has_non_null_equality("id") {
+        if let Some(guard) = &concurrency {
+            return Err(DbError::multi_row_version_filter_unsupported(
+                &coll,
+                &guard.column,
+            ));
+        }
     }
 
     update_validation::validate(&schema, &update)?;
@@ -713,9 +732,14 @@ pub(crate) async fn run_update_many(
                 ));
             }
             if target_rows.is_empty() {
-                if let Some(expected_version) = cas_version {
+                if let Some(guard) = &concurrency {
                     let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-                    return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                    return Err(DbError::version_mismatch(
+                        &coll,
+                        row_id,
+                        &guard.column,
+                        guard.expected,
+                    ));
                 }
                 return Ok(0);
             }
@@ -739,9 +763,8 @@ pub(crate) async fn run_update_many(
                 )
                 .await?;
                 let mut row_filter = crate::value!({ "id": row_id });
-                if let Some(expected_version) = cas_version {
-                    row_filter[concurrency_column(&schema)?.expect("CAS column")] =
-                        Value::from(expected_version);
+                if let Some(guard) = &concurrency {
+                    row_filter[&guard.column] = Value::from(guard.expected);
                 }
                 // The probe resolved this row by its declared primary key, so
                 // the per-row statement does not need a second bounded
@@ -773,10 +796,15 @@ pub(crate) async fn run_update_many(
                 .await?;
             }
 
-            if let Some(expected_version) = cas_version {
+            if let Some(guard) = &concurrency {
                 if affected != target_count as u64 {
                     let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-                    return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                    return Err(DbError::version_mismatch(
+                        &coll,
+                        row_id,
+                        &guard.column,
+                        guard.expected,
+                    ));
                 }
             }
             Ok(affected)
@@ -811,27 +839,38 @@ pub(crate) async fn run_update_many(
         exec_mutation_count_with_emit(bq, &route, &coll, zeroship_data_orm::cdc::ChangeOp::Update)
             .await?;
     // A primary-key CAS miss has the same error contract as updateOne.
-    if let Some(expected_version) = cas_version {
+    if let Some(guard) = &concurrency {
         if affected == 0 {
             let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+            return Err(DbError::version_mismatch(
+                &coll,
+                row_id,
+                &guard.column,
+                guard.expected,
+            ));
         }
     }
     Ok(affected)
 }
 
-fn extract_cas_version(
+fn extract_concurrency_guard(
     filter: &predicate::Input,
     collection: &str,
     schema: &Value,
-) -> Result<Option<i64>, DbError> {
+) -> Result<Option<assignment_pass::ConcurrencyGuard>, DbError> {
     if let Some(filter) = filter.dynamic() {
-        return assignment_pass::extract_cas_version(filter, collection, schema);
+        return assignment_pass::extract_concurrency_guard(filter, collection, schema);
     }
     let Some(column) = concurrency_column(schema)? else {
         return Ok(None);
     };
-    Ok(filter.conjunctive_value(column).and_then(Value::as_i64))
+    Ok(filter
+        .conjunctive_value(column)
+        .and_then(Value::as_i64)
+        .map(|expected| assignment_pass::ConcurrencyGuard {
+            column: column.to_owned(),
+            expected,
+        }))
 }
 
 /// Delete one row, applying soft-delete assignments when the descriptor enables them.
