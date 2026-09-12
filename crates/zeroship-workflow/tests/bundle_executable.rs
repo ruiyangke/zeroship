@@ -37,7 +37,7 @@ async fn fixture(store: &dyn BlobStore) -> Manifest {
 }
 
 #[compio::test]
-async fn executable_identity_covers_code_schema_and_declarations() {
+async fn executable_loading_preserves_code_schema_and_declarations() {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalDiskBlobStore::new(dir.path().into()).unwrap();
     let manifest = fixture(&store).await;
@@ -52,21 +52,15 @@ async fn executable_identity_covers_code_schema_and_declarations() {
         original.snapshot().runtime_descriptor(),
         Some(&json!({"version":2,"collections":{}}))
     );
-    let mut repacked = manifest.clone();
-    repacked.deploy_hash = Some("a".repeat(64));
-    repacked.metadata = serde_json::from_value(json!({"built_at":"repackaged"})).unwrap();
-    assert_eq!(
-        BundleExecutable::load(&repacked, &store, 4096)
-            .await
-            .unwrap()
-            .content_hash(),
-        original.content_hash()
-    );
-
-    let mut changes = vec![];
     let mut declarations = manifest.clone();
     declarations.workflows = Some(json!(["Other"]));
-    changes.push(declarations);
+    let loaded = BundleExecutable::load(&declarations, &store, 4096)
+        .await
+        .unwrap();
+    let registration = loaded.registration("deployment".into(), "a".repeat(64));
+    assert_eq!(registration.workflows, ["Other".into()].into());
+    assert_eq!(registration.hash, "a".repeat(64));
+    let mut changes = vec![];
     let mut schema = manifest.clone();
     schema.runtime_descriptor = None;
     changes.push(schema);
@@ -85,8 +79,8 @@ async fn executable_identity_covers_code_schema_and_declarations() {
             BundleExecutable::load(&changed, &store, 4096)
                 .await
                 .unwrap()
-                .content_hash(),
-            original.content_hash()
+                .snapshot(),
+            original.snapshot()
         );
     }
 }

@@ -19,6 +19,7 @@ tar = { workspace = true }
 tracing = { workspace = true }
 compio-s3 = { workspace = true }
 futures = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }

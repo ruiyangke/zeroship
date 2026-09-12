@@ -28,6 +28,14 @@ workflow-specific artifact argument. The engine's customer executable snapshot
 copies are superseded by the app-deployment contract below and must be removed
 together with their callers.
 
+The normal bundle crate now owns executable loading and manifest-identity
+verification. Ingest preserves the manifest fields used to compute deployment
+identity; the CLI verifies that identity before loading code. Native tests load
+an earlier deployment after installing a replacement and reject corrupt,
+missing or oversized sources. The workflow-specific content hash has been
+removed. Durable deployment holds and replacement of executable snapshot
+persistence remain pending.
+
 The replacement service now uses a shared `OrmStore`; its workflow-owned
 PostgreSQL and SQLite adapters have been removed. The CLI supplies its normal
 database binding and object storage. Transaction ownership stays on the engine's

@@ -62,6 +62,21 @@ manifest.json first
 
 The upload must contain every referenced blob. The server re-checks every hash; dedupe is an internal store concern, not a client-side `has_blob` round trip.
 
+## Executable loading
+
+`verify_deployment_manifest` verifies a stored manifest against the deployment
+hash selected by its host, retaining the raw field-presence and extension-field
+semantics used by ingest. `LoadedWorker::load` then reads the module graph and
+runtime descriptor from their content-addressed blobs. It validates module
+paths, hashes, source text and descriptor JSON within a shared source budget.
+The resulting module graph is an in-memory value; the persisted artifact remains
+the normal app manifest and blobs.
+
+The CLI's app deployment path and the replacement workflow engine use this
+loader. Deployment retention and replacement of the workflow engine's existing
+executable copies remain work in progress in the
+[workflow proposal](../proposals/2026-09-11-workflow-worker.md).
+
 ## Gateway-side caching
 
 Gateway adds two caches on top of `BlobStore`:

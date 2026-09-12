@@ -7,6 +7,7 @@ pub mod asset;
 pub mod blob;
 pub mod blob_config;
 pub mod compiled;
+mod executable;
 pub mod limits;
 pub mod manifest;
 pub mod rule;
@@ -16,6 +17,7 @@ pub mod unpack;
 pub mod workflow_blob;
 
 pub use asset::{AssetEntry, AssetVariant};
+pub use executable::{verify_deployment_manifest, ExecutableError, LoadedWorker};
 pub use blob::{
     sha256_hex, validate_hash_format, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome,
 };
