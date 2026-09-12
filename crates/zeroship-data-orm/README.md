@@ -155,14 +155,14 @@ same `PreparedOperation` path as those operations and the V8 adapter.
 Implementation: `src/orm.rs`, `src/orm/`, `src/crud/`, `src/transaction/`, and
 `src/exec.rs`, `src/executor.rs`, `src/protection/`, and `src/search.rs`. Macro implementations live in `crates/zeroship-data-macros/`.
 
-Run the engine tests and compiler contracts with:
+Run the ORM tests and compiler contracts with:
 
 ```sh
 cargo test -p zeroship-data-orm --lib
 cargo test -p zeroship-data-orm --test derive_contract
 ```
 
-The engine suite starts PostgreSQL through an owned testcontainer. Docker is
+The ORM suite starts PostgreSQL through an owned testcontainer. Docker is
 required; startup failure fails the test. No external database URL is needed:
 
 ```sh

@@ -641,7 +641,7 @@ const { data } = await db.todos.find({}, {
 const { data: u } = await db.users.update("usr_01hxyz...", { name: "Alice Smith" });
 if (!u) throw new Error("not found");
 
-// By filter (returns the first match, or null)
+// By filter (returns the lowest-id match, or null)
 const { data: u } = await db.users.update({ email: "alice@..." }, { role: "admin" });
 
 // Atomic operators — per-field
@@ -668,6 +668,9 @@ const { data, error } = await db.products.update(
 );
 // error instanceof OptimisticLockError when stored version != 5
 ```
+
+Filtered single-row updates, deletes, restores, and purges choose the matching
+row with the lowest `id`. This keeps the result stable across database plans.
 
 Bulk update, delete, restore, and purge operations affect all matching rows and
 report database affected-row counts without fetching the changed records.

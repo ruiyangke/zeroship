@@ -1045,6 +1045,46 @@ fn first_row_mutations_require_the_collection_identity() {
     );
 }
 
+#[test]
+fn first_row_mutations_choose_the_lowest_identity() {
+    for compiler in [&PostgresCompiler as &dyn SqlCompiler, &SqliteCompiler] {
+        let table = table();
+        let id = table.column("id").unwrap();
+        let revision = table.column("revision").unwrap();
+        let update = Statement::Update(
+            Update::new(UpdateParts {
+                table: table.clone(),
+                assignments: vec![Assignment {
+                    column: revision,
+                    value: Expression::Bind(Value::from(2)),
+                }],
+                predicate: ResolvedPredicate::Const(true),
+                scope: MutationScope::First { target: id.clone() },
+                returning: Vec::new(),
+            })
+            .unwrap(),
+        );
+        let delete = Statement::Delete(
+            Delete::new(DeleteParts {
+                table,
+                predicate: ResolvedPredicate::Const(true),
+                scope: MutationScope::First { target: id },
+                returning: Vec::new(),
+            })
+            .unwrap(),
+        );
+
+        for statement in [update, delete] {
+            let query = compiler.compile(statement, &compiler.support()).unwrap();
+            assert!(
+                query.sql().contains(" ORDER BY \"id\" LIMIT 1"),
+                "{}",
+                query.sql()
+            );
+        }
+    }
+}
+
 fn parts(table: &Table) -> UpsertParts {
     UpsertParts {
         table: table.clone(),
