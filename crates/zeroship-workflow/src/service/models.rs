@@ -26,6 +26,12 @@ pub struct DeploymentManifest {
 }
 
 #[derive(FromRow)]
+#[orm(entity = deploys)]
+pub struct DeploymentHash {
+    pub hash: String,
+}
+
+#[derive(FromRow)]
 #[orm(entity = requests)]
 pub struct RequestResult {
     pub operation: String,
@@ -53,6 +59,14 @@ pub struct GenerationOutcome {
     pub output: Option<String>,
     pub output_ref: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = generations)]
+pub struct GenerationInput {
+    pub input: String,
+    pub input_ref: Option<String>,
+    pub started_at: i64,
 }
 
 #[derive(FromRow)]

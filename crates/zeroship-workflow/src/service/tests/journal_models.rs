@@ -1,13 +1,20 @@
 use super::*;
 use crate::{
     engine::StepCheckpoint,
-    service::{app, journal, models},
+    service::{app, frontier, journal, models},
 };
 use zeroship_data_orm::{
-    orm::{Entity, Operation},
+    orm::{Entity, FindOptions, FromRow, Operation},
     sql::{compile::MAX_INSERT_MANY_BATCH, RowLimit},
     value, Value,
 };
+
+#[derive(FromRow)]
+#[orm(entity = models::generations)]
+struct GenerationLifecycle {
+    state: String,
+    terminal_at: Option<i64>,
+}
 
 #[compio::test]
 async fn sqlite_model_journal_reads_preserve_scope_and_complete_history() {
@@ -45,7 +52,10 @@ async fn read_contract(store: Rc<OrmStore>) {
             run_id,
             "Example",
             &deploy.id,
-            &StartOptions::default(),
+            &StartOptions {
+                input: json!({"scope":scope, "generation":0}),
+                ..Default::default()
+            },
             now,
         )
         .await
@@ -54,14 +64,19 @@ async fn read_contract(store: Rc<OrmStore>) {
             .database()
             .collection(models::generations::Entity::COLLECTION)
             .unwrap();
-        generations.update(
-            value!({"app_id":app_id.as_str(), "run_id":*run_id, "generation":0}),
-            value!({"state":"completed", "output":json!({"scope":scope, "generation":0}).to_string()}),
-        ).await.unwrap();
+        generations
+            .update(
+                value!({"app_id":app_id.as_str(), "run_id":*run_id, "generation":0}),
+                value!({"state":"completed", "terminal_at":now,
+                "output":json!({"scope":scope, "generation":0}).to_string()}),
+            )
+            .await
+            .unwrap();
         generations
             .insert(value!({
                 "app_id":app_id.as_str(), "run_id":*run_id, "generation":1, "deploy_id":deploy.id,
-                "input":"null", "state":"completed", "started_at":now,
+                "input":json!({"scope":scope, "generation":1}).to_string(),
+                "state":"completed", "started_at":now, "terminal_at":now,
                 "output":json!({"scope":scope, "generation":1}).to_string(),
             }))
             .await
@@ -168,6 +183,59 @@ async fn read_contract(store: Rc<OrmStore>) {
                 status.output,
                 Some(json!({"scope":scope, "generation":generation}))
             );
+            let mut tx = service.begin().await.unwrap();
+            app::lock_app(&mut tx, app_id).await.unwrap();
+            let run = app::lock_run(&mut tx, app_id, run_id).await.unwrap();
+            let invocation = frontier::invocation(&mut tx, app_id, &run).await.unwrap();
+            assert_eq!(invocation.app_id, app_id.as_str());
+            assert_eq!(invocation.run_id, *run_id);
+            assert_eq!(
+                invocation.trigger.input,
+                Some(json!({"scope":scope, "generation":generation}))
+            );
+            tx.commit().await.unwrap();
         }
+    }
+
+    for (scope, (app_id, run_id)) in scopes.iter().enumerate() {
+        service
+            .for_app((*app_id).clone())
+            .restart(
+                &RequestId::mint(),
+                run_id,
+                crate::operations::RestartOptions::default(),
+            )
+            .await
+            .unwrap();
+        let mut tx = service.begin().await.unwrap();
+        app::lock_app(&mut tx, app_id).await.unwrap();
+        let previous = tx
+            .database()
+            .entity::<models::generations::Entity>()
+            .unwrap()
+            .find::<GenerationLifecycle>(
+                models::generations::app_id
+                    .eq(app_id.as_str())
+                    .unwrap()
+                    .and(models::generations::run_id.eq(*run_id).unwrap())
+                    .and(models::generations::generation.eq(1_i64).unwrap()),
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(previous[0].state, "completed");
+        assert_eq!(previous[0].terminal_at, Some(now));
+        let run = app::lock_run(&mut tx, app_id, run_id).await.unwrap();
+        assert_eq!(run.integer("generation").unwrap(), 2);
+        let invocation = frontier::invocation(&mut tx, app_id, &run).await.unwrap();
+        assert_eq!(
+            invocation.trigger.input,
+            Some(json!({"scope":scope, "generation":1}))
+        );
+        assert!(invocation.journal.is_empty());
+        tx.commit().await.unwrap();
     }
 }
