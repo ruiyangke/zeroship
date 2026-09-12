@@ -176,7 +176,7 @@ async fn postgres_schedule_rechecks_artifact_after_waiting_for_app_lock() {
     let observer = connect(&fixture.admin_url).await;
     compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND query LIKE 'SELECT app_id FROM %')", &[]).await.unwrap().get(0);
+            let waiting: bool = observer.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0)", &[]).await.unwrap().get(0);
             if waiting { break; }
             compio::time::sleep(Duration::from_millis(10)).await;
         }

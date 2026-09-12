@@ -790,11 +790,31 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
 
 #[compio::test]
 async fn postgres_collection_rechecks_references_after_waiting_for_completion() {
+    use std::time::Duration;
+
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let service = service.with_payload_storage(local(dir.path())).unwrap();
+    let objects = local(dir.path());
+    let service = service.with_payload_storage(objects.clone()).unwrap();
+    let collector = WorkflowService::open(
+        Rc::new(
+            orm_store(
+                &fixture
+                    .admin_url
+                    .replacen("postgres@", "customer_worker@", 1),
+                fixture.store.binding.schema().clone(),
+            )
+            .await,
+        ),
+        service.policies.clone(),
+    )
+    .await
+    .unwrap()
+    .with_deployments(service.deployments.clone().unwrap())
+    .with_payload_storage(objects)
+    .unwrap();
     let scope = service.for_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -803,7 +823,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     let worker = WorkerIdentity::new("worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     let output = reference(b"survives");
-    service
+    let staged = service
         .stage_payload(
             &worker,
             &task.id,
@@ -815,7 +835,16 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute("CREATE FUNCTION customer.delay_payload_promotion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='referenced' THEN PERFORM pg_sleep(1); END IF; RETURN NEW; END $$; CREATE TRIGGER delay_payload_promotion BEFORE UPDATE ON customer.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION customer.delay_payload_promotion(); UPDATE customer.__zeroship_workflow_payloads SET expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint + 500;").await.unwrap();
+    admin.batch_execute("CREATE FUNCTION customer.gate_payload_promotion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.slot='output' THEN PERFORM pg_advisory_xact_lock(73921862); END IF; RETURN NEW; END $$; CREATE TRIGGER gate_payload_promotion BEFORE INSERT ON customer.__zeroship_workflow_payload_refs FOR EACH ROW EXECUTE FUNCTION customer.gate_payload_promotion();").await.unwrap();
+    let blocker_pid: i32 = admin
+        .query_one("SELECT pg_backend_pid()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    admin
+        .query_one("SELECT pg_advisory_lock(73921862)", &[])
+        .await
+        .unwrap();
     let completing_service = service.clone();
     let completing = compio::runtime::spawn(async move {
         completing_service
@@ -827,16 +856,48 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
             )
             .await
     });
-    compio::time::timeout(std::time::Duration::from_secs(10), async {
+    let completion_pid = compio::time::timeout(Duration::from_secs(10), async {
         loop {
-            let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event='PgSleep')", &[]).await.unwrap();
-            if row.get::<_, bool>(0) { break; }
-            compio::time::sleep(std::time::Duration::from_millis(10)).await;
+            let row = admin.query_one("SELECT min(pid) FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_payload_refs' in query) > 0 AND $1=ANY(pg_blocking_pids(pid))", &[&blocker_pid]).await.unwrap();
+            if let Some(pid) = row.get::<_, Option<i32>>(0) { break pid; }
+            compio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.expect("completion reached the delayed promotion");
-    compio::time::sleep(std::time::Duration::from_millis(600)).await;
-    assert_eq!(service.collect_payloads(64).await.unwrap(), 0);
-    completing.await.unwrap().unwrap();
+    }).await.expect("completion reached the gated output reference insertion");
+    // Completion has validated the staged payload and still owns the app lock.
+    // Expire its committed record before the independent collector discovers it.
+    assert_eq!(
+        compio::time::timeout(
+            Duration::from_secs(10),
+            admin.execute(
+                "UPDATE customer.__zeroship_workflow_payloads SET expires_at=0 WHERE app_id=$1 AND id=$2 AND state='staged'",
+                &[&app.as_str(), &staged.id],
+            ),
+        )
+        .await
+        .expect("expire the staged payload before reference insertion")
+        .unwrap(),
+        1
+    );
+    let collecting = compio::runtime::spawn(async move { collector.collect_payloads(64).await });
+    compio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND position('__zeroship_workflow_app_state' in query) > 0 AND $1=ANY(pg_blocking_pids(pid)))", &[&completion_pid]).await.unwrap();
+            if row.get::<_, bool>(0) { break; }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.expect("collector discovered the expired payload and reached completion's app lock");
+    assert!(admin
+        .query_one("SELECT pg_advisory_unlock(73921862)", &[])
+        .await
+        .unwrap()
+        .get::<_, bool>(0));
+    compio::time::timeout(Duration::from_secs(10), async {
+        let (completion, collected) = futures::join!(completing, collecting);
+        completion.unwrap().unwrap();
+        assert_eq!(collected.unwrap().unwrap(), 0);
+    })
+    .await
+    .expect("completion and collection settled after releasing promotion");
     assert_eq!(
         drain(
             scope
