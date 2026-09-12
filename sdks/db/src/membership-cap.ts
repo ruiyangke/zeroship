@@ -2,7 +2,7 @@
  * Largest `$in` membership list any SDK path may send in one native call.
  *
  * MUST NOT exceed `MAX_MEMBERSHIP_LIST_LEN` in
- * `crates/zeroship-data-sql/src/compile.rs`, which **rejects** a longer list
+ * `crates/zeroship-data-orm/src/sql/compile.rs`, which **rejects** a longer list
  * outright rather than clamping it. The two are separate constants in separate
  * languages with no compile-time link, so raising one without the other turns
  * every over-cap call into a hard error.

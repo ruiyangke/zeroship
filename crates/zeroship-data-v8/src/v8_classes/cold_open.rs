@@ -193,7 +193,7 @@ fn mask_policy_install_does_not_open_a_database() {
     assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
     zeroship_data_orm::protection::mask_policy::install_mask_policy(
         &binding,
-        zeroship_data_sql::value!({ "support": ["spi"] }),
+        zeroship_data_orm::value!({ "support": ["spi"] }),
     )
     .expect("V8 installed this policy");
 
@@ -211,18 +211,18 @@ fn mask_policy_install_does_not_open_a_database() {
     assert!(rejection_code(&settled[0]).is_none());
     zeroship_data_orm::protection::mask_policy::install_mask_policy(
         &next,
-        zeroship_data_sql::value!({ "support": ["pii"] }),
+        zeroship_data_orm::value!({ "support": ["pii"] }),
     )
     .expect("V8 installed this policy");
     zeroship_data_orm::protection::mask_policy::install_mask_policy(
         &binding,
-        zeroship_data_sql::value!({ "support": ["spi"] }),
+        zeroship_data_orm::value!({ "support": ["spi"] }),
     )
     .expect("V8 installed this policy");
     assert!(
         zeroship_data_orm::protection::mask_policy::install_mask_policy(
             &binding,
-            zeroship_data_sql::value!({ "support": ["pii"] })
+            zeroship_data_orm::value!({ "support": ["pii"] })
         )
         .is_err(),
         "the pinned policy remains immutable"
@@ -294,7 +294,7 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
     crate::tests::fixtures::install_cold_schema(
         app_id,
         "users",
-        zeroship_data_sql::value!({
+        zeroship_data_orm::value!({
             "id":  { "type": "string" },
             "ssn": {
                 "type": "string",
@@ -327,8 +327,8 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     };
     struct HostFactory(Arc<AtomicUsize>);
     impl BackendFactory for HostFactory {
-        fn dialect(&self) -> zeroship_data_sql::compile::SqlDialect {
-            zeroship_data_sql::compile::SqlDialect::Sqlite
+        fn dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
+            zeroship_data_orm::sql::compile::SqlDialect::Sqlite
         }
         fn connect(
             &self,
@@ -359,7 +359,7 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     crate::tests::fixtures::install_cold_schema(
         "app_injected",
         "items",
-        zeroship_data_sql::value!({
+        zeroship_data_orm::value!({
             "id": { "type": "id" }, "name": { "type": "string" }
         }),
     );

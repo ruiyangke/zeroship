@@ -33,7 +33,7 @@ pub(super) async fn unmask_setup_with_schema(
     host: &Host,
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_sql::value::Value,
+    schema: crate::value::Value,
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(

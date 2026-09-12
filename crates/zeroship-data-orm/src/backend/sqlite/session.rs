@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Once, Weak};
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use rusqlite::Connection;
 

@@ -8,9 +8,9 @@ use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
-pub use zeroship_data_sql::value::Value;
+pub use crate::value::Value;
 
-use crate::{backend::BackendHandle, compile::BuiltQuery, crud, tx_route::CapturedRoute};
+use crate::{backend::BackendHandle, sql::compile::BuiltQuery, crud, tx_route::CapturedRoute};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -91,7 +91,7 @@ impl Database {
 
     pub fn collection(&self, name: &str) -> Result<Collection, DbError> {
         self.context.with(|| {
-            crate::compile::validate_collection(name)?;
+            crate::sql::compile::validate_collection(name)?;
             crate::descriptor::collection_schema(&self.binding, name)?;
             Ok(Collection {
                 database: self.clone(),
@@ -355,7 +355,7 @@ mod read_builder;
 mod read_input;
 pub use read_builder::*;
 pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
-pub use zeroship_data_sql::value::Record;
+pub use crate::value::Record;
 
 /// Implementation support for generated metadata.
 #[doc(hidden)]
@@ -512,7 +512,7 @@ impl PreparedOperation {
                 "ORM binding does not match the captured database route",
             ));
         }
-        crate::compile::validate_collection(collection)?;
+        crate::sql::compile::validate_collection(collection)?;
         crate::descriptor::collection_schema(&binding, collection)?;
         let plan = match operation {
             Operation::Read(query) => {

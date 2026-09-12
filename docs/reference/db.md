@@ -446,8 +446,8 @@ the mechanism this page used to cite. It had **no production call site** -
 only integration tests, calling it directly to pin a refusal nothing reached -
 and it was deleted on 2026-09-02 rather than wired, because the data plane no
 longer emits DDL and so has nowhere to wire it to. Nor is it
-`crates/zeroship-data-sql`; the migration engine validates the same
-renderer and does not depend on the crate.
+`crates/zeroship-data-orm/src/sql`; migration validation belongs to the
+migration engine.
 
 **Schema is applied by the migration engine at deploy**, and that is where the
 answer lives. Four things hold there, in order:
@@ -1286,7 +1286,7 @@ assigned fields. The V8 bridge forwards operations to this ORM.
 
 Implementation: `crates/zeroship-data-orm/src/assignments.rs`,
 `crates/zeroship-data-orm/src/crud/assignment_pass.rs`,
-`crates/zeroship-data-sql/src/lifecycle.rs`.
+`crates/zeroship-data-orm/src/sql/lifecycle.rs`.
 
 ## Masking
 
@@ -1536,7 +1536,7 @@ as text and holds no foreign key into them.
 
 ## Encrypted and Masked Fields (Shipped Reference)
 
-This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-sql/src/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
+This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
 
 The migration engine records physical placement in each field's runtime
 `storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
@@ -1547,7 +1547,7 @@ that the raw column is inaccessible to ordinary creator queries.
 `t.encrypted(...)` applies a full mask with `pii` classification by default.
 `.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
 storage. Both operations follow the runtime descriptor rather than naming a
-mask column from a suffix (`crates/zeroship-data-sql/src/compile.rs`,
+mask column from a suffix (`crates/zeroship-data-orm/src/sql/compile.rs`,
 `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
 On writes, `apply_mask_on_write` computes the mask from plaintext, not from a later read-path decrypt, and a separate relocation stage - the ONE stage that owns physical placement, running after the encryption and bytes passes - moves the finished value to the raw column and writes the mask into the field's own. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values relocate nothing and write no mask, and `kind: "none"` skips the field entirely (`crates/zeroship-data-orm/src/protection/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
@@ -1558,7 +1558,7 @@ Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })`
 
 `defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and snapshots a pending role-to-classification map for bootstrap to install. Declarations may be replaced during startup; after the startup flush, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
-Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-sql/src/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
+Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-orm/src/sql/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
 
 Column encryption is always randomised. Each write uses a fresh nonce and
 binds authentication to the app, collection, column and row identity.

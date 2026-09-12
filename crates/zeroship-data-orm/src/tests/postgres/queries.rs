@@ -5,9 +5,9 @@ use crate::tests::fixtures::Host;
 
 use compio_postgres::Pool;
 
-use zeroship_data_sql::value::{Value, value};
+use crate::value::{Value, value};
 
-use zeroship_data_sql::compile::*;
+use crate::sql::compile::*;
 
 /// The descriptor entry for the `weather` fixture table used by the Postgres
 /// docs HAVING example. Aggregate builds its own SELECT from `$group`, so this
@@ -37,7 +37,7 @@ fn filter_comparison_operators() {
                 {"title": "D", "category": "food", "views": 40}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -47,7 +47,7 @@ fn filter_comparison_operators() {
 
             // $gt 25
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"views": {"$gt": 25}}),
                 None,
@@ -62,7 +62,7 @@ fn filter_comparison_operators() {
 
             // $lte 20
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"views": {"$lte": 20}}),
                 None,
@@ -77,7 +77,7 @@ fn filter_comparison_operators() {
 
             // $in
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"category": {"$in": ["tech", "food"]}}),
                 None,
@@ -92,7 +92,7 @@ fn filter_comparison_operators() {
 
             // $nin
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"category": {"$nin": ["food"]}}),
                 None,
@@ -107,7 +107,7 @@ fn filter_comparison_operators() {
 
             // $ne
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"category": {"$ne": "food"}}),
                 None,
@@ -140,7 +140,7 @@ fn filter_logical_operators() {
                 {"title": "C", "category": "food", "views": 10}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -150,7 +150,7 @@ fn filter_logical_operators() {
 
             // $and: tech AND views > 20
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
                 None,
@@ -166,7 +166,7 @@ fn filter_logical_operators() {
 
             // $or: tech OR views > 20
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
                 None,
@@ -181,7 +181,7 @@ fn filter_logical_operators() {
 
             // $not: NOT food
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"$not": {"category": "food"}}),
                 None,
@@ -214,7 +214,7 @@ fn filter_pattern_operators() {
                 {"title": "Goodbye", "category": "food"}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -224,7 +224,7 @@ fn filter_pattern_operators() {
 
             // $like (case sensitive)
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"title": {"$like": "Hello%"}}),
                 None,
@@ -239,7 +239,7 @@ fn filter_pattern_operators() {
 
             // $ilike (case insensitive)
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"title": {"$ilike": "%hello%"}}),
                 None,
@@ -272,7 +272,7 @@ fn find_with_options() {
                 {"title": "B", "category": "tech", "views": 20}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -282,7 +282,7 @@ fn find_with_options() {
 
             // Order by views ASC, limit 2
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({}),
                 Some(2),
@@ -299,7 +299,7 @@ fn find_with_options() {
 
             // Order by views DESC, limit 1, offset 1
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({}),
                 Some(1),
@@ -328,7 +328,7 @@ fn find_with_projection() {
             setup(&pool, schema).await;
 
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Proj", "body": "secret", "category": "tech"}),
@@ -337,7 +337,7 @@ fn find_with_projection() {
             exec_mutation(&pool, bq).await;
 
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({}),
                 None,
@@ -376,7 +376,7 @@ fn distinct_values() {
                 {"title": "D", "category": "science"}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -385,7 +385,7 @@ fn distinct_values() {
             exec_mutation(&pool, bq).await;
 
             let bq = build_distinct(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 "category",
                 &value!({}),
@@ -404,7 +404,7 @@ fn distinct_values() {
 
             // Distinct with filter
             let bq = build_distinct(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 "category",
                 &value!({"category": {"$ne": "science"}}),
@@ -434,7 +434,7 @@ fn count_with_filter() {
                 {"title": "C", "category": "food"}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -444,7 +444,7 @@ fn count_with_filter() {
 
             // Count all
             let bq = build_count(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({}),
@@ -462,7 +462,7 @@ fn count_with_filter() {
 
             // Count with filter
             let bq = build_count(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"category": "tech"}),
@@ -499,7 +499,7 @@ fn aggregate_full() {
                 {"title": "D", "category": "food", "views": 100}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -520,7 +520,7 @@ fn aggregate_full() {
                 {"$sort": {"cnt": -1}}
             ]);
             let bq = build_aggregate(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &pipeline,
                 &notes_schema(),
@@ -555,7 +555,7 @@ fn aggregate_multi_group() {
                 {"title": "D", "category": "food", "body": "pasta", "views": 50}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -571,7 +571,7 @@ fn aggregate_multi_group() {
                 {"$sort": {"cnt": -1}}
             ]);
             let bq = build_aggregate(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &pipeline,
                 &notes_schema(),
@@ -603,7 +603,7 @@ fn aggregate_having() {
                 {"title": "D", "category": "food", "views": 5}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &docs,
@@ -621,7 +621,7 @@ fn aggregate_having() {
                 {"$sort": {"cnt": -1}}
             ]);
             let bq = build_aggregate(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &pipeline,
                 &notes_schema(),
@@ -649,7 +649,7 @@ fn null_handling() {
 
             // Insert with body
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "WithBody", "body": "has content", "category": "tech"}),
@@ -658,7 +658,7 @@ fn null_handling() {
             exec_mutation(&pool, bq).await;
             // Insert without body (column defaults to NULL)
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "NoBody", "category": "tech"}),
@@ -668,7 +668,7 @@ fn null_handling() {
 
             // Find where body IS NULL
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"body": null}),
                 None,
@@ -684,7 +684,7 @@ fn null_handling() {
 
             // Find where body IS NOT NULL
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"body": {"$ne": null}}),
                 None,
@@ -700,7 +700,7 @@ fn null_handling() {
 
             // $exists: true
             let bq = build_find_with_schema(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &value!({"body": {"$exists": true}}),
                 None,
@@ -729,7 +729,7 @@ fn timestamps_as_numbers() {
             setup(&pool, schema).await;
 
             let bq = build_insert(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "notes",
                 &notes_schema(),
                 &value!({"title": "Time", "category": "tech"}),
@@ -801,7 +801,7 @@ fn aggregate_having_postgres_docs_example() {
                 {"city": "Hayward", "temp_lo": 41, "temp_hi": 55}
             ]);
             let bq = build_insert_many(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "weather",
                 &weather_schema(),
                 &docs,
@@ -820,7 +820,7 @@ fn aggregate_having_postgres_docs_example() {
                 {"$having": {"max_temp": {"$lt": 42}}}
             ]);
             let bq = build_aggregate(
-                &zeroship_data_sql::SchemaName::new(schema).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(schema).expect("fixture schema name"),
                 "weather",
                 &pipeline,
                 &weather_schema(),

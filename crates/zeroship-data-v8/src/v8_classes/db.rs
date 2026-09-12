@@ -189,7 +189,7 @@ impl Db {
             let raw = parsed
                 .as_object()
                 .and_then(|o| o.get("isolationLevel"))
-                .and_then(zeroship_data_sql::value::Value::as_str)
+                .and_then(zeroship_data_orm::value::Value::as_str)
                 .map(str::to_string);
             match raw {
                 Some(s) => Some(normalize_isolation_level(&s)?),
@@ -380,7 +380,7 @@ pub fn mint_db<'s>(
 /// cache keys cannot drift from the receivers that later read them.
 ///
 /// **This is the DATA PLANE's one app-id-to-schema derivation.** Every other
-/// data-plane consumer takes the [`zeroship_data_sql::SchemaName`] off the
+/// data-plane consumer takes the [`zeroship_data_orm::sql::SchemaName`] off the
 /// binding instead of deriving its own.
 ///
 /// It is NOT the only one in the tree, and changing it alone does not complete
@@ -402,7 +402,7 @@ pub(crate) fn binding_for_isolate(
     scope: &mut v8::PinScope<'_, '_>,
     app_id: &str,
 ) -> Option<DbBinding> {
-    let schema = zeroship_data_sql::SchemaName::new(app_id).ok()?;
+    let schema = zeroship_data_orm::sql::SchemaName::new(app_id).ok()?;
     // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
     // runtimes carry the hash they were started on. Absent in dev/raw-JS
     // harnesses means the historical `cold_start` token.
@@ -422,8 +422,8 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use zeroship_data_sql::value;
-    use zeroship_data_sql::value::Value;
+    use zeroship_data_orm::value;
+    use zeroship_data_orm::value::Value;
     use zeroship_runtime::Runtime;
 
     use super::normalize_isolation_level;
@@ -510,7 +510,7 @@ mod tests {
         let pinned_binding = DbBinding::new(
             APP,
             PINNED,
-            zeroship_data_sql::SchemaName::new(APP).unwrap(),
+            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
         );
         crate::tests::fixtures::install_schema(
             &pinned_binding,
@@ -543,7 +543,7 @@ mod tests {
         let current_binding = DbBinding::new(
             APP,
             CURRENT,
-            zeroship_data_sql::SchemaName::new(APP).unwrap(),
+            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
         );
         crate::tests::fixtures::install_schema(
             &current_binding,
@@ -616,7 +616,7 @@ mod tests {
     /// Minting must refuse an app id that is not a legal schema name.
     ///
     /// `binding_for_isolate` used to stamp the app id into a `DbBinding` with no
-    /// validation at all, so a name `zeroship_data_sql::compile::validate_schema`
+    /// validation at all, so a name `zeroship_data_orm::sql::compile::validate_schema`
     /// rejected survived the mint. The refusal surfaced only LATER and only PER
     /// OPERATION, inside the query builder, as `QueryError::InvalidCollection`
     /// -- so an isolate could hold a live `env.db` whose every operation was
@@ -629,7 +629,7 @@ mod tests {
     /// is what forces the two meanings apart.
     ///
     /// **THE DEFERRED REFUSAL IS NOW UNREACHABLE, WHICH IS THE POINT.** The
-    /// builders take a [`zeroship_data_sql::SchemaName`], so the control below
+    /// builders take a [`zeroship_data_orm::sql::SchemaName`], so the control below
     /// asserts the refusal where it now lives - at construction - rather than at
     /// a per-operation `build_find_with_schema` that can no longer be handed an
     /// illegal name.
@@ -646,11 +646,11 @@ mod tests {
         // CONTROL, differing in one variable: the fixture really is a name the
         // shared validator rejects, so the arm below is not asserting against an
         // arbitrary string.
-        let refused = zeroship_data_sql::SchemaName::new(ILLEGAL);
+        let refused = zeroship_data_orm::sql::SchemaName::new(ILLEGAL);
         assert!(
             matches!(
                 refused,
-                Err(zeroship_data_sql::compile::QueryError::InvalidCollection(_))
+                Err(zeroship_data_orm::sql::compile::QueryError::InvalidCollection(_))
             ),
             "control: the fixture must be a name validate_schema rejects, got {refused:?}"
         );

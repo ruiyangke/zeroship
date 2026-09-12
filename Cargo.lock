@@ -8081,6 +8081,7 @@ dependencies = [
  "flume 0.11.1",
  "futures",
  "hmac 0.12.1",
+ "indexmap 2.14.0",
  "rusqlite",
  "rustls",
  "scoped-tls",
@@ -8090,6 +8091,7 @@ dependencies = [
  "sqlite-vec",
  "tempfile",
  "testcontainers",
+ "time",
  "tracing",
  "tracing-subscriber",
  "trybuild",
@@ -8099,30 +8101,14 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-cdc-wire",
  "zeroship-data-macros",
- "zeroship-data-sql",
  "zeroship-metering",
  "zeroship-migrate",
+ "zeroship-migrate-backend",
+ "zeroship-migrate-core",
  "zeroship-migrate-policy",
  "zeroship-migrate-postgres",
  "zeroship-migrate-server",
  "zeroship-migrate-sqlite",
-]
-
-[[package]]
-name = "zeroship-data-sql"
-version = "0.1.0"
-dependencies = [
- "base64",
- "criterion",
- "indexmap 2.14.0",
- "serde",
- "serde_json",
- "time",
- "trybuild",
- "zeroship-core",
- "zeroship-migrate",
- "zeroship-migrate-backend",
- "zeroship-migrate-core",
 ]
 
 [[package]]
@@ -8148,7 +8134,6 @@ dependencies = [
  "v8",
  "zeroship-core",
  "zeroship-data-orm",
- "zeroship-data-sql",
  "zeroship-metering",
  "zeroship-migrate",
  "zeroship-migrate-policy",
@@ -8466,7 +8451,6 @@ dependencies = [
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
- "zeroship-data-sql",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",

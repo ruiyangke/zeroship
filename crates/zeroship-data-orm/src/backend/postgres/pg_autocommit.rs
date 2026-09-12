@@ -2,12 +2,12 @@
 
 use std::rc::Rc;
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::backend::postgres::pg_error;
 use crate::backend::postgres::pg_session_sql::autocommit_local_session_setup_sql;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::SchemaName;
+use crate::sql::SchemaName;
 
 pub use zeroship_data_orm::capability::ScalarRead;
 

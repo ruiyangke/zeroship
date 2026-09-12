@@ -1,6 +1,6 @@
 use super::*;
 use zeroship_data_orm::encryption::ProjectKeySource;
-use zeroship_data_sql::value;
+use crate::value;
 
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
@@ -200,7 +200,7 @@ async fn postgres_native_models_round_trip() {
     );
     let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
     let binding = DbBinding::cold_start(&app);
-    let quoted_schema = crate::compile::quote_ident(&app);
+    let quoted_schema = crate::sql::compile::quote_ident(&app);
     backend
         .execute_fixture(&format!("CREATE SCHEMA {quoted_schema}"), &[])
         .await
@@ -212,7 +212,7 @@ async fn postgres_native_models_round_trip() {
         .await
         .unwrap();
     let role = zeroship_core::database_role::per_app_role_name(&app).unwrap();
-    let quoted_role = crate::compile::quote_ident(&role);
+    let quoted_role = crate::sql::compile::quote_ident(&role);
     backend
         .execute_fixture(
             &format!(
@@ -720,7 +720,7 @@ async fn caught_statement_failure_cannot_commit_a_poisoned_transaction() {
 #[compio::test]
 async fn preparation_rejects_a_route_for_another_database() {
     let (db, _directory) = database().await;
-    let route = CapturedRoute::pool_for_tests("another_app", crate::compile::SqlDialect::Sqlite);
+    let route = CapturedRoute::pool_for_tests("another_app", crate::sql::compile::SqlDialect::Sqlite);
     let result = PreparedOperation::new(
         db.binding.clone(),
         "posts",
@@ -769,7 +769,7 @@ struct RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::executor::ScopedExecutor for RegisteredBackend {
-    fn dialect(&self) -> crate::compile::SqlDialect {
+    fn dialect(&self) -> crate::sql::compile::SqlDialect {
         self.inner.dialect()
     }
     async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
@@ -778,7 +778,7 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
     async fn query(
         &self,
         app_id: &str,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
@@ -788,7 +788,7 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
     async fn exec(
         &self,
         app_id: &str,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
@@ -797,7 +797,7 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
     async fn open_tx_session(
         &self,
         app_id: &str,
-        schema: &zeroship_data_sql::SchemaName,
+        schema: &crate::sql::SchemaName,
         begin: crate::error::BeginIntent,
     ) -> Result<crate::driver::Session, crate::error::OpenSessionError> {
         self.transactions.set(self.transactions.get() + 1);
@@ -806,7 +806,7 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::protection::Catalog for RegisteredBackend {
-    async fn introspect_schema(&self, app_id: &str) -> Result<crate::catalog::LiveSchema, DbError> {
+    async fn introspect_schema(&self, app_id: &str) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         self.inner.introspect_schema(app_id).await
     }
 }

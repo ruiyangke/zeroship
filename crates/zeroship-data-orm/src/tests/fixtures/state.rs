@@ -4,7 +4,7 @@ use crate::{metrics, protection, tx_lanes};
 pub(crate) fn cache_schema(
     app_id: &str,
     collection: &str,
-    schema: zeroship_data_sql::value::Value,
+    schema: crate::value::Value,
 ) {
     cache_schema_for_deploy(
         &zeroship_data_orm::binding::DbBinding::cold_start(app_id),
@@ -19,7 +19,7 @@ pub(crate) fn cache_schema(
 pub(crate) fn cache_schema_for_deploy(
     binding: &zeroship_data_orm::binding::DbBinding,
     collection: &str,
-    schema: zeroship_data_sql::value::Value,
+    schema: crate::value::Value,
 ) {
     zeroship_data_orm::schema_cache::with_mut(|c| {
         c.insert_one(binding, collection, super::schema::generated_fields(schema))
@@ -93,7 +93,7 @@ mod tests {
             c.insert_one(
                 &binding,
                 "users",
-                zeroship_data_sql::value!({ "email": { "type": "string" } }),
+                crate::value!({ "email": { "type": "string" } }),
             );
         });
         assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());

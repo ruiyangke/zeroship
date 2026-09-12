@@ -10,7 +10,6 @@ autotests = false
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }
 zeroship-core = { workspace = true }
-zeroship-data-sql = { workspace = true }
 zeroship-data-orm = { workspace = true }
 # Operator policy and metering are injected when the worker primitive is built.
 zeroship-metering = { workspace = true }

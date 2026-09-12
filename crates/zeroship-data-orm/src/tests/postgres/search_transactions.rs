@@ -18,8 +18,8 @@ use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::tx_route::{CapturedRoute, TxRoute};
-use zeroship_data_sql::compile::SqlDialect;
-use zeroship_data_sql::value::{Value, value};
+use crate::sql::compile::SqlDialect;
+use crate::value::{Value, value};
 
 /// Connect, or fail the test. Deliberately NOT a skip, for the reason in the
 /// module header.
@@ -82,7 +82,7 @@ async fn fixture(
         .await
         .unwrap();
     let ddl = fixture_table_sql(
-        &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         &schema,
         &FkEmission::Inline,

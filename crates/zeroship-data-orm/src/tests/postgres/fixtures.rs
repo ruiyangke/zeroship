@@ -4,7 +4,7 @@ use crate::tests::fixtures::Host;
 
 use compio_postgres::{NoTls, Pool};
 
-use zeroship_data_sql::value::{Value, value};
+use crate::value::{Value, value};
 
 pub(super) async fn require_pg(
     host: &Host,
@@ -85,7 +85,7 @@ pub(super) async fn setup(pool: &Pool, schema: &str) {
 /// Helper: build + execute a query, return parsed JSON array.
 pub(super) async fn exec_query(
     pool: &Pool,
-    bq: zeroship_data_sql::compile::BuiltQuery,
+    bq: crate::sql::compile::BuiltQuery,
 ) -> Vec<Value> {
     let param_refs = &bq.params;
     let rows = zeroship_data_orm::backend::postgres::params::query(
@@ -101,7 +101,7 @@ pub(super) async fn exec_query(
 /// Helper: build + execute a mutation, return parsed JSON array.
 pub(super) async fn exec_mutation(
     pool: &Pool,
-    bq: zeroship_data_sql::compile::BuiltQuery,
+    bq: crate::sql::compile::BuiltQuery,
 ) -> Vec<Value> {
     let param_refs = &bq.params;
     let rows = zeroship_data_orm::backend::postgres::params::query(
@@ -116,7 +116,7 @@ pub(super) async fn exec_mutation(
 
 /// Simplified row → JSON (just text columns for testing).
 pub(super) fn row_to_value(row: &compio_postgres::Row) -> Value {
-    let mut obj = zeroship_data_sql::value::Map::new();
+    let mut obj = crate::value::Map::new();
     for col in row.columns() {
         let name = col.name();
         let val = match col.type_().oid() {

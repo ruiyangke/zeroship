@@ -2,7 +2,7 @@
 
 use super::session::{TypedCell, TypedRows};
 use crate::error::DbError;
-use zeroship_data_sql::value::{Map, Value};
+use crate::value::{Map, Value};
 
 /// Preserve storage types and reject values the native contract cannot express.
 pub fn typed_rows_to_values(rows: &TypedRows) -> Result<Vec<Value>, DbError> {

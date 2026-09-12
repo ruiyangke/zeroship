@@ -3,7 +3,8 @@ use super::session::{SqliteCancelHandle, SqliteSessionHandle};
 use crate::{driver::*, error::*};
 use async_trait::async_trait;
 use std::rc::Rc;
-use zeroship_data_sql::{compile::SqlDialect, value::Value};
+use crate::value::Value;
+use crate::sql::{compile::SqlDialect};
 
 #[derive(Debug)]
 struct SqliteCancellation(SqliteCancelHandle);
@@ -145,7 +146,7 @@ mod tests {
             .query("SELECT id FROM app_owned_driver.leased", &[])
             .await
             .unwrap();
-        assert_eq!(rows[0]["id"], zeroship_data_sql::value::Value::from(1));
+        assert_eq!(rows[0]["id"], crate::value::Value::from(1));
     }
 
     #[compio::test]
@@ -164,7 +165,7 @@ mod tests {
     #[compio::test]
     async fn invalid_native_results_are_errors_and_the_session_remains_usable() {
         use crate::driver::{Driver, LeaseKind};
-        use zeroship_data_sql::value::Value;
+        use crate::value::Value;
         let directory = tempfile::tempdir().unwrap();
         let backend = super::super::SqliteBackend::new(
             directory.path().to_owned(),

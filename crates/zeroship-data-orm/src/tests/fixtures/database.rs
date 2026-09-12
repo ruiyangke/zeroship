@@ -10,7 +10,7 @@ pub(crate) trait DatabaseFixture: 'static {
     async fn execute_fixture(
         &self,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
+        params: &[crate::value::Value],
     ) -> Result<u64, DbError>;
 
     #[allow(async_fn_in_trait)]
@@ -18,6 +18,6 @@ pub(crate) trait DatabaseFixture: 'static {
         &self,
         client: &Self::Client,
         sql: &str,
-        params: &[zeroship_data_sql::value::Value],
+        params: &[crate::value::Value],
     ) -> Result<u64, DbError>;
 }

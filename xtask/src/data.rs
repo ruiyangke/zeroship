@@ -3,7 +3,6 @@ use serde_json::Value;
 use std::process::Command;
 
 const PACKAGES: &[&str] = &[
-    "zeroship-data-sql",
     "zeroship-data-macros",
     "zeroship-data-orm",
     "zeroship-data-v8",

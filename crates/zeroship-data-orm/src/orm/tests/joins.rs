@@ -1,5 +1,5 @@
 use super::*;
-use zeroship_data_sql::{AggregateFunc, AggregateRef, CompareOp, Operand, Predicate};
+use crate::sql::{AggregateFunc, AggregateRef, CompareOp, Operand, Predicate};
 
 #[derive(Debug, FromRow)]
 #[orm(entity = posts)]
@@ -85,7 +85,7 @@ pub(super) async fn exercise(db: &Database) {
     let child = ReadSource::new("posts", "c");
     let mut grouped = ReadQuery::new(source.clone());
     grouped.joins.push(ReadJoin {
-        kind: zeroship_data_sql::JoinKind::Left,
+        kind: crate::sql::JoinKind::Left,
         source: child.clone(),
         on: on(),
     });
@@ -99,7 +99,7 @@ pub(super) async fn exercise(db: &Database) {
     grouped.having = Predicate::compare(
         Operand::Aggregate(count),
         CompareOp::Eq,
-        Operand::Lit(zeroship_data_sql::Literal::Int(0)),
+        Operand::Lit(crate::sql::Literal::Int(0)),
     );
     let Output::Rows { rows, .. } = db.read(grouped.clone()).await.unwrap() else {
         panic!("expected rows")
