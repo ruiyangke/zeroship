@@ -18,6 +18,10 @@ The shared executor hydrates referenced input within its payload budget before
 module initialization. Lazy output reads use the assignment's captured journal
 and live task credentials, so replay never resolves through the app's current
 generation. Oversized input fails before a runtime is loaded.
+Losing a required replay payload interrupts the isolate and wakes the host
+independently of JavaScript promise settlement. The runner releases the task
+without committing app outcomes, and a fresh attempt can retry the read. App
+code cannot catch that infrastructure failure and continue producing effects.
 
 The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
 The CLI uses `WorkflowBinding::dev_sqlite` for the local development engine.

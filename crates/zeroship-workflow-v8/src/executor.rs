@@ -1,7 +1,7 @@
 //! V8 lifecycle adapter for the shared workflow runner.
 
 use async_trait::async_trait;
-use std::rc::Rc;
+use std::{future::Future, rc::Rc, task::Poll};
 use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
 use zeroship_workflow::{
     service::{
@@ -160,8 +160,12 @@ impl TaskExecution for V8Execution {
                     "workflow loader returned another app's runtime".into(),
                 ));
             }
+            let interrupt = loaded.runtime.interrupt_handle();
             loaded.runtime.with_scope(|scope| {
-                scope.set_slot(crate::v8_class::TaskOutputReader(payloads.clone()));
+                scope.set_slot(crate::v8_class::TaskOutputReader {
+                    reader: payloads.clone(),
+                    interrupt,
+                });
             });
         }
         let envelope = serde_json::to_string(&self.invocation)
@@ -178,14 +182,34 @@ impl TaskExecution for V8Execution {
             WorkflowOutcome::Response { json, .. } => json,
             WorkflowOutcome::Pending { rx, .. } => {
                 loaded.runtime.notify_pump();
-                let result = rx.recv().await;
+                let mut received = std::pin::pin!(rx.recv());
+                let mut failed = std::pin::pin!(async {
+                    if let Some(payloads) = &self.payloads {
+                        payloads.failed().await
+                    } else {
+                        std::future::pending().await
+                    }
+                });
+                let result = std::future::poll_fn(|cx| {
+                    if let Poll::Ready(error) = failed.as_mut().poll(cx) {
+                        return Poll::Ready(Err(error));
+                    }
+                    received.as_mut().poll(cx).map(|result| {
+                        result.map_err(|error| WorkflowServiceError::Unavailable(error.message))
+                    })
+                })
+                .await;
                 self.budget.check()?;
-                result
-                    .map_err(|error| WorkflowServiceError::Unavailable(error.message))?
-                    .json
+                if let Some(payloads) = &self.payloads {
+                    payloads.check()?;
+                }
+                result?.json
             }
         };
         self.budget.check()?;
+        if let Some(payloads) = &self.payloads {
+            payloads.check()?;
+        }
         WorkflowExecution::from_runtime_json(&json)
     }
 

@@ -294,6 +294,66 @@ async fn oversized_input_never_initializes_the_creator_module() {
     assert!(fixture.loader.probes.borrow().is_empty());
 }
 
+struct UnavailablePayloads;
+#[async_trait(?Send)]
+impl zeroship_workflow::service::runner::TaskPayloads for UnavailablePayloads {
+    async fn read(
+        &self,
+        _task: &str,
+        _token: &zeroship_workflow::service::TaskToken,
+        _reference: &zeroship_workflow::engine::WorkflowOutputRef,
+    ) -> Result<zeroship_workflow::service::PayloadRead, WorkflowServiceError> {
+        Err(WorkflowServiceError::Unavailable(
+            "fixture payload outage".into(),
+        ))
+    }
+}
+
+#[compio::test]
+async fn payload_outage_interrupts_app_code_and_leaves_the_frontier_retryable() {
+    let fixture = Fixture::new(
+        r"
+        import { env } from 'zeroship';
+        export class Example {
+            async run(_trigger, step) {
+                const saved = await step.run('stored', () => { throw new Error('must replay'); });
+                try { return await saved.json(); }
+                catch {
+                    env.probe.mark('escaped');
+                    return 'caught infrastructure failure';
+                }
+            }
+        }
+    ",
+    )
+    .await;
+    let run = prepare_payload(&fixture, false).await;
+    let tasks = Rc::new(
+        fixture
+            .service
+            .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
+    );
+    let executor = Rc::new(
+        V8TaskExecutor::new(fixture.loader.clone(), Rc::new(UnavailablePayloads), 1024).unwrap(),
+    );
+    let mut runner = RunnerSlot::new(tasks, executor, Duration::from_secs(5)).unwrap();
+    let result = runner.run_once().await;
+    assert_eq!(
+        result.unwrap_err(),
+        WorkflowServiceError::Unavailable("fixture payload outage".into())
+    );
+    assert!(fixture.loader.markers.0.lock().unwrap().is_empty());
+    assert!(!fixture.app.status(&run).await.unwrap().state.is_terminal());
+    fixture.assert_disposed().await;
+    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+    assert_eq!(done.state, RunState::Completed);
+    assert_eq!(
+        fixture.app.status(&run).await.unwrap().output,
+        Some(json!({"secret":"retained"}))
+    );
+    fixture.assert_disposed().await;
+}
+
 async fn assert_deadline_interrupts(source: &str, timeout: Duration, policy: AppPolicy) {
     // Disable the CPU timer: only the host's monotonic deadline may interrupt.
     let fixture = Fixture::with_limits(&format!("{BURN}\n{source}"), None, policy).await;

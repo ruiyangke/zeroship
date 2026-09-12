@@ -42,7 +42,11 @@ pub struct WorkflowRun {
     pub(crate) run_id: String,
 }
 
-pub(crate) struct TaskOutputReader(pub Rc<zeroship_workflow::service::runner::TaskPayloadReader>);
+#[derive(Clone)]
+pub(crate) struct TaskOutputReader {
+    pub reader: Rc<zeroship_workflow::service::runner::TaskPayloadReader>,
+    pub interrupt: zeroship_runtime::RuntimeInterrupt,
+}
 
 // ---------------------------------------------------------------------------
 // JS value helpers
@@ -464,11 +468,17 @@ impl WorkflowRun {
         let run_id = self.run_id.clone();
         let task_reader = scope
             .get_slot::<TaskOutputReader>()
-            .filter(|reader| reader.0.run_id() == run_id)
-            .map(|reader| reader.0.clone());
+            .filter(|reader| reader.reader.run_id() == run_id)
+            .cloned();
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             let read = if let Some(reader) = task_reader {
-                reader.read_step_output(&name, occurrence as u32).await
+                let result = reader.reader.read_step_output(&name, occurrence as u32).await;
+                if reader.reader.check().is_err() {
+                    // App code cannot catch a lost replay dependency and then
+                    // continue producing external effects or journal outcomes.
+                    reader.interrupt.cancel();
+                }
+                result
             } else {
                 backend
                     .read_step_output(run_id, name, occurrence as u32)

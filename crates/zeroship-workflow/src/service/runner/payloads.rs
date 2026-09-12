@@ -13,7 +13,11 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde_json::Value;
-use std::rc::Rc;
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    task::{Poll, Waker},
+};
 use zeroship_core::app_id::AppId;
 
 /// Host-only payload authority; task credentials never enter the app isolate.
@@ -66,6 +70,8 @@ pub struct TaskPayloadReader {
     journal: Vec<JournalStep>,
     input_ref: Option<WorkflowOutputRef>,
     max_bytes: usize,
+    failure: RefCell<Option<WorkflowServiceError>>,
+    failure_waker: RefCell<Option<Waker>>,
 }
 impl std::fmt::Debug for TaskPayloadReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,6 +108,8 @@ impl TaskPayloadReader {
             journal: assignment.invocation.journal.clone(),
             input_ref: assignment.invocation.trigger.input_ref.clone(),
             max_bytes,
+            failure: RefCell::new(None),
+            failure_waker: RefCell::new(None),
         })
     }
 
@@ -113,6 +121,33 @@ impl TaskPayloadReader {
     #[must_use]
     pub const fn app_id(&self) -> &AppId {
         &self.app
+    }
+
+    /// Check whether replay lost access to a required referenced payload.
+    ///
+    /// # Errors
+    /// Once a reference read fails, this reader remains failed. The host must
+    /// abandon this execution rather than commit a caught app exception as a
+    /// new journal outcome. A fresh task attempt receives a fresh reader.
+    pub fn check(&self) -> Result<(), WorkflowServiceError> {
+        self.failure.borrow().clone().map_or(Ok(()), Err)
+    }
+
+    /// Wait for a failed replay dependency.
+    ///
+    /// The execution host owns this waiter
+    /// and races it against the runtime result; stopping V8 need not settle its
+    /// JavaScript promises.
+    pub async fn failed(&self) -> WorkflowServiceError {
+        std::future::poll_fn(|cx| {
+            if let Err(error) = self.check() {
+                Poll::Ready(error)
+            } else {
+                *self.failure_waker.borrow_mut() = Some(cx.waker().clone());
+                Poll::Pending
+            }
+        })
+        .await
     }
 
     /// Hydrate only the input reference captured from this assignment.
@@ -167,6 +202,26 @@ impl TaskPayloadReader {
     }
 
     async fn bytes(&self, reference: &WorkflowOutputRef) -> Result<Vec<u8>, WorkflowServiceError> {
+        self.check()?;
+        let result = self.read_verified(reference).await;
+        if let Err(error) = &result {
+            self.failure
+                .borrow_mut()
+                .get_or_insert_with(|| error.clone());
+            let waker = self.failure_waker.borrow_mut().take();
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        }
+        // Another concurrent read may have failed while this one was pending.
+        self.check()?;
+        result
+    }
+
+    async fn read_verified(
+        &self,
+        reference: &WorkflowOutputRef,
+    ) -> Result<Vec<u8>, WorkflowServiceError> {
         // Refuse before asking the transport to open an oversized object.
         if usize::try_from(reference.size)
             .ok()
