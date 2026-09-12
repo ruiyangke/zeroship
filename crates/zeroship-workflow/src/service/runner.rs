@@ -1,5 +1,8 @@
 //! Execution slots shared by embedded and remote worker hosts.
 
+mod budget;
+pub use budget::{ExecutionBudget, ExecutionGuard};
+
 use super::{
     CompletionReceipt, ControlIntent, Heartbeat, RemoteTasks, TaskAssignment, TaskToken,
     WorkerIdentity, WorkflowService,
@@ -103,9 +106,12 @@ pub trait TaskExecutor {
     /// Allocate an execution handle. Loading and app execution happen in `wait`
     /// so the runner maintains the lease throughout both. Task credentials stay
     /// in this Rust host; only `assignment.invocation` may enter app code.
+    /// Executors that run synchronous app code must install a budget interrupt
+    /// before entering it, so starvation of this thread cannot bypass expiry.
     fn start(
         &self,
         assignment: &TaskAssignment,
+        budget: ExecutionBudget,
     ) -> Result<Box<dyn TaskExecution>, WorkflowServiceError>;
 }
 
@@ -189,7 +195,9 @@ impl RunnerSlot {
             return Ok(RunnerOutcome::Idle);
         };
         let lease = Cell::new(LeaseWindow::new(assignment.lease_ms, started)?);
-        let execution = match self.executor.start(&assignment) {
+        let guard = ExecutionGuard::new(self.execution_timeout)?;
+        guard.renew_lease(lease.get().expires)?;
+        let execution = match self.executor.start(&assignment, guard.budget()) {
             Ok(execution) => execution,
             Err(error) => {
                 let _ = release(self.transport.as_ref(), &assignment, &lease).await;
@@ -209,11 +217,12 @@ impl RunnerSlot {
                     &active.assignment,
                     execution.0,
                     &lease,
+                    &guard,
                     self.execution_timeout,
                 )
                 .boxed_local();
-                let ownership =
-                    renew(self.transport.as_ref(), &active.assignment, &lease).boxed_local();
+                let ownership = renew(self.transport.as_ref(), &active.assignment, &lease, &guard)
+                    .boxed_local();
                 match futures::future::select(work, ownership).await {
                     Either::Left((result, ownership)) => {
                         drop(ownership);
@@ -229,6 +238,7 @@ impl RunnerSlot {
                 Either::Left(result) => result,
                 Either::Right(control) => {
                     execution.0.cancel();
+                    guard.finish();
                     execution.0.stop().await;
                     match control {
                         Ok(control) => release(self.transport.as_ref(), &active.assignment, &lease)
@@ -290,6 +300,7 @@ async fn renew(
     transport: &dyn TaskTransport,
     task: &TaskAssignment,
     lease: &Cell<LeaseWindow>,
+    guard: &ExecutionGuard,
 ) -> Result<ControlIntent, WorkflowServiceError> {
     loop {
         let remaining = lease.get().remaining();
@@ -305,6 +316,7 @@ async fn renew(
         .await
         .map_err(|_| WorkflowServiceError::Timeout)??;
         lease.set(LeaseWindow::new(heartbeat.lease_ms, started)?);
+        guard.renew_lease(lease.get().expires)?;
         if heartbeat.control != ControlIntent::None {
             return Ok(heartbeat.control);
         }
@@ -316,13 +328,16 @@ async fn execute(
     task: &TaskAssignment,
     execution: &mut dyn TaskExecution,
     lease: &Cell<LeaseWindow>,
+    guard: &ExecutionGuard,
     timeout: Duration,
 ) -> Result<RunnerOutcome, WorkflowServiceError> {
     let result = compio::time::timeout(timeout, execution.wait())
         .await
         .map_err(|_| WorkflowServiceError::Timeout)
-        .and_then(|result| result);
+        .and_then(|result| result)
+        .and_then(|result| guard.budget().check().map(|()| result));
     execution.cancel();
+    guard.finish();
     execution.stop().await;
     let outcomes = match result {
         Ok(outcomes) => outcomes,
