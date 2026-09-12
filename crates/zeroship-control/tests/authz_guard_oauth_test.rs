@@ -6,26 +6,27 @@ use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration as StdDuration, SystemTime, UNIX_EPOCH};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use compio_postgres::{NoTls, connect};
-use ed25519_dalek::SigningKey;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use compio_postgres::{connect, NoTls};
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::http::StatusCode;
-use ntex::web::{self, HttpResponse, test};
-use serde_json::{Value, json};
+use ntex::web::{self, test, HttpResponse};
+use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore, api,
-    authz_guard::AuthzGuard,
+    api, authz_guard::AuthzGuard, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    StripeStore,
 };
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_core::config::{Secret, SourceKind};
 use zeroship_core::device_grant::{
     OP_PROVIDER, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -64,7 +65,7 @@ fn tmpdir(label: &str) -> PathBuf {
 
 struct Fixture {
     state: Arc<AppState>,
-    user_id: Uuid,
+    user_id: UserId,
     app_id: Option<Uuid>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
@@ -79,7 +80,7 @@ impl Fixture {
             .control_pg
             .execute(
                 "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         if let Some(app_id) = self.app_id {
@@ -99,7 +100,7 @@ impl Fixture {
                 "DELETE FROM zeroship.projects p \
                   USING zeroship.organizations o \
                   WHERE o.id = p.organization_id AND o.personal_owner_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
@@ -107,13 +108,16 @@ impl Fixture {
             .control_pg
             .execute(
                 "DELETE FROM zeroship.organizations WHERE personal_owner_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = self
             .state
             .control_pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }
@@ -133,7 +137,7 @@ impl Drop for Fixture {
 /// was a file full of `let Some(fx) = ... else { return }` - the shape that
 /// used to mean "pass silently" - left standing as a template. Returning the
 /// value makes it unwritable rather than merely unreachable.
-async fn fixture_with_platform(label: &str, user_id: Uuid) -> Fixture {
+async fn fixture_with_platform(label: &str, user_id: &UserId) -> Fixture {
     let jwks = PlatformJwksMock::start();
     let auth_provider = platform_auth_provider(jwks.jwks_url());
     fixture_with_auth_provider(label, user_id, auth_provider, Some(jwks)).await
@@ -141,7 +145,7 @@ async fn fixture_with_platform(label: &str, user_id: Uuid) -> Fixture {
 
 async fn fixture_with_auth_provider(
     label: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     auth_provider: Arc<AuthProvider>,
     jwks: Option<PlatformJwksMock>,
 ) -> Fixture {
@@ -216,7 +220,7 @@ async fn fixture_with_auth_provider(
     insert_user(&state, user_id, label).await;
     Fixture {
         state,
-        user_id,
+        user_id: user_id.clone(),
         app_id: None,
         blob_root,
         deploy_tmp_dir,
@@ -225,14 +229,14 @@ async fn fixture_with_auth_provider(
     }
 }
 
-async fn insert_user(state: &AppState, user_id: Uuid, label: &str) {
-    let email = format!("{label}-{user_id}@zeroship.test");
+async fn insert_user(state: &AppState, user_id: &UserId, label: &str) {
+    let email = format!("{label}-{}@zeroship.test", user_id.as_str());
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, $3, NOW())",
-            &[&user_id, &email, &label],
+            &[&user_id.as_str(), &email, &label],
         )
         .await
         .expect("insert oauth test user");
@@ -240,16 +244,16 @@ async fn insert_user(state: &AppState, user_id: Uuid, label: &str) {
 
 /// Create an app owned by the fixture's principal (binds the owner membership).
 async fn create_app(fx: &mut Fixture, label: &str) -> Uuid {
-    let owner = fx.user_id;
-    create_app_owned_by(fx, label, owner).await
+    let owner = fx.user_id.clone();
+    create_app_owned_by(fx, label, &owner).await
 }
 
 /// Create an app owned by an arbitrary `owner_id` (which may differ from the
 /// fixture principal). Used to exercise the "principal is only a viewer of an
 /// app someone else owns" case — the create now binds an owner membership, so
 /// tests that need the principal to NOT be the owner must seed a distinct owner.
-async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> Uuid {
-    if owner_id != fx.user_id {
+async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: &UserId) -> Uuid {
+    if owner_id != &fx.user_id {
         // The owner must exist (FK on app_members.user_id → users.id).
         insert_user(&fx.state, owner_id, &format!("{label}-owner")).await;
     }
@@ -260,7 +264,7 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> U
         .create_app(
             &app_name,
             &zeroship_control::plan_catalog::free_plan_id(),
-            &owner_id,
+            owner_id,
             None,
         )
         .await
@@ -281,7 +285,7 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> U
 /// `zeroship_control::organizations::add_member`, because these cases seat a
 /// role on behalf of no particular actor. The rank fence is tested where it
 /// lives, in `organizations_test.rs`, not here.
-async fn grant_organization_member(state: &AppState, app_id: Uuid, user_id: Uuid, role: &str) {
+async fn grant_organization_member(state: &AppState, app_id: Uuid, user_id: &UserId, role: &str) {
     state
         .control_pg
         .execute(
@@ -291,7 +295,7 @@ async fn grant_organization_member(state: &AppState, app_id: Uuid, user_id: Uuid
                JOIN zeroship.projects p ON p.id = a.project_id \
               WHERE a.id = $1 \
              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[&app_id, &user_id, &role],
+            &[&app_id, &user_id.as_str(), &role],
         )
         .await
         .expect("seat organization member");
@@ -360,7 +364,7 @@ async fn raw_app_deploy_check(
         .await
     {
         Ok(()) => web::HttpResponse::Ok().json(&json!({
-            "principal_id": authz.principal_id.to_string(),
+            "principal_id": authz.principal_id.as_str(),
         })),
         Err(resp) => resp,
     }
@@ -370,11 +374,11 @@ fn bearer_for(token: &str) -> String {
     format!("Bearer {token}")
 }
 
-fn bearer_for_scope(subject: Uuid, scope: &str) -> String {
+fn bearer_for_scope(subject: &UserId, scope: &str) -> String {
     bearer_for(&platform_token(subject, scope, PLATFORM_ISSUER))
 }
 
-fn bearer_for_subject(subject: impl ToString, scope: &str) -> String {
+fn bearer_for_subject(subject: &str, scope: &str) -> String {
     bearer_for(&platform_token_subject(
         subject,
         scope,
@@ -394,18 +398,18 @@ fn platform_auth_provider_for(issuer: &str, jwks_url: String) -> Arc<AuthProvide
     )))
 }
 
-fn platform_token(subject: Uuid, scope: &str, issuer: &str) -> String {
+fn platform_token(subject: &UserId, scope: &str, issuer: &str) -> String {
     platform_token_with_client_id(subject, scope, issuer, "zeroship-cli")
 }
 
 fn platform_token_with_client_id(
-    subject: Uuid,
+    subject: &UserId,
     scope: &str,
     issuer: &str,
     client_id: &str,
 ) -> String {
     platform_token_subject(
-        subject.to_string(),
+        subject.as_str(),
         scope,
         issuer,
         vec!["control.zeroship.ai"],
@@ -414,7 +418,7 @@ fn platform_token_with_client_id(
 }
 
 fn platform_token_subject(
-    subject: impl ToString,
+    subject: &str,
     scope: &str,
     issuer: &str,
     aud: Vec<&str>,
@@ -423,7 +427,7 @@ fn platform_token_subject(
     let now = unix_now_secs();
     let claims = json!({
         "iss": issuer,
-        "sub": subject.to_string(),
+        "sub": subject,
         "aud": aud,
         "exp": now + 3600,
         "iat": now,
@@ -712,25 +716,24 @@ async fn assert_platform_cli_registration(pg: &compio_postgres::Client) {
     assert!(row.get::<_, Vec<String>>("redirect_uris").is_empty());
     assert_eq!(row.get::<_, Vec<String>>("scopes"), expected_scopes);
     assert!(row.get::<_, bool>("skip_consent"));
-    assert!(row.get::<_, Option<Uuid>>("created_by").is_none());
+    assert!(row.get::<_, Option<String>>("created_by").is_none());
     assert!(row.get::<_, Option<String>>("client_secret_hash").is_none());
     assert!(row.get::<_, bool>("refresh_allowed"));
     assert_eq!(row.get::<_, String>("token_endpoint_auth_method"), "none");
     assert!(!row.get::<_, bool>("brokered"));
-    assert!(
-        row.get::<_, Option<String>>("backchannel_logout_uri")
-            .is_none()
-    );
+    assert!(row
+        .get::<_, Option<String>>("backchannel_logout_uri")
+        .is_none());
     assert!(row.get::<_, bool>("has_no_app_extension"));
 }
 
 #[compio::test]
 async fn op_cli_device_token_authorizes_control_endpoint() {
-    let user_id = Uuid::new_v4();
+    let user_id = UserId::mint();
     let database_url = db_url();
     let op = PlatformOp::start(auth_role_db_url(&database_url));
     let auth_provider = platform_auth_provider_for(&op.issuer, op.jwks_url());
-    let mut fx = fixture_with_auth_provider("op-cli-control", user_id, auth_provider, None).await;
+    let mut fx = fixture_with_auth_provider("op-cli-control", &user_id, auth_provider, None).await;
     fx._op = Some(op);
     assert_platform_cli_registration(&fx.state.control_pg).await;
     let app_id = create_app(&mut fx, "op-cli-control").await;
@@ -815,7 +818,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
                     (SELECT credential_version FROM zeroship.users WHERE id = $1), \
                  status = 'approved' \
              WHERE user_code = $3 AND provider = $4",
-            &[&user_id, &sid, &user_code, &OP_PROVIDER],
+            &[&user_id.as_str(), &sid, &user_code, &OP_PROVIDER],
         )
         .await
         .expect("approve OP device grant");
@@ -861,7 +864,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
             .expect("decode OP access token claims"),
     )
     .expect("parse OP access token claims");
-    assert_eq!(claims["sub"], user_id.to_string());
+    assert_eq!(claims["sub"], user_id.as_str());
     assert_eq!(claims["aud"], "control.zeroship.ai");
     assert_eq!(claims["client_id"], PLATFORM_CLI_CLIENT_ID);
     assert_eq!(claims["scope"], "apps:deploy apps:read");
@@ -916,7 +919,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     );
     let control_body: Value =
         serde_json::from_str(&deploy_body_text).expect("decode control response");
-    assert_eq!(control_body["principal_id"], user_id.to_string());
+    assert_eq!(control_body["principal_id"], user_id.as_str());
     assert_eq!(
         app_status,
         StatusCode::OK,
@@ -942,12 +945,12 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
 
 #[compio::test]
 async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("platform-issuer", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("platform-issuer", &user_id).await;
     let app_id = create_app(&mut fx, "platform-issuer").await;
     let app = init_control!(fx);
 
-    let platform_deploy = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
+    let platform_deploy = platform_token(&user_id, "apps:deploy", PLATFORM_ISSUER);
     let req = test::TestRequest::post()
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
         .header("authorization", bearer_for(&platform_deploy))
@@ -956,9 +959,9 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body: Value =
         serde_json::from_slice(&test::read_body(resp).await).expect("platform body json");
-    assert_eq!(body["principal_id"], user_id.to_string());
+    assert_eq!(body["principal_id"], user_id.as_str());
 
-    let unknown_issuer = platform_token(user_id, "apps:read", "https://unknown-issuer.test");
+    let unknown_issuer = platform_token(&user_id, "apps:read", "https://unknown-issuer.test");
     let req = test::TestRequest::get()
         .uri("/api/apps")
         .header("authorization", bearer_for(&unknown_issuer))
@@ -981,12 +984,12 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
 
 #[compio::test]
 async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("platform-revoked", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("platform-revoked", &user_id).await;
     let app_id = create_app(&mut fx, "platform-revoked").await;
     let app = init_control!(fx);
 
-    let token = platform_token(user_id, "apps:deploy", PLATFORM_ISSUER);
+    let token = platform_token(&user_id, "apps:deploy", PLATFORM_ISSUER);
     fx.state
         .control_pg
         .execute(
@@ -994,7 +997,7 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
              VALUES ('zeroship-cli', $1, NOW() + INTERVAL '5 seconds') \
              ON CONFLICT (client_id, sub) DO UPDATE \
              SET revoked_after = EXCLUDED.revoked_after",
-            &[&user_id.to_string()],
+            &[&user_id.as_str()],
         )
         .await
         .expect("insert platform token revocation marker");
@@ -1010,7 +1013,7 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
         .control_pg
         .execute(
             "DELETE FROM zeroship.token_revocations WHERE client_id = 'zeroship-cli' AND sub = $1",
-            &[&user_id.to_string()],
+            &[&user_id.as_str()],
         )
         .await
         .expect("cleanup platform token revocation marker");
@@ -1023,10 +1026,10 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
 
 #[compio::test]
 async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_token() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("bearer-verifier", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("bearer-verifier", &user_id).await;
 
-    let oauth_token = platform_token(user_id, "apps:read apps:deploy", PLATFORM_ISSUER);
+    let oauth_token = platform_token(&user_id, "apps:read apps:deploy", PLATFORM_ISSUER);
     let oauth = fx
         .state
         .bearer_verifier()
@@ -1054,7 +1057,7 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
 
     let revoked_client_id = "zeroship-cli-revoked";
     let platform =
-        platform_token_with_client_id(user_id, "apps:deploy", PLATFORM_ISSUER, revoked_client_id);
+        platform_token_with_client_id(&user_id, "apps:deploy", PLATFORM_ISSUER, revoked_client_id);
     fx.state
         .control_pg
         .execute(
@@ -1062,7 +1065,7 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
              VALUES ($2, $1, NOW() + INTERVAL '5 seconds') \
              ON CONFLICT (client_id, sub) DO UPDATE \
              SET revoked_after = EXCLUDED.revoked_after",
-            &[&user_id.to_string(), &revoked_client_id],
+            &[&user_id.as_str(), &revoked_client_id],
         )
         .await
         .expect("insert direct platform token revocation marker");
@@ -1080,7 +1083,7 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
         .control_pg
         .execute(
             "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
-            &[&revoked_client_id, &user_id.to_string()],
+            &[&revoked_client_id, &user_id.as_str()],
         )
         .await;
     fx.cleanup().await;
@@ -1093,8 +1096,8 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
 
 #[compio::test]
 async fn oauth_token_with_apps_read_can_list_apps() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("apps-read", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("apps-read", &user_id).await;
     let app = init_control!(fx);
     let request_id = format!("req_h4_{}", Uuid::new_v4().simple());
 
@@ -1102,7 +1105,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
         .uri("/api/apps")
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:read apps:deploy"),
+            bearer_for_scope(&user_id, "apps:read apps:deploy"),
         )
         .header("x-request-id", request_id.as_str())
         .to_request();
@@ -1117,7 +1120,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
              WHERE actor_user_id = $1 AND action = 'apps:read' \
              ORDER BY occurred_at DESC \
              LIMIT 1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("select authz decision");
@@ -1137,8 +1140,8 @@ async fn oauth_token_with_apps_read_can_list_apps() {
 
 #[compio::test]
 async fn oauth_token_owned_by_anonymized_user_returns_401() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("anonymized-owner", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("anonymized-owner", &user_id).await;
     let app = init_control!(fx);
 
     fx.state
@@ -1148,13 +1151,13 @@ async fn oauth_token_owned_by_anonymized_user_returns_401() {
              SET disabled_at = NOW(), anonymized_at = NOW(), \
                  credential_version = credential_version + 1 \
              WHERE id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .expect("anonymize OAuth owner");
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer_for_scope(user_id, "apps:read"))
+        .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
 
@@ -1168,8 +1171,8 @@ async fn oauth_token_owned_by_anonymized_user_returns_401() {
 
 #[compio::test]
 async fn oauth_token_ignores_standard_oidc_scopes() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("oidc-scopes", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("oidc-scopes", &user_id).await;
     let app = init_control!(fx);
 
     // Native platform token carrying standard OIDC scopes alongside the one
@@ -1180,7 +1183,7 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
         .header(
             "authorization",
             bearer_for_scope(
-                user_id,
+                &user_id,
                 "openid offline_access profile email address phone apps:read",
             ),
         )
@@ -1212,13 +1215,13 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
 /// production create path.
 #[compio::test]
 async fn creator_self_service_creates_and_lists_only_own_apps() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("self-service", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("self-service", &user_id).await;
 
     // Seed ANOTHER creator's app (different owner) directly. It must never show
     // up in this principal's scoped list.
-    let other_owner = Uuid::new_v4();
-    insert_user(&fx.state, other_owner, "self-service-other").await;
+    let other_owner = UserId::mint();
+    insert_user(&fx.state, &other_owner, "self-service-other").await;
     let other_app = fx
         .state
         .registry
@@ -1243,7 +1246,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         // an app INSIDE a project it already reaches, and nothing else.
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:write apps:read organization:create"),
+            bearer_for_scope(&user_id, "apps:write apps:read organization:create"),
         )
         .set_json(&json!({ "name": create_name }))
         .to_request();
@@ -1264,7 +1267,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         .uri("/api/apps")
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:write apps:read"),
+            bearer_for_scope(&user_id, "apps:write apps:read"),
         )
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1303,7 +1306,10 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     let _ = fx
         .state
         .control_pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&other_owner])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&other_owner.as_str()],
+        )
         .await;
     fx.cleanup().await;
 
@@ -1314,14 +1320,14 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
 
 #[compio::test]
 async fn oauth_token_without_required_scope_returns_403() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("missing-deploy", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("missing-deploy", &user_id).await;
     let app_id = create_app(&mut fx, "missing-deploy").await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::post()
         .uri(&format!("/api/apps/{app_id}/deploy"))
-        .header("authorization", bearer_for_scope(user_id, "apps:read"))
+        .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1335,8 +1341,8 @@ async fn oauth_token_without_required_scope_returns_403() {
 
 #[compio::test]
 async fn invalid_oauth_token_returns_401() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("invalid-token", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("invalid-token", &user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
@@ -1360,12 +1366,12 @@ async fn invalid_oauth_token_returns_401() {
 
 #[compio::test]
 async fn oauth_token_wrong_audience_returns_401() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("wrong-audience", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("wrong-audience", &user_id).await;
     let app = init_control!(fx);
 
     let token = platform_token_subject(
-        user_id,
+        user_id.as_str(),
         "apps:read",
         PLATFORM_ISSUER,
         vec!["gateway"],
@@ -1387,15 +1393,15 @@ async fn oauth_token_wrong_audience_returns_401() {
 
 #[compio::test]
 async fn invalid_oauth_sub_returns_401() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("invalid-sub", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("invalid-sub", &user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
         .header(
             "authorization",
-            bearer_for_subject("not-a-uuid", "apps:read"),
+            bearer_for_subject("not-a-user-id", "apps:read"),
         )
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1410,15 +1416,15 @@ async fn invalid_oauth_sub_returns_401() {
 
 #[compio::test]
 async fn unknown_scope_returns_401_not_silently_dropped() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("unknown-scope", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("unknown-scope", &user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:read bogus:scope"),
+            bearer_for_scope(&user_id, "apps:read bogus:scope"),
         )
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1433,13 +1439,13 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
 
 #[compio::test]
 async fn invalid_app_resource_id_returns_400_before_cedar() {
-    let user_id = Uuid::new_v4();
-    let fx = fixture_with_platform("invalid-resource-id", user_id).await;
+    let user_id = UserId::mint();
+    let fx = fixture_with_platform("invalid-resource-id", &user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/raw-app/app%22%3B%20permit%20%28principal%2C%20action%2C%20resource%29%3B")
-        .header("authorization", bearer_for_scope(user_id, "apps:read"))
+        .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1453,21 +1459,21 @@ async fn invalid_app_resource_id_returns_400_before_cedar() {
 
 #[compio::test]
 async fn oauth_token_subset_of_user_two_call_enforcement() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("token-subset", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("token-subset", &user_id).await;
     let app_id = create_app(&mut fx, "token-subset").await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
         .uri("/api/apps")
-        .header("authorization", bearer_for_scope(user_id, "apps:read"))
+        .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::OK);
 
     let req = test::TestRequest::put()
         .uri(&format!("/api/apps/{app_id}/archive"))
-        .header("authorization", bearer_for_scope(user_id, "apps:read"))
+        .header("authorization", bearer_for_scope(&user_id, "apps:read"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -1488,7 +1494,7 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
 /// what makes "operator revoked everything" distinguishable from "never
 /// provisioned" - see `zeroship_authn::platform_cli::materialize_default_grants`,
 /// which took that meaning over from control's deleted identity-bridge module.
-async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
+async fn seed_grants(state: &AppState, principal_id: &UserId, grants: &[&str]) {
     state
         .control_pg
         .execute(
@@ -1496,7 +1502,7 @@ async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
                 (principal_id, provider, provider_subject, email) \
              VALUES ($1, 'platform', $2, NULL) \
              ON CONFLICT (provider, provider_subject) DO NOTHING",
-            &[&principal_id, &principal_id.to_string()],
+            &[&principal_id.as_str(), &principal_id.as_str()],
         )
         .await
         .expect("seed identity_links marker");
@@ -1506,7 +1512,7 @@ async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
             .execute(
                 "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
                  VALUES ($1, $2) ON CONFLICT (principal_id, grant_name) DO NOTHING",
-                &[&principal_id, grant],
+                &[&principal_id.as_str(), grant],
             )
             .await
             .expect("seed principal grant");
@@ -1519,26 +1525,26 @@ async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
 /// exist - and it is a `let _ =`, so the refusal is silent and the user row
 /// simply leaks. Anything that seeds or materializes them must clear them
 /// here first.
-async fn clear_grants(state: &AppState, principal_id: Uuid) {
+async fn clear_grants(state: &AppState, principal_id: &UserId) {
     for sql in [
         "DELETE FROM zeroship.principal_grants WHERE principal_id = $1",
         "DELETE FROM zeroship.identity_links WHERE principal_id = $1",
     ] {
         state
             .control_pg
-            .execute(sql, &[&principal_id])
+            .execute(sql, &[&principal_id.as_str()])
             .await
             .expect("clear seeded grant state");
     }
 }
 
-async fn stored_grants(state: &AppState, principal_id: Uuid) -> Vec<String> {
+async fn stored_grants(state: &AppState, principal_id: &UserId) -> Vec<String> {
     state
         .control_pg
         .query(
             "SELECT grant_name FROM zeroship.principal_grants \
              WHERE principal_id = $1 ORDER BY grant_name",
-            &[&principal_id],
+            &[&principal_id.as_str()],
         )
         .await
         .expect("read principal grants")
@@ -1547,13 +1553,13 @@ async fn stored_grants(state: &AppState, principal_id: Uuid) -> Vec<String> {
         .collect()
 }
 
-async fn seeding_marker_count(state: &AppState, principal_id: Uuid) -> i64 {
+async fn seeding_marker_count(state: &AppState, principal_id: &UserId) -> i64 {
     state
         .control_pg
         .query_one(
             "SELECT COUNT(*)::INT8 AS n FROM zeroship.identity_links \
              WHERE principal_id = $1",
-            &[&principal_id],
+            &[&principal_id.as_str()],
         )
         .await
         .expect("count identity links")
@@ -1578,18 +1584,18 @@ async fn seeding_marker_count(state: &AppState, principal_id: Uuid) -> i64 {
 /// is the 403 this exists to prevent.
 #[compio::test]
 async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("first-cli", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("first-cli", &user_id).await;
     let app_id = create_app(&mut fx, "first-cli").await;
     let app = init_control!(fx);
 
     assert_eq!(
-        stored_grants(&fx.state, user_id).await,
+        stored_grants(&fx.state, &user_id).await,
         Vec::<String>::new(),
         "the measurement needs a principal that starts with no grant rows"
     );
     assert_eq!(
-        seeding_marker_count(&fx.state, user_id).await,
+        seeding_marker_count(&fx.state, &user_id).await,
         0,
         "the measurement needs a principal that starts with no seeding marker"
     );
@@ -1598,7 +1604,7 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:deploy apps:read"),
+            bearer_for_scope(&user_id, "apps:deploy apps:read"),
         )
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -1612,7 +1618,7 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
     // second definition, and the one thing this assertion must not do is pass
     // because somebody updated the copy instead of the constant.
     assert_eq!(
-        stored_grants(&fx.state, user_id).await,
+        stored_grants(&fx.state, &user_id).await,
         {
             let mut expected: Vec<&str> =
                 zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES.to_vec();
@@ -1622,12 +1628,12 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
         "the default CLI grants were not materialized, so an operator has no row to delete"
     );
     assert_eq!(
-        seeding_marker_count(&fx.state, user_id).await,
+        seeding_marker_count(&fx.state, &user_id).await,
         1,
         "materializing without the marker lets a later request re-seed revoked grants"
     );
 
-    clear_grants(&fx.state, user_id).await;
+    clear_grants(&fx.state, &user_id).await;
     fx.cleanup().await;
 
     drop(app);
@@ -1650,17 +1656,17 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
 /// other half.
 #[compio::test]
 async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("narrowed-cli", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("narrowed-cli", &user_id).await;
     let app_id = create_app(&mut fx, "narrowed-cli").await;
-    seed_grants(&fx.state, user_id, &["apps:read"]).await;
+    seed_grants(&fx.state, &user_id, &["apps:read"]).await;
     let app = init_control!(fx);
 
     let read = test::TestRequest::get()
         .uri(&format!("/api/apps/{app_id}"))
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:deploy apps:read"),
+            bearer_for_scope(&user_id, "apps:deploy apps:read"),
         )
         .to_request();
     let read_status = test::call_service(&app, read).await.status();
@@ -1669,7 +1675,7 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
         .uri(&format!("/raw-app/{app_id}/deploy-check"))
         .header(
             "authorization",
-            bearer_for_scope(user_id, "apps:deploy apps:read"),
+            bearer_for_scope(&user_id, "apps:deploy apps:read"),
         )
         .to_request();
     let deploy_status = test::call_service(&app, deploy).await.status();
@@ -1688,12 +1694,12 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
     // The revoked grant must stay revoked: nothing on the request path may
     // re-seed a principal whose marker already exists.
     assert_eq!(
-        stored_grants(&fx.state, user_id).await,
+        stored_grants(&fx.state, &user_id).await,
         vec!["apps:read"],
         "a request re-seeded grants an operator had deleted"
     );
 
-    clear_grants(&fx.state, user_id).await;
+    clear_grants(&fx.state, &user_id).await;
     fx.cleanup().await;
 
     drop(app);
@@ -1703,34 +1709,37 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
 
 #[compio::test]
 async fn viewer_role_cannot_use_granted_apps_archive_scope() {
-    let user_id = Uuid::new_v4();
-    let mut fx = fixture_with_platform("user-subset", user_id).await;
+    let user_id = UserId::mint();
+    let mut fx = fixture_with_platform("user-subset", &user_id).await;
     // The app is owned by a DIFFERENT principal; `user_id` is only a viewer.
     // (create_app now binds the creator as owner, so the principal-under-test
     // must NOT be the creator for this "viewer-only" scenario.)
-    let owner_id = Uuid::new_v4();
-    let app_id = create_app_owned_by(&mut fx, "user-subset", owner_id).await;
-    grant_organization_member(&fx.state, app_id, user_id, "viewer").await;
+    let owner_id = UserId::mint();
+    let app_id = create_app_owned_by(&mut fx, "user-subset", &owner_id).await;
+    grant_organization_member(&fx.state, app_id, &user_id, "viewer").await;
     // The principal is entitled to `apps:archive` and the token carries it, so
     // the 403 below is the ROLE check refusing a viewer. Seed the grant
     // explicitly so the assertion does not depend on just-in-time default CLI
     // grant materialization elsewhere in the request path.
-    seed_grants(&fx.state, user_id, &["apps:archive"]).await;
+    seed_grants(&fx.state, &user_id, &["apps:archive"]).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::put()
         .uri(&format!("/api/apps/{app_id}/archive"))
-        .header("authorization", bearer_for_scope(user_id, "apps:archive"))
+        .header("authorization", bearer_for_scope(&user_id, "apps:archive"))
         .to_request();
     let status = test::call_service(&app, req).await.status();
     assert_eq!(status, StatusCode::FORBIDDEN);
 
-    clear_grants(&fx.state, user_id).await;
+    clear_grants(&fx.state, &user_id).await;
     fx.cleanup().await;
     let _ = fx
         .state
         .control_pg
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner_id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&owner_id.as_str()],
+        )
         .await;
 
     drop(app);

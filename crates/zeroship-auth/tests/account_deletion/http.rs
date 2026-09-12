@@ -19,13 +19,13 @@ async fn the_emailed_link_cancels_deletion_without_a_session() {
 
     let requested = fixture.request_deletion(session.id).await;
     assert_eq!(requested.status().as_u16(), 302);
-    assert_eq!(control.asked(), [user.id.to_string()]);
+    assert_eq!(control.asked(), [user.id.as_str().to_owned()]);
     assert!(sessions::validate(&db, session.id).await.unwrap().is_none());
     let pending: bool = db
         .query_one(
             "SELECT deletion_requested_at IS NOT NULL AND deletion_scheduled_for IS NOT NULL
              FROM zeroship.users WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap()
@@ -75,7 +75,7 @@ async fn the_emailed_link_cancels_deletion_without_a_session() {
         .query_one(
             "SELECT deletion_requested_at IS NULL AND deletion_scheduled_for IS NULL AND disabled_at IS NULL
              FROM zeroship.users WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap()
@@ -98,7 +98,7 @@ async fn the_cancel_route_refuses_a_token_it_never_issued() {
         let control = MockControl::start(Answer::Clear).await;
         let fixture = DeletionServer::start(database, &control, control.keyring()).await;
         let (user, _) = signed_in_user(&db).await;
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
@@ -116,7 +116,7 @@ async fn the_cancel_route_refuses_a_token_it_never_issued() {
         let pending: bool = db
             .query_one(
                 "SELECT deletion_requested_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -167,7 +167,7 @@ async fn a_refused_preflight_leaves_the_account_and_session_active() {
         assert_eq!(
             control.asked(),
             if trusted {
-                vec![user.id.to_string()]
+                vec![user.id.as_str().to_owned()]
             } else {
                 vec![]
             }
@@ -182,7 +182,7 @@ async fn a_refused_preflight_leaves_the_account_and_session_active() {
                         disabled_at IS NULL AND deletion_requested_at IS NULL AND deletion_scheduled_for IS NULL,
                         NOT EXISTS (SELECT FROM zeroship.magic_links WHERE user_id = $1 AND purpose = 'deletion_cancel')
                  FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -213,7 +213,7 @@ async fn signed_in_user(db: &compio_postgres::Client) -> (users::UserRow, sessio
     let session = sessions::create(
         db,
         &sessions::CreateSession {
-            user_id: user.id,
+            user_id: user.id.clone(),
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,

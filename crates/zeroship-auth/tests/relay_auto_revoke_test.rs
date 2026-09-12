@@ -37,13 +37,13 @@ async fn pg() -> Client {
 
 /// Seed a user, an oauth client + grant, and an active relay-alias identity row
 /// keyed on `(client_id, user)`. Returns `(user_id, client_id, relay_email)`.
-async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
-    let user_id = Uuid::new_v4();
-    let email = format!("autorevoke-{}@zeroship.test", user_id.simple());
+async fn seed_active_alias(db: &Client) -> (zeroship_core::UserId, String, String) {
+    let user_id = zeroship_core::UserId::mint();
+    let email = format!("autorevoke-{}@zeroship.test", user_id.as_str());
     db.execute(
         "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
          VALUES ($1, $2::citext, $3, NOW())",
-        &[&user_id, &email, &"AutoRevoke".to_string()],
+        &[&user_id.as_str(), &email, &"AutoRevoke".to_string()],
     )
     .await
     .expect("insert user");
@@ -65,7 +65,7 @@ async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
     db.execute(
         "INSERT INTO zeroship.oauth_grants (user_id, client_id, granted_scopes) \
          VALUES ($1, $2, $3)",
-        &[&user_id, &client_id, &vec!["email".to_string()]],
+        &[&user_id.as_str(), &client_id, &vec!["email".to_string()]],
     )
     .await
     .expect("insert grant");
@@ -78,14 +78,14 @@ async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
     // hit the immutable-binding refusal as an opaque 500.
     let pairwise_sub = zeroship_core::auth::derive_pairwise(
         &zeroship_core::crypto::derive_key("relay-auto-revoke-test-salt"),
-        &user_id.to_string(),
+        &user_id,
         &format!("https://{client_id}.zeroship.localhost"),
     );
     db.execute(
         "INSERT INTO zeroship.app_user_identities \
             (app_client_id, global_user_id, pairwise_sub, relay_email) \
          VALUES ($1, $2, $3, $4)",
-        &[&client_id, &user_id, &pairwise_sub, &relay_email],
+        &[&client_id, &user_id.as_str(), &pairwise_sub, &relay_email],
     )
     .await
     .expect("insert identity");
@@ -93,18 +93,18 @@ async fn seed_active_alias(db: &Client) -> (Uuid, String, String) {
     (user_id, client_id, relay_email)
 }
 
-async fn grant_count(db: &Client, user_id: Uuid, client_id: &str) -> i64 {
+async fn grant_count(db: &Client, user_id: &zeroship_core::UserId, client_id: &str) -> i64 {
     db.query(
         "SELECT COUNT(*)::BIGINT AS n FROM zeroship.oauth_grants \
          WHERE user_id = $1 AND client_id = $2",
-        &[&user_id, &client_id],
+        &[&user_id.as_str(), &client_id],
     )
     .await
     .expect("count grant")[0]
         .get("n")
 }
 
-async fn cleanup(db: &Client, user_id: Uuid, client_id: &str) {
+async fn cleanup(db: &Client, user_id: &zeroship_core::UserId, client_id: &str) {
     let _ = db
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
@@ -124,7 +124,10 @@ async fn cleanup(db: &Client, user_id: Uuid, client_id: &str) {
         )
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = $1",
+            &[&user_id.as_str()],
+        )
         .await;
 }
 
@@ -147,7 +150,7 @@ async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
     );
 
     // Local disable — the in-scope, immediate protection. Revokes exactly 1 row.
-    let n = relay::revoke_local_alias(&db, &client_id, user_id)
+    let n = relay::revoke_local_alias(&db, &client_id, &user_id)
         .await
         .expect("local revoke");
     assert_eq!(n, 1, "the active alias row must be newly revoked");
@@ -164,7 +167,7 @@ async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
 
     // Idempotent: a re-trigger revokes 0 (already revoked) — the audit then
     // reports "already_local_revoked", never a second fake success.
-    let n2 = relay::revoke_local_alias(&db, &client_id, user_id)
+    let n2 = relay::revoke_local_alias(&db, &client_id, &user_id)
         .await
         .expect("local revoke idempotent");
     assert_eq!(n2, 0, "a re-trigger must revoke 0 rows (already revoked)");
@@ -174,11 +177,11 @@ async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
     // (`cross_service_grant_revoke: not_implemented`), so the trail matches
     // reality rather than claiming a completed cross-service revoke.
     assert_eq!(
-        grant_count(&db, user_id, &client_id).await,
+        grant_count(&db, &user_id, &client_id).await,
         1,
         "auto-revoke must NOT delete the zeroship.oauth_grants row (cross-service \
          revoke is not implemented — the audit must not claim it ran)"
     );
 
-    cleanup(&db, user_id, &client_id).await;
+    cleanup(&db, &user_id, &client_id).await;
 }

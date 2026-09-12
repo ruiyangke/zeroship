@@ -3,7 +3,7 @@
 //! `crates/zeroship-auth/tests/oidc_refresh_token_test.rs` already covers the generic
 //! rotation and reuse machinery for an ordinary app client. What it cannot
 //! cover is the property that makes the CLI different: the token control
-//! accepts is a PLATFORM PRINCIPAL token (`sub` = the `zeroship.users` UUID,
+//! accepts is a PLATFORM PRINCIPAL token (`sub` = the canonical `zeroship.users` id,
 //! `aud` = control's resource audience), not an app-sector pairwise token. A
 //! rotation that quietly minted the ordinary shape would return HTTP 200 and
 //! then be refused by `zeroship_authn::BearerVerifier::verify_bearer`, which
@@ -143,7 +143,7 @@ struct Fixture {
     server: AuthServer,
     db: Client,
     issuer: Arc<Issuer>,
-    user_id: Uuid,
+    user_id: zeroship_core::UserId,
 }
 
 impl Fixture {
@@ -160,12 +160,12 @@ impl Fixture {
             .await
             .expect("reconcile platform CLI client");
 
-        let user_id = Uuid::new_v4();
+        let user_id = zeroship_core::UserId::mint();
         let email = format!("cli-device-{}@zeroship.test", Uuid::new_v4().simple());
         db.execute(
             "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
              VALUES ($1, $2::citext, NOW(), 'CLI Device User')",
-            &[&user_id, &email],
+            &[&user_id.as_str(), &email],
         )
         .await
         .expect("seed CLI device user");
@@ -174,7 +174,7 @@ impl Fixture {
             server,
             db,
             issuer,
-            user_id,
+            user_id: user_id.clone(),
         }
     }
 
@@ -234,7 +234,7 @@ impl Fixture {
                      status = 'approved' \
                  WHERE user_code = $3 AND provider = $4",
                 &[
-                    &self.user_id,
+                    &self.user_id.as_str(),
                     &Uuid::new_v4().to_string(),
                     &user_code,
                     &OP_PROVIDER,
@@ -282,7 +282,7 @@ impl Fixture {
                  FROM zeroship.sessions \
                  WHERE person_id = $1 AND revoked_at IS NULL \
                  ORDER BY created_at DESC LIMIT 1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await
             .expect("load live refresh family row");
@@ -304,7 +304,7 @@ impl Fixture {
                  WHERE person_id = $1 AND rotated_at IS NOT NULL \
                    AND idem_expires_at IS NOT NULL \
                  ORDER BY rotated_at DESC LIMIT 1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await
             .expect("load rotated predecessor row");
@@ -336,8 +336,8 @@ fn assert_platform_principal_token(fx: &Fixture, access_token: &str, scope: &str
         .expect("verify CLI access token");
     assert_eq!(
         claims.sub,
-        fx.user_id.to_string(),
-        "control keys authorization off the platform principal UUID, not a pairwise subject"
+        fx.user_id.as_str().to_owned(),
+        "control keys authorization off the platform principal id, not a pairwise subject"
     );
     assert_eq!(claims.aud, CONTROL_AUDIENCE);
     assert_eq!(claims.client_id, PLATFORM_CLI_CLIENT_ID);
@@ -530,7 +530,7 @@ async fn the_cli_device_grant_caps_scope_to_the_client_registration_only() {
             .query(
                 "SELECT COUNT(*)::BIGINT AS n FROM zeroship.principal_grants \
                  WHERE principal_id = $1",
-                &[&fx.user_id],
+                &[&fx.user_id.as_str()],
             )
             .await
             .expect("count principal grants");
@@ -589,7 +589,7 @@ async fn reusing_a_rotated_cli_refresh_token_kills_the_family_and_recalls_the_ac
         let fx = Fixture::boot(database).await;
         let (token, _device_code) = fx.login().await;
         let first_refresh = token.refresh_token.clone().expect("root refresh token");
-        let sub = fx.user_id.to_string();
+        let sub = fx.user_id.as_str().to_owned();
         assert_eq!(
             fx.revocation_marker(&sub).await,
             0,

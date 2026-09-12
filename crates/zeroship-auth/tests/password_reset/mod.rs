@@ -33,13 +33,13 @@ async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
                 "SELECT \
              (SELECT COUNT(*) FROM zeroship.idp_sessions WHERE user_id = $1) AS idp, \
              (SELECT COUNT(*) FROM zeroship.gateway_sessions WHERE user_id = $1) AS gateway",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
         assert_eq!(remaining.get::<_, i64>("idp"), 0);
         assert_eq!(remaining.get::<_, i64>("gateway"), 0);
-        let mut preserved: Vec<_> = sessions::list_by_user(&pg, other.id)
+        let mut preserved: Vec<_> = sessions::list_by_user(&pg, &other.id)
             .await
             .unwrap()
             .iter()
@@ -48,13 +48,16 @@ async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
         preserved.sort();
         let mut expected = vec![other_idp, other_gateway];
         expected.sort();
-        assert_eq!(preserved, expected, "another user's sessions remain listed as active");
+        assert_eq!(
+            preserved, expected,
+            "another user's sessions remain listed as active"
+        );
 
         let changes: i64 = pg
             .query_one(
                 "SELECT COUNT(*) FROM zeroship.audit_events WHERE actor_user_id = $1 \
              AND event_type = 'password_changed' AND outcome = 'success'",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -64,7 +67,7 @@ async fn reset_revokes_the_users_sessions_and_audits_the_effects() {
             .query_one(
                 "SELECT detail FROM zeroship.audit_events WHERE actor_user_id = $1 \
              AND event_type = 'sessions_revoked_after_password_reset' AND outcome = 'success'",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()
@@ -93,7 +96,10 @@ async fn reset_consumes_only_the_users_pending_magic_login_state() {
                 "INSERT INTO zeroship.magic_completions \
                  (csrf_nonce, code, email, login_challenge, expires_at) \
                  VALUES ($1, '123456', $2::citext, 'reset-login-challenge', NOW() + INTERVAL '5 minutes')",
-                &[&format!("completion-{}", person.id), &person.email],
+                &[
+                    &format!("completion-{}", person.id.as_str()),
+                    &person.email,
+                ],
             ).await.unwrap();
         }
         let reset = password_reset::issue(&pg, &user.email).await.unwrap();
@@ -109,7 +115,7 @@ async fn reset_consumes_only_the_users_pending_magic_login_state() {
         let detail: serde_json::Value = pg.query_one(
             "SELECT detail FROM zeroship.audit_events WHERE actor_user_id = $1 \
              AND event_type = 'sessions_revoked_after_password_reset' AND outcome = 'success'",
-            &[&user.id],
+            &[&user.id.as_str()],
         ).await.unwrap().get(0);
         assert_eq!(detail["magic_tokens"], 1);
         assert_eq!(detail["magic_completions"], 1);
@@ -178,7 +184,7 @@ async fn reset_revokes_app_anchors_and_marks_each_pairwise_family() {
         let epoch: i64 = pg
             .query_one(
                 "SELECT credential_version FROM zeroship.users WHERE id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap()

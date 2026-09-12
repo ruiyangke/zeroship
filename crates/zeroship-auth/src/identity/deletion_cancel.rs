@@ -44,6 +44,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::GenericClient;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -82,7 +83,7 @@ pub struct IssuedToken {
 /// outside it would make it true only when a handler remembered.
 pub async fn issue_in_transaction(
     conn: &(impl GenericClient + ?Sized),
-    user_id: uuid::Uuid,
+    user_id: &UserId,
     expires_at: chrono::DateTime<chrono::Utc>,
 ) -> Result<IssuedToken> {
     let mut token_bytes = [0u8; TOKEN_LEN_BYTES];
@@ -93,7 +94,7 @@ pub async fn issue_in_transaction(
     conn.execute(
         "UPDATE zeroship.magic_links SET consumed_at = NOW() \
          WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL",
-        &[&user_id, &PURPOSE],
+        &[&user_id.as_str(), &PURPOSE],
     )
     .await
     .map_err(|e| AuthError::Db(format!("deletion_cancel supersede previous: {e}")))?;
@@ -108,7 +109,7 @@ pub async fn issue_in_transaction(
             &CSRF_NONCE_SENTINEL,
             &PURPOSE,
             &expires_at,
-            &user_id,
+            &user_id.as_str(),
         ],
     )
     .await
@@ -120,7 +121,7 @@ pub async fn issue_in_transaction(
 /// The account a redeemed token restored.
 #[derive(Debug, Clone)]
 pub struct CancelledDeletion {
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     pub email: String,
 }
 
@@ -176,10 +177,14 @@ pub async fn redeem(
         )
         .await
         .map_err(|e| AuthError::Db(format!("deletion_cancel redeem: {e}")))?;
-    Ok(rows.first().map(|row| CancelledDeletion {
-        user_id: row.get("id"),
-        email: row.get("email"),
-    }))
+    rows.first()
+        .map(|row| {
+            Ok(CancelledDeletion {
+                user_id: crate::user_id::from_row(row, "id", "deletion cancel redeem")?,
+                email: row.get("email"),
+            })
+        })
+        .transpose()
 }
 
 fn sha256(input: &str) -> [u8; 32] {

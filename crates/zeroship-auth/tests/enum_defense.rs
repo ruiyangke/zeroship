@@ -171,8 +171,13 @@ async fn login_failure_responses_are_indistinguishable() {
     .expect("hash ok");
     pg_client
         .execute(
-            "INSERT INTO zeroship.users (email, name, password_hash) VALUES ($1::citext, $2, $3)",
-            &[&real_email.as_str(), &"Real User", &phc.as_str()],
+            "INSERT INTO zeroship.users (id, email, name, password_hash) VALUES ($1, $2::citext, $3, $4)",
+            &[
+                &zeroship_core::UserId::mint().as_str(),
+                &real_email.as_str(),
+                &"Real User",
+                &phc.as_str(),
+            ],
         )
         .await
         .expect("insert real user");
@@ -208,16 +213,30 @@ async fn login_failure_responses_are_indistinguishable() {
         let return_to = native_authorize_return_to(&test_client_id, test_redirect);
 
         // ── wrong password on existing user ──────────────────────────────
-        let (status_w, len_w, elapsed_w) =
-            one_failure(&http, &auth_base, &return_to, &real_email, "totally-wrong-password-xyz").await;
+        let (status_w, len_w, elapsed_w) = one_failure(
+            &http,
+            &auth_base,
+            &return_to,
+            &real_email,
+            "totally-wrong-password-xyz",
+        )
+        .await;
         wrong_pw_times.push(elapsed_w);
         wrong_pw_resps.push((status_w, len_w));
-        eprintln!("[enum_defense] iter {i}: wrong-pw status={status_w} body_len={len_w} t={elapsed_w:?}");
+        eprintln!(
+            "[enum_defense] iter {i}: wrong-pw status={status_w} body_len={len_w} t={elapsed_w:?}"
+        );
 
         // ── any password on a missing user ───────────────────────────────
         let ghost_email = format!("ghost-{}@zeroship.test", Uuid::new_v4().simple());
-        let (status_m, len_m, elapsed_m) =
-            one_failure(&http, &auth_base, &return_to, &ghost_email, "totally-wrong-password-xyz").await;
+        let (status_m, len_m, elapsed_m) = one_failure(
+            &http,
+            &auth_base,
+            &return_to,
+            &ghost_email,
+            "totally-wrong-password-xyz",
+        )
+        .await;
         missing_times.push(elapsed_m);
         missing_resps.push((status_m, len_m));
         eprintln!("[enum_defense] iter {i}: missing-user status={status_m} body_len={len_m} t={elapsed_m:?}");

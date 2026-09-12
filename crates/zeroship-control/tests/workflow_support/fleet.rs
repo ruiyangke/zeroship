@@ -18,6 +18,7 @@ use zeroship_core::service_assertion::{
     ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
 };
 use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+use zeroship_core::UserId;
 
 pub const CONTROL_KEY: &str = "test-control-key";
 const MASTER_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -363,7 +364,7 @@ impl Fleet {
         );
         let descriptor = fs::read(schema_work.join("generated/schema.runtime.json")).unwrap();
         pack(&bundle, &descriptor);
-        let owner = Uuid::new_v4();
+        let owner = UserId::mint();
         let output = Command::new(&binaries["dev-provision"])
             .args([
                 "--db",
@@ -377,7 +378,7 @@ impl Fleet {
             ])
             .arg(&bundle)
             .arg("--owner")
-            .arg(owner.to_string())
+            .arg(owner.as_str())
             .current_dir(fleet.work.path())
             .output()
             .expect("provision workflow app");
@@ -419,7 +420,7 @@ impl Fleet {
             &request,
             &policy,
             &ledger,
-            owner,
+            &owner,
         )
         .await
         .expect("apply workflow effect schema through the migration service");
@@ -435,7 +436,7 @@ impl Fleet {
             ])
             .arg(&bundle)
             .arg("--owner")
-            .arg(owner.to_string())
+            .arg(owner.as_str())
             .current_dir(fleet.work.path())
             .output()
             .unwrap();

@@ -43,6 +43,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::{Client, GenericClient};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
+use zeroship_core::UserId;
 
 use crate::advisory_lock::NS_USER;
 use crate::error::{AuthError, Result};
@@ -74,7 +75,7 @@ pub struct RedeemedToken {
 /// Result of a successful [`complete`] — the row's linked user.
 #[derive(Debug, Clone)]
 pub struct CompletedReset {
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     pub email: String,
 }
 
@@ -391,10 +392,14 @@ pub async fn complete(
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset complete: {e}")))?;
-    Ok(rows.first().map(|r| CompletedReset {
-        user_id: r.get("user_id"),
-        email: r.get("email"),
-    }))
+    rows.first()
+        .map(|row| {
+            Ok(CompletedReset {
+                user_id: crate::user_id::from_row(row, "user_id", "password reset complete")?,
+                email: row.get("email"),
+            })
+        })
+        .transpose()
 }
 
 fn sha256(s: &str) -> [u8; 32] {

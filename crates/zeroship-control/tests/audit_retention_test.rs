@@ -14,6 +14,7 @@ use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_control::cron::audit_retention;
 use zeroship_control::Registry;
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -41,12 +42,12 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     // app-scoped, and the global sweep only touches >retention rows.
     let conn = raw_conn(&url).await;
     // create_app binds an owner membership (FK → zeroship.users); seed one.
-    let owner_id = Uuid::new_v4();
+    let owner_id = UserId::mint();
     conn.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
         &[
-            &owner_id,
-            &format!("ret-owner-{owner_id}@zeroship.test"),
+            &owner_id.as_str(),
+            &format!("ret-owner-{}@zeroship.test", owner_id.as_str()),
             &"ret-owner",
         ],
     )
@@ -54,7 +55,12 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     .expect("seed owner user");
     let name = format!("ret-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let app = registry
-        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &owner_id,
+            None,
+        )
         .await
         .expect("create_app")
         .id;
@@ -85,7 +91,9 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
 
     // The sanctioned retention sweep (sets the GUC) removes the >12-month row
     // and keeps the fresh one.
-    audit_retention::tick(&registry, 12).await.expect("retention tick");
+    audit_retention::tick(&registry, 12)
+        .await
+        .expect("retention tick");
 
     let remaining: i64 = conn
         .query_one(

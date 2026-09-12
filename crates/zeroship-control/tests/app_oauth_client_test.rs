@@ -10,8 +10,10 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, ScopeDef};
 use zeroship_control::app_oauth_client::{self, client_id_for_app, redirect_uris_for_hosts};
-use zeroship_control::{AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore};
-use zeroship_core::config::OriginScheme;
+use zeroship_control::{
+    AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+};
+use zeroship_core::{config::OriginScheme, UserId};
 
 use crate::common;
 
@@ -28,13 +30,13 @@ async fn pg(db_url: &str) -> Client {
     client
 }
 
-async fn seed_owner(pg: &Client, label: &str) -> Uuid {
-    let owner_id = Uuid::new_v4();
+async fn seed_owner(pg: &Client, label: &str) -> UserId {
+    let owner_id = UserId::mint();
     pg.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
         &[
-            &owner_id,
-            &format!("{label}-{owner_id}@zeroship.test"),
+            &owner_id.as_str(),
+            &format!("{label}-{}@zeroship.test", owner_id.as_str()),
             &label,
         ],
     )
@@ -87,7 +89,12 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let owner_id = seed_owner(&raw, "oac-owner").await;
     let app_name = format!("zs-1d-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
+        .create_app(
+            &app_name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &owner_id,
+            None,
+        )
         .await
         .expect("create app");
     let app_id = app.id;
@@ -139,7 +146,9 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
         "control generated and stored a broker client_secret_hash"
     );
     assert_eq!(
-        oc[0].get::<_, Option<String>>("backchannel_logout_uri").as_deref(),
+        oc[0]
+            .get::<_, Option<String>>("backchannel_logout_uri")
+            .as_deref(),
         Some(format!("http://{apex}/oidc/backchannel-logout").as_str())
     );
     assert_eq!(oc[0].get::<_, Vec<String>>("redirect_uris"), want_uris);
@@ -238,7 +247,10 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     )
     .await
     .expect("sync redirect uris");
-    assert!(changed, "adding a host must update the native redirect mirror");
+    assert!(
+        changed,
+        "adding a host must update the native redirect mirror"
+    );
     let extended = redirect_uris(&raw, &client_id).await;
     assert_eq!(extended.len(), 4, "2 hosts x 2 paths");
     assert!(extended.iter().any(|uri| uri.contains(&custom)));
@@ -305,7 +317,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new("test-master-key-deadbeefcafebabe".to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -407,7 +419,12 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
         .get("n");
     assert_eq!(ext_count, 1, "archive retains the per-app OAuth binding");
     assert!(
-        !state.registry.get_routes().await.expect("routes").contains_key(&app_id),
+        !state
+            .registry
+            .get_routes()
+            .await
+            .expect("routes")
+            .contains_key(&app_id),
         "archive removes the app from the gateway projection"
     );
 
@@ -417,7 +434,12 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
         .await
         .expect("restore app")
         .expect("app exists");
-    assert!(state.registry.get_routes().await.expect("routes").contains_key(&app_id));
+    assert!(state
+        .registry
+        .get_routes()
+        .await
+        .expect("routes")
+        .contains_key(&app_id));
 
     drop(state);
     common::drain_pg().await;

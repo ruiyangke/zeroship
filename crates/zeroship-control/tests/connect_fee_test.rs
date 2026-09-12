@@ -27,11 +27,11 @@ use compio::net::{TcpListener, TcpStream};
 use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    stripe_handlers, AppState, EnvStore, Quota, RateLimiter, Registry,
-    SecretString, StripeStore,
+    stripe_handlers, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
@@ -114,7 +114,9 @@ async fn start_mock_stripe() -> MockStripe {
 
     compio::runtime::spawn(async move {
         loop {
-            let Ok((stream, _peer)) = listener.accept().await else { break };
+            let Ok((stream, _peer)) = listener.accept().await else {
+                break;
+            };
             let conn_state = Arc::clone(&accept_state);
             compio::runtime::spawn(async move {
                 serve_conn(stream, conn_state).await;
@@ -176,7 +178,12 @@ fn try_parse_request(buf: &[u8]) -> Option<(RecordedRequest, usize)> {
     }
     let body = String::from_utf8_lossy(&buf[body_start..body_start + content_length]).to_string();
     Some((
-        RecordedRequest { method, path, idempotency_key, body },
+        RecordedRequest {
+            method,
+            path,
+            idempotency_key,
+            body,
+        },
         body_start + content_length,
     ))
 }
@@ -213,9 +220,7 @@ fn handle_mock_request(req: &RecordedRequest, state: &Arc<Mutex<MockState>>) -> 
         return http_200_json(&format!(r#"{{"id":"{acct}","object":"account"}}"#));
     } else if req.path == "/v1/account_links" {
         let acct = form_param(&req.body, "account").unwrap_or_default();
-        format!(
-            r#"{{"object":"account_link","url":"https://connect.stripe.test/setup/{acct}"}}"#
-        )
+        format!(r#"{{"object":"account_link","url":"https://connect.stripe.test/setup/{acct}"}}"#)
     } else if req.path == "/v1/payment_intents" {
         format!(
             r#"{{"id":"pi_mock_{0}","object":"payment_intent","client_secret":"pi_mock_{0}_secret"}}"#,
@@ -333,7 +338,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -353,7 +358,10 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -371,7 +379,12 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         ),
     });
 
-    Fixture { state, mock, blob_root, deploy_tmp_dir }
+    Fixture {
+        state,
+        mock,
+        blob_root,
+        deploy_tmp_dir,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +392,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 // ---------------------------------------------------------------------------
 
 struct Caller {
-    user_id: Uuid,
+    user_id: UserId,
     token: String,
 }
 
@@ -416,15 +429,15 @@ async fn make_organization(state: &AppState, label: &str) -> String {
     organization_id
 }
 
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let id = Uuid::now_v7();
-    let email = format!("{label}-{}@zeroship.test", id.simple());
+async fn make_user(state: &AppState, label: &str) -> UserId {
+    let id = UserId::mint();
+    let email = format!("{label}-{}@zeroship.test", id.as_str());
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2, $3, NOW())",
-            &[&id, &email, &label.to_string()],
+            &[&id.as_str(), &email, &label.to_string()],
         )
         .await
         .expect("insert user");
@@ -436,10 +449,10 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
 /// It used to take an optional platform role and seed a `platform_admin_roles`
 /// row for the operator paths. That table and those roles are deleted, so every
 /// principal this mints is an ordinary organization.
-async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
+async fn issue_bearer(state: &AppState, user_id: &UserId, scope: &str) -> Caller {
     let _ = state;
     Caller {
-        user_id,
+        user_id: user_id.clone(),
         token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
     }
 }
@@ -457,16 +470,49 @@ async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
 async fn cleanup(state: &AppState, subjects: &[&str], callers: &[&Caller]) {
     let pg = &state.control_pg;
     for c in subjects {
-        let _ = pg.execute("DELETE FROM zeroship.organization_fee_policy WHERE organization_id = $1", &[c]).await;
-        let _ = pg.execute("DELETE FROM zeroship.payouts WHERE organization_id = $1", &[c]).await;
-        let _ = pg.execute("DELETE FROM zeroship.organization_account_history WHERE organization_id = $1", &[c]).await;
-        let _ = pg.execute("DELETE FROM zeroship.organization_accounts WHERE organization_id = $1", &[c]).await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.organization_fee_policy WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.payouts WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.organization_account_history WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.organization_accounts WHERE organization_id = $1",
+                &[c],
+            )
+            .await;
     }
     for caller in callers {
-        let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
+        let _ = pg
+            .execute(
+                "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
+                &[&caller.user_id.as_str()],
+            )
+            .await;
     }
-    let user_ids: Vec<uuid::Uuid> = callers.iter().map(|caller| caller.user_id).collect();
-    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&user_ids]).await;
+    let user_ids: Vec<&str> = callers
+        .iter()
+        .map(|caller| caller.user_id.as_str())
+        .collect();
+    let _ = pg
+        .execute(
+            "DELETE FROM zeroship.users WHERE id = ANY($1)",
+            &[&user_ids],
+        )
+        .await;
 }
 
 // ===========================================================================
@@ -484,7 +530,7 @@ async fn onboard_returns_real_account_link() {
     // which a token can only carry through a seat.
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -513,7 +559,10 @@ async fn onboard_returns_real_account_link() {
         "onboard must POST /v1/account_links"
     );
     // The created account carries metadata.organization_id (the ownership signal).
-    let create_body = fx.mock.first_body("POST", "/v1/accounts").expect("account create");
+    let create_body = fx
+        .mock
+        .first_body("POST", "/v1/accounts")
+        .expect("account create");
     assert!(
         create_body.contains(&organization.to_string().replace('-', "%2D"))
             || create_body.contains(&organization.to_string()),
@@ -543,13 +592,19 @@ async fn callback_rejects_acct_not_owned_by_creator() {
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
     let attacker = make_user(&fx.state, "attacker").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                ),
         ),
     )
     .await;
@@ -575,10 +630,12 @@ async fn callback_rejects_acct_not_owned_by_creator() {
         .lock()
         .unwrap()
         .accounts
-        .insert(foreign_acct.clone(), attacker.to_string());
+        .insert(foreign_acct.clone(), attacker.as_str().to_string());
 
     let forge = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "stripe_account_id": foreign_acct }))
         .to_request();
@@ -607,14 +664,20 @@ async fn callback_accepts_owned_account_and_persists_flags() {
     // which a token can only carry through a seat.
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                ),
         ),
     )
     .await;
@@ -623,11 +686,16 @@ async fn callback_accepts_owned_account_and_persists_flags() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
 
     // Callback with NO body acct hint — server retrieves + verifies the stored acct.
     let cb = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
@@ -670,14 +738,23 @@ async fn checkout_stamps_server_fee_not_client_value() {
     // which a token can only carry through a seat.
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
         ),
     )
     .await;
@@ -688,9 +765,14 @@ async fn checkout_stamps_server_fee_not_client_value() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
     let cb = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
@@ -700,7 +782,9 @@ async fn checkout_stamps_server_fee_not_client_value() {
     // client tries to set application_fee_amount=1 in the body — it has no wire
     // path and MUST be ignored.
     let checkout = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({
             "amount_cents": 20000,
@@ -721,7 +805,10 @@ async fn checkout_stamps_server_fee_not_client_value() {
 
     // FAITHFUL: assert the REAL Stripe wire carried application_fee_amount=3000,
     // transfer_data[destination]=acct_…, and amount=20000 — NOT the client's 1.
-    let pi_body = fx.mock.first_body("POST", "/v1/payment_intents").expect("PI created");
+    let pi_body = fx
+        .mock
+        .first_body("POST", "/v1/payment_intents")
+        .expect("PI created");
     assert!(
         pi_body.contains("application_fee_amount=3000"),
         "the Connect charge must carry the SERVER fee (3000), got: {pi_body}"
@@ -730,7 +817,10 @@ async fn checkout_stamps_server_fee_not_client_value() {
         !pi_body.contains("application_fee_amount=1"),
         "the client-supplied fee (1) must be IGNORED, got: {pi_body}"
     );
-    assert!(pi_body.contains("amount=20000"), "charge amount, got: {pi_body}");
+    assert!(
+        pi_body.contains("amount=20000"),
+        "charge amount, got: {pi_body}"
+    );
     assert!(
         pi_body.contains("transfer_data%5Bdestination%5D=acct_")
             || pi_body.contains("transfer_data[destination]=acct_"),
@@ -756,15 +846,24 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
     let op = make_user(&fx.state, "operator").await;
-    let creator_caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
-    let op_caller = issue_bearer(&fx.state, op, "billing:write").await;
+    let creator_caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    let op_caller = issue_bearer(&fx.state, &op, "billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
         ),
     )
     .await;
@@ -774,9 +873,14 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", creator_caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
     let cb = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
@@ -804,7 +908,9 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
 
     // Charge $200 → 25% = 5000, capped to 4000.
     let checkout = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", creator_caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "c2" }))
         .to_request();
@@ -812,7 +918,11 @@ async fn checkout_stamps_the_stored_fee_policy_with_its_cap() {
     assert_eq!(resp.status(), StatusCode::OK);
     let bytes = test::read_body(resp).await;
     let body: serde_json::Value = serde_json::from_slice(&bytes).expect("response is JSON");
-    assert_eq!(body["application_fee_cents"], serde_json::json!(4000), "25% capped at 4000");
+    assert_eq!(
+        body["application_fee_cents"],
+        serde_json::json!(4000),
+        "25% capped at 4000"
+    );
 
     cleanup(&fx.state, &[organization], &[&creator_caller, &op_caller]).await;
 
@@ -835,16 +945,25 @@ async fn checkout_rejected_when_charges_not_enabled() {
     // which a token can only carry through a seat.
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
     // The account exists but onboarding is incomplete: charges are NOT enabled.
     fx.mock.set_flags(false, false, false);
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
         ),
     )
     .await;
@@ -854,11 +973,16 @@ async fn checkout_rejected_when_charges_not_enabled() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
 
     // Callback verifies + persists the (false) flags from Stripe's truth.
     let cb = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
@@ -873,9 +997,13 @@ async fn checkout_rejected_when_charges_not_enabled() {
 
     // Checkout must be REJECTED with 400 before any PI POST.
     let checkout = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", caller.bearer())
-        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-x" }))
+        .set_json(
+            &serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-x" }),
+        )
         .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown at the end of this test.
@@ -920,15 +1048,24 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
     // which a token can only carry through a seat.
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
         ),
     )
     .await;
@@ -937,9 +1074,14 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
     let cb = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
@@ -947,7 +1089,9 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
 
     // First checkout with NO cart_id, amount $200.
     let c1 = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd" }))
         .to_request();
@@ -962,7 +1106,9 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
 
     // Second checkout with NO cart_id, DIFFERENT amount $50.
     let c2 = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd" }))
         .to_request();
@@ -976,20 +1122,31 @@ async fn checkout_rejects_empty_cart_id_no_stale_replay() {
         .into_iter()
         .filter(|r| r.path == "/v1/payment_intents")
         .count();
-    assert_eq!(pis, 0, "rejected empty-cart_id checkouts must not POST any PaymentIntent (M2)");
+    assert_eq!(
+        pis, 0,
+        "rejected empty-cart_id checkouts must not POST any PaymentIntent (M2)"
+    );
 
     // And an EXPLICIT cart_id still works AND folds amount into the idempotency
     // key — two carts with different amounts get DISTINCT idempotency keys.
     let c3 = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", caller.bearer())
-        .set_json(&serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-A" }))
+        .set_json(
+            &serde_json::json!({ "amount_cents": 20000, "currency": "usd", "cart_id": "cart-A" }),
+        )
         .to_request();
     assert_eq!(test::call_service(&svc, c3).await.status(), StatusCode::OK);
     let c4 = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/connect/checkout"))
+        .uri(&format!(
+            "/api/organizations/{organization}/connect/checkout"
+        ))
         .header("authorization", caller.bearer())
-        .set_json(&serde_json::json!({ "amount_cents": 5000, "currency": "usd", "cart_id": "cart-A" }))
+        .set_json(
+            &serde_json::json!({ "amount_cents": 5000, "currency": "usd", "cart_id": "cart-A" }),
+        )
         .to_request();
     assert_eq!(test::call_service(&svc, c4).await.status(), StatusCode::OK);
 
@@ -1026,15 +1183,24 @@ async fn checkout_rejects_bad_currency() {
     // which a token can only carry through a seat.
     let owner = make_user(&fx.state, "owner").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
+    let caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
     fx.mock.set_flags(true, true, true);
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
-                .service(web::resource("/stripe/callback").route(web::post().to(stripe_handlers::callback)))
-                .service(web::resource("/connect/checkout").route(web::post().to(stripe_handlers::connect_checkout))),
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
+                .service(
+                    web::resource("/stripe/callback")
+                        .route(web::post().to(stripe_handlers::callback)),
+                )
+                .service(
+                    web::resource("/connect/checkout")
+                        .route(web::post().to(stripe_handlers::connect_checkout)),
+                ),
         ),
     )
     .await;
@@ -1043,9 +1209,14 @@ async fn checkout_rejects_bad_currency() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
     let cb = test::TestRequest::post()
-        .uri(&format!("/api/organizations/{organization}/stripe/callback"))
+        .uri(&format!(
+            "/api/organizations/{organization}/stripe/callback"
+        ))
         .header("authorization", caller.bearer())
         .set_json(&serde_json::json!({}))
         .to_request();
@@ -1072,7 +1243,6 @@ async fn checkout_rejects_bad_currency() {
     common::drain_pg().await;
 }
 
-
 /// `GET /api/organizations/{id}/earnings` and `DELETE /api/organizations/{id}/stripe` are
 /// `earnings` and `unlink` are gated by a SEAT at the organization in the path.
 ///
@@ -1094,13 +1264,16 @@ async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
     let owner = make_user(&fx.state, "owner").await;
     let other = make_user(&fx.state, "other").await;
     common::seat_organization_member(&fx.state.control_pg, organization, &owner, "owner").await;
-    let owner_caller = issue_bearer(&fx.state, owner, "billing:read billing:write").await;
-    let other_caller = issue_bearer(&fx.state, other, "billing:read billing:write").await;
+    let owner_caller = issue_bearer(&fx.state, &owner, "billing:read billing:write").await;
+    let other_caller = issue_bearer(&fx.state, &other, "billing:read billing:write").await;
 
     let svc = test::init_service(
         web::App::new().state(fx.state.clone()).service(
             web::scope("/api/organizations/{id}")
-                .service(web::resource("/stripe/onboard").route(web::post().to(stripe_handlers::onboard)))
+                .service(
+                    web::resource("/stripe/onboard")
+                        .route(web::post().to(stripe_handlers::onboard)),
+                )
                 .service(web::resource("/earnings").route(web::get().to(stripe_handlers::earnings)))
                 .service(web::resource("/stripe").route(web::delete().to(stripe_handlers::unlink))),
         ),
@@ -1113,7 +1286,10 @@ async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
         .uri(&format!("/api/organizations/{organization}/stripe/onboard"))
         .header("authorization", owner_caller.bearer())
         .to_request();
-    assert_eq!(test::call_service(&svc, onboard).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&svc, onboard).await.status(),
+        StatusCode::OK
+    );
 
     // The owner reads their OWN earnings.
     let status = test::call_service(
@@ -1125,7 +1301,11 @@ async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::OK, "a organization reads their own earnings");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a organization reads their own earnings"
+    );
 
     // A DIFFERENT organization, same request, is refused.
     let status = test::call_service(
@@ -1137,7 +1317,11 @@ async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::FORBIDDEN, "nobody reads another organization's earnings");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "nobody reads another organization's earnings"
+    );
 
     // Unlink: the stranger first, so a wrongly-allowed call would be caught by
     // the owner's own unlink answering 404 "not linked" afterwards.
@@ -1150,7 +1334,11 @@ async fn earnings_and_unlink_require_a_seat_at_the_path_organization() {
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::FORBIDDEN, "nobody unlinks another organization's account");
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "nobody unlinks another organization's account"
+    );
 
     let status = test::call_service(
         &svc,

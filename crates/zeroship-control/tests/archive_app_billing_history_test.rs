@@ -12,6 +12,7 @@ use uuid::Uuid;
 use zeroship_bundle::Manifest;
 use zeroship_control::registry::RegistryError;
 use zeroship_control::Registry;
+use zeroship_core::UserId;
 
 fn db_url() -> String {
     common::require_control_db()
@@ -54,16 +55,16 @@ async fn archive_migration_removes_hard_delete_capability_and_grants_only_the_wo
     common::drain_pg().await;
 }
 
-async fn seed_owner_and_plan(client: &Client) -> (Uuid, String) {
+async fn seed_owner_and_plan(client: &Client) -> (UserId, String) {
     let email = format!("archive-{}@test.invalid", Uuid::new_v4().simple());
-    let owner: Uuid = client
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'archive') RETURNING id",
-            &[&email],
+    let owner = UserId::mint();
+    client
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, 'archive')",
+            &[&owner.as_str(), &email],
         )
         .await
-        .expect("insert user")[0]
-        .get("id");
+        .expect("insert user");
     let plan_id = format!("pln_archive_{}", Uuid::new_v4().simple());
     client
         .execute(
@@ -99,7 +100,10 @@ async fn archive_preserves_finalized_invoice_history() {
     // `create_app` provisioned - read back off the row rather than assumed, so
     // the invoice below is attached to the app whose archival is under test.
     let organization: String = client
-        .query("SELECT organization_id FROM zeroship.apps WHERE id = $1", &[&app.id])
+        .query(
+            "SELECT organization_id FROM zeroship.apps WHERE id = $1",
+            &[&app.id],
+        )
         .await
         .expect("read app organization")[0]
         .get("organization_id");
@@ -410,7 +414,7 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
                  applied_at, descriptor_sha256) \
              VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
                      '[]'::jsonb, $3, now(), $4)",
-            &[&app.id, &Uuid::now_v7(), &owner, &descriptor_hash],
+            &[&app.id, &Uuid::now_v7(), &owner.as_str(), &descriptor_hash],
         )
         .await
         .expect("record applied schema descriptor");

@@ -65,7 +65,7 @@ struct Fixture {
     cfg: Arc<AuthConfig>,
     pg: Arc<compio_postgres::Client>,
     mailer: Arc<CapturingMailer>,
-    user_id: Uuid,
+    user_id: zeroship_core::UserId,
     email: String,
     session_id: Uuid,
 }
@@ -95,7 +95,7 @@ impl Fixture {
         let session = sessions::create(
             &pg,
             &CreateSession {
-                user_id: user.id,
+                user_id: user.id.clone(),
                 auth_method: "password",
                 amr: vec!["pwd".to_owned()],
                 acr: None,
@@ -125,15 +125,15 @@ impl Fixture {
     #[allow(clippy::future_not_send)]
     async fn seed_confirmed(&self) -> Vec<u8> {
         let secret = totp::generate_secret();
-        let ct = totp::encrypt_secret(&self.key(), self.user_id, &secret).expect("encrypt");
+        let ct = totp::encrypt_secret(&self.key(), &self.user_id, &secret).expect("encrypt");
         assert!(
-            totp_store::enroll(&self.pg, self.user_id, &ct, false)
+            totp_store::enroll(&self.pg, &self.user_id, &ct, false)
                 .await
                 .expect("seed enroll"),
             "seeding a pending credential must write"
         );
         let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-        totp_store::confirm(&self.pg, self.user_id, &hashes)
+        totp_store::confirm(&self.pg, &self.user_id, &hashes)
             .await
             .expect("seed confirm");
         secret
@@ -192,7 +192,7 @@ impl Fixture {
 
     #[allow(clippy::future_not_send)]
     async fn is_enabled(&self) -> bool {
-        totp_store::is_enabled(&self.pg, self.user_id)
+        totp_store::is_enabled(&self.pg, &self.user_id)
             .await
             .expect("is_enabled")
     }
@@ -214,12 +214,10 @@ impl Fixture {
 
     #[allow(clippy::future_not_send)]
     async fn cleanup(self) {
-        for sql in [
-            "DELETE FROM zeroship.rate_limits WHERE bucket_key = $1",
-        ] {
+        for sql in ["DELETE FROM zeroship.rate_limits WHERE bucket_key = $1"] {
             let _ = self
                 .pg
-                .execute(sql, &[&format!("totp:verify:{}", self.user_id)])
+                .execute(sql, &[&format!("totp:verify:{}", self.user_id.as_str())])
                 .await;
         }
         for sql in [
@@ -229,7 +227,7 @@ impl Fixture {
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
             "DELETE FROM zeroship.users WHERE id = $1",
         ] {
-            let _ = self.pg.execute(sql, &[&self.user_id]).await;
+            let _ = self.pg.execute(sql, &[&self.user_id.as_str()]).await;
         }
     }
 }
@@ -275,11 +273,22 @@ async fn disable_notifies_the_account_holder_and_revokes_nothing() {
 
     let (status, body) = fx.post("disable", None, Some(FIXTURE_PASSWORD)).await;
 
-    assert_eq!(status, 200, "password re-auth must disable 2FA, got {status} {body}");
-    assert!(!fx.is_enabled().await, "2FA must be off after a successful disable");
+    assert_eq!(
+        status, 200,
+        "password re-auth must disable 2FA, got {status} {body}"
+    );
+    assert!(
+        !fx.is_enabled().await,
+        "2FA must be off after a successful disable"
+    );
 
     let sent = fx.mailer.sent();
-    assert_eq!(sent.len(), 1, "exactly one removal notice, got {}", sent.len());
+    assert_eq!(
+        sent.len(),
+        1,
+        "exactly one removal notice, got {}",
+        sent.len()
+    );
     assert_is_removal_notice(&sent[0], &fx.email);
 
     assert!(
@@ -303,7 +312,10 @@ async fn refused_disable_sends_no_notice() {
 
     let (status, body) = fx.post("disable", None, None).await;
 
-    assert_eq!(status, 401, "a cookie-only disable must be refused, got {status} {body}");
+    assert_eq!(
+        status, 401,
+        "a cookie-only disable must be refused, got {status} {body}"
+    );
     assert!(fx.is_enabled().await, "a refused disable leaves 2FA armed");
     assert!(
         fx.mailer.sent().is_empty(),
@@ -328,7 +340,10 @@ async fn enroll_over_a_confirmed_credential_notifies() {
 
     let (status, body) = fx.post("enroll", None, Some(FIXTURE_PASSWORD)).await;
 
-    assert_eq!(status, 200, "password re-auth must be accepted, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "password re-auth must be accepted, got {status} {body}"
+    );
     assert!(
         !fx.is_enabled().await,
         "re-enrollment resets the credential to pending, so 2FA is off"
@@ -357,7 +372,10 @@ async fn first_enrollment_sends_no_notice() {
 
     let (status, body) = fx.post("enroll", None, None).await;
 
-    assert_eq!(status, 200, "a first enrollment needs no re-auth, got {status} {body}");
+    assert_eq!(
+        status, 200,
+        "a first enrollment needs no re-auth, got {status} {body}"
+    );
     assert!(
         fx.mailer.sent().is_empty(),
         "a first enrollment removes nothing and must send no notice"
