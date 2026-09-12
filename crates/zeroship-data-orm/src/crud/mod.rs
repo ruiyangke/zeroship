@@ -26,15 +26,15 @@ mod identity;
 pub(crate) mod insert;
 mod predicate;
 pub mod read_pipeline;
-mod resolved;
-mod update_validation;
+pub(crate) mod resolved;
 mod update;
+mod update_validation;
 pub mod upsert;
 mod write_pipeline;
 
 #[cfg(test)]
 pub use write_pipeline::{
-    WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
+    reset_write_path_counters_for_tests, write_path_counters_for_tests, WritePathCounters,
 };
 
 /// Execute a row-returning mutation, emit its change event and process the result.
@@ -991,8 +991,12 @@ pub fn plan_restore_one(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
-        let marker = soft_delete_column(&schema)?
-            .ok_or_else(|| DbError::validation("restore_not_supported", "collection has no soft-delete column"))?;
+        let marker = soft_delete_column(&schema)?.ok_or_else(|| {
+            DbError::validation(
+                "restore_not_supported",
+                "collection has no soft-delete column",
+            )
+        })?;
         delete::build_lifecycle(
             binding.schema(),
             collection,
@@ -1021,8 +1025,12 @@ pub fn plan_restore_many(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
-        let marker = soft_delete_column(&schema)?
-            .ok_or_else(|| DbError::validation("restore_not_supported", "collection has no soft-delete column"))?;
+        let marker = soft_delete_column(&schema)?.ok_or_else(|| {
+            DbError::validation(
+                "restore_not_supported",
+                "collection has no soft-delete column",
+            )
+        })?;
         delete::build_lifecycle(
             binding.schema(),
             collection,

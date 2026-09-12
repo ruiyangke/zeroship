@@ -100,6 +100,8 @@ pub(crate) fn build_upsert_with_registration(
 
 pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements {
     Requirements {
+        relational_reads: false,
+        aggregate_reads: false,
         explicit_conflict_target: true,
         conditional_conflict_update: guard_identity,
         returning: true,

@@ -1,8 +1,8 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
     statement::{
-        ArithmeticOperator, ArrayOperator, Column, Expression, MutationScope, ResolvedPredicate,
-        Statement, StorageType, Table,
+        ArithmeticOperator, ArrayOperator, Column, Expression, MutationScope, ResolvedOperand,
+        ResolvedPredicate, ResolvedPredicateValue, Statement, StorageType, Table,
     },
     CompareOp, MembershipOp, PatternOp,
 };
@@ -10,6 +10,8 @@ use crate::value::Value;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SqlSupport {
+    pub relational_reads: bool,
+    pub aggregate_reads: bool,
     pub explicit_conflict_target: bool,
     pub conditional_conflict_update: bool,
     pub returning: bool,
@@ -21,6 +23,8 @@ pub struct SqlSupport {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Requirements {
+    pub relational_reads: bool,
+    pub aggregate_reads: bool,
     pub explicit_conflict_target: bool,
     pub conditional_conflict_update: bool,
     pub returning: bool,
@@ -33,6 +37,26 @@ pub struct Requirements {
 impl Requirements {
     pub fn for_statement(statement: &Statement) -> Self {
         match statement {
+            Statement::Select(select) => {
+                let parts = select.parts();
+                Self {
+                    relational_reads: !parts.joins.is_empty(),
+                    aggregate_reads: parts.projection.iter().any(|selected| {
+                        matches!(selected.expression, ResolvedOperand::Aggregate { .. })
+                    }) || !parts.group_by.is_empty()
+                        || predicate_has_aggregate(&parts.having),
+                    bind_parameters: parts
+                        .joins
+                        .iter()
+                        .map(|join| predicate_binds(&join.on))
+                        .sum::<usize>()
+                        + predicate_binds(&parts.predicate)
+                        + predicate_binds(&parts.having)
+                        + usize::from(parts.limit.is_some())
+                        + usize::from(parts.offset.is_some()),
+                    ..Self::default()
+                }
+            }
             Statement::Insert(insert) => {
                 let parts = insert.parts();
                 let values = parts.rows.iter().flatten();
@@ -53,6 +77,8 @@ impl Requirements {
                 let parts = upsert.parts();
                 let values = parts.insert.iter().chain(&parts.update).map(|a| &a.value);
                 Self {
+                    relational_reads: false,
+                    aggregate_reads: false,
                     explicit_conflict_target: true,
                     conditional_conflict_update: parts.condition.is_some(),
                     returning: !parts.returning.is_empty(),
@@ -90,6 +116,28 @@ impl Requirements {
     }
 }
 
+fn predicate_has_aggregate(predicate: &ResolvedPredicate) -> bool {
+    match predicate {
+        ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
+            children.iter().any(predicate_has_aggregate)
+        }
+        ResolvedPredicate::Not(child) => predicate_has_aggregate(child),
+        ResolvedPredicate::Compare { lhs, rhs, .. } => {
+            matches!(lhs, ResolvedOperand::Aggregate { .. })
+                || matches!(
+                    rhs,
+                    ResolvedPredicateValue::Operand(ResolvedOperand::Aggregate { .. })
+                )
+        }
+        ResolvedPredicate::Membership { lhs, .. }
+        | ResolvedPredicate::Pattern { lhs, .. }
+        | ResolvedPredicate::IsNull { operand: lhs, .. } => {
+            matches!(lhs, ResolvedOperand::Aggregate { .. })
+        }
+        ResolvedPredicate::Const(_) => false,
+    }
+}
+
 fn expression_binds(expression: &Expression) -> usize {
     usize::from(matches!(
         expression,
@@ -106,7 +154,10 @@ fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
             children.iter().map(predicate_binds).sum()
         }
         ResolvedPredicate::Not(child) => predicate_binds(child),
-        ResolvedPredicate::Compare { .. } | ResolvedPredicate::Pattern { .. } => 1,
+        ResolvedPredicate::Compare { rhs, .. } => {
+            usize::from(matches!(rhs, ResolvedPredicateValue::Bind { .. }))
+        }
+        ResolvedPredicate::Pattern { escape, .. } => 1 + usize::from(escape.is_some()),
         ResolvedPredicate::Membership { values, .. } => values.len(),
         ResolvedPredicate::IsNull { .. } | ResolvedPredicate::Const(_) => 0,
     }
@@ -171,6 +222,18 @@ pub(crate) fn check(
     effective: &SqlSupport,
 ) -> Result<(), CompileError> {
     for (requirement, available, implementation, name) in [
+        (
+            required.relational_reads,
+            effective.relational_reads,
+            implemented.relational_reads,
+            "relational reads",
+        ),
+        (
+            required.aggregate_reads,
+            effective.aggregate_reads,
+            implemented.aggregate_reads,
+            "aggregate reads",
+        ),
         (
             required.explicit_conflict_target,
             effective.explicit_conflict_target,
@@ -242,6 +305,7 @@ pub(crate) fn compile(
         effective,
     )?;
     match statement {
+        Statement::Select(select) => compile_select(syntax, effective, select),
         Statement::Insert(insert) => {
             insert.validate()?;
             let parts = insert.into_parts();
@@ -379,6 +443,84 @@ pub(crate) fn compile(
     }
 }
 
+fn compile_select(
+    syntax: Syntax,
+    effective: &SqlSupport,
+    select: crate::sql::statement::SelectStatement,
+) -> Result<CompiledQuery, CompileError> {
+    select.validate()?;
+    let parts = select.into_parts();
+    let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    writer.sql.push_str("SELECT ");
+    if parts.distinct {
+        writer.sql.push_str("DISTINCT ");
+    }
+    for (index, selected) in parts.projection.into_iter().enumerate() {
+        comma(&mut writer, index);
+        write_operand(&mut writer, &selected.expression);
+        writer.sql.push_str(" AS ");
+        writer.identifier(selected.alias.as_str());
+    }
+    writer.sql.push_str(" FROM ");
+    write_table_reference(&mut writer, &parts.table);
+    for join in parts.joins {
+        writer.sql.push_str(match join.kind {
+            crate::sql::JoinKind::Inner => " INNER JOIN ",
+            crate::sql::JoinKind::Left => " LEFT JOIN ",
+        });
+        write_table_reference(&mut writer, &join.table);
+        writer.sql.push_str(" ON ");
+        write_predicate(&mut writer, syntax, join.on)?;
+    }
+    if !matches!(parts.predicate, ResolvedPredicate::Const(true)) {
+        writer.sql.push_str(" WHERE ");
+        write_predicate(&mut writer, syntax, parts.predicate)?;
+    }
+    if !parts.group_by.is_empty() {
+        writer.sql.push_str(" GROUP BY ");
+        for (index, expression) in parts.group_by.iter().enumerate() {
+            comma(&mut writer, index);
+            write_operand(&mut writer, expression);
+        }
+    }
+    if !matches!(parts.having, ResolvedPredicate::Const(true)) {
+        writer.sql.push_str(" HAVING ");
+        write_predicate(&mut writer, syntax, parts.having)?;
+    }
+    if !parts.order_by.is_empty() {
+        writer.sql.push_str(" ORDER BY ");
+        for (index, order) in parts.order_by.iter().enumerate() {
+            comma(&mut writer, index);
+            write_operand(&mut writer, &order.expression);
+            writer.sql.push_str(match order.direction {
+                crate::sql::Direction::Ascending => " ASC",
+                crate::sql::Direction::Descending => " DESC",
+            });
+            writer.sql.push_str(match order.nulls {
+                crate::sql::NullOrder::First => " NULLS FIRST",
+                crate::sql::NullOrder::Last => " NULLS LAST",
+            });
+        }
+    }
+    if let Some(limit) = parts.limit {
+        writer.sql.push_str(" LIMIT ");
+        writer.write_param(Value::from(limit))?;
+    }
+    if let Some(offset) = parts.offset {
+        writer.sql.push_str(" OFFSET ");
+        writer.write_param(Value::from(offset))?;
+    }
+    Ok(writer.finish())
+}
+
+fn write_table_reference(writer: &mut SqlWriter, table: &Table) {
+    write_table(writer, table);
+    if let Some(alias) = table.alias() {
+        writer.sql.push_str(" AS ");
+        writer.identifier(alias.as_str());
+    }
+}
+
 fn write_mutation_predicate(
     writer: &mut SqlWriter,
     syntax: Syntax,
@@ -432,8 +574,8 @@ fn write_predicate(
             write_predicate(writer, syntax, *child)?;
             writer.sql.push(')');
         }
-        ResolvedPredicate::Compare { column, op, value } => {
-            writer.identifier(column.name().as_str());
+        ResolvedPredicate::Compare { lhs, op, rhs } => {
+            write_operand(writer, &lhs);
             writer.sql.push_str(match op {
                 CompareOp::Eq => " = ",
                 CompareOp::Ne => " != ",
@@ -442,10 +584,16 @@ fn write_predicate(
                 CompareOp::Gt => " > ",
                 CompareOp::Gte => " >= ",
             });
-            write_bind(writer, syntax, column.storage(), value)?;
+            match rhs {
+                ResolvedPredicateValue::Operand(rhs) => write_operand(writer, &rhs),
+                ResolvedPredicateValue::Bind { storage, value } => {
+                    write_bind(writer, syntax, storage, value)?
+                }
+            }
         }
-        ResolvedPredicate::Membership { column, op, values } => {
-            writer.identifier(column.name().as_str());
+        ResolvedPredicate::Membership { lhs, op, values } => {
+            let storage = lhs.storage()?;
+            write_operand(writer, &lhs);
             writer.sql.push_str(if op == MembershipOp::In {
                 " IN ("
             } else {
@@ -453,12 +601,17 @@ fn write_predicate(
             });
             for (index, value) in values.into_iter().enumerate() {
                 comma(writer, index);
-                write_bind(writer, syntax, column.storage(), value)?;
+                write_bind(writer, syntax, storage, value)?;
             }
             writer.sql.push(')');
         }
-        ResolvedPredicate::Pattern { column, op, value } => {
-            writer.identifier(column.name().as_str());
+        ResolvedPredicate::Pattern {
+            lhs,
+            op,
+            value,
+            escape,
+        } => {
+            write_operand(writer, &lhs);
             let insensitive = matches!(op, PatternOp::ILike | PatternOp::NotILike);
             let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
             if negated {
@@ -472,18 +625,51 @@ fn write_predicate(
             });
             writer.sql.push(' ');
             writer.write_param(Value::from(value))?;
+            if let Some(escape) = escape {
+                writer.sql.push_str(" ESCAPE ");
+                writer.write_param(Value::from(escape))?;
+            }
             if insensitive {
                 writer.sql.push_str(syntax.insensitive_like_suffix);
             }
         }
-        ResolvedPredicate::IsNull { column, negated } => {
-            writer.identifier(column.name().as_str());
+        ResolvedPredicate::IsNull { operand, negated } => {
+            write_operand(writer, &operand);
             writer
                 .sql
                 .push_str(if negated { " IS NOT NULL" } else { " IS NULL" });
         }
     }
     Ok(())
+}
+
+fn write_operand(writer: &mut SqlWriter, operand: &ResolvedOperand) {
+    match operand {
+        ResolvedOperand::Column(column) => {
+            if let Some(alias) = column.table().alias() {
+                writer.identifier(alias.as_str());
+                writer.sql.push('.');
+            }
+            writer.identifier(column.name().as_str());
+        }
+        ResolvedOperand::Aggregate {
+            function,
+            column,
+            distinct,
+        } => {
+            writer.sql.push_str(function.as_sql());
+            writer.sql.push('(');
+            if *distinct {
+                writer.sql.push_str("DISTINCT ");
+            }
+            if let Some(column) = column {
+                write_operand(writer, &ResolvedOperand::Column(column.clone()));
+            } else {
+                writer.sql.push('*');
+            }
+            writer.sql.push(')');
+        }
+    }
 }
 
 fn write_connective(

@@ -4,7 +4,9 @@ use crate::{
         compile::{self, QueryError},
         predicate::{CompareOp, MembershipOp, PatternOp},
         registration::SqlRegistration,
-        statement::{Column, ResolvedPredicate, StorageType},
+        statement::{
+            Column, ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, StorageType,
+        },
     },
     value::Value,
 };
@@ -121,13 +123,16 @@ fn condition(
                 ));
             }
             return Ok(ResolvedPredicate::IsNull {
-                column,
+                operand: ResolvedOperand::Column(column),
                 negated: op == CompareOp::Ne,
             });
         }
         return Ok(ResolvedPredicate::Compare {
-            value: encode(field, definition, column.storage(), value, registration)?,
-            column,
+            rhs: ResolvedPredicateValue::Bind {
+                storage: column.storage(),
+                value: encode(field, definition, column.storage(), value, registration)?,
+            },
+            lhs: ResolvedOperand::Column(column),
             op,
         });
     }
@@ -151,13 +156,16 @@ fn condition(
                 .collect::<Result<Vec<_>, _>>()?;
             if values.is_empty() {
                 return Ok(if saw_null {
-                    ResolvedPredicate::IsNull { column, negated }
+                    ResolvedPredicate::IsNull {
+                        operand: ResolvedOperand::Column(column),
+                        negated,
+                    }
                 } else {
                     ResolvedPredicate::Const(negated)
                 });
             }
             let membership = ResolvedPredicate::Membership {
-                column: column.clone(),
+                lhs: ResolvedOperand::Column(column.clone()),
                 op: if negated {
                     MembershipOp::NotIn
                 } else {
@@ -168,7 +176,10 @@ fn condition(
             if !saw_null {
                 return Ok(membership);
             }
-            let null = ResolvedPredicate::IsNull { column, negated };
+            let null = ResolvedPredicate::IsNull {
+                operand: ResolvedOperand::Column(column),
+                negated,
+            };
             Ok(if negated {
                 ResolvedPredicate::and(vec![membership, null])
             } else {
@@ -176,7 +187,7 @@ fn condition(
             })
         }
         "$exists" => Ok(ResolvedPredicate::IsNull {
-            column,
+            operand: ResolvedOperand::Column(column),
             negated: value
                 .as_bool()
                 .ok_or_else(|| invalid("$exists must be a boolean"))?,
@@ -190,13 +201,14 @@ fn condition(
                 return Err(invalid("a LIKE pattern must not contain a NUL byte"));
             }
             Ok(ResolvedPredicate::Pattern {
-                column,
+                lhs: ResolvedOperand::Column(column),
                 op: if operator == "$like" {
                     PatternOp::Like
                 } else {
                     PatternOp::ILike
                 },
                 value,
+                escape: None,
             })
         }
         _ => Err(invalid(format!("unsupported operator: {operator}"))),
@@ -230,23 +242,33 @@ fn shape(predicate: &ResolvedPredicate) -> String {
             children.iter().map(shape).collect::<Vec<_>>().join(",")
         ),
         ResolvedPredicate::Not(child) => format!("not({})", shape(child)),
-        ResolvedPredicate::Compare { column, op, .. } => {
-            format!("compare({},{op:?})", column.name().as_str())
+        ResolvedPredicate::Compare { lhs, op, .. } => {
+            format!("compare({},{op:?})", operand_shape(lhs))
         }
         ResolvedPredicate::Membership {
-            column, op, values, ..
-        } => format!(
-            "membership({},{op:?},{})",
-            column.name().as_str(),
-            values.len()
-        ),
-        ResolvedPredicate::Pattern { column, op, .. } => {
-            format!("pattern({},{op:?})", column.name().as_str())
+            lhs, op, values, ..
+        } => format!("membership({},{op:?},{})", operand_shape(lhs), values.len()),
+        ResolvedPredicate::Pattern { lhs, op, .. } => {
+            format!("pattern({},{op:?})", operand_shape(lhs))
         }
-        ResolvedPredicate::IsNull { column, negated } => {
-            format!("null({},{negated})", column.name().as_str())
+        ResolvedPredicate::IsNull { operand, negated } => {
+            format!("null({},{negated})", operand_shape(operand))
         }
         ResolvedPredicate::Const(value) => format!("const({value})"),
+    }
+}
+
+fn operand_shape(operand: &ResolvedOperand) -> String {
+    match operand {
+        ResolvedOperand::Column(column) => column.name().as_str().to_owned(),
+        ResolvedOperand::Aggregate {
+            function,
+            column,
+            distinct,
+        } => format!(
+            "aggregate({function:?},{},{distinct})",
+            column.as_ref().map_or("*", |column| column.name().as_str())
+        ),
     }
 }
 
