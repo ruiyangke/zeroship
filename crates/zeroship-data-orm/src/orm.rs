@@ -348,7 +348,7 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
 }
 mod codecs;
 mod model;
-pub use codecs::{Decimal, Point, Protected, sql_types};
+pub use codecs::{sql_types, Decimal, Point, Protected};
 pub use model::*;
 pub mod read;
 pub use read::{ReadJoin, ReadProjection, ReadQuery, ReadSource};
@@ -356,7 +356,7 @@ mod read_builder;
 mod read_input;
 pub use crate::value::Record;
 pub use read_builder::*;
-pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
+pub use zeroship_data_macros::{schema, Changeset, FromRow, Insertable};
 
 /// Implementation support for generated metadata.
 #[doc(hidden)]
@@ -522,7 +522,7 @@ impl PreparedOperation {
                 }
                 Plan::Read(Box::new(read::PreparedRead::new(
                     &binding,
-                    route.dialect(),
+                    route.sql_registration(),
                     *query,
                 )?))
             }

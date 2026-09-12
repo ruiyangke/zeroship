@@ -3,10 +3,12 @@ use zeroship_data_orm::{
         compiler::{CompileError, PostgresCompiler, Requirements, SqlCompiler, SqliteCompiler},
         registration::{SqlRegistration, SqlStorageCodecs},
         statement::{
-            Assignment, Comparison, Expression, Insert, InsertParts, ReturnedColumn, Statement,
-            StorageType, Table, Upsert, UpsertParts,
+            Assignment, Comparison, Expression, Insert, InsertParts, ResolvedJoin, ResolvedOperand,
+            ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn, SelectParts,
+            SelectStatement, SelectedExpression, Statement, StorageType, Table, Upsert,
+            UpsertParts,
         },
-        CompareOp, Ident, IdentRole, SchemaName,
+        CompareOp, Ident, IdentRole, JoinKind, SchemaName,
     },
     value::Value,
 };
@@ -48,6 +50,123 @@ fn insert_parts(table: &Table) -> InsertParts {
         }],
         insert_generated_identity: true,
     }
+}
+
+#[test]
+fn column_comparisons_do_not_consume_the_bind_budget() {
+    let source = Table::aliased(
+        SchemaName::new("app-reads").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        Ident::parse_as("source", IdentRole::Alias).unwrap(),
+        [("id", StorageType::Integer)].map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap();
+    let joined = Table::aliased(
+        SchemaName::new("app-reads").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        Ident::parse_as("joined", IdentRole::Alias).unwrap(),
+        [("id", StorageType::Integer)].map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap();
+    let statement = || {
+        Statement::Select(
+            SelectStatement::new(SelectParts {
+                table: source.clone(),
+                joins: vec![ResolvedJoin {
+                    kind: JoinKind::Inner,
+                    table: joined.clone(),
+                    on: ResolvedPredicate::Compare {
+                        lhs: ResolvedOperand::Column(source.column("id").unwrap()),
+                        op: CompareOp::Eq,
+                        rhs: ResolvedPredicateValue::Operand(ResolvedOperand::Column(
+                            joined.column("id").unwrap(),
+                        )),
+                    },
+                }],
+                projection: vec![SelectedExpression {
+                    expression: ResolvedOperand::Column(source.column("id").unwrap()),
+                    alias: Ident::parse_as("id", IdentRole::Alias).unwrap(),
+                }],
+                predicate: ResolvedPredicate::Const(true),
+                group_by: Vec::new(),
+                having: ResolvedPredicate::Const(true),
+                order_by: Vec::new(),
+                limit: Some(1),
+                offset: Some(0),
+                distinct: false,
+            })
+            .unwrap(),
+        )
+    };
+    let requirements = Requirements::for_statement(&statement());
+    assert_eq!(requirements.bind_parameters, 2);
+    let mut support = SqliteCompiler.support();
+    support.max_bind_parameters = requirements.bind_parameters;
+    let compiled = SqliteCompiler.compile(statement(), &support).unwrap();
+    assert_eq!(compiled.params(), &[Value::from(1), Value::from(0)]);
+}
+
+#[test]
+fn a_join_cannot_reference_a_source_that_has_not_been_introduced() {
+    let aliased = |alias: &str| {
+        Table::aliased(
+            SchemaName::new("app-reads").unwrap(),
+            Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+            Ident::parse_as(alias, IdentRole::Alias).unwrap(),
+            [("id", StorageType::Integer)].map(|(name, storage)| {
+                (
+                    Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                    storage,
+                )
+            }),
+        )
+        .unwrap()
+    };
+    let source = aliased("source");
+    let joined = aliased("joined");
+    let forward = aliased("forward");
+    let compare = |left: &Table, right: &Table| ResolvedPredicate::Compare {
+        lhs: ResolvedOperand::Column(left.column("id").unwrap()),
+        op: CompareOp::Eq,
+        rhs: ResolvedPredicateValue::Operand(ResolvedOperand::Column(right.column("id").unwrap())),
+    };
+    let statement = SelectStatement::new(SelectParts {
+        table: source.clone(),
+        joins: vec![
+            ResolvedJoin {
+                kind: JoinKind::Inner,
+                table: joined.clone(),
+                on: compare(&source, &forward),
+            },
+            ResolvedJoin {
+                kind: JoinKind::Inner,
+                table: forward.clone(),
+                on: compare(&joined, &forward),
+            },
+        ],
+        projection: vec![SelectedExpression {
+            expression: ResolvedOperand::Column(source.column("id").unwrap()),
+            alias: Ident::parse_as("id", IdentRole::Alias).unwrap(),
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+    });
+    assert!(statement.is_err());
 }
 
 #[test]

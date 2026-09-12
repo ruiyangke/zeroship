@@ -57,6 +57,7 @@ impl StorageType {
 struct Source {
     namespace: SchemaName,
     table: Ident,
+    alias: Option<Ident>,
     columns: Vec<(Ident, StorageType)>,
     indices: BTreeMap<String, usize>,
 }
@@ -86,6 +87,7 @@ impl Table {
         Ok(Self(Arc::new(Source {
             namespace,
             table,
+            alias: None,
             columns: resolved,
             indices,
         })))
@@ -96,6 +98,24 @@ impl Table {
     }
     pub fn name(&self) -> &Ident {
         &self.0.table
+    }
+
+    pub fn aliased(
+        namespace: SchemaName,
+        table: Ident,
+        alias: Ident,
+        columns: impl IntoIterator<Item = (Ident, StorageType)>,
+    ) -> Result<Self, CompileError> {
+        Ident::parse_as(alias.as_str(), IdentRole::Alias)?;
+        let mut resolved = Self::new(namespace, table, columns)?;
+        Arc::get_mut(&mut resolved.0)
+            .expect("new table source is uniquely owned")
+            .alias = Some(alias);
+        Ok(resolved)
+    }
+
+    pub fn alias(&self) -> Option<&Ident> {
+        self.0.alias.as_ref()
     }
 
     pub fn column(&self, name: &str) -> Result<Column, CompileError> {
@@ -116,6 +136,10 @@ impl Table {
             return Err(invalid("column belongs to a different source"));
         }
         Ok(())
+    }
+
+    pub fn owns(&self, column: &Column) -> bool {
+        Arc::ptr_eq(&self.0, &column.source.0)
     }
 }
 
@@ -186,28 +210,68 @@ pub struct Comparison {
     pub value: Value,
 }
 
+#[derive(Clone, Debug)]
+pub enum ResolvedOperand {
+    Column(Column),
+    Aggregate {
+        function: super::AggregateFunc,
+        column: Option<Column>,
+        distinct: bool,
+    },
+}
+
+impl ResolvedOperand {
+    pub fn storage(&self) -> Result<StorageType, CompileError> {
+        Ok(match self {
+            Self::Column(column) => column.storage(),
+            Self::Aggregate {
+                function: super::AggregateFunc::Count,
+                ..
+            } => StorageType::Integer,
+            Self::Aggregate {
+                function: super::AggregateFunc::Avg,
+                ..
+            } => StorageType::Real,
+            Self::Aggregate {
+                column: Some(column),
+                ..
+            } => column.storage(),
+            Self::Aggregate { column: None, .. } => {
+                return Err(invalid("aggregate requires a column"));
+            }
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum ResolvedPredicateValue {
+    Operand(ResolvedOperand),
+    Bind { storage: StorageType, value: Value },
+}
+
 #[derive(Debug)]
 pub enum ResolvedPredicate {
     And(Vec<Self>),
     Or(Vec<Self>),
     Not(Box<Self>),
     Compare {
-        column: Column,
+        lhs: ResolvedOperand,
         op: CompareOp,
-        value: Value,
+        rhs: ResolvedPredicateValue,
     },
     Membership {
-        column: Column,
+        lhs: ResolvedOperand,
         op: MembershipOp,
         values: Vec<Value>,
     },
     Pattern {
-        column: Column,
+        lhs: ResolvedOperand,
         op: PatternOp,
         value: String,
+        escape: Option<char>,
     },
     IsNull {
-        column: Column,
+        operand: ResolvedOperand,
         negated: bool,
     },
     Const(bool),
@@ -253,6 +317,62 @@ impl ResolvedPredicate {
 pub struct ReturnedColumn {
     pub column: Column,
     pub alias: Option<Ident>,
+}
+
+#[derive(Debug)]
+pub struct SelectedExpression {
+    pub expression: ResolvedOperand,
+    pub alias: Ident,
+}
+
+#[derive(Debug)]
+pub struct ResolvedJoin {
+    pub kind: super::JoinKind,
+    pub table: Table,
+    pub on: ResolvedPredicate,
+}
+
+#[derive(Debug)]
+pub struct ResolvedOrder {
+    pub expression: ResolvedOperand,
+    pub direction: super::Direction,
+    pub nulls: super::NullOrder,
+}
+
+#[derive(Debug)]
+pub struct SelectParts {
+    pub table: Table,
+    pub joins: Vec<ResolvedJoin>,
+    pub projection: Vec<SelectedExpression>,
+    pub predicate: ResolvedPredicate,
+    pub group_by: Vec<ResolvedOperand>,
+    pub having: ResolvedPredicate,
+    pub order_by: Vec<ResolvedOrder>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub distinct: bool,
+}
+
+#[derive(Debug)]
+pub struct SelectStatement(SelectParts);
+
+impl SelectStatement {
+    pub fn new(parts: SelectParts) -> Result<Self, CompileError> {
+        validate_select(&parts)?;
+        Ok(Self(parts))
+    }
+
+    pub fn parts(&self) -> &SelectParts {
+        &self.0
+    }
+
+    pub fn into_parts(self) -> SelectParts {
+        self.0
+    }
+
+    pub fn validate(&self) -> Result<(), CompileError> {
+        validate_select(&self.0)
+    }
 }
 
 #[derive(Debug)]
@@ -450,10 +570,55 @@ impl Upsert {
 
 #[derive(Debug)]
 pub enum Statement {
+    Select(SelectStatement),
     Insert(Insert),
     Upsert(Upsert),
     Update(Update),
     Delete(Delete),
+}
+
+fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
+    if parts.projection.is_empty() {
+        return Err(invalid("select requires a projection"));
+    }
+    if parts.joins.len() >= super::MAX_READ_SOURCES {
+        return Err(invalid("select exceeds its source budget"));
+    }
+    let mut tables = vec![&parts.table];
+    tables.extend(parts.joins.iter().map(|join| &join.table));
+    let mut aliases = HashSet::new();
+    for table in &tables {
+        let alias = table
+            .alias()
+            .ok_or_else(|| invalid("select sources require aliases"))?;
+        if !aliases.insert(alias.as_str()) {
+            return Err(invalid("duplicate select source alias"));
+        }
+    }
+    let mut outputs = HashSet::new();
+    for selected in &parts.projection {
+        validate_operand(&tables, &selected.expression, true)?;
+        if !outputs.insert(selected.alias.as_str()) {
+            return Err(invalid("duplicate select output alias"));
+        }
+    }
+    let mut introduced = vec![&parts.table];
+    for join in &parts.joins {
+        introduced.push(&join.table);
+        validate_predicate_for_tables(&introduced, &join.on, false)?;
+    }
+    validate_predicate_for_tables(&tables, &parts.predicate, false)?;
+    validate_predicate_for_tables(&tables, &parts.having, true)?;
+    for expression in &parts.group_by {
+        validate_operand(&tables, expression, false)?;
+    }
+    for order in &parts.order_by {
+        validate_operand(&tables, &order.expression, true)?;
+    }
+    if parts.limit.is_some_and(|value| value < 0) || parts.offset.is_some_and(|value| value < 0) {
+        return Err(invalid("select pagination cannot be negative"));
+    }
+    Ok(())
 }
 
 fn invalid(message: &'static str) -> CompileError {
@@ -647,6 +812,14 @@ fn validate_update_expression(
 }
 
 fn validate_predicate(table: &Table, predicate: &ResolvedPredicate) -> Result<(), CompileError> {
+    validate_predicate_for_tables(&[table], predicate, false)
+}
+
+fn validate_predicate_for_tables(
+    tables: &[&Table],
+    predicate: &ResolvedPredicate,
+    allow_aggregate: bool,
+) -> Result<(), CompileError> {
     let mut pending = vec![predicate];
     while let Some(predicate) = pending.pop() {
         match predicate {
@@ -654,36 +827,91 @@ fn validate_predicate(table: &Table, predicate: &ResolvedPredicate) -> Result<()
                 pending.extend(children);
             }
             ResolvedPredicate::Not(child) => pending.push(child),
-            ResolvedPredicate::Compare { column, value, .. } => {
-                table.check_column(column)?;
-                if value.is_null() || !column.storage().accepts(value) {
-                    return Err(invalid(
-                        "comparison requires a non-null value with matching storage type",
-                    ));
+            ResolvedPredicate::Compare { lhs, rhs, .. } => {
+                validate_operand(tables, lhs, allow_aggregate)?;
+                let lhs_storage = lhs.storage()?;
+                match rhs {
+                    ResolvedPredicateValue::Operand(rhs) => {
+                        validate_operand(tables, rhs, allow_aggregate)?;
+                        if rhs.storage()? != lhs_storage {
+                            return Err(invalid(
+                                "comparison operands have different storage types",
+                            ));
+                        }
+                    }
+                    ResolvedPredicateValue::Bind { storage, value }
+                        if *storage == lhs_storage
+                            && !value.is_null()
+                            && storage.accepts(value) => {}
+                    ResolvedPredicateValue::Bind { .. } => {
+                        return Err(invalid(
+                            "comparison requires a non-null value with matching storage type",
+                        ));
+                    }
                 }
             }
-            ResolvedPredicate::Membership { column, values, .. } => {
-                table.check_column(column)?;
+            ResolvedPredicate::Membership { lhs, values, .. } => {
+                validate_operand(tables, lhs, allow_aggregate)?;
+                let storage = lhs.storage()?;
                 if values.is_empty()
                     || values
                         .iter()
-                        .any(|value| value.is_null() || !column.storage().accepts(value))
+                        .any(|value| value.is_null() || !storage.accepts(value))
                 {
                     return Err(invalid(
                         "membership requires non-null values with matching storage types",
                     ));
                 }
             }
-            ResolvedPredicate::Pattern { column, value, .. } => {
-                table.check_column(column)?;
-                if column.storage() != StorageType::Text || value.contains('\0') {
+            ResolvedPredicate::Pattern {
+                lhs, value, escape, ..
+            } => {
+                validate_operand(tables, lhs, allow_aggregate)?;
+                if lhs.storage()? != StorageType::Text
+                    || value.contains('\0')
+                    || escape.is_some_and(|value| !value.is_ascii_graphic())
+                {
                     return Err(invalid("pattern requires text storage without a NUL byte"));
                 }
             }
-            ResolvedPredicate::IsNull { column, .. } => table.check_column(column)?,
+            ResolvedPredicate::IsNull { operand, .. } => {
+                validate_operand(tables, operand, allow_aggregate)?
+            }
             ResolvedPredicate::Const(_) => {}
         }
     }
+    Ok(())
+}
+
+fn validate_operand(
+    tables: &[&Table],
+    operand: &ResolvedOperand,
+    allow_aggregate: bool,
+) -> Result<(), CompileError> {
+    match operand {
+        ResolvedOperand::Column(column) => {
+            if !tables
+                .iter()
+                .any(|table| table.check_column(column).is_ok())
+            {
+                return Err(invalid("column belongs to a different source"));
+            }
+        }
+        ResolvedOperand::Aggregate { column, .. } if allow_aggregate => {
+            if let Some(column) = column {
+                if !tables
+                    .iter()
+                    .any(|table| table.check_column(column).is_ok())
+                {
+                    return Err(invalid("aggregate column belongs to a different source"));
+                }
+            }
+        }
+        ResolvedOperand::Aggregate { .. } => {
+            return Err(invalid("aggregate is not valid in a mutation predicate"));
+        }
+    }
+    operand.storage()?;
     Ok(())
 }
 

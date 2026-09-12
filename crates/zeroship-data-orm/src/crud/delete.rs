@@ -5,7 +5,8 @@ use crate::{
         lifecycle::WriteAssignments,
         registration::SqlRegistration,
         statement::{
-            Delete, DeleteParts, MutationScope, ResolvedPredicate, Statement, Update, UpdateParts,
+            Delete, DeleteParts, MutationScope, ResolvedOperand, ResolvedPredicate, Statement,
+            Update, UpdateParts,
         },
         SchemaName,
     },
@@ -56,7 +57,7 @@ pub(crate) fn build_lifecycle(
     let predicate = ResolvedPredicate::and(vec![
         predicate::resolve(filter, schema, &resolved, registration)?,
         ResolvedPredicate::IsNull {
-            column: marker,
+            operand: ResolvedOperand::Column(marker),
             negated: match_deleted,
         },
     ]);

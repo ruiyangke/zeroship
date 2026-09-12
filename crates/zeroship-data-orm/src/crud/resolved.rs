@@ -11,12 +11,14 @@ use crate::{
 };
 use std::collections::BTreeMap;
 
+#[derive(Debug)]
 pub(crate) struct PhysicalInput {
     pub(crate) column: String,
     pub(crate) storage: StorageType,
     pub(crate) insert_only: bool,
 }
 
+#[derive(Debug)]
 pub(crate) struct ResolvedTable {
     pub(crate) table: Table,
     pub(crate) inputs: BTreeMap<String, PhysicalInput>,
@@ -26,6 +28,26 @@ impl ResolvedTable {
     pub(crate) fn new(
         namespace: &SchemaName,
         collection: &str,
+        schema: &Value,
+        registration: &SqlRegistration,
+    ) -> Result<Self, QueryError> {
+        Self::build(namespace, collection, None, schema, registration)
+    }
+
+    pub(crate) fn aliased(
+        namespace: &SchemaName,
+        collection: &str,
+        alias: &str,
+        schema: &Value,
+        registration: &SqlRegistration,
+    ) -> Result<Self, QueryError> {
+        Self::build(namespace, collection, Some(alias), schema, registration)
+    }
+
+    fn build(
+        namespace: &SchemaName,
+        collection: &str,
+        alias: Option<&str>,
         schema: &Value,
         registration: &SqlRegistration,
     ) -> Result<Self, QueryError> {
@@ -68,15 +90,19 @@ impl ResolvedTable {
                 );
             }
         }
-        Ok(Self {
-            table: Table::new(
+        let collection = Ident::parse_as(collection, IdentRole::Collection)
+            .map_err(crate::sql::compiler::CompileError::from)?;
+        let table = match alias {
+            Some(alias) => Table::aliased(
                 namespace.clone(),
-                Ident::parse_as(collection, IdentRole::Collection)
+                collection,
+                Ident::parse_as(alias, IdentRole::Alias)
                     .map_err(crate::sql::compiler::CompileError::from)?,
                 physical,
             )?,
-            inputs,
-        })
+            None => Table::new(namespace.clone(), collection, physical)?,
+        };
+        Ok(Self { table, inputs })
     }
 
     pub(crate) fn returning(&self, schema: &Value) -> Result<Vec<ReturnedColumn>, QueryError> {

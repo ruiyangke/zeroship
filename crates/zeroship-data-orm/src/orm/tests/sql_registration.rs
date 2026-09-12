@@ -297,3 +297,60 @@ async fn update_one_is_refused_by_the_registered_compiler_before_row_mutation() 
     assert_eq!(rows[0]["label"], value!("original"));
     owner.close().await;
 }
+
+#[compio::test]
+async fn relational_read_is_refused_by_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let constrained = constrained_database(&owner, "fixture-without-relational-reads", |support| {
+        support.relational_reads = false
+    })
+    .await;
+    let source = ReadSource::new("records", "source");
+    let joined = ReadSource::new("records", "joined");
+    let mut query = ReadQuery::new(source.clone());
+    query.joins.push(ReadJoin {
+        kind: crate::sql::JoinKind::Inner,
+        source: joined.clone(),
+        on: crate::sql::Predicate::compare(
+            crate::sql::Operand::Path(source.column("id").unwrap()),
+            crate::sql::CompareOp::Eq,
+            crate::sql::Operand::Path(joined.column("id").unwrap()),
+        ),
+    });
+    query.projection.push(ReadProjection::Row {
+        output: "record".into(),
+        source: source.alias,
+        fields: Some(vec!["label".into()]),
+        optional: false,
+    });
+
+    let error = constrained.read(query).await.unwrap_err();
+    assert!(error.to_string().contains("relational reads"), "{error}");
+    owner.close().await;
+}
+
+#[compio::test]
+async fn aggregate_read_is_refused_by_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let constrained = constrained_database(&owner, "fixture-without-aggregate-reads", |support| {
+        support.aggregate_reads = false
+    })
+    .await;
+    let source = ReadSource::new("records", "source");
+    let mut query = ReadQuery::new(source.clone());
+    query.projection.push(ReadProjection::Scalar {
+        output: "records".into(),
+        expression: crate::sql::Operand::Aggregate(
+            crate::sql::AggregateRef::over_path(
+                crate::sql::AggregateFunc::Count,
+                source.column("id").unwrap(),
+                false,
+            )
+            .unwrap(),
+        ),
+    });
+
+    let error = constrained.read(query).await.unwrap_err();
+    assert!(error.to_string().contains("aggregate reads"), "{error}");
+    owner.close().await;
+}

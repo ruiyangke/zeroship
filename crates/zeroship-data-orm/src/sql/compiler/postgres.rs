@@ -14,6 +14,8 @@ use crate::{
 pub struct PostgresCompiler;
 
 const SUPPORT: SqlSupport = SqlSupport {
+    relational_reads: true,
+    aggregate_reads: true,
     explicit_conflict_target: true,
     conditional_conflict_update: true,
     returning: true,
