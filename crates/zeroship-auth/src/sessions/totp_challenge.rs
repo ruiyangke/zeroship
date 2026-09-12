@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use zeroship_core::auth::hmac_sha256;
+use zeroship_core::UserId;
 
 /// 5-minute window to enter the second factor.
 pub const CHALLENGE_MAX_AGE_SECS: i64 = 300;
@@ -61,7 +62,7 @@ pub enum FirstFactor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TotpChallenge {
     /// The user who cleared factor 1 and is awaiting a second factor.
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     /// Credential version captured at factor-1 time; a later change
     /// (password reset / forced logout) invalidates this challenge.
     pub credential_version: i64,
@@ -76,14 +77,14 @@ pub struct TotpChallenge {
 impl TotpChallenge {
     #[must_use]
     pub fn new(
-        user_id: uuid::Uuid,
+        user_id: UserId,
         credential_version: i64,
         return_to: String,
         first_factor: FirstFactor,
     ) -> Self {
         let iat = unix_now();
         Self {
-            user_id,
+            user_id: user_id.clone(),
             credential_version,
             return_to,
             first_factor,
@@ -173,12 +174,7 @@ mod tests {
     use super::*;
 
     fn sample(key: &[u8]) -> (TotpChallenge, String) {
-        let c = TotpChallenge::new(
-            uuid::Uuid::new_v4(),
-            7,
-            "lc-abc".into(),
-            FirstFactor::Password,
-        );
+        let c = TotpChallenge::new(UserId::mint(), 7, "lc-abc".into(), FirstFactor::Password);
         let enc = c.encode(key);
         (c, enc)
     }
@@ -212,7 +208,7 @@ mod tests {
         let key = b"k".repeat(32);
         let now = unix_now();
         let c = TotpChallenge {
-            user_id: uuid::Uuid::new_v4(),
+            user_id: UserId::mint(),
             credential_version: 1,
             return_to: "/oauth2/authorize".into(),
             first_factor: FirstFactor::Password,
@@ -227,7 +223,7 @@ mod tests {
         let key = b"k".repeat(32);
         let now = unix_now();
         let c = TotpChallenge {
-            user_id: uuid::Uuid::new_v4(),
+            user_id: UserId::mint(),
             credential_version: 1,
             return_to: "/oauth2/authorize".into(),
             first_factor: FirstFactor::Password,

@@ -2,6 +2,7 @@
 
 use compio_postgres::GenericClient;
 use serde_json::Value;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -15,7 +16,7 @@ pub async fn insert(
     conn: &(impl GenericClient + Sync),
     event_type: &str,
     outcome: &str,
-    user_id: Option<&uuid::Uuid>,
+    user_id: Option<&UserId>,
     client_id: Option<&str>,
     request_id: Option<&str>,
     ip: Option<std::net::IpAddr>,
@@ -23,6 +24,7 @@ pub async fn insert(
     auth_method: Option<&str>,
     detail: &Value,
 ) -> Result<()> {
+    let user_id = user_id.map(UserId::as_str);
     conn.execute(
         "INSERT INTO zeroship.audit_events \
             (event_type, outcome, actor_user_id, client_id, request_id, ip, user_agent, auth_method, detail) \

@@ -76,10 +76,10 @@ fn request(csrf: &str, token: &str, ip: &str) -> test::TestRequest {
         .set_payload(body)
 }
 
-async fn stored_password(pg: &compio_postgres::Client, id: uuid::Uuid) -> String {
+async fn stored_password(pg: &compio_postgres::Client, id: &zeroship_core::UserId) -> String {
     pg.query_one(
         "SELECT password_hash FROM zeroship.users WHERE id = $1",
-        &[&id],
+        &[&id.as_str()],
     )
     .await
     .expect("read password hash")
@@ -146,7 +146,7 @@ async fn accepted_request_reaches_the_observed_hasher() {
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/login");
         assert_eq!(calls.get(), 1, "the observer must see accepted hashing");
-        assert!(password::verify(NEW_PASSWORD, &stored_password(&pg, user.id).await).unwrap());
+        assert!(password::verify(NEW_PASSWORD, &stored_password(&pg, &user.id).await).unwrap());
         assert!(!password_reset::is_live(&pg, &token.raw).await.unwrap());
     })
     .await;
@@ -166,7 +166,7 @@ async fn production_route_updates_the_credential_and_consumes_the_token() {
             test::call_service(&app, request(&csrf, &token.raw, CLIENT_IP).to_request()).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(response.headers().get(LOCATION).unwrap(), "/login");
-        let stored = stored_password(&pg, user.id).await;
+        let stored = stored_password(&pg, &user.id).await;
         assert!(password::verify(NEW_PASSWORD, &stored).unwrap());
         assert!(!password::verify(OLD_PASSWORD, &stored).unwrap());
         assert!(!password_reset::is_live(&pg, &token.raw).await.unwrap());
@@ -208,7 +208,7 @@ async fn exhausted_ip_is_rejected_before_hashing_a_live_token() {
             test::call_service(&app, request(&csrf, &token.raw, "192.0.2.2").to_request()).await;
         assert_eq!(response.status(), StatusCode::FOUND);
         assert_eq!(calls.get(), 1, "a different IP has an independent budget");
-        assert!(password::verify(NEW_PASSWORD, &stored_password(&pg, user.id).await).unwrap());
+        assert!(password::verify(NEW_PASSWORD, &stored_password(&pg, &user.id).await).unwrap());
     })
     .await;
 }

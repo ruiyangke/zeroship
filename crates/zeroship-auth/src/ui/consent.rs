@@ -11,6 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 use zeroship_authz::{self as authz, AuthzContext, Resource, Scope};
 use zeroship_core::typed_id::app_id_from_oauth_client_id;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{oauth_grant_lock_key, with_advisory_lock};
 use crate::audit::{self, AuditEvent};
@@ -92,7 +93,7 @@ async fn get_consent_native(
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    let info = native_consent_request(&ctx, session.user_id);
+    let info = native_consent_request(&ctx, session.user_id.clone());
     let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
         Ok(defs) => defs,
         Err(e) => {
@@ -111,7 +112,14 @@ async fn get_consent_native(
         return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer());
     }
 
-    render_consent_page(&return_to, &info, db, cfg, classified.can_grant, &app_scope_defs)
+    render_consent_page(
+        &return_to,
+        &info,
+        db,
+        cfg,
+        classified.can_grant,
+        &app_scope_defs,
+    )
     .await
 }
 
@@ -173,7 +181,7 @@ async fn post_consent_accept_native(
             return render_error(PublicErrorMessage::InvalidRequest);
         }
     };
-    let info = native_consent_request(&ctx, session.user_id);
+    let info = native_consent_request(&ctx, session.user_id.clone());
     let app_scope_defs = match load_app_scope_defs(db, &ctx.client.client_id).await {
         Ok(defs) => defs,
         Err(e) => {
@@ -182,11 +190,12 @@ async fn post_consent_accept_native(
         }
     };
     match classify_and_authorize(db, &info, &app_scope_defs).await {
-        Ok(c) if c.has_unknown => return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer()),
+        Ok(c) if c.has_unknown => {
+            return oauth_error_redirect(&ctx, "invalid_scope", issuer.issuer())
+        }
         Ok(c) if c.can_grant => {}
         Ok(_) => {
-            return render_consent_page(&return_to, &info, db, cfg, false, &app_scope_defs)
-            .await;
+            return render_consent_page(&return_to, &info, db, cfg, false, &app_scope_defs).await;
         }
         Err(e) => {
             tracing::error!(error = %e, client_id = %ctx.client.client_id, "POST /consent/accept native authorization failed");
@@ -206,7 +215,7 @@ async fn post_consent_accept_native(
     let cumulative_scopes = match with_advisory_lock(&lock_conn, lock_key, || async {
         let cumulative = persist_consent_grant(
             &lock_conn,
-            session.user_id,
+            &session.user_id,
             &ctx.client.client_id,
             &requested_scopes,
         )
@@ -219,7 +228,7 @@ async fn post_consent_accept_native(
             match crate::store::relay::mint_alias_at_consent(
                 &lock_conn,
                 &ctx.client.client_id,
-                session.user_id,
+                &session.user_id,
                 cfg.settings.relay_domain.get(),
             )
             .await
@@ -372,7 +381,7 @@ struct NativeConsentClient {
 
 #[derive(Clone, Debug)]
 struct NativeConsentRequest {
-    subject: String,
+    subject: UserId,
     client: NativeConsentClient,
     requested_scope: Vec<String>,
 }
@@ -420,9 +429,9 @@ async fn load_native_oauth_client(
     })
 }
 
-fn native_consent_request(ctx: &NativeConsentContext, subject: Uuid) -> NativeConsentRequest {
+fn native_consent_request(ctx: &NativeConsentContext, subject: UserId) -> NativeConsentRequest {
     NativeConsentRequest {
-        subject: subject.to_string(),
+        subject,
         client: NativeConsentClient {
             client_id: ctx.client.client_id.clone(),
             client_name: Some(ctx.client.client_name.clone()),
@@ -463,10 +472,12 @@ async fn resolve_native_session(
     let Some(session_id) = session_cookie::parse_cookie(cookie_header) else {
         return Ok(None);
     };
-    session_store::validate(db, session_id).await.map_err(|err| {
-        tracing::error!(error = %err, "native consent session validation failed");
-        render_error(PublicErrorMessage::ContactSupport)
-    })
+    session_store::validate(db, session_id)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "native consent session validation failed");
+            render_error(PublicErrorMessage::ContactSupport)
+        })
 }
 
 fn sort_dedup_scopes(scopes: &[String]) -> Vec<String> {
@@ -666,10 +677,7 @@ enum Partition {
 /// reject fires rather than a bare CANNOT_GRANT (spec §5.2). We classify EVERY
 /// scope before deciding (no early-return) so a later `Unknown` is always
 /// observed.
-fn partition_scopes(
-    requested: &[String],
-    app_scope_defs: &HashMap<String, ScopeDef>,
-) -> Partition {
+fn partition_scopes(requested: &[String], app_scope_defs: &HashMap<String, ScopeDef>) -> Partition {
     let mut delegated: Vec<Scope> = Vec::new();
     let mut has_unknown = false;
     let mut has_ungrantable_reserved = false;
@@ -711,26 +719,34 @@ async fn classify_and_authorize(
 ) -> Result<ClassifiedScopes, String> {
     let delegated = match partition_scopes(&info.requested_scope, app_scope_defs) {
         Partition::HasUnknown => {
-            return Ok(ClassifiedScopes { can_grant: false, has_unknown: true });
+            return Ok(ClassifiedScopes {
+                can_grant: false,
+                has_unknown: true,
+            });
         }
         Partition::UngrantableReserved => {
-            return Ok(ClassifiedScopes { can_grant: false, has_unknown: false });
+            return Ok(ClassifiedScopes {
+                can_grant: false,
+                has_unknown: false,
+            });
         }
         Partition::Delegated(delegated) => delegated,
     };
 
     if delegated.is_empty() {
-        return Ok(ClassifiedScopes { can_grant: true, has_unknown: false });
+        return Ok(ClassifiedScopes {
+            can_grant: true,
+            has_unknown: false,
+        });
     }
 
-    let principal_id = Uuid::parse_str(&info.subject)
-        .map_err(|e| format!("consent subject is not a UUID: {e}"))?;
+    let principal_id = info.subject.clone();
     let policies = platform_policies()?;
     let now = now_unix()?;
 
     for scope in delegated {
         let ctx = AuthzContext {
-            principal_id,
+            principal_id: principal_id.clone(),
             token_policy: None,
             action: scope.action(),
             resource: Resource::Any,
@@ -740,12 +756,20 @@ async fn classify_and_authorize(
         };
         match authz::is_authorized_anywhere(db, policies, &ctx).await {
             Ok(true) => {}
-            Ok(false) => return Ok(ClassifiedScopes { can_grant: false, has_unknown: false }),
+            Ok(false) => {
+                return Ok(ClassifiedScopes {
+                    can_grant: false,
+                    has_unknown: false,
+                })
+            }
             Err(e) => return Err(format!("authorize {}: {e}", scope.as_str())),
         }
     }
 
-    Ok(ClassifiedScopes { can_grant: true, has_unknown: false })
+    Ok(ClassifiedScopes {
+        can_grant: true,
+        has_unknown: false,
+    })
 }
 
 /// The shipped bands and their schema, loaded once per process.
@@ -899,11 +923,7 @@ fn standard_scope_label(scope: &str) -> Option<&'static str> {
     })
 }
 
-fn csrf_valid(
-    req: &HttpRequest,
-    form: &ConsentDecisionForm,
-    _cfg: &AuthConfig,
-) -> bool {
+fn csrf_valid(req: &HttpRequest, form: &ConsentDecisionForm, _cfg: &AuthConfig) -> bool {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -1017,7 +1037,10 @@ mod tests {
         // RECOGNIZED (the round-3 reconciliation: app scopes are no longer
         // rendered unrecognized).
         assert_eq!(scopes[2].label, "View billing");
-        assert_eq!(scopes[2].description.as_deref(), Some("See invoices and plan."));
+        assert_eq!(
+            scopes[2].description.as_deref(),
+            Some("See invoices and plan.")
+        );
         assert!(!scopes[2].unrecognized);
         // Genuinely unknown — rendered unrecognized (and the consent gate
         // rejects it with invalid_scope on the live path).
@@ -1030,12 +1053,18 @@ mod tests {
         let mut defs = HashMap::new();
         defs.insert(
             "read:billing".to_owned(),
-            ScopeDef { label: "View billing".to_owned(), description: None },
+            ScopeDef {
+                label: "View billing".to_owned(),
+                description: None,
+            },
         );
 
         // (b) identity — self-grantable.
         assert_eq!(classify_scope("openid", &defs), ScopeClass::SelfGrant);
-        assert_eq!(classify_scope("offline_access", &defs), ScopeClass::SelfGrant);
+        assert_eq!(
+            classify_scope("offline_access", &defs),
+            ScopeClass::SelfGrant
+        );
         // (b) app-declared — self-grantable, even though it is not in the
         // platform vocabulary.
         assert_eq!(classify_scope("read:billing", &defs), ScopeClass::SelfGrant);
@@ -1043,7 +1072,10 @@ mod tests {
         assert_eq!(classify_scope("apps:deploy", &defs), ScopeClass::Delegated);
         assert_eq!(classify_scope("billing:read", &defs), ScopeClass::Delegated);
         // (a) reserved prefixes — delegated.
-        assert_eq!(classify_scope("platform:admin", &defs), ScopeClass::Delegated);
+        assert_eq!(
+            classify_scope("platform:admin", &defs),
+            ScopeClass::Delegated
+        );
         assert_eq!(classify_scope("org:manage", &defs), ScopeClass::Delegated);
         // (d) unknown — neither identity, app-declared, nor platform vocab.
         assert_eq!(classify_scope("write:projects", &defs), ScopeClass::Unknown);
@@ -1060,16 +1092,25 @@ mod tests {
         // A planted registry row that collides with the closed platform vocab.
         defs.insert(
             "billing:read".to_owned(),
-            ScopeDef { label: "evil".to_owned(), description: None },
+            ScopeDef {
+                label: "evil".to_owned(),
+                description: None,
+            },
         );
         // The classifier must NOT self-grant it — platform vocabulary first.
         assert_eq!(classify_scope("billing:read", &defs), ScopeClass::Delegated);
         // A planted reserved-prefix row is likewise forced through delegation.
         defs.insert(
             "platform:admin".to_owned(),
-            ScopeDef { label: "evil".to_owned(), description: None },
+            ScopeDef {
+                label: "evil".to_owned(),
+                description: None,
+            },
         );
-        assert_eq!(classify_scope("platform:admin", &defs), ScopeClass::Delegated);
+        assert_eq!(
+            classify_scope("platform:admin", &defs),
+            ScopeClass::Delegated
+        );
     }
 
     /// The consent screen cannot name an authority the platform does not have,
@@ -1141,7 +1182,10 @@ mod tests {
         let mut defs = HashMap::new();
         defs.insert(
             "read:billing".to_owned(),
-            ScopeDef { label: "View billing".to_owned(), description: None },
+            ScopeDef {
+                label: "View billing".to_owned(),
+                description: None,
+            },
         );
         let requested = vec!["openid".to_owned(), "read:billing".to_owned()];
         match partition_scopes(&requested, &defs) {
@@ -1161,7 +1205,10 @@ mod tests {
         let mut defs = HashMap::new();
         defs.insert(
             "read:billing".to_owned(),
-            ScopeDef { label: "View billing".to_owned(), description: None },
+            ScopeDef {
+                label: "View billing".to_owned(),
+                description: None,
+            },
         );
         let requested = vec!["read:billing".to_owned(), "apps:deploy".to_owned()];
         match partition_scopes(&requested, &defs) {
@@ -1169,11 +1216,14 @@ mod tests {
                 assert_eq!(delegated.len(), 1, "only the platform scope is delegated");
                 assert_eq!(delegated[0].as_str(), "apps:deploy");
             }
-            other => panic!("expected Delegated, got {}", match other {
-                Partition::HasUnknown => "HasUnknown",
-                Partition::UngrantableReserved => "UngrantableReserved",
-                Partition::Delegated(_) => unreachable!(),
-            }),
+            other => panic!(
+                "expected Delegated, got {}",
+                match other {
+                    Partition::HasUnknown => "HasUnknown",
+                    Partition::UngrantableReserved => "UngrantableReserved",
+                    Partition::Delegated(_) => unreachable!(),
+                }
+            ),
         }
     }
 

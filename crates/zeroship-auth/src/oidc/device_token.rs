@@ -14,6 +14,7 @@ use uuid::Uuid;
 use zeroship_core::device_grant::{
     OFFLINE_ACCESS_SCOPE, PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_REGISTERED_SCOPES,
 };
+use zeroship_core::UserId;
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::config::AuthConfig;
@@ -168,11 +169,11 @@ pub(super) async fn platform_cli_policy_selected(
 /// Mint the access token a grant for `client` must hand back.
 ///
 /// The first-party CLI client is a PLATFORM PRINCIPAL client: its token's
-/// `sub` is the `zeroship.users` UUID and its `aud` is control's configured
+/// `sub` is the `zeroship.users` id and its `aud` is control's configured
 /// resource audience, because control is the only thing that consumes it
 /// (`zeroship_authn::BearerVerifier::verify_bearer` compares both, and
 /// `crates/authz`'s `token_revocations` lookup is keyed on `(client_id, sub)`
-/// with that same UUID). Every other client gets the ordinary pairwise OIDC
+/// with that same id). Every other client gets the ordinary pairwise OIDC
 /// access token, with its per-app sector subject and app-resource audience.
 ///
 /// Both grants that can produce a CLI token come through here - the device
@@ -186,19 +187,18 @@ pub(super) async fn mint_grant_access_token(
     cfg: &AuthConfig,
     issuer: &Issuer,
     client: &crate::oidc::authorization_code::OAuthClient,
-    user_id: Uuid,
+    user_id: &UserId,
     scopes: &[String],
     proof: &ValidatedSession,
 ) -> Result<String, OAuthError> {
     if !platform_cli_policy_selected(db, &client.client_id).await? {
         return mint_access_token(db, issuer, client, user_id, scopes, proof).await;
     }
-    let principal_id = user_id.to_string();
     issuer
         .issue_principal_access_token(
             db,
             &PrincipalAccessTokenMint {
-                principal_id: &principal_id,
+                principal_id: user_id,
                 audience: cfg.settings.oauth_audience.get().trim(),
                 client_id: PLATFORM_CLI_CLIENT_ID,
                 scopes,
@@ -427,7 +427,7 @@ pub(crate) async fn approve_user_code(
     db: &Client,
     user_code: &str,
     provider: &str,
-    user_id: Uuid,
+    user_id: &UserId,
     sid: Uuid,
     auth_credential_version: i64,
 ) -> Result<DeviceApproval, String> {
@@ -447,7 +447,7 @@ pub(crate) async fn approve_user_code(
                AND status = 'pending' \
                AND expires_at > NOW()",
             &[
-                &user_id,
+                &user_id.as_str(),
                 &sid.to_string(),
                 &auth_credential_version,
                 &user_code,
@@ -603,15 +603,21 @@ async fn exchange_device_code_locked(
             ))
         }
         "approved" => {
-            let Some(user_id) = row.get::<_, Option<Uuid>>("principal_id") else {
+            let Some(raw_user_id) = row.get::<_, Option<String>>("principal_id") else {
                 tracing::error!("device token: approved grant missing principal_id");
                 return Err(OAuthError::server_error("device grant is incomplete"));
             };
+            let user_id =
+                crate::user_id::parse_stored(&raw_user_id, "device grant principal_id is invalid")
+                    .map_err(|err| {
+                        tracing::error!(error = %err, "device token: principal_id decode failed");
+                        OAuthError::server_error("device grant is incomplete")
+                    })?;
             let auth_credential_version: i64 = row.get("auth_credential_version");
-            lock_refresh_user_xact(db, user_id).await.map_err(|err| {
+            lock_refresh_user_xact(db, &user_id).await.map_err(|err| {
                 tracing::error!(
                     error = %err,
-                    user_id = %user_id,
+                    user_id = user_id.as_str(),
                     "device token: user lock failed"
                 );
                 OAuthError::server_error("device token validation unavailable")
@@ -625,13 +631,13 @@ async fn exchange_device_code_locked(
                        AND deletion_requested_at IS NULL \
                        AND deletion_scheduled_for IS NULL \
                        AND anonymized_at IS NULL",
-                    &[&user_id, &auth_credential_version],
+                    &[&user_id.as_str(), &auth_credential_version],
                 )
                 .await
                 .map_err(|err| {
                     tracing::error!(
                         error = %err,
-                        user_id = %user_id,
+                        user_id = user_id.as_str(),
                         "device token: owner validation failed"
                     );
                     OAuthError::server_error("device token validation unavailable")
@@ -701,7 +707,7 @@ async fn exchange_device_code_locked(
                 &refresh::session_keys(cfg)?,
                 &refresh::Establish {
                     client,
-                    user_id,
+                    user_id: &user_id,
                     granted_scopes: &granted_scopes,
                     auth_credential_version,
                     kind: SessionKind::Cli,
@@ -717,14 +723,14 @@ async fn exchange_device_code_locked(
                 cfg,
                 issuer,
                 client,
-                user_id,
+                &user_id,
                 &granted_scopes,
                 &established.proof,
             )
             .await?;
             let refresh_token = established.secret;
 
-            tracing::debug!(client_id = %client.client_id, user_id = %user_id, sid = %sid, "device token approved");
+            tracing::debug!(client_id = %client.client_id, user_id = user_id.as_str(), sid = %sid, "device token approved");
             Ok(TokenResponse {
                 access_token,
                 id_token: None,

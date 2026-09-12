@@ -9,6 +9,7 @@ use std::time::Duration;
 use compio_postgres::{Client, GenericClient};
 use http::Method;
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 use crate::oidc::{Issuer, LogoutTokenMint};
@@ -40,7 +41,7 @@ struct RelyingPartySession {
 /// token.
 pub async fn record_rp_participation(
     db: &(impl GenericClient + ?Sized),
-    user_id: Uuid,
+    user_id: &UserId,
     sid: &str,
     client_id: &str,
     sub: &str,
@@ -70,7 +71,7 @@ pub async fn record_rp_participation(
             sid = EXCLUDED.sid, \
             sub = EXCLUDED.sub, \
             last_seen_at = NOW()",
-        &[&idp_session_id, &user_id, &client_id, &sid, &sub],
+        &[&idp_session_id, &user_id.as_str(), &client_id, &sid, &sub],
     )
     .await
     .map_err(|e| AuthError::Db(format!("record BCL RP participation: {e}")))?;
@@ -121,7 +122,7 @@ pub async fn emit_for_app_session(
     db: &Client,
     issuer: &Issuer,
     app_id: Uuid,
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> Result<LogoutEmissionReport> {
     let rows = db
         .query(
@@ -136,7 +137,7 @@ pub async fn emit_for_app_session(
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RP for app: {e}")))?;
 
-    let subject = user_id.to_string();
+    let subject = user_id.as_str().to_owned();
     let rps: Vec<RelyingPartySession> = rows
         .iter()
         .filter_map(|row| {
@@ -150,7 +151,7 @@ pub async fn emit_for_app_session(
             let sub = if brokered {
                 subject.clone()
             } else {
-                issuer.pairwise_subject(&subject, &sector)
+                issuer.pairwise_subject(user_id, &sector)
             };
             Some(RelyingPartySession {
                 client_id: row.get("client_id"),
@@ -168,13 +169,16 @@ pub async fn emit_for_app_session(
 pub async fn emit_for_user(
     db: &Client,
     issuer: &Issuer,
-    user_id: Uuid,
+    user_id: &UserId,
 ) -> Result<LogoutEmissionReport> {
     let rps = load_rps_for_user(db, user_id).await?;
     emit_to_rps(db, issuer, rps).await
 }
 
-async fn load_rps_for_session(db: &Client, idp_session_id: Uuid) -> Result<Vec<RelyingPartySession>> {
+async fn load_rps_for_session(
+    db: &Client,
+    idp_session_id: Uuid,
+) -> Result<Vec<RelyingPartySession>> {
     let rows = db
         .query(
             "SELECT osc.client_id, osc.sid, osc.sub, oc.backchannel_logout_uri \
@@ -186,13 +190,10 @@ async fn load_rps_for_session(db: &Client, idp_session_id: Uuid) -> Result<Vec<R
         )
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RPs for session: {e}")))?;
-    Ok(rows
-        .iter()
-        .filter_map(row_to_rp)
-        .collect())
+    Ok(rows.iter().filter_map(row_to_rp).collect())
 }
 
-async fn load_rps_for_user(db: &Client, user_id: Uuid) -> Result<Vec<RelyingPartySession>> {
+async fn load_rps_for_user(db: &Client, user_id: &UserId) -> Result<Vec<RelyingPartySession>> {
     let rows = db
         .query(
             "SELECT osc.client_id, osc.sid, osc.sub, oc.backchannel_logout_uri \
@@ -200,14 +201,11 @@ async fn load_rps_for_user(db: &Client, user_id: Uuid) -> Result<Vec<RelyingPart
              JOIN zeroship.oauth_clients oc ON oc.client_id = osc.client_id \
              WHERE osc.user_id = $1 \
                AND oc.backchannel_logout_uri IS NOT NULL",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RPs for user: {e}")))?;
-    Ok(rows
-        .iter()
-        .filter_map(row_to_rp)
-        .collect())
+    Ok(rows.iter().filter_map(row_to_rp).collect())
 }
 
 fn row_to_rp(row: &compio_postgres::Row) -> Option<RelyingPartySession> {
