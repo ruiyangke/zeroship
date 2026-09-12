@@ -1028,6 +1028,9 @@ fn validate_delete(parts: &DeleteParts) -> Result<(), CompileError> {
 fn validate_scope(table: &Table, scope: &MutationScope) -> Result<(), CompileError> {
     if let MutationScope::First { target } = scope {
         table.check_column(target)?;
+        if target.name().as_str() != "id" {
+            return Err(invalid("first-row mutation requires the id column"));
+        }
     }
     Ok(())
 }

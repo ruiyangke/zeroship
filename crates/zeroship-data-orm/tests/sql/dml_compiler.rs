@@ -6,11 +6,11 @@ use zeroship_data_orm::{
         },
         registration::{SqlFamily, SqlRegistration, SqlStorageCodecs},
         statement::{
-            ArrayOperator, Assignment, Comparison, Expression, IdentityRequest, Insert,
-            InsertParts, MutationScope, ResolvedJoin, ResolvedOperand, ResolvedPredicate,
-            ResolvedPredicateValue, ReturnedColumn, SelectParts, SelectStatement,
-            SelectedExpression, SpatialNearParts, SpatialNearStatement, Statement, StorageType,
-            Table, Update, UpdateParts, Upsert, UpsertParts, VectorSearchParts,
+            ArrayOperator, Assignment, Comparison, Delete, DeleteParts, Expression,
+            IdentityRequest, Insert, InsertParts, MutationScope, ResolvedJoin, ResolvedOperand,
+            ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn, SelectParts,
+            SelectStatement, SelectedExpression, SpatialNearParts, SpatialNearStatement, Statement,
+            StorageType, Table, Update, UpdateParts, Upsert, UpsertParts, VectorSearchParts,
             VectorSearchStatement,
         },
         CompareOp, Ident, IdentRole, JoinKind, SchemaName,
@@ -585,6 +585,40 @@ fn array_mutations_accept_structured_json_from_storage_codecs() {
         returning: Vec::new(),
     });
     assert!(statement.is_ok());
+}
+
+#[test]
+fn first_row_mutations_require_the_collection_identity() {
+    let table = table();
+    let revision = table.column("revision").unwrap();
+    let error = Update::new(UpdateParts {
+        table: table.clone(),
+        assignments: vec![Assignment {
+            column: revision.clone(),
+            value: Expression::Bind(Value::from(2)),
+        }],
+        predicate: ResolvedPredicate::Const(true),
+        scope: MutationScope::First { target: revision },
+        returning: Vec::new(),
+    })
+    .unwrap_err();
+    assert_eq!(
+        error,
+        CompileError::InvalidStatement("first-row mutation requires the id column".into())
+    );
+
+    let revision = table.column("revision").unwrap();
+    let error = Delete::new(DeleteParts {
+        table,
+        predicate: ResolvedPredicate::Const(true),
+        scope: MutationScope::First { target: revision },
+        returning: Vec::new(),
+    })
+    .unwrap_err();
+    assert_eq!(
+        error,
+        CompileError::InvalidStatement("first-row mutation requires the id column".into())
+    );
 }
 
 fn parts(table: &Table) -> UpsertParts {
