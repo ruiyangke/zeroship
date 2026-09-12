@@ -35,12 +35,14 @@ keeps lease credentials outside the invocation and binds returned outcomes to
 its claim before applying them.
 
 The shared engine is composed into the CLI; production worker and Control
-integration remain unfinished. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
-embeds it in the customer's worker with customer-bound persistence; a lightweight
-server coordinates metadata and does not own the journal or payloads. Workers
-may access only creator databases; Control and other platform services may access
-only the control database. Authenticated service contracts carry cross-boundary
-requests without sharing database credentials.
+integration remain unfinished. The [revised design](../../docs/proposals/2026-09-11-workflow-worker.md)
+assigns scheduling and queue delivery to the manager, with workers consuming
+bounded jobs against creator storage. The [planned crate layout](../../docs/proposals/2026-09-11-workflow-worker.md#crate-layout)
+extracts the manager and service client while keeping customer execution here.
+These changes are not implemented; the module descriptions above reflect the
+current tree. Workers may access only creator databases; Control and other
+platform services may access only the Control database. Authenticated service
+contracts carry cross-boundary requests without sharing database credentials.
 `AppWorkflows::apply_management` commits coordinator lifecycle commands with
 durable customer-journal receipts. Repeated commands return their recorded
 outcome even after ordinary request cleanup or policy expiry. Changed command
