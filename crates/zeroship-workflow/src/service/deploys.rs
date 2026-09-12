@@ -1,12 +1,11 @@
-//! Executable snapshots and reconciliation against Control's current selection.
+//! Executable snapshots selected and retained by the trusted customer worker.
 
 use super::{
     app::{decode, encode, lock_app},
     store::Transaction,
-    AppPolicy, DeployRegistration, ScheduleRegistration, WorkflowService,
+    AppPolicy, DeployRegistration, WorkflowService,
 };
 use crate::{validation, WorkflowServiceError};
-use serde::Deserialize;
 use zeroship_core::{app_id::AppId, typed_id};
 
 impl WorkflowService {
@@ -16,28 +15,10 @@ impl WorkflowService {
         app: &AppId,
         deploy: &DeployRegistration,
     ) -> Result<(), WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
-        if tx.platform_policy.is_some() {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "platform workflow deployments are selected by Control".into(),
-            ));
-        }
+        let mut tx = self.begin().await?;
         let policy = lock_app(&mut tx, app).await?;
         let now = tx.now().await?;
         install(&mut tx, app, deploy, &policy, now).await?;
-        tx.commit().await
-    }
-
-    /// A notification is a hint to read authority, never a deployment selector.
-    pub async fn reconcile_deploy(&self, app: &AppId) -> Result<(), WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
-        if tx.platform_policy.is_none() {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "deployment reconciliation requires platform authority".into(),
-            ));
-        }
-        let policy = lock_app(&mut tx, app).await?;
-        reconcile_platform(&mut tx, app, &policy).await?;
         tx.commit().await
     }
 }
@@ -100,81 +81,4 @@ async fn install(
     super::schedules::reconcile(tx, app, deploy, policy, activated_at).await?;
 
     Ok(())
-}
-
-#[derive(Deserialize)]
-struct ManifestWorkflows {
-    #[serde(default)]
-    workflows: Option<Vec<String>>,
-    #[serde(default)]
-    schedules: Vec<ScheduleRegistration>,
-}
-
-// Call only after lock_app. Its shared platform app fence freezes selection
-// and history writers until the workflow transaction commits.
-pub(crate) async fn reconcile_platform(
-    tx: &mut Transaction,
-    app: &AppId,
-    policy: &AppPolicy,
-) -> Result<(), WorkflowServiceError> {
-    if tx.platform_policy.is_none() {
-        return Ok(());
-    }
-    let app_id = app.uuid().to_string();
-    let rows = tx
-        .query(
-            "SELECT deploy_hash,manifest_json FROM zeroship.apps WHERE id=$1::text::uuid",
-            &[app_id.clone().into()],
-        )
-        .await?;
-    let current = rows.first().ok_or_else(invalid_authority)?;
-    let revision = super::deploy_notifications::revision(tx, app).await?;
-    let Some(hash) = current.optional_text("deploy_hash")? else {
-        let deploys = tx.table("deploys");
-        let schedules = tx.table("schedules");
-        tx.execute(
-            &format!("UPDATE {deploys} SET active=0 WHERE app_id=$1"),
-            &[app.as_str().into()],
-        )
-        .await?;
-        tx.execute(
-            &format!("UPDATE {schedules} SET next_at=NULL WHERE app_id=$1"),
-            &[app.as_str().into()],
-        )
-        .await?;
-        super::deploy_notifications::acknowledge(tx, app, revision).await?;
-        return Ok(());
-    };
-    if revision.is_none() {
-        return Err(invalid_authority());
-    }
-    let manifest = current
-        .optional_text("manifest_json")?
-        .ok_or_else(invalid_authority)?;
-    let rows = tx.query("SELECT id,manifest_json,CAST(FLOOR(EXTRACT(EPOCH FROM activated_at)*1000) AS BIGINT) AS activated_at FROM zeroship.app_deploys WHERE app_id=$1::text::uuid AND deploy_hash=$2", &[app_id.into(),hash.clone().into()]).await?;
-    let history = rows.first().ok_or_else(invalid_authority)?;
-    if rows.len() != 1 || history.text("manifest_json")? != manifest {
-        return Err(invalid_authority());
-    }
-    let manifest: ManifestWorkflows =
-        serde_json::from_str(&manifest).map_err(|_| invalid_authority())?;
-    let names = manifest.workflows.unwrap_or_default();
-    let workflows: std::collections::BTreeSet<_> = names.iter().cloned().collect();
-    if workflows.len() != names.len() {
-        return Err(invalid_authority());
-    }
-    let deploy = DeployRegistration {
-        id: history.text("id")?,
-        hash,
-        workflows,
-        schedules: manifest.schedules,
-    };
-    install(tx, app, &deploy, policy, history.integer("activated_at")?).await?;
-    super::deploy_notifications::acknowledge(tx, app, revision).await
-}
-
-fn invalid_authority() -> WorkflowServiceError {
-    WorkflowServiceError::Unavailable(
-        "current workflow deployment authority is missing or invalid".into(),
-    )
 }

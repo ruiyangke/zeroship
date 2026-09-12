@@ -78,7 +78,7 @@ impl AppWorkflows {
     ) -> Result<CapabilityToken, WorkflowServiceError> {
         let authority = authority(&self.service)?;
         let digest = digest(&options)?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) = request_result(
@@ -136,7 +136,7 @@ impl AppWorkflows {
         target: Option<SignalTarget>,
     ) -> Result<RevokedSignals, WorkflowServiceError> {
         let digest = digest(&target)?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) = request_result(
@@ -210,7 +210,7 @@ impl WorkflowService {
         options: SignalOptions,
     ) -> Result<IngressReceipt, WorkflowServiceError> {
         let authority = authority(self)?;
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let now = tx.now().await?;
         let grant = verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
         if &grant.app_id != app || &grant.target != target {

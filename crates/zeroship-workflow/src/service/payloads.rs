@@ -132,7 +132,7 @@ impl WorkflowService {
     ) -> Result<StagedPayload, WorkflowServiceError> {
         validate_reference(&reference)?;
         let storage = storage(self)?;
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         let table = tx.table("payloads");
         let existing = tx
@@ -189,7 +189,7 @@ impl WorkflowService {
 
         // Lock in the same order as completion and GC. A bounded upload holds
         // this lock until the store finishes, so GC cannot race a live writer.
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
         claim.policy.admit()?;
@@ -257,7 +257,7 @@ impl WorkflowService {
     ) -> Result<PayloadRead, WorkflowServiceError> {
         validate_reference(reference)?;
         let storage = storage(self)?;
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
         let row = owned_reference(&mut tx, &claim.app, &claim.run, reference, claim.now).await?;
@@ -276,7 +276,7 @@ impl WorkflowService {
             ));
         }
         let storage = storage(self)?;
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let table = tx.table("payloads");
         let now = tx.now().await?;
         let candidates = tx.query(&format!("SELECT app_id,id FROM {table} WHERE state IN ('uploading','staged','deleting','deleted') AND expires_at <= $1 ORDER BY expires_at,app_id,id LIMIT $2"), &[now.into(),(limit as i64).into()]).await?;
@@ -287,7 +287,7 @@ impl WorkflowService {
                 WorkflowServiceError::Internal("invalid payload app identity".into())
             })?;
             let id = candidate.text("id")?;
-            let mut tx = self.store.begin().await?;
+            let mut tx = self.begin().await?;
             lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
             let row = payload(&mut tx, &app, &id).await?;
@@ -324,7 +324,7 @@ impl WorkflowService {
                 .delete(app.as_str(), &id)
                 .await
                 .map_err(storage_error)?;
-            let mut tx = self.store.begin().await?;
+            let mut tx = self.begin().await?;
             let policy = lock_app(&mut tx, &app).await?;
             let now = tx.now().await?;
             // Keep a tombstone and sweep it again. A remote store may finish an
@@ -355,7 +355,7 @@ impl AppWorkflows {
         let occurrence = i32::try_from(occurrence).map_err(|_| {
             WorkflowServiceError::InvalidRequest("invalid step name occurrence".into())
         })?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         lock_app(&mut tx, &self.app).await?;
         let run = lock_run(&mut tx, &self.app, run_id).await?;
         let generation = run.integer("generation")?;
@@ -410,7 +410,7 @@ impl AppWorkflows {
     ) -> Result<PayloadRead, WorkflowServiceError> {
         validate_run(run_id)?;
         let storage = storage(&self.service)?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         lock_app(&mut tx, &self.app).await?;
         lock_run(&mut tx, &self.app, run_id).await?;
         let row = reference_at(&mut tx, &self.app, run_id, generation, slot).await?;

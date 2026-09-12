@@ -1,36 +1,38 @@
 import { table, t } from "../../../packages/zero-migrate/dist/index.js";
 
-// The workflow service owns this schema. Platform migrations and local schema
-// generation call the same definition through the migration compiler.
+// The customer owns the journal. Provisioning supplies its resolved schema;
+// both database adapters use the canonical definition and reserved table names.
 export function workflowSchema(namespace) {
-  const tables = [];
+  const identifiers = new Set();
+  const columnsInSchema = new Set();
+  const owned = name => { identifiers.add(name); return name; };
   const text = () => t.text().notNull();
   const integer = () => t.bigInt().notNull();
   const identity = () => ({ app_id: text() });
   const runIdentity = () => ({ ...identity(), run_id: text() });
   const generation = () => ({ ...runIdentity(), generation: integer() });
   const fk = (name, columns, target, targetColumns, onDelete = "restrict") => ({
-    name, columns, references: { table: target, schema: namespace, columns: targetColumns }, onDelete,
+    name: owned(name), columns, references: { table: target, schema: namespace, columns: targetColumns }, onDelete,
   });
   const appFk = (name) => fk(`${name}_app`, ["app_id"], "app_state", ["app_id"]);
   const runFk = (name) => fk(`${name}_run`, ["app_id", "run_id"], "runs", ["app_id", "id"]);
   const generationFk = (name) => fk(`${name}_generation`, ["app_id", "run_id", "generation"], "generations", ["app_id", "run_id", "generation"]);
   const create = (name, columns, primaryKey, foreignKeys = [], uniques = []) => {
-    tables.push(name);
+    owned(name);
+    Object.keys(columns).forEach(column => columnsInSchema.add(column));
     table(name, { schema: namespace }).create({ columns, primaryKey, foreignKeys });
     for (const unique of uniques) {
-      table(name, { schema: namespace }).index(unique.name).add({ on: unique.columns, unique: true });
+      table(name, { schema: namespace }).index(owned(unique.name)).add({ on: unique.columns, unique: true });
     }
   };
-  const index = (name, purpose, columns) => table(name, { schema: namespace }).index(`${name}_${purpose}_idx`).add({ on: columns });
+  const index = (name, purpose, columns) => table(name, { schema: namespace }).index(owned(`${name}_${purpose}_idx`)).add({ on: columns });
 
   create("schema_version", { id: text(), fingerprint: text() }, ["id"]);
   create("app_state", {
-    ...identity(), revision: integer(), policy: t.text(), signal_epoch: integer(),
-    platform_app_id: t.text(), deploy_revision: integer().default(0),
+    ...identity(), signal_epoch: integer(),
     last_polled_at: integer().default(0),
     subscription_sequence: integer().default(0),
-  }, ["app_id"], [], [{ name: "platform_app_identity", columns: ["platform_app_id"] }]);
+  }, ["app_id"]);
   create("deploys", {
     ...identity(), id: text(), hash: text(), manifest: text(), created_at: integer(),
     active: integer(), state: text(),
@@ -121,7 +123,7 @@ export function workflowSchema(namespace) {
     fk("subscription_step", ["app_id", "run_id", "generation", "ordinal"], "steps", ["app_id", "run_id", "generation", "ordinal"]),
   ], [
     { name: "subscription_identity", columns: ["app_id", "id"] },
-    { name: "subscription_sequence", columns: ["app_id", "sequence"] },
+    { name: "subscription_sequence_unique", columns: ["app_id", "sequence"] },
   ]);
   index("subscriptions", "topic", ["app_id", "topic", "id"]);
   create("requests", {
@@ -141,7 +143,7 @@ export function workflowSchema(namespace) {
     generationFk("payloads"),
     fk("payload_task", ["app_id", "run_id", "generation", "task_id"], "tasks", ["app_id", "run_id", "generation", "id"]),
   ]);
-  table("payloads", { schema: namespace }).index("payload_upload_request").add({ on: ["app_id", "task_id", "request_id"], unique: true });
+  table("payloads", { schema: namespace }).index(owned("payload_upload_request")).add({ on: ["app_id", "task_id", "request_id"], unique: true });
   index("payloads", "expiry", ["state", "expires_at"]);
   create("payload_refs", {
     ...generation(), slot: text(), ordinal: integer(), payload_id: text(),
@@ -153,5 +155,5 @@ export function workflowSchema(namespace) {
     ...identity(), id: text(), kind: text(), payload: text(), created_at: integer(), delivered_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("outbox")]);
   index("outbox", "delivery", ["delivered_at", "created_at"]);
-  return tables;
+  return { identifiers, columns: columnsInSchema };
 }

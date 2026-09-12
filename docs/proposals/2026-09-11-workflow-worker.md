@@ -9,9 +9,11 @@ management. The previously proposed data-owning server violated that boundary.
 The [workflow reference](../reference/workflows.md) describes the existing
 Control/Gateway dispatch implementation. The replacement engine, embedded task
 runner, V8 lifecycle adapter and payload contracts are implemented in the
-refactor branch, but their production composition remains unfinished. The branch
-still contains engine store and policy composition that must be bound to
-customer storage before worker cutover. The obsolete central completion and
+refactor branch, but their production composition remains unfinished. The engine
+now requires an explicit customer schema binding and host-owned policy
+snapshots. Its reserved journal tables contain execution data; admission policy
+does not come from customer SQL or a platform database join.
+The obsolete central completion and
 payload protocol and its platform migration have been removed.
 Closed coordination messages now live in `zeroship_core::workflow_coordination`,
 alongside shared lifecycle metadata and validated identifiers/counters. Native

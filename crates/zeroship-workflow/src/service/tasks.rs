@@ -19,7 +19,7 @@ impl WorkflowService {
     ) -> Result<Option<TaskAssignment>, WorkflowServiceError> {
         let mut remaining = 128i64;
         while remaining > 0 {
-            let mut tx = self.store.begin().await?;
+            let mut tx = self.begin().await?;
             let now = tx.now().await?;
             let runs = tx.table("runs");
             let tasks = tx.table("tasks");
@@ -36,7 +36,7 @@ impl WorkflowService {
                     WorkflowServiceError::Internal("invalid persisted workflow app identity".into())
                 })?;
                 let id = candidate.text("id")?;
-                let mut tx = self.store.begin().await?;
+                let mut tx = self.begin().await?;
                 let policy = lock_app(&mut tx, &app).await?;
                 let mut run = lock_run(&mut tx, &app, &id).await?;
                 let now = tx.now().await?;
@@ -117,9 +117,22 @@ impl WorkflowService {
         task_id: &str,
         token: &TaskToken,
     ) -> Result<Heartbeat, WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
+        if !claim.policy.admission || !claim.policy.dispatch {
+            let deadline = claim.task.integer("deadline")?;
+            let control = match ControlIntent::parse(&claim.run.text("control")?)? {
+                ControlIntent::None => ControlIntent::Pause,
+                requested => requested,
+            };
+            tx.commit().await?;
+            return Ok(Heartbeat {
+                deadline,
+                lease_ms: deadline - claim.now,
+                control,
+            });
+        }
         let expires = deadline(claim.now, claim.policy.lease_ms)?;
         let tasks = tx.table("tasks");
         let runs = tx.table("runs");
@@ -155,7 +168,7 @@ impl WorkflowService {
         execution: WorkflowExecution,
     ) -> Result<CompletionReceipt, WorkflowServiceError> {
         let body_digest = digest(&execution)?;
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         if claim.task.text("state")? == "completed" {
             if claim.task.optional_text("completion_digest")?.as_deref() != Some(&body_digest) {
@@ -199,7 +212,7 @@ impl WorkflowService {
         task_id: &str,
         token: &TaskToken,
     ) -> Result<(), WorkflowServiceError> {
-        let mut tx = self.store.begin().await?;
+        let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         if claim.task.text("state")? == "released" {
             return Ok(());

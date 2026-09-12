@@ -2,7 +2,7 @@ use super::{
     schema,
     store::{PostgresStore, SqliteStore, Transaction, WorkflowStore},
 };
-use super::{AppPolicy, DeployRegistration, RequestId, WorkflowService};
+use super::{AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, RequestId, WorkflowService};
 use crate::operations::{ConflictPolicy, SignalOptions, StartOptions};
 use crate::WorkflowServiceError;
 use compio_postgres::NoTls;
@@ -15,11 +15,16 @@ use testcontainers::{
 };
 use zeroship_core::{app_id::AppId, typed_id};
 
+fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
+    PolicySnapshot::configuration(revision.try_into().unwrap(), policy).unwrap()
+}
+
 mod payloads;
 mod output_reads;
 mod output_writes;
 mod policy;
 mod runner;
+mod schema_binding;
 
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {
@@ -36,16 +41,18 @@ async fn postgres_app_operations_are_scoped_and_retryable() {
 }
 
 async fn registered_service(store: Arc<dyn WorkflowStore>) -> (WorkflowService, AppId, AppId) {
-    let service = WorkflowService::open(store).await.unwrap();
+    let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
+        .await
+        .unwrap();
     let a = AppId::mint();
     let b = AppId::mint();
     for app in [&a, &b] {
         service
-            .register_app(app, &AppPolicy::default())
+            .register_app(app, configured_policy(1, AppPolicy::default()))
             .await
             .unwrap();
         service
-            .register_app(app, &AppPolicy::default())
+            .register_app(app, configured_policy(1, AppPolicy::default()))
             .await
             .unwrap();
         service
@@ -122,7 +129,10 @@ async fn app_contract(store: Arc<dyn WorkflowStore>) {
         admission: false,
         ..AppPolicy::default()
     };
-    service.register_app(a.app_id(), &policy).await.unwrap();
+    service
+        .register_app(a.app_id(), configured_policy(2, policy))
+        .await
+        .unwrap();
     assert_eq!(
         first,
         a.start(&request, "Example", options.clone()).await.unwrap()
@@ -154,24 +164,30 @@ impl PostgresFixture {
         let admin = connect(&admin_url).await;
         admin
             .batch_execute(
-                "CREATE ROLE zeroship_workflow_migrator NOLOGIN; \
-             CREATE ROLE zeroship_workflow LOGIN; CREATE ROLE zeroship_worker LOGIN; \
+                "CREATE ROLE customer_migrator NOLOGIN; \
+             CREATE ROLE customer_worker LOGIN; CREATE ROLE zeroship_worker LOGIN; \
              CREATE ROLE zeroship_gateway LOGIN; CREATE ROLE zeroship_app LOGIN; \
-             CREATE SCHEMA workflow AUTHORIZATION zeroship_workflow_migrator; \
-             SET ROLE zeroship_workflow_migrator;",
+             CREATE ROLE zeroship_control LOGIN; CREATE ROLE zeroship_workflow LOGIN; \
+             CREATE SCHEMA customer AUTHORIZATION customer_migrator; \
+             SET ROLE customer_migrator;",
             )
             .await
             .unwrap();
-        admin.batch_execute(schema::POSTGRES_SQL).await.unwrap();
+        let schema = super::store::SchemaName::new("customer").unwrap();
+        admin
+            .batch_execute(&schema::postgres_sql(&schema))
+            .await
+            .unwrap();
         admin.batch_execute(
-            "RESET ROLE; GRANT USAGE ON SCHEMA workflow TO zeroship_workflow; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA workflow TO zeroship_workflow;"
+            "RESET ROLE; GRANT USAGE ON SCHEMA customer TO customer_worker; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA customer TO customer_worker;"
         ).await.unwrap();
         Self {
             _container: container,
-            store: PostgresStore::new(format!(
-                "postgres://zeroship_workflow@{host}:{port}/postgres"
-            )),
+            store: PostgresStore::new(
+                format!("postgres://customer_worker@{host}:{port}/postgres"),
+                schema,
+            ),
             admin_url,
         }
     }
@@ -220,7 +236,7 @@ async fn storage_contract(store: &dyn WorkflowStore) {
     store.verify().await.unwrap();
     let mut tx = store.begin().await.unwrap();
     let apps = tx.table("app_state");
-    tx.execute(&format!("INSERT INTO {apps} (app_id, revision, policy, signal_epoch) VALUES ('app_rollback',0,'{{}}',0)"), &[]).await.unwrap();
+    tx.execute(&format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ('app_rollback',0)"), &[]).await.unwrap();
     drop(tx);
     let mut tx = store.begin().await.unwrap();
     assert!(tx
@@ -232,7 +248,7 @@ async fn storage_contract(store: &dyn WorkflowStore) {
         .unwrap()
         .is_empty());
     for app in ["app_a", "app_b"] {
-        tx.execute(&format!("INSERT INTO {apps} (app_id, revision, policy, signal_epoch) VALUES ($1,0,'{{}}',0)"), &[app.into()]).await.unwrap();
+        tx.execute(&format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ($1,0)"), &[app.into()]).await.unwrap();
         let deploys = tx.table("deploys");
         tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state) VALUES ($1,$2,$2,'{{}}',0,1,'available')"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
     }
@@ -281,30 +297,32 @@ async fn insert_run(
 }
 
 #[compio::test]
-async fn workflow_runtime_has_dml_without_ddl_and_app_processes_have_no_access() {
+async fn customer_runtime_has_dml_without_ddl_and_platform_roles_have_no_access() {
     let fixture = PostgresFixture::start().await;
     fixture.store.verify().await.unwrap();
     let admin = connect(&fixture.admin_url).await;
-    for role in ["zeroship_worker", "zeroship_gateway", "zeroship_app"] {
+    for role in [
+        "zeroship_worker", "zeroship_gateway", "zeroship_app", "zeroship_control", "zeroship_workflow",
+    ] {
         let url = fixture
             .admin_url
             .replacen("postgres@", &format!("{role}@"), 1);
         let client = connect(&url).await;
         assert!(client
-            .batch_execute("SELECT * FROM workflow.runs")
+            .batch_execute("SELECT * FROM customer.__zeroship_workflow_runs")
             .await
             .is_err());
         assert!(client
-            .batch_execute("DELETE FROM workflow.runs")
+            .batch_execute("DELETE FROM customer.__zeroship_workflow_runs")
             .await
             .is_err());
         assert!(client
-            .batch_execute("SET ROLE zeroship_workflow_migrator")
+            .batch_execute("SET ROLE customer_migrator")
             .await
             .is_err());
         let member: bool = admin
             .query_one(
-                "SELECT pg_has_role($1, 'zeroship_workflow_migrator', 'MEMBER')",
+                "SELECT pg_has_role($1, 'customer_migrator', 'MEMBER')",
                 &[&role],
             )
             .await
@@ -315,19 +333,19 @@ async fn workflow_runtime_has_dml_without_ddl_and_app_processes_have_no_access()
     let runtime = connect(
         &fixture
             .admin_url
-            .replacen("postgres@", "zeroship_workflow@", 1),
+            .replacen("postgres@", "customer_worker@", 1),
     )
     .await;
     assert!(runtime
-        .batch_execute("CREATE TABLE workflow.unauthorized (id text)")
+        .batch_execute("CREATE TABLE customer.unauthorized (id text)")
         .await
         .is_err());
     assert!(runtime
-        .batch_execute("ALTER TABLE workflow.runs ADD COLUMN unauthorized text")
+        .batch_execute("ALTER TABLE customer.__zeroship_workflow_runs ADD COLUMN unauthorized text")
         .await
         .is_err());
     assert!(runtime
-        .batch_execute("SET ROLE zeroship_workflow_migrator")
+        .batch_execute("SET ROLE customer_migrator")
         .await
         .is_err());
 }
@@ -502,8 +520,9 @@ async fn task_contract(store: Arc<dyn WorkflowStore>) {
             .await,
         Err(WorkflowServiceError::Conflict(_))
     ));
+    let policies = service.policies.clone();
     drop(service);
-    let recovered = WorkflowService::open(store).await.unwrap();
+    let recovered = WorkflowService::open(store, policies).await.unwrap();
     let replacement = recovered.poll(&other).await.unwrap().unwrap();
     assert_eq!(replacement.invocation.run_id, new.id);
     assert!(replacement.epoch > abandoned.epoch);
@@ -822,7 +841,7 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
         compensation_retry_ms: 60_000,
         ..Default::default()
     };
-    service.register_app(&app, &policy).await.unwrap();
+    service.register_app(&app, configured_policy(2, policy)).await.unwrap();
     let request = RequestId::mint();
     let mut starts = Vec::new();
     for _ in 0..4 {
@@ -976,7 +995,7 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let recovered = WorkflowService::open(store.clone()).await.unwrap();
+    let recovered = WorkflowService::open(store.clone(), service.policies.clone()).await.unwrap();
     let task = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(
         task.invocation.journal[1].compensation_state.as_deref(),
@@ -1013,10 +1032,10 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
     service
         .register_app(
             &app,
-            &AppPolicy {
+            configured_policy(3, AppPolicy {
                 max_running: 0,
                 ..Default::default()
-            },
+            }),
         )
         .await
         .unwrap();
@@ -1057,15 +1076,15 @@ async fn postgres_completion_that_outlives_its_lease_rolls_back() {
     service
         .register_app(
             &app,
-            &AppPolicy {
+            configured_policy(2, AppPolicy {
                 lease_ms: 300,
                 ..Default::default()
-            },
+            }),
         )
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute("CREATE FUNCTION workflow.delay_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_checkpoint BEFORE INSERT ON workflow.steps FOR EACH ROW EXECUTE FUNCTION workflow.delay_checkpoint();").await.unwrap();
+    admin.batch_execute("CREATE FUNCTION customer.delay_checkpoint() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.5); RETURN NEW; END $$; CREATE TRIGGER delay_checkpoint BEFORE INSERT ON customer.__zeroship_workflow_steps FOR EACH ROW EXECUTE FUNCTION customer.delay_checkpoint();").await.unwrap();
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
     let task = service.poll(&worker).await.unwrap().unwrap();
     assert!(matches!(service.complete(&worker,&task.id,&task.token,execution(json!([{"kind":"StepCompleted","ordinal":0,"name":"slow","output":"must roll back"},{"kind":"RunCompleted"}]))).await,Err(WorkflowServiceError::Conflict(_))));
@@ -1081,7 +1100,7 @@ async fn postgres_completion_that_outlives_its_lease_rolls_back() {
         .is_empty());
     tx.commit().await.unwrap();
     admin
-        .batch_execute("DROP TRIGGER delay_checkpoint ON workflow.steps;")
+        .batch_execute("DROP TRIGGER delay_checkpoint ON customer.__zeroship_workflow_steps;")
         .await
         .unwrap();
     let replacement = service.poll(&worker).await.unwrap().unwrap();
@@ -1441,7 +1460,7 @@ async fn broadcast_contract(store: Arc<dyn WorkflowStore>) {
     ));
     let late = wait_on_topic(&service, &scope, &worker).await;
     assert_eq!(service.tick_broadcasts().await.unwrap(), 128);
-    let recovered = WorkflowService::open(store.clone()).await.unwrap();
+    let recovered = WorkflowService::open(store.clone(), service.policies.clone()).await.unwrap();
     assert_eq!(recovered.tick_broadcasts().await.unwrap(), 1);
     assert_eq!(recovered.tick_broadcasts().await.unwrap(), 0);
     let mut actual = std::collections::BTreeSet::new();
@@ -1749,7 +1768,7 @@ async fn ingress_contract(store: Arc<dyn WorkflowStore>) {
             .await,
         Err(WorkflowServiceError::Unauthenticated)
     );
-    let recovered = WorkflowService::open(store.clone())
+    let recovered = WorkflowService::open(store.clone(), service.policies.clone())
         .await
         .unwrap()
         .with_signal_authority(authority);

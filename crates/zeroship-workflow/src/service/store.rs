@@ -11,6 +11,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
+pub use zeroship_data_sql::SchemaName;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Value {
@@ -130,9 +131,6 @@ pub trait WorkflowStore: Send + Sync {
         if row.len() != 1 || row[0].text("fingerprint")? != schema::fingerprint(tx.dialect())? {
             return Err(schema::incompatible());
         }
-        if tx.platform_policy.is_some() {
-            super::PlatformPolicy::verify(&mut tx).await?;
-        }
         tx.commit().await
     }
 }
@@ -140,7 +138,7 @@ pub trait WorkflowStore: Send + Sync {
 #[derive(Clone)]
 pub struct PostgresStore {
     url: String,
-    policy: Option<super::PlatformPolicy>,
+    schema: SchemaName,
 }
 impl std::fmt::Debug for PostgresStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -149,17 +147,8 @@ impl std::fmt::Debug for PostgresStore {
 }
 impl PostgresStore {
     #[must_use]
-    pub fn new(url: String) -> Self {
-        Self { url, policy: None }
-    }
-
-    /// Resolve platform policy inside every workflow transaction.
-    #[must_use]
-    pub fn platform(url: String, policy: super::PlatformPolicy) -> Self {
-        Self {
-            url,
-            policy: Some(policy),
-        }
+    pub const fn new(url: String, schema: SchemaName) -> Self {
+        Self { url, schema }
     }
 }
 #[async_trait(?Send)]
@@ -180,8 +169,9 @@ impl WorkflowStore for PostgresStore {
             .map_err(postgres_error)?;
         Ok(Transaction {
             backend: Backend::Postgres(client),
+            namespace: self.schema.quoted(),
             finished: false,
-            platform_policy: self.policy.clone(),
+            policies: None,
         })
     }
 }
@@ -214,8 +204,9 @@ impl WorkflowStore for SqliteStore {
             .map_err(sqlite_error)?;
         Ok(Transaction {
             backend: Backend::Sqlite(conn),
+            namespace: "\"main\"".into(),
             finished: false,
-            platform_policy: None,
+            policies: None,
         })
     }
 }
@@ -228,8 +219,9 @@ enum Backend {
 #[derive(Debug)]
 pub struct Transaction {
     backend: Backend,
+    namespace: String,
     finished: bool,
-    pub(crate) platform_policy: Option<super::PlatformPolicy>,
+    pub(crate) policies: Option<std::sync::Arc<super::HostPolicies>>,
 }
 impl Transaction {
     pub(crate) fn dialect(&self) -> &'static str {
@@ -240,11 +232,7 @@ impl Transaction {
     }
     pub(crate) fn table(&self, name: &str) -> String {
         debug_assert!(name.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'));
-        let namespace = match self.backend {
-            Backend::Postgres(_) => "workflow",
-            Backend::Sqlite(_) => "main",
-        };
-        format!("\"{namespace}\".\"{name}\"")
+        format!("{}.\"__zeroship_workflow_{name}\"", self.namespace)
     }
     pub(crate) fn lock_clause(&self) -> &'static str {
         match self.backend {

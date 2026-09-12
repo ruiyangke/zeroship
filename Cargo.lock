@@ -8657,6 +8657,7 @@ dependencies = [
  "url",
  "uuid",
  "zeroship-core",
+ "zeroship-data-sql",
  "zeroship-storage",
 ]
 

@@ -250,15 +250,21 @@ async fn output_contract(store: Arc<dyn WorkflowStore>) {
         .unwrap();
 
     // Host or service limits retain the accepted prefix and stop the frontier.
-    for (mode, length, service_limit) in [("inline", 64, 256), ("auto", 300, 256), ("auto", 64, 16)]
-    {
+    for (revision, mode, length, service_limit) in [
+        (2, "inline", 64, 256),
+        (3, "auto", 300, 256),
+        (4, "auto", 64, 16),
+    ] {
         service
             .register_app(
                 &app,
-                &AppPolicy {
-                    max_payload_bytes: service_limit,
-                    ..AppPolicy::default()
-                },
+                super::configured_policy(
+                    revision,
+                    AppPolicy {
+                        max_payload_bytes: service_limit,
+                        ..AppPolicy::default()
+                    },
+                ),
             )
             .await
             .unwrap();

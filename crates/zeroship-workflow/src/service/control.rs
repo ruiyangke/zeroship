@@ -25,7 +25,7 @@ impl AppWorkflows {
     ) -> Result<TransitionedRun, WorkflowServiceError> {
         validate_run(run_id)?;
         let digest = digest(&(run_id, operation))?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) =
@@ -99,7 +99,7 @@ impl AppWorkflows {
         validate_run(run_id)?;
         let deploy_policy = crate::lifecycle::restart_deploy_policy(&options)?;
         let digest = digest(&(run_id, &options))?;
-        let mut tx = self.service.store.begin().await?;
+        let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) =
@@ -169,7 +169,7 @@ impl AppWorkflows {
             ));
         }
         let deploy = if deploy_policy == RestartDeploy::Latest {
-            let deploy = active_deploy(&mut tx, &self.app, &policy).await?;
+            let deploy = active_deploy(&mut tx, &self.app).await?;
             if !deploy.workflows.contains(&run.text("workflow_name")?) {
                 return Err(WorkflowServiceError::Conflict(
                     "workflow is absent from the active deployment".into(),

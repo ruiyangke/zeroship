@@ -13,7 +13,7 @@ and the local SQLite engine. It does not depend on V8 or the worker runtime.
 - `dev.rs`: SQLite persistence and scheduling through a host-owned `WorkflowExecutor`.
 - `service/`: replacement shared service, app handles, transactional lifecycle and
   worker task protocol over PostgreSQL or SQLite.
-- `schema/`: owned service schema recorded through the canonical migration DSL
+- `schema/`: customer journal recorded through the canonical migration DSL
   and generated through its PostgreSQL and SQLite compilers.
 
 Rust hosts can construct `HttpWorkflowBackend` with `WorkflowClientConfig` and
@@ -35,9 +35,28 @@ its claim before applying them.
 The replacement engine is under construction and is not yet composed into the
 worker, Control or CLI. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
 embeds it in the customer's worker with customer-bound persistence; a lightweight
-server coordinates metadata and does not own the journal or payloads. The
-engine store still needs its customer-schema binding and trusted host policy
-composition. The obsolete central task transport has been removed. The engine's
+server coordinates metadata and does not own the journal or payloads.
+`PostgresStore::new` requires an explicit validated `SchemaName`; app identity
+does not select a physical schema. `schema::postgres_sql` binds the generated
+DDL for a provisioning host with authorized migration credentials. Runtime
+operations only verify the journal fingerprint and use ordinary DML.
+PostgreSQL and SQLite use reserved `__zeroship_workflow_*` tables. The generator
+compiles the canonical logical definition, then binds owned table, constraint
+and index identifiers for the provisioning artifact. Creator migration and
+query validators continue refusing reserved collections.
+
+`WorkflowService::open` requires `HostPolicies`. The trusted worker supplies
+validated `PolicySnapshot` values through `register_app`, then binds app code
+with `for_app`. Policy stays in host memory; journal rows cannot restore
+admission after a worker restart. Snapshots reject stale revisions and
+conflicting limits. Explicit host configuration has no metadata expiry;
+authenticated remote metadata uses a monotonic lease deadline. Expiry stops new
+admission and dispatch, and heartbeat responses request a pause without
+extending an existing task lease. History and completion under an already live
+claim remain available. Deploy selection also comes from the trusted host,
+through `activate_deploy`, without querying platform tables.
+
+The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,
 lifecycle changes, child execution, retained restart
 history and scheduled occurrences against both database adapters. PostgreSQL

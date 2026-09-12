@@ -4,8 +4,15 @@ use std::path::Path;
 
 use crate::WorkflowServiceError;
 
-pub const POSTGRES_SQL: &str = include_str!("../../schema/postgres.sql");
+const POSTGRES_TEMPLATE: &str = include_str!("../../schema/postgres.sql");
 pub const SQLITE_SQL: &str = include_str!("../../schema/sqlite.sql");
+/// Instantiate canonical DDL in the customer's resolved physical schema.
+/// The provisioning host supplies its own authorized migration connection.
+#[must_use]
+pub fn postgres_sql(schema: &super::store::SchemaName) -> String {
+    POSTGRES_TEMPLATE.replace("\"__zeroship_workflow_schema\"", &schema.quoted())
+}
+
 const FINGERPRINTS: &str = include_str!("../../schema/fingerprints.json");
 
 pub(crate) fn fingerprint(dialect: &str) -> Result<String, WorkflowServiceError> {
@@ -47,7 +54,7 @@ pub fn initialize_sqlite(path: &Path) -> Result<(), WorkflowServiceError> {
     if populated {
         let actual: String = tx
             .query_row(
-                "SELECT fingerprint FROM schema_version WHERE id = 'workflow'",
+                "SELECT fingerprint FROM __zeroship_workflow_schema_version WHERE id = 'workflow'",
                 [],
                 |row| row.get(0),
             )

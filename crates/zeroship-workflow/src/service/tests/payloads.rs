@@ -330,7 +330,7 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
         )
         .await
         .unwrap();
-    let recovered = WorkflowService::open(store.clone())
+    let recovered = WorkflowService::open(store.clone(), service.policies.clone())
         .await
         .unwrap()
         .with_payload_storage(storage.clone())
@@ -414,7 +414,10 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
         max_payload_objects: 1,
         ..Default::default()
     };
-    recovered.register_app(&a, &policy).await.unwrap();
+    recovered
+        .register_app(&a, super::configured_policy(2, policy))
+        .await
+        .unwrap();
     assert!(matches!(
         recovered
             .stage_payload(
@@ -442,7 +445,7 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
         Err(WorkflowServiceError::ResourceExhausted(_))
     ));
     recovered
-        .register_app(&a, &AppPolicy::default())
+        .register_app(&a, super::configured_policy(3, AppPolicy::default()))
         .await
         .unwrap();
     recovered
@@ -672,7 +675,7 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
             .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
-    let recovered = WorkflowService::open(store)
+    let recovered = WorkflowService::open(store, service.policies.clone())
         .await
         .unwrap()
         .with_payload_storage(storage.clone())
@@ -722,7 +725,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
         .await
         .unwrap();
     let admin = connect(&fixture.admin_url).await;
-    admin.batch_execute("CREATE FUNCTION workflow.delay_payload_promotion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='referenced' THEN PERFORM pg_sleep(1); END IF; RETURN NEW; END $$; CREATE TRIGGER delay_payload_promotion BEFORE UPDATE ON workflow.payloads FOR EACH ROW EXECUTE FUNCTION workflow.delay_payload_promotion(); UPDATE workflow.payloads SET expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint + 500;").await.unwrap();
+    admin.batch_execute("CREATE FUNCTION customer.delay_payload_promotion() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='referenced' THEN PERFORM pg_sleep(1); END IF; RETURN NEW; END $$; CREATE TRIGGER delay_payload_promotion BEFORE UPDATE ON customer.__zeroship_workflow_payloads FOR EACH ROW EXECUTE FUNCTION customer.delay_payload_promotion(); UPDATE customer.__zeroship_workflow_payloads SET expires_at = (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint + 500;").await.unwrap();
     let completing_service = service.clone();
     let completing = compio::runtime::spawn(async move {
         completing_service
@@ -736,7 +739,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     });
     compio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
-            let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='zeroship_workflow' AND wait_event='PgSleep')", &[]).await.unwrap();
+            let row = admin.query_one("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event='PgSleep')", &[]).await.unwrap();
             if row.get::<_, bool>(0) { break; }
             compio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
