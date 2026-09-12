@@ -60,6 +60,12 @@ joins now use generated ORM models and collections. Mailbox reads retain their
 inclusive time bounds and generation targets; consumption checks the affected
 row count before committing the checkpoint. Broadcast recovery keeps its durable
 recipient cursor and publication cutoff across batches and restarts.
+Completion, compensation and continuation writes also use ORM collections.
+Compensation errors are read in descending ordinal pages, and continuation
+retargets parent checkpoints using the complete run, generation and ordinal
+cursor. Native tests cover histories and parent waits that span query pages
+without crossing app or generation boundaries. The atomic relational update
+that wakes waiting parents remains explicit SQL.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),

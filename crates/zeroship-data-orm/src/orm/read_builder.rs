@@ -74,6 +74,9 @@ impl<C: FilterableColumn> SourceColumn<C> {
     pub fn gt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
         self.comparison("$gt", value)
     }
+    pub fn lt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+        self.comparison("$lt", value)
+    }
     pub fn gte<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
         self.comparison("$gte", value)
     }

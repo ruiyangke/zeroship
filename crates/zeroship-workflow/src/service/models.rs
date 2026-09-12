@@ -78,6 +78,30 @@ pub struct StoredStep {
 }
 
 #[derive(FromRow)]
+#[orm(entity = steps)]
+pub struct CompensationRecord {
+    pub compensation_attempts: i64,
+    pub compensation_retry_ms: i64,
+    pub compensation_due_at: Option<i64>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = steps)]
+pub struct CompensationFailure {
+    pub ordinal: i64,
+    pub compensation_error: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = steps)]
+pub struct ParentStep {
+    pub run_id: String,
+    pub generation: i64,
+    pub ordinal: i64,
+    pub record: String,
+}
+
+#[derive(FromRow)]
 #[orm(entity = tasks)]
 pub struct TaskRecord {
     pub id: String,
