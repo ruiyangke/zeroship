@@ -811,6 +811,39 @@ impl SqlCompiler for PermissiveCompiler {
 }
 
 #[derive(Clone, Copy)]
+struct OverbindingCompiler(SqlSupport);
+
+impl SqlCompiler for OverbindingCompiler {
+    fn support(&self) -> SqlSupport {
+        self.0
+    }
+
+    fn check(&self, _: &Requirements, _: &SqlSupport) -> Result<(), CompileError> {
+        Ok(())
+    }
+
+    fn compile(&self, _: Statement, _: &SqlSupport) -> Result<CompiledQuery, CompileError> {
+        Ok(CompiledQuery::new(
+            "SELECT $1, $2".into(),
+            vec![Value::from(1), Value::from(2)],
+        ))
+    }
+
+    fn compile_identity_allocation(
+        &self,
+        _: IdentityRequest,
+        _: &SqlSupport,
+    ) -> Result<IdentityPlan, CompileError> {
+        Ok(IdentityPlan {
+            reservation: None,
+            allocation: zeroship_data_orm::sql::compiler::IdentityReadPlan::Rows(
+                CompiledQuery::new("SELECT $1, $2".into(), vec![Value::from(1), Value::from(2)]),
+            ),
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
 struct DownstreamCodecs;
 
 impl SqlStorageCodecs for DownstreamCodecs {
@@ -882,6 +915,51 @@ fn registration_enforces_common_support_even_when_a_compiler_check_is_permissive
         overclaimed,
     )
     .is_err());
+}
+
+#[test]
+fn registration_enforces_bind_limits_on_downstream_compiler_output() {
+    let mut support = PostgresCompiler.support();
+    support.max_bind_parameters = 1;
+    let registration = SqlRegistration::new(
+        "overbinding-sql",
+        SqlFamily::new("example.overbinding-sql"),
+        OverbindingCompiler(support),
+        DownstreamCodecs,
+        support,
+    )
+    .unwrap();
+    let source = search_table();
+    let statement = Statement::Select(
+        SelectStatement::new(SelectParts {
+            table: source.clone(),
+            joins: Vec::new(),
+            projection: vec![SelectedExpression {
+                expression: ResolvedOperand::Column(source.column("id").unwrap()),
+                alias: Ident::parse_as("id", IdentRole::Alias).unwrap(),
+            }],
+            predicate: ResolvedPredicate::Const(true),
+            group_by: Vec::new(),
+            having: ResolvedPredicate::Const(true),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            distinct: false,
+            lock: zeroship_data_orm::sql::statement::RowLock::None,
+        })
+        .unwrap(),
+    );
+    assert!(matches!(
+        registration.compile(statement),
+        Err(CompileError::BindLimitExceeded { limit: 1 })
+    ));
+
+    let table = table();
+    let request = IdentityRequest::new(table.clone(), table.column("id").unwrap(), 1).unwrap();
+    assert!(matches!(
+        registration.compile_identity_allocation(request),
+        Err(CompileError::BindLimitExceeded { limit: 1 })
+    ));
 }
 
 #[test]
