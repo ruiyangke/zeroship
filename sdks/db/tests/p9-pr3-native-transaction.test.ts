@@ -194,10 +194,7 @@ describe("P9 PR 3 — native env.db.transaction(fn)", () => {
   test("re-install then transaction(fn) does not recurse (native method captured once)", async () => {
     // The install loop plants an own `transaction` property that shadows
     // the native method. A second installSchema on the same native handle
-    // must still reach the *native* orchestrator, not the previously
-    // installed wrapper (which would recurse forever). The bootstrap
-    // stashes the native method under a hidden key on first install and
-    // reuses it.
+    // must still reach the captured native orchestrator.
     const native = makeNativeTxMock();
     const db1 = installSchemaForTest(
       { posts: { title: t.string().required() } },

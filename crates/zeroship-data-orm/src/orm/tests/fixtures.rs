@@ -77,6 +77,97 @@ impl CollectionFixture {
         Self::postgres_with_keys(collection, fields, ProjectKeySource::unavailable()).await
     }
 
+    pub async fn sqlite_from_table_definition(
+        collection: &str,
+        fields: Value,
+        columns: &str,
+    ) -> Self {
+        crate::tests::fixtures::reset_engine();
+        let directory = tempfile::tempdir().unwrap();
+        let binding = DbBinding::cold_start("orm_internal_fixture");
+        let file = directory
+            .path()
+            .join(format!("zs-{}.sqlite", binding.app_id()));
+        rusqlite::Connection::open(&file)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE {} ({columns})",
+                crate::sql::mapping::quote_ident(collection)
+            ))
+            .unwrap();
+        let database = Database::connect(
+            binding,
+            crate::ConnectOptions::new(
+                directory.path().join("control.sqlite").to_string_lossy(),
+                ProjectKeySource::unavailable(),
+            ),
+            vec![(collection.into(), fields)],
+        )
+        .await
+        .unwrap();
+        Self {
+            database,
+            sqlite_file: Some(file),
+            directory: Some(directory),
+            postgres: None,
+            server: None,
+        }
+    }
+
+    pub async fn postgres_from_table_definition(
+        collection: &str,
+        fields: Value,
+        columns: &str,
+    ) -> Self {
+        let server = crate::tests::fixtures::postgres::Postgres::start();
+        crate::tests::fixtures::reset_engine();
+        let backend = Rc::new(
+            crate::backend::postgres::PostgresBackend::connect(
+                &server.url(),
+                4,
+                ProjectKeySource::unavailable(),
+            )
+            .await
+            .unwrap(),
+        );
+        let app = format!("zsorm_{}", uuid::Uuid::new_v4().simple());
+        let schema = crate::sql::mapping::quote_ident(&app);
+        let table = crate::sql::mapping::quote_ident(collection);
+        backend
+            .pool()
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema}; CREATE TABLE {schema}.{table} ({columns})"
+            ))
+            .await
+            .unwrap();
+        crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
+            .await
+            .unwrap();
+        let role = crate::sql::mapping::quote_ident(
+            &zeroship_core::database_role::per_app_role_name(&app).unwrap(),
+        );
+        backend
+            .pool()
+            .batch_execute(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {schema}.{table} TO {role}"
+            ))
+            .await
+            .unwrap();
+        let database = Database::from_schema(
+            DbBinding::cold_start(&app),
+            crate::backend_handle::BackendHandle::new(backend.clone()),
+            vec![(collection.into(), fields)],
+        )
+        .unwrap();
+        Self {
+            database,
+            sqlite_file: None,
+            directory: None,
+            postgres: Some((backend, schema, role)),
+            server: Some(server),
+        }
+    }
+
     pub async fn postgres_with_keys(
         collection: &str,
         fields: Value,

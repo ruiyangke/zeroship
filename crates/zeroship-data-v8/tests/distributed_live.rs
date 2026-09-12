@@ -43,7 +43,7 @@ use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
@@ -262,17 +262,15 @@ fn runtime_for(
 ) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
-        DbService::new(DbServiceConfig {
-            project_keys: Default::default(),
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
-                .expect("valid database configuration"),
-            cdc_relay: Some(relay.clone()),
-            meter: None,
-        })
-        .expect("db service")
-        .plugin(),
-    ];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        project_keys: Default::default(),
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+            .expect("valid database configuration"),
+        cdc_relay: Some(relay.clone()),
+        meter: None,
+    })
+    .expect("db service")
+    .plugin()];
     Runtime::builder()
         .modules(modules)
         .env_vars(env_vars)
@@ -385,9 +383,16 @@ function fetchHandler(request) {
     }
     if (path === "/arm") {
         return (async () => {
-            held = env.db.collection("events").openSubscription();
-            await held.ready();
-            return new Response("ready", { status: 200 });
+            try {
+                held = env.db.collection("events").openSubscription();
+                await held.ready();
+                return new Response("ready", { status: 200 });
+            } catch (error) {
+                return new Response(JSON.stringify({
+                    code: error?.code,
+                    message: error?.message,
+                }), { status: 418 });
+            }
         })();
     }
     return new Response("not found", { status: 404 });
@@ -435,7 +440,6 @@ import { createLive } from "@zeroship/db/internal";
 
 async function* todosSubscribe() {
     const live = createLive(
-        {},
         () => env.db.collection("events").find({}, {}),
         { tables: ["events"] },
     );
@@ -869,13 +873,14 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {
-        let (probe, connection) = compio_postgres::connect(&url, NoTls).await.unwrap_or_else(
-            |error| {
-                panic!(
+        let (probe, connection) =
+            compio_postgres::connect(&url, NoTls)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
                     "could not connect to the distributed live PostgreSQL fixture at {url}: {error}"
                 )
-            },
-        );
+                });
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })

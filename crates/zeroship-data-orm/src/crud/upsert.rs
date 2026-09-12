@@ -15,27 +15,40 @@ use crate::{
 };
 use std::collections::HashSet;
 
-pub(crate) fn build_upsert_with_registration(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
-    document: Value,
-    conflict: &Value,
-    assignments: &WriteAssignments,
-    expected_id: Option<Value>,
-    registration: &crate::sql::registration::SqlRegistration,
-) -> Result<CompiledQuery, QueryError> {
-    let statement = resolve(
-        namespace,
-        collection,
-        schema,
-        document,
-        conflict,
-        assignments,
-        expected_id,
-        registration,
-    )?;
-    registration.compile(statement).map_err(Into::into)
+pub(crate) struct Builder<'a> {
+    namespace: &'a SchemaName,
+    collection: &'a str,
+    schema: &'a Value,
+    assignments: &'a WriteAssignments,
+    registration: &'a crate::sql::registration::SqlRegistration,
+}
+
+impl<'a> Builder<'a> {
+    pub(crate) const fn new(
+        namespace: &'a SchemaName,
+        collection: &'a str,
+        schema: &'a Value,
+        assignments: &'a WriteAssignments,
+        registration: &'a crate::sql::registration::SqlRegistration,
+    ) -> Self {
+        Self {
+            namespace,
+            collection,
+            schema,
+            assignments,
+            registration,
+        }
+    }
+
+    pub(crate) fn build(
+        &self,
+        document: Value,
+        conflict: &Value,
+        expected_id: Option<Value>,
+    ) -> Result<CompiledQuery, QueryError> {
+        let statement = resolve(self, document, conflict, expected_id)?;
+        self.registration.compile(statement).map_err(Into::into)
+    }
 }
 
 pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements {
@@ -57,15 +70,18 @@ pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements
 }
 
 fn resolve(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
+    builder: &Builder<'_>,
     document: Value,
     conflict: &Value,
-    assignments: &WriteAssignments,
     expected_id: Option<Value>,
-    registration: &crate::sql::registration::SqlRegistration,
 ) -> Result<Statement, QueryError> {
+    let Builder {
+        namespace,
+        collection,
+        schema,
+        assignments,
+        registration,
+    } = builder;
     mapping::validate_collection(collection)?;
     let Value::Object(mut document) = document else {
         return Err(invalid("upsert document must be an object"));

@@ -233,18 +233,16 @@ interface ZeroshipCollection {
 }
 
 /**
- * The collections-only view handed to an `env.db.transaction(fn)` callback.
+ * The table view handed to an `env.db.transaction(fn)` callback.
  *
  * Each property is a tx-bound {@link ZeroshipCollection} — every CRUD op
  * routes through the open transaction connection automatically. There is
- * NO `commit` / `rollback` / `collection` method: the transaction
- * lifecycle is owned entirely by the native Rust orchestrator. Abort by
- * throwing inside the callback; commit by resolving. The native
- * `Transaction` v8_class (with explicit `.commit()` / `.rollback()` and a
- * GC-auto-rollback finalizer) was removed.
+ * `collection(name)` reaches names that collide with view methods. The
+ * transaction lifecycle is owned by the native Rust orchestrator: throw to
+ * abort and resolve to commit.
  */
 interface ZeroshipTxView {
-  [collection: string]: ZeroshipCollection;
+  collection(name: string): ZeroshipCollection;
 }
 
 /** One event emitted by a subscription's `next()`. */
@@ -313,7 +311,7 @@ interface ZeroshipDb {
   /**
    * Run `callback` inside a native transaction.
    *
-   * `callback` receives a collections-only {@link ZeroshipTxView}; the
+   * `callback` receives a table-scoped {@link ZeroshipTxView}; the
    * returned promise resolves with the callback's result on **commit**
    * (callback resolved) and rejects with the callback's error on
    * **rollback** (callback threw / rejected). A `transaction(...)` call

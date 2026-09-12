@@ -1810,10 +1810,9 @@ const _procedures = { deepNest };
     );
 }
 
-/// The `tx` view handed to the callback is collections-only: it has no
-/// `commit` / `rollback` / `collection` method.
+/// The `tx` view has collection lookup without manual lifecycle methods.
 #[test]
-fn tx_view_has_no_lifecycle_methods() {
+fn tx_view_exposes_collection_lookup_without_lifecycle_methods() {
     let (_postgres, url) = require_pg();
     let app = crate::tests::fixtures::test_app_id!();
     let app = app.as_str();
@@ -1857,8 +1856,8 @@ const _procedures = { probeTxView };
     );
     assert_eq!(
         inner.get("hasCollection").and_then(|v| v.as_str()),
-        Some("undefined"),
-        "tx.collection must not exist; body={body}"
+        Some("function"),
+        "tx.collection must resolve method-name collisions; body={body}"
     );
     assert_eq!(
         inner.get("hasNotes").and_then(|v| v.as_str()),

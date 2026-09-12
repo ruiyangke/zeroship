@@ -543,11 +543,9 @@ async fn audited_unmask_fixture_with(
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
-    // The audit INSERT and the value SELECT both run `SET LOCAL ROLE
-    // app_<id>_role`, so the per-app role and its grants have to exist. The
-    // deploy's `zeroship migrate` creates them; this stands in for it. The
-    // append privilege on the audit table comes from `ensure_per_app_role`
-    // itself, which is why it runs AFTER the table is provisioned.
+    // The audit INSERT and value SELECT both run under the per-app role. The
+    // deploy provisions that role after creating the schema tables; this
+    // fixture follows the same order.
     crate::tests::fixtures::roles::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");

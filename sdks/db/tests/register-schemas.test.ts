@@ -10,10 +10,8 @@
  *    true`), so a second `installSchema` call with overlapping names
  *    re-installs without throwing.
  *
- * 2. A schema name colliding with the native v8_class method surface (e.g.
- *    `collection`, `transaction`, ...) throws, silently shadowing the
- *    native `env.db.collection` mint would be worse than a clear boot-time
- *    error.
+ * 2. A table name colliding with the native method surface stays available
+ *    through name lookup without replacing that method.
  *
  * Every case needs a runtime schema descriptor. Collections come from the
  * descriptor alone, so an install with none has nothing to apply these
@@ -98,21 +96,87 @@ describe("installSchema", () => {
     assert.notEqual(first, second, "second install replaced the wrapper");
   });
 
-  test("throws when a schema name collides with a native v8_class method", () => {
+  test("replaces native direct aliases with the same SDK contract on first install", () => {
     const native = makeMockNative();
+    const nativeAlias = native.collection("todos");
+    Object.defineProperty(native, "todos", {
+      value: nativeAlias,
+      configurable: true,
+      enumerable: true,
+      writable: false,
+    });
+
+    install({ todos: { title: t.string().required() } }, native);
+    const first = (native as unknown as { todos: unknown }).todos;
+    assert.notEqual(first, nativeAlias, "bootstrap must install the typed SDK facade");
+
+    install({ todos: { title: t.string().required() } }, native);
+    const second = (native as unknown as { todos: unknown }).todos;
+    assert.notEqual(second, nativeAlias, "reinstall must preserve the SDK facade contract");
+  });
+
+  test("keeps methods callable and resolves colliding tables by name", async () => {
     for (const reserved of [
       "collection",
-      "openSubscription",
-      "migrations",
       "transaction",
       "live",
+      "constructor",
     ]) {
-      assert.throws(
-        () => install({ [reserved]: { name: t.string().required() } }, native),
-        /collides with a native env.db method/,
-        `reserved name "${reserved}" must throw`,
+      const native = makeMockNative();
+      const nativeLookup = native.collection;
+      const { collections } = install(
+        { [reserved]: { name: t.string().required() } },
+        native,
+      );
+      assert.ok((collections as Record<string, unknown>)[reserved]);
+      assert.equal(native.collection, nativeLookup, `${reserved} must preserve collection(name)`);
+      assert.equal(
+        typeof (native as unknown as Record<string, unknown>)[reserved],
+        "function",
+        `${reserved} must remain callable`,
+      );
+
+      const result = await native.collection(reserved).find({});
+      assert.deepEqual(result, []);
+    }
+  });
+
+  test("treats former db method names as ordinary direct collections", () => {
+    for (const name of ["migrations", "openSubscription"]) {
+      const native = makeMockNative();
+      const { collections } = install(
+        { [name]: { title: t.string().required() } },
+        native,
+      );
+      assert.equal(
+        (native as unknown as Record<string, unknown>)[name],
+        (collections as Record<string, unknown>)[name],
       );
     }
+  });
+
+  test("preserves a __proto__ collection through descriptor installation", () => {
+    const native = makeMockNative();
+    const declared = Object.create(null) as Record<string, unknown>;
+    declared.__proto__ = { title: t.string().required() };
+    const descriptorCollections = Object.create(null) as Record<string, unknown>;
+    descriptorCollections.__proto__ = {
+      fields: { id: { type: "string", required: true, primaryKey: true } },
+      options: { softDelete: false, versioning: false, strictness: "strict" },
+      indexes: [],
+    };
+
+    const { collections } = installSchema(declared as never, native, {
+      descriptor: { version: 2, collections: descriptorCollections },
+    } as never);
+
+    assert.ok(Object.hasOwn(collections, "__proto__"));
+    assert.equal(typeof native.collection("__proto__").find, "function");
+    assert.equal(
+      typeof (native as unknown as Record<string, unknown>).__proto__,
+      "object",
+      "the inherited object member remains lookup-only",
+    );
   });
 
   test("beginTransaction is not a reserved env.db name", () => {

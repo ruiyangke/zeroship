@@ -115,7 +115,7 @@ impl SqlStorageCodecs for SqliteCodecs {
 }
 
 fn decode_vector_blob(bytes: &[u8]) -> Result<Vec<Value>, CompileError> {
-    if bytes.is_empty() || bytes.len() % size_of::<f32>() != 0 {
+    if bytes.is_empty() || !bytes.len().is_multiple_of(size_of::<f32>()) {
         return Err(invalid_vector());
     }
     bytes

@@ -25,7 +25,7 @@ export type {
 } from "./native";
 export { Query } from "./query";
 export type { PaginationResult } from "./query";
-export type { TxCollection, TxQuery, TransactionOptions } from "./db-types";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
 export { createLive } from "./live";
 export type { LiveOptions, LiveQuery } from "./live";
 export { subscribe } from "./subscribe";

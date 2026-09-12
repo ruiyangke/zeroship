@@ -24,13 +24,15 @@ pub(crate) fn build_one(
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
     build(
-        namespace,
-        collection,
-        schema,
-        filter,
-        update,
-        generated,
-        true,
+        BuildInput {
+            namespace,
+            collection,
+            schema,
+            filter,
+            update,
+            generated,
+        },
+        UpdateCardinality::One,
         registration,
     )
 }
@@ -45,41 +47,63 @@ pub(crate) fn build_many(
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
     build(
-        namespace,
-        collection,
-        schema,
-        filter,
-        update,
-        generated,
-        false,
+        BuildInput {
+            namespace,
+            collection,
+            schema,
+            filter,
+            update,
+            generated,
+        },
+        UpdateCardinality::Many,
         registration,
     )
 }
 
-fn build(
-    namespace: &SchemaName,
-    collection: &str,
-    schema: &Value,
+struct BuildInput<'a> {
+    namespace: &'a SchemaName,
+    collection: &'a str,
+    schema: &'a Value,
     filter: predicate::Input,
     update: Value,
-    generated: &WriteAssignments,
-    first: bool,
+    generated: &'a WriteAssignments,
+}
+
+#[derive(Clone, Copy)]
+enum UpdateCardinality {
+    One,
+    Many,
+}
+
+fn build(
+    input: BuildInput<'_>,
+    cardinality: UpdateCardinality,
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
-    let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
-    let predicate = filter.resolve(schema, &resolved, registration)?;
-    let assignments = resolve_assignments(update, generated, &resolved, registration)?;
-    let scope = if first {
+    let resolved = ResolvedTable::new(
+        input.namespace,
+        input.collection,
+        input.schema,
+        registration,
+    )?;
+    let predicate = input
+        .filter
+        .resolve(input.schema, &resolved, registration)?;
+    let assignments = resolve_assignments(input.update, input.generated, &resolved, registration)?;
+    let scope = if matches!(cardinality, UpdateCardinality::One) {
         MutationScope::First {
             target: resolved
                 .table
-                .column(&crate::sql::mapping::value_column_for_field("id", schema))?,
+                .column(&crate::sql::mapping::value_column_for_field(
+                    "id",
+                    input.schema,
+                ))?,
         }
     } else {
         MutationScope::Matching
     };
-    let returning = if first {
-        resolved.returning(schema)?
+    let returning = if matches!(cardinality, UpdateCardinality::One) {
+        resolved.returning(input.schema)?
     } else {
         Vec::new()
     };
