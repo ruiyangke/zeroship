@@ -5,7 +5,7 @@
 use crate::value::Value;
 
 use crate::backend::BackendHandle;
-use crate::sql::compile::BuiltQuery;
+use crate::sql::compiler::CompiledQuery;
 
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
@@ -124,7 +124,7 @@ pub async fn run_statement(route: &TxRoute, sql: &str, params: &[Value]) -> Resu
 }
 
 /// Execute a compiled read and meter a successful operation.
-pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub async fn exec_query(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
@@ -139,7 +139,7 @@ pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, D
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
 ///
-pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError> {
+pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbError> {
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
@@ -166,7 +166,7 @@ pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError>
 /// Native records feed the protection passes and adapters. Broker events
 /// encode their explicit wire contract separately.
 ///
-pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
+pub async fn exec_mutation(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
@@ -196,7 +196,7 @@ pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>
 /// from the RETURNING row. For now this collects what's already in
 /// the result `Value`.
 pub async fn exec_mutation_with_emit(
-    bq: BuiltQuery,
+    bq: CompiledQuery,
     route: &TxRoute,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
@@ -223,7 +223,7 @@ pub async fn exec_mutation_with_emit(
 
 /// Execute a count-only mutation and queue a collection invalidation on success.
 pub async fn exec_mutation_count_with_emit(
-    bq: BuiltQuery,
+    bq: CompiledQuery,
     route: &TxRoute,
     collection: &str,
     op: zeroship_data_orm::cdc::ChangeOp,
@@ -1043,7 +1043,7 @@ mod tests {
             reset_sqlite_route();
             let inserted = exec_mutation(
                 &ambient_route_for_tests("app_exec", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"INSERT INTO "app_exec"."notes" (id, title)
                         VALUES (1, 'tx-row') RETURNING *"#
                         .to_string(),
@@ -1065,7 +1065,7 @@ mod tests {
             reset_sqlite_route();
             let count = exec_count(
                 &ambient_route_for_tests("app_exec", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"SELECT COUNT(*) AS count FROM "app_exec"."notes""#.to_string(),
                     params: vec![],
                 },
@@ -1082,7 +1082,7 @@ mod tests {
             reset_sqlite_route();
             let rows = exec_query(
                 &ambient_route_for_tests("app_exec", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"SELECT title FROM "app_exec"."notes" WHERE id = 1"#.to_string(),
                     params: vec![],
                 },
@@ -1156,7 +1156,7 @@ mod tests {
             // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
             exec_mutation(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(
                         r#"INSERT INTO "{app_id}"."notes" (id, title) VALUES (1, 'a') RETURNING *"#
                     ),
@@ -1169,7 +1169,7 @@ mod tests {
             // 1 query (read) → db_reads +1.
             exec_query(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(r#"SELECT title FROM "{app_id}"."notes" WHERE id = 1"#),
                     params: vec![],
                 },
@@ -1180,7 +1180,7 @@ mod tests {
             // 1 count (read) → db_reads +1.
             exec_count(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(r#"SELECT COUNT(*) AS count FROM "{app_id}"."notes""#),
                     params: vec![],
                 },
@@ -1191,7 +1191,7 @@ mod tests {
             // A FAILED op (bad SQL) must emit NOTHING.
             let bad = exec_query(
                 &ambient_route_for_tests(app_id, handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: format!(r#"SELECT nope FROM "{app_id}"."no_such_table""#),
                     params: vec![],
                 },
@@ -1201,7 +1201,7 @@ mod tests {
 
             for (filter, expected) in [("id = 1", 1), ("id = 2", 0)] {
                 let affected = exec_mutation_count_with_emit(
-                    BuiltQuery {
+                    CompiledQuery {
                         sql: format!(
                             r#"UPDATE "{app_id}"."notes" SET title = 'changed' WHERE {filter}"#
                         ),
@@ -1217,7 +1217,7 @@ mod tests {
             }
             assert!(
                 exec_mutation_count_with_emit(
-                    BuiltQuery {
+                    CompiledQuery {
                         sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
                         params: vec![],
                     },
@@ -1315,7 +1315,7 @@ mod tests {
             reset_sqlite_route();
             let rows = exec_query(
                 &ambient_route_for_tests("app_b", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: "SELECT 'b' AS title".to_string(),
                     params: vec![],
                 },
@@ -1409,7 +1409,7 @@ mod tests {
             let task = crate::orm_context::spawn(async move {
                 exec_query(
                     &ambient_route_for_tests("app_exec_cancel", spawned_handle),
-                    BuiltQuery {
+                    CompiledQuery {
                         sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#
                             .to_string(),
                         params: vec![],
@@ -1437,7 +1437,7 @@ mod tests {
 
             let rows = exec_query(
                 &ambient_route_for_tests("app_exec_cancel", handle.clone()),
-                BuiltQuery {
+                CompiledQuery {
                     sql: r#"SELECT title FROM "app_exec_cancel"."notes" WHERE id = 1"#.to_string(),
                     params: vec![],
                 },

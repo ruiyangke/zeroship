@@ -56,6 +56,7 @@ pub use write::{
 pub mod catalog;
 /// Runtime SQL compilation from validated collection operations.
 pub mod compile;
+pub mod compiler;
 pub mod descriptors;
 pub mod lifecycle;
 pub mod mask_codec;

@@ -97,7 +97,7 @@ struct SourceLayout {
 }
 #[derive(Debug)]
 pub(super) struct PreparedRead {
-    query: BuiltQuery,
+    query: CompiledQuery,
     dialect: crate::sql::compile::SqlDialect,
     sources: Vec<SourceLayout>,
     projections: Vec<ReadProjection>,
