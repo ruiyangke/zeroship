@@ -10,16 +10,17 @@ The [workflow reference](../reference/workflows.md) describes the existing
 Control/Gateway dispatch implementation. The replacement engine, embedded task
 runner, V8 lifecycle adapter and payload contracts are implemented in the
 refactor branch, but their production composition remains unfinished. The branch
-also contains central-journal, remote-completion and Control-authority work that
-must be removed or replaced before cutover. Those implementations are not
-permission to centralize customer workflow data.
+still contains engine store and policy composition that must be bound to
+customer storage before worker cutover. The obsolete central completion and
+payload protocol and its platform migration have been removed.
 Closed coordination messages now live in `zeroship_core::workflow_coordination`,
 alongside shared lifecycle metadata and validated identifiers/counters. Native
 wire tests reject execution data and credentials at the message boundary,
 including nested management operations and acknowledgements. The coordinator
-metadata store and canonical schema are implemented with native PostgreSQL
-contracts. The HTTP host and platform migration still need conversion from the
-data-owning prototype; the new store is not yet the server's startup composition.
+metadata store, HTTP host and platform migration now use the metadata-only
+contract. Native PostgreSQL and real-process tests cover scoped authority,
+replica retries, startup privileges and restart recovery. Worker/CLI engine
+composition remains unfinished.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),

@@ -37,16 +37,8 @@ pub fn run() -> Result<()> {
         "workflow engine, binding and scheduler tests",
     )?;
     checked(
-        cargo().args([
-            "test",
-            "-p",
-            "zeroship-workflow-server",
-            "--test",
-            "coordination_wire",
-            "--test",
-            "coordinator",
-        ]),
-        "workflow coordinator metadata contracts",
+        cargo().args(["test", "-p", "zeroship-workflow-server"]),
+        "workflow coordinator store, HTTP and platform authority contracts",
     )?;
     checked(
         cargo().args([

@@ -12,6 +12,45 @@ use crate::{app_id::AppId, entity_id::declare_entity_id, typed_id};
 use serde::{Deserialize, Serialize};
 use std::num::{NonZeroI64, NonZeroU32};
 
+pub const AUDIENCE: &str = "spiffe://zeroship.ai/svc/workflow";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureCode {
+    Invalid,
+    Unauthenticated,
+    RequestTooLarge,
+    Denied,
+    Conflict,
+    Capacity,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Failure {
+    pub code: FailureCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkerPage {
+    pub after: Option<WorkerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScopePage {
+    pub after: Option<AppId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagementStatus {
+    pub app_id: AppId,
+    pub request_id: RequestId,
+}
+
 declare_entity_id! {
     /// An enrolled worker instance named by a placement assignment.
     WorkerId,

@@ -5,7 +5,7 @@
     reason = "task payload I/O runs on its compio host thread"
 )]
 
-use super::{EmbeddedTasks, RemoteTasks};
+use super::EmbeddedTasks;
 use crate::{
     engine::{JournalStep, WorkflowOutputRef},
     service::{PayloadRead, RequestId, StagedPayload, TaskAssignment, TaskToken},
@@ -66,32 +66,9 @@ impl TaskPayloads for EmbeddedTasks {
     }
 }
 
-#[async_trait(?Send)]
-impl TaskPayloads for RemoteTasks {
-    async fn stage(
-        &self,
-        task: &str,
-        token: &TaskToken,
-        request: &RequestId,
-        reference: WorkflowOutputRef,
-        body: BoxChunkSource,
-    ) -> Result<StagedPayload, WorkflowServiceError> {
-        self.stage_payload(task, token, request, reference, body)
-            .await
-    }
-    async fn read(
-        &self,
-        task: &str,
-        token: &TaskToken,
-        reference: &WorkflowOutputRef,
-    ) -> Result<PayloadRead, WorkflowServiceError> {
-        self.read_payload(task, token, reference).await
-    }
-}
-
 /// Resolves names only in the assigned journal, including after run restart.
 ///
-/// Remote object reads still require the assignment's live lease. Inline values
+/// Customer object reads still require the assignment's live lease. Inline values
 /// are already part of the trusted replay envelope and need no further I/O.
 pub struct TaskPayloadReader {
     transport: Rc<dyn TaskPayloads>,

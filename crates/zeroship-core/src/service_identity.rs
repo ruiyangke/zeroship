@@ -462,45 +462,65 @@ pub mod endpoints {
         "GET",
         "/internal/principals/{principal_id}/erasure-preflight",
     );
-    pub const WORKFLOW_DEPLOY: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_WORKERS: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/apps/{app_id}/workflow-deploy",
+        "/v1/workers/list",
     );
-    pub const CONTROL_WORKFLOW_CAPABILITY: ServiceEndpoint = ServiceEndpoint::new(
-        "control",
-        "POST",
-        "/v1/runtime/apps/{app_id}/workflow-capability",
-    );
-    pub const WORKFLOW_TASK_POLL: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_ASSIGN: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/tasks/poll",
+        "/v1/assignments/assign",
     );
-    pub const WORKFLOW_TASK_HEARTBEAT: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_RECOVERY: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/tasks/{task_id}/heartbeat",
+        "/v1/assignments/recovery",
     );
-    pub const WORKFLOW_TASK_COMPLETE: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_MANAGE: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/tasks/{task_id}/complete",
+        "/v1/management/enqueue",
     );
-    pub const WORKFLOW_TASK_RELEASE: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_MANAGEMENT_STATUS: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/tasks/{task_id}/release",
+        "/v1/management/status",
     );
-    pub const WORKFLOW_TASK_UPLOAD: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_REGISTER: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/tasks/{task_id}/payloads",
+        "/v1/workers/register",
     );
-    pub const WORKFLOW_TASK_READ: ServiceEndpoint = ServiceEndpoint::new(
+    pub const WORKFLOW_ASSIGNMENTS: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
-        "/v1/tasks/{task_id}/payloads/read",
+        "/v1/assignments/list",
+    );
+    pub const WORKFLOW_RENEW: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/assignments/renew",
+    );
+    pub const WORKFLOW_RELEASE: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/assignments/release",
+    );
+    pub const WORKFLOW_WAKE: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/wake-hints/publish",
+    );
+    pub const WORKFLOW_MANAGEMENT_POLL: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/management/poll",
+    );
+    pub const WORKFLOW_MANAGEMENT_ACK: ServiceEndpoint = ServiceEndpoint::new(
+        "workflow",
+        "POST",
+        "/v1/management/acknowledge",
     );
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
@@ -559,7 +579,11 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/control"),
                 &[
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
-                    endpoints::WORKFLOW_DEPLOY,
+                    endpoints::WORKFLOW_WORKERS,
+                    endpoints::WORKFLOW_ASSIGN,
+                    endpoints::WORKFLOW_RECOVERY,
+                    endpoints::WORKFLOW_MANAGE,
+                    endpoints::WORKFLOW_MANAGEMENT_STATUS,
                     endpoints::WORKER_APP_LOGS,
                 ],
             ),
@@ -593,13 +617,13 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
-                    endpoints::CONTROL_WORKFLOW_CAPABILITY,
-                    endpoints::WORKFLOW_TASK_POLL,
-                    endpoints::WORKFLOW_TASK_HEARTBEAT,
-                    endpoints::WORKFLOW_TASK_COMPLETE,
-                    endpoints::WORKFLOW_TASK_RELEASE,
-                    endpoints::WORKFLOW_TASK_UPLOAD,
-                    endpoints::WORKFLOW_TASK_READ,
+                    endpoints::WORKFLOW_REGISTER,
+                    endpoints::WORKFLOW_ASSIGNMENTS,
+                    endpoints::WORKFLOW_RENEW,
+                    endpoints::WORKFLOW_RELEASE,
+                    endpoints::WORKFLOW_WAKE,
+                    endpoints::WORKFLOW_MANAGEMENT_POLL,
+                    endpoints::WORKFLOW_MANAGEMENT_ACK,
                     endpoints::CDC_SUBSCRIBE,
                     // Host app reads are role-scoped: an authenticated worker
                     // may request any app's version, environment, and project

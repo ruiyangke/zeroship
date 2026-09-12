@@ -3,16 +3,15 @@ name = "zeroship-workflow-server"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Workflow HTTP authority and worker task service"
+description = "Workflow worker registry, placement and management coordinator"
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-workflow-server"
 class = "platform"
-reason = "Deployed workflow authority with a dedicated database login and generated settings."
+reason = "Metadata coordinator with a dedicated platform database login and generated settings."
 
 [dependencies]
 async-trait = { workspace = true }
-bytes = { workspace = true }
 clap = { workspace = true }
 futures = { workspace = true }
 compio = { workspace = true }
@@ -23,12 +22,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-authn = { workspace = true }
-zeroship-workflow = { workspace = true }
-zeroship-storage = { workspace = true, features = ["s3"] }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true, features = ["pkcs8"] }
-sha2 = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }

@@ -1,54 +1,56 @@
 # zeroship-workflow-server
 
-The [revised target](../../docs/proposals/2026-09-11-workflow-worker.md) is a
-lightweight registry, placement and management coordinator. Customer workers
-own workflow history, task claims and payload storage. The data-owning HTTP
-host described below is the current refactor prototype; it has not replaced the
-deployed worker path and must be reshaped before cutover. Its customer-data
-routes and platform journal are not part of the target coordinator contract.
-The closed metadata messages live in `zeroship_core::workflow_coordination`.
-They separate registration, placement, wake-up hints and lifecycle management
-from execution data. Native wire tests reject customer payload and credential
-fields, including inside nested command acknowledgements.
+A lightweight coordinator for worker registration, app placement, wake-up hints
+and high-level workflow management. Customer workers own execution, task leases,
+scheduling, history and payload storage. The server does not construct an
+execution engine or payload store. Its HTTP contract contains metadata operations
+and exposes no task-completion, input, signal-body or output-upload endpoint.
 
-`src/coordinator.rs` implements the metadata store on a bounded compio PostgreSQL
-pool. `schema/schema.ts` defines its tables through the canonical migration DSL.
-Native tests in `tests/coordinator.rs` exercise concurrent replicas, retained
-placement revisions, wake acknowledgements, management retries, lost-worker
-recovery discovery and database privileges. The store rejects the last worker's
-voluntary release until host-driven wake-up delivery is available. The HTTP host
-and platform migration still use the prototype below and need conversion.
+The [ownership design](../../docs/proposals/2026-09-11-workflow-worker.md) describes
+the complete target. The metadata HTTP host and platform migration implement this
+boundary; composing the replacement engine into the customer worker and CLI is
+still in progress.
 
-The V8-free HTTP host for `zeroship-workflow::service`. App routes require a
-Control-issued capability. Task routes verify an active enrolled worker's
-signature and bind the service's task token to that instance. Operator deploy
-notifications use the platform service allowlist. They carry no deployment
-selection: the service reads Control's current immutable snapshot under the
-app's transaction lock. New starts and schedule sweeps also reconcile that
-selection, so delayed notifications cannot restore older code or schedules.
+Control authorizes placement and queues typed pause, resume, cancellation or
+restart commands. Workers authenticate with their enrolled instance key, then
+register, discover assignments, renew placement, publish hints and acknowledge
+management. Every worker mutation checks app, worker, assignment revision and
+expiry. Registration cannot nominate an app or revive an expired placement.
+Service assertions use a shared PostgreSQL replay store across server replicas.
+Handlers authenticate before buffering bounded JSON bodies.
 
-Streaming payload routes keep upload identities and task tokens in Rust. Clients
-apply bounded backpressure and independently verify downloaded content; retries
-reuse the durable upload receipt and cancel an unused source.
+Assignments and mutation receipts survive restart. Wake revisions reject stale
+or conflicting publication. A worker cannot release the last active placement;
+missing owners expose the app for host-driven recovery and a customer-journal
+rescan, even when the previous worker never published a hint. Actual task claims
+and management application remain transactions in the customer's database.
 
-The executable loads an immutable signing and verification snapshot, verifies
-the migrated database authority and uses PostgreSQL for assertion replay
-protection across replicas. Maintenance delivers Control's durable deploy
-notifications and drives schedules, topic delivery and payload collection.
-Reconciliation acknowledges the notification in its journal transaction.
-JSON handlers authenticate before buffering request bodies.
-The deployed worker and Control cutover remain in progress.
+The platform migration creates `workflow_coordination` metadata under a migration
+owner and grants the `zeroship_workflow` login ordinary DML. Runtime verifies the
+schema fingerprint and rejects elevated roles, role memberships, DDL and
+mutable schema fingerprints. It can read enrolled worker verification keys and
+maintain service-assertion receipts, with no journal or customer-table grants.
+Loss of the shared authentication connection stops the process for supervisor
+recovery instead of leaving a listener attached to a dead verifier connection.
 
-- `src/api.rs` maps typed app and task requests onto the shared service.
-- `src/auth.rs` verifies app grants, service peers and enrolled worker identities.
-- `src/config.rs` declares `[workflow]` TOML settings and their CLI overrides.
-- `src/server.rs` composes the platform policy, payload backend and HTTP listener.
-- `tests/http.rs` runs native clients against real HTTP listeners and
-  Testcontainers PostgreSQL, including cross-replica retries and revocation.
-- `tests/platform_schema.rs` applies the platform migration corpus and exercises
-  separate server processes, shared assertion replay and restart recovery.
+- `src/api.rs`: the closed metadata HTTP operations.
+- `src/auth.rs`: service assertions and enrolled worker key verification.
+- `src/coordinator/`: transactional placement and management persistence.
+- `src/config.rs`: `[workflow]` settings and generated CLI overrides.
+- `src/server.rs`: metadata pools, verification and HTTP lifecycle.
+- `schema/schema.ts`: the canonical migration DSL definition.
+- `tests/coordinator.rs`: native store, fencing and recovery contracts.
+- `tests/http.rs`: real server processes, replicas, revocation and restart.
+- `tests/platform_schema.rs`: actual platform migrations and database authority.
 
-Run `cargo test -p zeroship-workflow-server` for the host contracts.
-`zeroship-workflow-server --config zeroship.toml --check-config` validates
-configuration without connecting to dependencies. `/healthz` reports process
-liveness; `/readyz` verifies database authority and worker-registry access.
+Run `cargo test -p zeroship-workflow-server` for the host contracts. Required
+PostgreSQL fixtures are owned by Testcontainers. `cargo xtask test workflow`
+includes the coordinator alongside the engine and example suites.
+Regenerate metadata SQL with
+`node crates/zeroship-workflow-server/schema/generate.mjs`.
+
+The host needs a platform metadata database login and a peer verification bundle
+containing Control's key. It needs no customer connection, payload location or
+private signing key. `zeroship-workflow-server --config zeroship.toml --check-config`
+validates settings without connecting to dependencies. `/healthz` reports process
+liveness; `/readyz` verifies metadata and worker-registry access.

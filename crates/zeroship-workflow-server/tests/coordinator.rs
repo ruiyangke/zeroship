@@ -501,6 +501,33 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
     let fixture = Fixture::new().await;
     let service = fixture.service().await;
     let runtime = connect(&fixture.runtime_url).await;
+    fixture
+        .admin
+        .batch_execute(
+            "CREATE ROLE customer_reader;
+         GRANT USAGE ON SCHEMA customer TO customer_reader;
+         GRANT SELECT ON customer.__zeroship_workflow_history TO customer_reader;
+         GRANT customer_reader TO coordinator_test WITH INHERIT FALSE;",
+        )
+        .await
+        .unwrap();
+    let privileges = runtime
+        .query_one(
+            "SELECT pg_has_role(current_user,'customer_reader','USAGE'),
+                pg_has_role(current_user,'customer_reader','SET')",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(!privileges.get::<_, bool>(0));
+    assert!(privileges.get::<_, bool>(1));
+    assert_eq!(service.verify().await, Err(Error::Unavailable));
+    fixture
+        .admin
+        .batch_execute("REVOKE customer_reader FROM coordinator_test")
+        .await
+        .unwrap();
+    service.verify().await.unwrap();
     assert!(runtime
         .query("SELECT * FROM customer.__zeroship_workflow_history", &[])
         .await

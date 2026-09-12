@@ -1363,7 +1363,6 @@ fn main() -> std::io::Result<()> {
             // human is the last owner of anything.
             .configure(erasure::configure)
             .configure(workflow_instance_api::configure)
-            .configure(zeroship_control::workflow_capabilities::configure)
             .service(
                 web::resource("/internal/billing/reconcile")
                     .route(web::post().to(internal::force_reconcile)),
