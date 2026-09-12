@@ -670,6 +670,8 @@ fn write_mutation_predicate(
                 writer.sql.push_str(" WHERE ");
                 write_predicate(writer, syntax, predicate)?;
             }
+            writer.sql.push_str(" ORDER BY ");
+            writer.identifier(target.name().as_str());
             writer.sql.push_str(" LIMIT 1");
             writer.sql.push_str(syntax.first_row_lock);
             writer.sql.push(')');
