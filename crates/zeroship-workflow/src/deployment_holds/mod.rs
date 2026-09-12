@@ -17,6 +17,9 @@ use zeroship_data_orm::{
     value, Value,
 };
 
+mod catalog;
+mod local;
+
 zeroship_data_orm::orm::schema!(pub models = "../../schema/deployments/schema.runtime.json");
 use models::{app_deploy_holds as holds, app_deploys as deploys};
 

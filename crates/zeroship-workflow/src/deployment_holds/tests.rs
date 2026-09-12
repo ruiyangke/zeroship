@@ -8,6 +8,8 @@ use testcontainers::{
 use zeroship_core::schema_name::SchemaName;
 use zeroship_data_orm::{binding::DbBinding, encryption::ProjectKeySource, ConnectOptions};
 
+mod catalog;
+
 async fn database(url: &str) -> Database {
     let schema = if url.starts_with("sqlite:") {
         "main"

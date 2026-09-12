@@ -45,9 +45,13 @@ deployment admission under the app lock and refuses retained runs, generations
 or schedules. Executable preparation fences retirement across storage I/O.
 Native PostgreSQL and SQLite tests exercise these transitions against the real
 metadata ledger, including stale acknowledgements and foreign app references.
-Host client composition, mandatory holds for normal app artifact loading, the
-production retention cutover and replacement of executable snapshot persistence
-remain pending.
+The local host now registers normal app deployments in an ORM-backed catalog
+beside their manifests and blobs. Deployment identities survive journal
+replacement, and activation acquires a durable hold using the local journal's
+stable host identity. Repeated publication preserves reclamation tombstones.
+Background host client composition, mandatory holds for normal app artifact
+loading, the production retention cutover and replacement of executable snapshot
+persistence remain pending.
 
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify
@@ -560,7 +564,11 @@ file polling to the CLI. Supporting multiple app deployments in the CLI is a
 separate design question and is outside this work.
 
 Local development builds the normal app deployment and retains
-its manifests and content-addressed blobs locally. HTTP and workflow execution
+its manifests and content-addressed blobs locally. The normal deployment catalog
+at `.zeroship/deployments/index.sqlite` records deployment identities and holds;
+it contains deployment metadata, while execution history stays in the app's
+existing database. No workflow database path or extra environment variable is
+needed. HTTP and workflow execution
 derive from the same app build; creators do not supply a workflow-only entry or
 archive. The CLI persists a trusted
 project app identity under `.zeroship`; the creator need not set `APP_ID`.

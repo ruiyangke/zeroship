@@ -17,14 +17,15 @@ pub mod unpack;
 pub mod workflow_blob;
 
 pub use asset::{AssetEntry, AssetVariant};
-pub use executable::{verify_deployment_manifest, ExecutableError, LoadedWorker};
 pub use blob::{
     sha256_hex, validate_hash_format, BlobError, BlobStore, LocalDiskBlobStore, PutOutcome,
 };
 pub use blob_config::{
     build_blob_store, build_workflow_blob_store, BlobStoreConfigError, S3Runtime, StoreUrl,
 };
-pub use s3_blob::{S3BlobStore, PART_SIZE};
+pub use executable::{
+    deployment_manifest_hash, verify_deployment_manifest, ExecutableError, LoadedWorker,
+};
 pub use limits::{
     MAX_BLOBS_PER_DEPLOY, MAX_BLOB_BYTES, MAX_COMPRESSED_BYTES, MAX_DECOMPRESSED_BYTES,
     MAX_MANIFEST_BYTES,
@@ -37,6 +38,7 @@ pub use rule::{
     Action, CacheCtl, Cors, HttpMethod, Match, ProcedureKind, RateLimit, RateLimitPer,
     RedirectAction, RequiredPrincipal, ResourceEntry, Rule, StaticAction, WorkerMode,
 };
+pub use s3_blob::{S3BlobStore, PART_SIZE};
 pub use store::{BundleStore, LocalFs, VfsError, VfsResult};
 pub use unpack::{ingest, IngestError, IngestSuccess};
 pub use workflow_blob::{

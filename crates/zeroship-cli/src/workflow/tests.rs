@@ -128,8 +128,8 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
     let host = LocalHost::start(
         root.path(),
-        config,
-        Some(bundle),
+        config.clone(),
+        Some(bundle.clone()),
         test_storage(root.path()),
         HashMap::new(),
         vec![],
@@ -141,6 +141,20 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
+    await_state(&api, &new.id, RunState::Waiting).await;
+    drop(host);
+    std::fs::remove_file(&bundle).unwrap();
+    let host = LocalHost::start(
+        root.path(),
+        config,
+        None,
+        test_storage(root.path()),
+        HashMap::new(),
+        vec![],
+        RuntimeLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(host.app, app);
     for (run, expected) in [
         (&old.id, "original:original:lazy"),
         (&new.id, "replacement:replacement:lazy"),

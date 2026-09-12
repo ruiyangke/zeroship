@@ -18,6 +18,7 @@ use std::{
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
+    deployment_holds::{DeploymentHolds, HoldScope},
     service::{
         runner::{TaskPayloadLimits, WorkerOptions, WorkflowWorker},
         schema,
@@ -100,9 +101,7 @@ impl LocalHost {
     ) -> Result<Self, String> {
         let config = config.validate()?;
         let app = project_identity(root)?;
-        let deployment = deployment
-            .map(|path| crate::deployment::AppDeployment::new(root, &path))
-            .transpose()?;
+        let deployment = crate::deployment::AppDeployment::new(root, deployment.as_deref())?;
         let worker_app = app.clone();
         let (ready, receive) = std::sync::mpsc::sync_channel(1);
         let (stop, stopped) = oneshot::channel();
@@ -122,7 +121,7 @@ impl LocalHost {
                 runtime.block_on(async move {
                     let initialized = initialize(
                         &config,
-                        deployment.as_ref(),
+                        &deployment,
                         &worker_app,
                         storage,
                         env_vars,
@@ -223,7 +222,7 @@ fn read_project_identity(root: &Path) -> Result<AppId, String> {
 
 async fn initialize(
     config: &LocalConfig,
-    deployment: Option<&crate::deployment::AppDeployment>,
+    deployment: &crate::deployment::AppDeployment,
     app: &AppId,
     storage: HostStorage,
     env_vars: HashMap<String, String>,
@@ -253,7 +252,8 @@ async fn initialize(
             )?,
         )
         .await?;
-    let installed = install_bundle(config, deployment, &service, app).await?;
+    let catalog = deployment.catalog().await?;
+    let installed = install_bundle(config, deployment, &catalog, &service, app).await?;
     let backend = service
         .for_app(app.clone())
         .into_backend(config.payloads.max_payload_bytes)?;
@@ -273,25 +273,33 @@ async fn initialize(
 
 async fn install_bundle(
     config: &LocalConfig,
-    deployment: Option<&crate::deployment::AppDeployment>,
+    deployment: &crate::deployment::AppDeployment,
+    catalog: &DeploymentHolds,
     service: &WorkflowService,
     app: &AppId,
 ) -> Result<Option<crate::deployment::LoadedApp>, WorkflowServiceError> {
-    let Some(deployment) = deployment else {
+    let Some(installed) = deployment
+        .load(
+            app,
+            catalog,
+            config.max_archive_bytes,
+            config.max_source_bytes,
+        )
+        .await?
+    else {
         return Ok(None);
     };
-    let installed = deployment
-        .load(app, config.max_archive_bytes, config.max_source_bytes)
-        .await?;
-    let executable = &installed.executable;
-    let registration = service
-        .deployment_by_hash(app, &installed.deploy_hash)
-        .await?
-        .unwrap_or_else(|| {
-            executable.registration(typed_id::generate("dep"), installed.deploy_hash.clone())
-        });
+    let registration = &installed.registration;
+    // The local app journal has a stable host holder across worker restarts.
+    let client = catalog.for_scope(HoldScope::new(
+        app.clone(),
+        format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid())),
+    )?);
     service
-        .activate_deploy(app, &registration, executable.snapshot())
+        .acquire_deployment_hold(app, &registration.id, &registration.hash, &client)
+        .await?;
+    service
+        .activate_deploy(app, registration, installed.executable.snapshot())
         .await?;
     Ok(Some(installed))
 }
