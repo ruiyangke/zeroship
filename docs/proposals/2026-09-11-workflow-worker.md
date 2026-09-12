@@ -66,6 +66,11 @@ retargets parent checkpoints using the complete run, generation and ordinal
 cursor. Native tests cover histories and parent waits that span query pages
 without crossing app or generation boundaries. The atomic relational update
 that wakes waiting parents remains explicit SQL.
+Schedule reconciliation scans historical entries in ordered ORM pages, preserving
+schedule identity and unchanged due times across activation retries. Occurrences,
+overlap checks and run creation use the shared ORM transaction. Revision overflow
+refuses activation and rolls back schedule changes on either backend. Scoped due
+schedule discovery retains its relational SQL query.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),

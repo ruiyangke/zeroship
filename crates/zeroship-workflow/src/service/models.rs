@@ -8,7 +8,8 @@ zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json"
 pub use journal::{
     __zeroship_workflow_app_state as app_state, __zeroship_workflow_broadcasts as broadcasts,
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
-    __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
+    __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_requests as requests,
+    __zeroship_workflow_runs as runs, __zeroship_workflow_schedules as schedules,
     __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_signals as signals,
     __zeroship_workflow_steps as steps, __zeroship_workflow_subscriptions as subscriptions,
     __zeroship_workflow_tasks as tasks, __zeroship_workflow_waits as waits,
@@ -139,6 +140,18 @@ pub struct SignalMessage {
     pub origin: String,
     pub delivery: String,
     pub topic: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = schedules)]
+pub struct ScheduleRecord {
+    pub id: String,
+    pub name: String,
+    pub deploy_id: String,
+    pub definition: String,
+    pub next_at: Option<i64>,
+    pub anchor_at: i64,
+    pub revision: i64,
 }
 
 /// Compose the journal with the app's existing descriptors in one publication.
