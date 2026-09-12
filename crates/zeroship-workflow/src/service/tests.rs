@@ -31,6 +31,7 @@ mod runner;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
 mod schema_binding;
+mod schema_metadata;
 mod snapshots;
 mod worker;
 use snapshots::{fixture_snapshot_store, test_snapshot};

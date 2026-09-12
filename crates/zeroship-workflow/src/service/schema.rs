@@ -38,6 +38,8 @@ pub async fn initialize_local(store: &super::store::OrmStore) -> Result<(), Work
 
 const POSTGRES_TEMPLATE: &str = include_str!("../../schema/postgres.sql");
 pub const SQLITE_SQL: &str = include_str!("../../schema/sqlite.sql");
+/// Migration-derived field and key metadata for the customer journal.
+pub const RUNTIME_DESCRIPTOR: &str = include_str!("../../schema/schema.runtime.json");
 /// Instantiate canonical DDL in the customer's resolved physical schema.
 /// The provisioning host supplies its own authorized migration connection.
 #[must_use]
