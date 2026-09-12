@@ -380,13 +380,15 @@ types; execution can borrow bindings or consume the output to transfer its
 buffers. Typed-plan database tests use the production native parameter encoder.
 Typed-plan rendering uses the shared writer for identifier quoting, native bind
 allocation, and statement-wide parameter limits. Collection builders still own
-their parameter collection until their operation cutovers.
+their parameter collection until their operation cutovers. Production upsert
+orders input columns by name so equivalent input maps share SQL and bind order.
 
 ## Implementation checklist
 
 - [x] Consolidate the SQL crate into the ORM and validate its consumers.
 - [x] Close incomplete runtime dialect admission; retain migration dialect support.
-- [ ] Consolidate compiler output and native binding through a shared writer.
+- [x] Consolidate compiler output with native bindings and redacted inspection.
+- [ ] Move remaining collection binding through the shared writer.
 - [ ] Register compiler, storage codecs, effective support, and immutable identity together.
 - [ ] Capture registration and verify it against bound backends and scoped sessions.
 - [ ] Replace production upsert construction with a resolved statement and capability preflight.
