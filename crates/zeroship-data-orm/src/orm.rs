@@ -187,6 +187,18 @@ pub struct Collection {
 }
 
 impl Collection {
+    fn dispatch(
+        &self,
+        prepared: Result<PreparedOperation, DbError>,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let backend = self.database.backend.clone();
+        let scope = self.database.scope.clone();
+        async move {
+            check_scope(scope.as_ref())?;
+            prepared?.execute(backend).await
+        }
+    }
+
     /// Prepare immediately, before returning the future to an executor.
     pub fn execute(
         &self,
@@ -203,12 +215,47 @@ impl Collection {
                     operation,
                 )
             });
-            let backend = db.backend.clone();
-            let scope = db.scope.clone();
-            async move {
-                check_scope(scope.as_ref())?;
-                prepared?.execute(backend).await
-            }
+            self.dispatch(prepared)
+        })
+    }
+
+    fn update_model(
+        &self,
+        filter: model::ModelPredicate,
+        patch: Value,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let db = &self.database;
+        db.context.with(|| {
+            let prepared = db.check_scope().and_then(|()| {
+                PreparedOperation::new_model_update(
+                    db.binding.clone(),
+                    &self.name,
+                    db.capture_route(),
+                    db.actor_id.clone(),
+                    filter,
+                    patch,
+                )
+            });
+            self.dispatch(prepared)
+        })
+    }
+
+    fn delete_model(
+        &self,
+        filter: model::ModelPredicate,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<> {
+        let db = &self.database;
+        db.context.with(|| {
+            let prepared = db.check_scope().and_then(|()| {
+                PreparedOperation::new_model_delete(
+                    db.binding.clone(),
+                    &self.name,
+                    db.capture_route(),
+                    db.actor_id.clone(),
+                    filter,
+                )
+            });
+            self.dispatch(prepared)
         })
     }
 
@@ -289,11 +336,50 @@ impl<E: Entity> EntityCollection<E> {
         filter: Filter<E>,
         options: FindOptions,
     ) -> impl Future<Output = Result<Vec<R>, DbError>> + use<E, R> {
-        let future = self.validate().map(|()| {
-            self.collection
-                .find(filter.into_value(), options.into_value::<E, R>())
+        let future = self.validate().and_then(|()| {
+            let mut source = ReadSource::new(E::COLLECTION, "source");
+            source.include_deleted = options.include_deleted;
+            let mut query = ReadQuery::new(source);
+            query.model_filter = Some(filter.into_predicate());
+            query.limit = options
+                .limit
+                .map(crate::sql::RowLimit::new)
+                .transpose()
+                .map_err(|error| DbError::validation("invalid_read", error.to_string()))?
+                .unwrap_or_default();
+            query.offset = options
+                .offset
+                .map(crate::sql::RowOffset::new)
+                .transpose()
+                .map_err(|error| DbError::validation("invalid_read", error.to_string()))?
+                .unwrap_or_default();
+            query.projection.push(ReadProjection::Row {
+                output: "model".into(),
+                source: "source".into(),
+                fields: Some(R::COLUMNS.iter().map(|field| (*field).into()).collect()),
+                optional: false,
+            });
+            Ok(self.collection.database.read(query))
         });
-        async move { decode_rows::<E, R>(future?.await?) }
+        async move {
+            let Output::Rows { rows, .. } = future?.await? else {
+                return Err(DbError::internal("model read returned a count"));
+            };
+            rows.into_iter()
+                .map(|row| {
+                    let Value::Object(mut fields) = row else {
+                        return Err(DbError::internal("model read returned a non-record"));
+                    };
+                    let Value::Object(model) = fields
+                        .swap_remove("model")
+                        .ok_or_else(|| DbError::internal("model read omitted its projection"))?
+                    else {
+                        return Err(DbError::internal("model projection was not a record"));
+                    };
+                    R::from_row(Row::new(model))
+                })
+                .collect()
+        }
     }
     pub fn insert<I: Insertable<E>, R: FromRow<E>>(
         &self,
@@ -318,8 +404,8 @@ impl<E: Entity> EntityCollection<E> {
             .validate()
             .and_then(|()| changes.into_changes())
             .map(|fields| {
-                self.collection.update(
-                    filter.into_value(),
+                self.collection.update_model(
+                    filter.into_predicate(),
                     Value::Object([("$set".into(), Value::Object(fields))].into()),
                 )
             });
@@ -329,12 +415,13 @@ impl<E: Entity> EntityCollection<E> {
         &self,
         filter: Filter<E>,
     ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, R> {
-        let future = self
-            .validate()
-            .map(|()| self.collection.delete(filter.into_value()));
+        let future = self.validate().map(|()| {
+            self.collection.delete_model(filter.into_predicate())
+        });
         async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
     }
 }
+
 fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbError> {
     let Output::Rows { rows, .. } = output else {
         return Err(DbError::internal("expected model rows"));
@@ -451,7 +538,7 @@ enum Plan {
     Insert(Value),
     InsertMany(Value),
     Update {
-        filter: Value,
+        filter: crud::predicate::Input,
         patch: Value,
         many: bool,
     },
@@ -508,13 +595,7 @@ impl PreparedOperation {
         actor_id: Option<String>,
         operation: Operation,
     ) -> Result<Self, DbError> {
-        if route.app_id() != binding.app_id() || route.schema() != binding.schema() {
-            return Err(DbError::internal(
-                "ORM binding does not match the captured database route",
-            ));
-        }
-        crate::sql::compile::validate_collection(collection)?;
-        crate::descriptor::collection_schema(&binding, collection)?;
+        validate_target(&binding, collection, &route)?;
         let plan = match operation {
             Operation::Read(query) => {
                 if query.source.collection != collection {
@@ -540,7 +621,7 @@ impl PreparedOperation {
                 patch,
                 many,
             } => Plan::Update {
-                filter,
+                filter: filter.into(),
                 patch,
                 many,
             },
@@ -619,6 +700,58 @@ impl PreparedOperation {
             route,
             actor_id,
             plan,
+        })
+    }
+
+    fn new_model_update(
+        binding: DbBinding,
+        collection: &str,
+        route: CapturedRoute,
+        actor_id: Option<String>,
+        filter: model::ModelPredicate,
+        patch: Value,
+    ) -> Result<Self, DbError> {
+        validate_target(&binding, collection, &route)?;
+        Ok(Self {
+            context: crate::orm_context::current(),
+            binding,
+            collection: collection.to_owned(),
+            route,
+            actor_id,
+            plan: Plan::Update {
+                filter: filter.into(),
+                patch,
+                many: false,
+            },
+        })
+    }
+
+    fn new_model_delete(
+        binding: DbBinding,
+        collection: &str,
+        route: CapturedRoute,
+        actor_id: Option<String>,
+        filter: model::ModelPredicate,
+    ) -> Result<Self, DbError> {
+        validate_target(&binding, collection, &route)?;
+        let query = crud::plan_delete_one_input(
+            &binding,
+            &route,
+            collection,
+            filter.into(),
+            actor_id.as_deref(),
+        )?;
+        Ok(Self {
+            context: crate::orm_context::current(),
+            binding,
+            collection: collection.to_owned(),
+            route,
+            actor_id,
+            plan: Plan::Mutation {
+                query,
+                operation: ChangeOp::Update,
+                many: false,
+            },
         })
     }
 
@@ -750,4 +883,19 @@ impl PreparedOperation {
         };
         Ok(result)
     }
+}
+
+fn validate_target(
+    binding: &DbBinding,
+    collection: &str,
+    route: &CapturedRoute,
+) -> Result<(), DbError> {
+    if route.app_id() != binding.app_id() || route.schema() != binding.schema() {
+        return Err(DbError::internal(
+            "ORM binding does not match the captured database route",
+        ));
+    }
+    crate::sql::compile::validate_collection(collection)?;
+    crate::descriptor::collection_schema(binding, collection)?;
+    Ok(())
 }

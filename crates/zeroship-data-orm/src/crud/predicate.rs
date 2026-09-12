@@ -11,6 +11,129 @@ use crate::{
     value::Value,
 };
 
+#[derive(Clone, Debug)]
+pub(crate) enum Input {
+    Dynamic(Value),
+    Model(crate::orm::ModelPredicate),
+}
+
+impl From<Value> for Input {
+    fn from(value: Value) -> Self {
+        Self::Dynamic(value)
+    }
+}
+
+impl From<crate::orm::ModelPredicate> for Input {
+    fn from(value: crate::orm::ModelPredicate) -> Self {
+        Self::Model(value)
+    }
+}
+
+impl Input {
+    pub(crate) fn resolve(
+        self,
+        schema: &Value,
+        table: &ResolvedTable,
+        registration: &SqlRegistration,
+    ) -> Result<ResolvedPredicate, QueryError> {
+        match self {
+            Self::Dynamic(value) => resolve(value, schema, table, registration),
+            Self::Model(value) => resolve_model(value, schema, table, registration),
+        }
+    }
+
+    pub(crate) fn dynamic(&self) -> Option<&Value> {
+        match self {
+            Self::Dynamic(value) => Some(value),
+            Self::Model(_) => None,
+        }
+    }
+
+    pub(crate) fn model_value(&self) -> Value {
+        match self {
+            Self::Dynamic(value) => value.clone(),
+            Self::Model(value) => model_value(value),
+        }
+    }
+
+    pub(crate) fn conjunctive_value(&self, field: &str) -> Option<&Value> {
+        match self {
+            Self::Dynamic(value) => dynamic_equality(value, field),
+            Self::Model(value) => model_equality(value, field),
+        }
+    }
+
+    pub(crate) fn has_non_null_equality(&self, field: &str) -> bool {
+        self.conjunctive_value(field)
+            .is_some_and(|value| !value.is_null())
+    }
+}
+
+fn dynamic_equality<'a>(filter: &'a Value, field: &str) -> Option<&'a Value> {
+    let mut value = filter.as_object()?.get(field)?;
+    if let Some(operators) = value.as_object() {
+        if operators.len() != 1 {
+            return None;
+        }
+        value = operators.get("$eq")?;
+    }
+    Some(value)
+}
+
+fn model_equality<'a>(predicate: &'a crate::orm::ModelPredicate, field: &str) -> Option<&'a Value> {
+    match predicate {
+        crate::orm::ModelPredicate::Compare {
+            field: candidate,
+            op: CompareOp::Eq,
+            value,
+        } if *candidate == field => Some(value),
+        crate::orm::ModelPredicate::And(children) => children
+            .iter()
+            .find_map(|child| model_equality(child, field)),
+        _ => None,
+    }
+}
+
+fn model_value(predicate: &crate::orm::ModelPredicate) -> Value {
+    match predicate {
+        crate::orm::ModelPredicate::Const(true) => Value::Object(crate::value::Record::new()),
+        crate::orm::ModelPredicate::Const(false) => {
+            Value::Object([("$or".into(), Value::Array(Vec::new()))].into())
+        }
+        crate::orm::ModelPredicate::And(children) => Value::Object(
+            [(
+                "$and".into(),
+                Value::Array(children.iter().map(model_value).collect()),
+            )]
+            .into(),
+        ),
+        crate::orm::ModelPredicate::Or(children) => Value::Object(
+            [(
+                "$or".into(),
+                Value::Array(children.iter().map(model_value).collect()),
+            )]
+            .into(),
+        ),
+        crate::orm::ModelPredicate::Compare { field, op, value } => {
+            let operator = match op {
+                CompareOp::Eq => "$eq",
+                CompareOp::Ne => "$ne",
+                CompareOp::Lt => "$lt",
+                CompareOp::Lte => "$lte",
+                CompareOp::Gt => "$gt",
+                CompareOp::Gte => "$gte",
+            };
+            Value::Object(
+                [(
+                    (*field).into(),
+                    Value::Object([(operator.into(), value.clone())].into()),
+                )]
+                .into(),
+            )
+        }
+    }
+}
+
 pub(crate) fn resolve(
     filter: Value,
     schema: &Value,
@@ -19,6 +142,68 @@ pub(crate) fn resolve(
 ) -> Result<ResolvedPredicate, QueryError> {
     compile::validate_filter_budget(&filter)?;
     resolve_inner(filter, schema, table, registration)
+}
+
+pub(crate) fn resolve_model(
+    predicate: crate::orm::ModelPredicate,
+    schema: &Value,
+    table: &ResolvedTable,
+    registration: &SqlRegistration,
+) -> Result<ResolvedPredicate, QueryError> {
+    use crate::orm::ModelPredicate;
+    Ok(match predicate {
+        ModelPredicate::And(children) => ResolvedPredicate::and(
+            children
+                .into_iter()
+                .map(|child| resolve_model(child, schema, table, registration))
+                .collect::<Result<_, _>>()?,
+        ),
+        ModelPredicate::Or(children) => ResolvedPredicate::or(
+            children
+                .into_iter()
+                .map(|child| resolve_model(child, schema, table, registration))
+                .collect::<Result<_, _>>()?,
+        ),
+        ModelPredicate::Const(value) => ResolvedPredicate::Const(value),
+        ModelPredicate::Compare {
+            field,
+            op,
+            mut value,
+        } => {
+            compile::validate_field_name(field)?;
+            compile::validate_value_operation(field, schema)?;
+            let definition = schema
+                .get(field)
+                .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
+            if definition["filterable"].as_bool() == Some(false) {
+                return Err(invalid(format!("field '{field}' is not filterable")));
+            }
+            let input = table
+                .inputs
+                .get(field)
+                .ok_or_else(|| invalid(format!("filter field has no physical column: {field}")))?;
+            let column = table.table.column(&input.column)?;
+            if value.is_null() {
+                if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                    return Err(invalid("null supports only equality comparisons"));
+                }
+                ResolvedPredicate::IsNull {
+                    operand: ResolvedOperand::Column(column),
+                    negated: op == CompareOp::Ne,
+                }
+            } else {
+                crate::sql::codecs::prepare_value(field, definition, &mut value)
+                    .map_err(|error| invalid(error.to_string()))?;
+                let storage = column.storage();
+                let value = registration.encode(storage, value)?;
+                ResolvedPredicate::Compare {
+                    lhs: ResolvedOperand::Column(column),
+                    op,
+                    rhs: ResolvedPredicateValue::Bind { storage, value },
+                }
+            }
+        }
+    })
 }
 
 fn resolve_inner(
@@ -66,6 +251,9 @@ fn resolve_inner(
         let definition = schema
             .get(&field)
             .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
+        if definition["filterable"].as_bool() == Some(false) {
+            return Err(invalid(format!("field '{field}' is not filterable")));
+        }
         let input = table
             .inputs
             .get(&field)

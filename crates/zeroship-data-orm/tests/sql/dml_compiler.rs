@@ -170,6 +170,52 @@ fn a_join_cannot_reference_a_source_that_has_not_been_introduced() {
 }
 
 #[test]
+fn an_aggregate_select_rejects_an_ungrouped_column() {
+    let source = Table::aliased(
+        SchemaName::new("app-reads").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        Ident::parse_as("source", IdentRole::Alias).unwrap(),
+        [
+            ("id", StorageType::Integer),
+            ("revision", StorageType::Integer),
+        ]
+        .map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap();
+    let statement = SelectStatement::new(SelectParts {
+        table: source.clone(),
+        joins: Vec::new(),
+        projection: vec![
+            SelectedExpression {
+                expression: ResolvedOperand::Column(source.column("id").unwrap()),
+                alias: Ident::parse_as("id", IdentRole::Alias).unwrap(),
+            },
+            SelectedExpression {
+                expression: ResolvedOperand::Aggregate {
+                    function: zeroship_data_orm::sql::AggregateFunc::Sum,
+                    column: Some(source.column("revision").unwrap()),
+                    distinct: false,
+                },
+                alias: Ident::parse_as("total", IdentRole::Alias).unwrap(),
+            },
+        ],
+        predicate: ResolvedPredicate::Const(true),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+    });
+    assert!(statement.is_err());
+}
+
+#[test]
 fn insert_columns_are_canonical_and_rows_follow_their_columns() {
     let table = table();
     let statement = Statement::Insert(Insert::new(insert_parts(&table)).unwrap());

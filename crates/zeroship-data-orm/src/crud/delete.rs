@@ -17,12 +17,12 @@ pub(crate) fn build_hard(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
-    filter: Value,
+    filter: predicate::Input,
     first: bool,
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
     let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
-    let predicate = predicate::resolve(filter, schema, &resolved, registration)?;
+    let predicate = filter.resolve(schema, &resolved, registration)?;
     let scope = scope(first, schema, &resolved)?;
     let returning = if first {
         resolved.returning(schema)?
@@ -43,7 +43,7 @@ pub(crate) fn build_lifecycle(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
-    filter: Value,
+    filter: predicate::Input,
     marker: &str,
     match_deleted: bool,
     generated: &WriteAssignments,
@@ -55,7 +55,7 @@ pub(crate) fn build_lifecycle(
         .table
         .column(&crate::sql::compile::value_column_for_field(marker, schema))?;
     let predicate = ResolvedPredicate::and(vec![
-        predicate::resolve(filter, schema, &resolved, registration)?,
+        filter.resolve(schema, &resolved, registration)?,
         ResolvedPredicate::IsNull {
             operand: ResolvedOperand::Column(marker),
             negated: match_deleted,

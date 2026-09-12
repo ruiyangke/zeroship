@@ -34,6 +34,7 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     first_row_lock: "",
     insensitive_like: "LIKE",
     insensitive_like_suffix: " COLLATE NOCASE",
+    average_suffix: "",
     array_mutation: write_array_mutation,
 };
 
