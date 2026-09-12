@@ -382,6 +382,8 @@ Typed-plan rendering uses the shared writer for identifier quoting, native bind
 allocation, and statement-wide parameter limits. Collection builders still own
 their parameter collection until their operation cutovers. Production upsert
 orders input columns by name so equivalent input maps share SQL and bind order.
+Upsert consumes its native document and transfers byte, text, and encoded JSON
+buffers into bindings. Only the guarded strategy retains input for its retry.
 
 ## Implementation checklist
 
