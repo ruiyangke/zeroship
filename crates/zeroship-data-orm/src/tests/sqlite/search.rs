@@ -750,6 +750,89 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
     })
 }
 
+#[test]
+fn near_uses_an_unreadable_identity_without_returning_it() {
+    Host::test(|host| {
+        host.run(async {
+            let app = "near_hidden_identity";
+            let (backend, _dir) = fresh_backend(host);
+            backend.attach_app_file(app).await.unwrap();
+            backend
+                .execute_fixture(
+                    &format!(
+                        "CREATE TABLE \"{app}\".\"places\" (\
+                         id INTEGER PRIMARY KEY, \
+                         label TEXT NOT NULL, \
+                         location BLOB NOT NULL)"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let point = GeoPoint { lat: 1.0, lng: 2.0 };
+            backend
+                .execute_fixture(
+                    &format!(
+                        "INSERT INTO \"{app}\".\"places\" (id, label, location) \
+                         VALUES (7, 'visible', {})",
+                        point_to_hex_lit(point)
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+
+            let binding = DbBinding::cold_start(app);
+            let schema = crate::value!({
+                "id":{
+                    "type":"integer",
+                    "required":true,
+                    "primaryKey":true,
+                    "readable":false
+                },
+                "label":{"type":"string"},
+                "location":{"type":"geoPoint"}
+            });
+            zeroship_data_orm::schema_cache::with_mut(|cache| {
+                cache.insert_one(&binding, "places", schema)
+            });
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
+            let route = zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
+                app,
+                registration.clone(),
+            )
+            .bind(BackendHandle::new(std::rc::Rc::new(backend)))
+            .unwrap();
+            let plan = zeroship_data_orm::crud::plan_near(
+                &binding,
+                &registration,
+                "places",
+                &crate::value!({
+                    "field":"location",
+                    "point":{"lat":point.lat,"lng":point.lng},
+                    "radius":1.0
+                }),
+            )
+            .unwrap();
+            let rows = zeroship_data_orm::crud::run_near(
+                &route,
+                binding,
+                "places".into(),
+                plan,
+            )
+            .await
+            .unwrap()
+            .rows;
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["label"], "visible");
+            assert!(rows[0].get("id").is_none());
+            assert!(rows[0]["_distance_m"].as_f64().is_some());
+        });
+        host.reset();
+    })
+}
+
 /// The six non-`id` system columns, for a fixture that keeps its own `id`
 /// declaration. The vector / spatial fixtures use an `INTEGER PRIMARY KEY
 /// AUTOINCREMENT` rowid so their assertions can name `id: 1`, but they still

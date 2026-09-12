@@ -72,6 +72,16 @@ fn compile_spatial_near(
     let mut writer = SqlWriter::new(effective.max_bind_parameters);
     writer.sql.push_str("SELECT ");
     super::shared::write_search_projection(&mut writer, &parts.projection);
+    if !parts
+        .projection
+        .iter()
+        .any(|selected| selected.column.name().as_str() == parts.identity.name().as_str())
+    {
+        writer.sql.push_str(", ");
+        super::shared::write_column_reference(&mut writer, &parts.identity);
+        writer.sql.push_str(" AS ");
+        writer.identifier(parts.identity.name().as_str());
+    }
     writer.sql.push_str(" FROM ");
     super::shared::write_table_reference(&mut writer, &parts.table);
     if !matches!(
