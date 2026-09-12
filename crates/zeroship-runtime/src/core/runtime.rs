@@ -1280,6 +1280,7 @@ impl RuntimeInner {
         // `setup_globals` can expose it as `globalThis.__zsRuntimeDescriptor`.
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
+        isolate.set_slot(crate::plugin::RuntimeAppIdentity(app_id));
 
         let context = {
             v8::scope!(let handle_scope, &mut isolate);
