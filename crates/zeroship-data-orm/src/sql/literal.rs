@@ -168,22 +168,8 @@ pub const MAX_VECTOR_DIMS: usize = 16_000;
 
 /// A query vector: non-empty, finite in every element, and bounded in width.
 ///
-/// # Why this is a [`Literal`] variant and not an encoding
-///
-/// The shipped builders carry a vector to the database by **two unrelated
-/// mechanisms for one concept**, which is the exact defect
-/// [`crate::sql::render::ValueFormat`] was introduced to close for `bytes`:
-/// `build_vector_search` formats the elements into a text literal `[1,2,3]` and
-/// binds that string, casting it `::vector` in the SQL
-/// (`crates/zeroship-data-orm/src/sql/compile.rs`), while the `SQLite` arm
-/// encodes the same values as a raw little-endian `f32` buffer and binds a BLOB
-/// (`crates/zeroship-data-orm/src/backend/sqlite/vector.rs`).
-///
-/// Neither encoding is the *value*; both are a dialect's spelling of it. So the
-/// plan carries the numbers, [`crate::sql::render::ValueFormat::vector_placeholder`]
-/// carries the SQL-side spelling, and how a driver puts `f32`s on the wire is
-/// the driver's business. A new dialect that gets this wrong now fails to
-/// compile rather than silently inheriting `PostgreSQL`'s text form.
+/// The compiler preserves component order and binds a native array. Database
+/// codecs and search compilers own its physical representation.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct QueryVector(Vec<Finite32>);
 
