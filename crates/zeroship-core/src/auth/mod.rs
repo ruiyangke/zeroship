@@ -196,15 +196,14 @@ pub const PAIRWISE_SUB_BODY_LEN: usize = 20;
 /// The fixed prefix every per-app pairwise subject carries. App access tokens
 /// and gateway session cookies use this shape so their verification paths can
 /// reject, as defense in depth, any credential whose subject is an unprojected
-/// global user UUID.
+/// platform user id.
 pub const PAIRWISE_SUB_PREFIX: &str = "pws_";
 
 /// Whether `sub` has the EXACT shape [`derive_pairwise`] mints: the `pws_`
 /// prefix followed by exactly [`PAIRWISE_SUB_BODY_LEN`] base62 (`[0-9A-Za-z]`)
 /// chars. The gateway wrapper / session cookie is JS-readable by app code, so
-/// it MUST NOT carry the global user UUID in any claim; a `sub` that survives
-/// this predicate can never be the un-projected global identity (a bare UUID
-/// has no `pws_` prefix).
+/// it MUST NOT carry the global user id in any claim; a `sub` that survives
+/// this predicate can never be the unprojected `usr_` identity.
 ///
 /// ## This is a SHAPE inverse, NOT a forgery/trust gate (security-review I8)
 ///
@@ -359,7 +358,7 @@ mod tests {
         assert_eq!(a.len(), 4 + PAIRWISE_SUB_BODY_LEN, "{a}");
         // Different sector ⇒ different sub (no cross-app correlation).
         assert_ne!(a, b);
-        // The global UUID never appears in the derived sub.
+        // The global user id never appears in the derived sub.
         assert!(
             !a.contains(uid.as_str()),
             "global user id must not leak into pws_: {a}"
@@ -367,7 +366,7 @@ mod tests {
     }
 
     #[test]
-    fn is_pairwise_subject_accepts_derived_and_rejects_uuid() {
+    fn is_pairwise_subject_accepts_derived_and_refuses_user_id() {
         let salt = b"platform-pairwise-salt";
         let uid = user("usr_0000000000000000000001");
         let pws = derive_pairwise(salt, &uid, "https://app.zeroship.ai");
@@ -376,7 +375,7 @@ mod tests {
             is_pairwise_subject(&pws),
             "derived pws_ must be accepted: {pws}"
         );
-        // A bare global UUID (what the un-projected wrapper would carry) fails.
+        // An unprojected global user id fails.
         assert!(
             !is_pairwise_subject(uid.as_str()),
             "a global user id must not pass the pairwise-subject invariant"
