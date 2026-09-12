@@ -1,5 +1,6 @@
 use super::{
     app::{deadline, emit, lock_app, lock_run, not_found, validate_run},
+    models,
     store::{Row, Transaction},
     tasks::authorized_task,
     AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
@@ -12,6 +13,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{cell::Cell, rc::Rc, time::Duration};
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, Operation, Output},
+    sql::Predicate,
+    value, Value,
+};
 use zeroship_storage::{
     backend::{BoxByteStream, BoxChunkSource, ChunkResult, ChunkSource, OnceChunk},
     Namespace, Storage, StorageError, StorageStore,
@@ -136,30 +142,33 @@ impl WorkflowService {
         let storage = storage(self)?;
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
-        let table = tx.table("payloads");
         let existing = tx
-            .query(
-                &format!("SELECT * FROM {table} WHERE app_id=$1 AND task_id=$2 AND request_id=$3"),
-                &[
-                    claim.app.as_str().into(),
-                    task_id.into(),
-                    request.as_str().into(),
-                ],
+            .database()
+            .entity::<models::payloads::Entity>()?
+            .find::<models::PayloadRecord>(
+                models::payloads::app_id
+                    .eq(claim.app.as_str())?
+                    .and(models::payloads::task_id.eq(task_id)?)
+                    .and(models::payloads::request_id.eq(request.as_str())?),
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
             )
             .await?;
         let id = if let Some(row) = existing.first() {
-            if reference_from(row)? != reference {
+            if reference_from(row) != reference {
                 return Err(WorkflowServiceError::Conflict(
                     "payload request was used for another object".into(),
                 ));
             }
-            let id = row.text("id")?;
-            if matches!(row.text("state")?.as_str(), "staged" | "referenced") {
+            let id = row.id.clone();
+            if matches!(row.state.as_str(), "staged" | "referenced") {
                 tx.commit().await?;
                 return Ok(StagedPayload { id, reference });
             }
             claim.validate_live()?;
-            if row.text("state")? != "uploading" || row.integer("expires_at")? <= claim.now {
+            if row.state != "uploading" || row.expires_at <= claim.now {
                 return Err(WorkflowServiceError::Conflict(
                     "payload upload has expired".into(),
                 ));
@@ -171,10 +180,9 @@ impl WorkflowService {
             if reference.size > claim.policy.max_payload_bytes {
                 return Err(WorkflowServiceError::PayloadTooLarge);
             }
-            let total = tx.query(&format!("SELECT CAST(COALESCE(SUM(size),0) AS BIGINT) AS total,COUNT(*) AS objects FROM {table} WHERE app_id=$1 AND state <> 'deleted'"), &[claim.app.as_str().into()]).await?;
-            if total[0].integer("objects")? >= claim.policy.max_payload_objects
-                || total[0]
-                    .integer("total")?
+            let (total, objects) = payload_usage(&tx, &claim.app).await?;
+            if objects >= claim.policy.max_payload_objects
+                || total
                     .checked_add(reference.size)
                     .is_none_or(|total| total > claim.policy.max_payload_storage_bytes)
             {
@@ -183,8 +191,12 @@ impl WorkflowService {
                 ));
             }
             let id = typed_id::generate(typed_id::WORKFLOW_PAYLOAD_PREFIX);
-            tx.execute(&format!("INSERT INTO {table} (app_id,run_id,generation,id,task_id,request_id,hash,size,content_type,state,created_at,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'uploading',$10,$11)"),
-                &[claim.app.as_str().into(),claim.run.text("id")?.into(),claim.run.integer("generation")?.into(),id.clone().into(),task_id.into(),request.as_str().into(),reference.hash.clone().into(),reference.size.into(),reference.content_type.clone().into(),claim.now.into(),deadline(claim.now,claim.policy.payload_staging_retention_ms)?.into()]).await?;
+            tx.database().collection(models::payloads::Entity::COLLECTION)?.insert(value!({
+                "app_id":claim.app.as_str(), "run_id":claim.run.text("id")?, "generation":claim.run.integer("generation")?,
+                "id":id.clone(), "task_id":task_id, "request_id":request.as_str(), "hash":reference.hash.clone(),
+                "size":reference.size, "content_type":reference.content_type.clone(), "state":"uploading",
+                "created_at":claim.now, "expires_at":deadline(claim.now,claim.policy.payload_staging_retention_ms)?,
+            })).await?;
             id
         };
         claim.validate_at(tx.now().await?)?;
@@ -197,12 +209,12 @@ impl WorkflowService {
         claim.validate_live()?;
         claim.policy.admit()?;
         let row = payload(&mut tx, &claim.app, &id).await?;
-        match row.text("state")?.as_str() {
+        match row.state.as_str() {
             "staged" | "referenced" => {
                 tx.commit().await?;
                 return Ok(StagedPayload { id, reference });
             }
-            "uploading" if row.integer("expires_at")? > claim.now => {}
+            "uploading" if row.expires_at > claim.now => {}
             _ => {
                 return Err(WorkflowServiceError::Conflict(
                     "payload upload has expired".into(),
@@ -218,11 +230,7 @@ impl WorkflowService {
             verified: verified.clone(),
             finished: false,
         };
-        let remaining = claim
-            .task
-            .deadline
-            .min(row.integer("expires_at")?)
-            - claim.now;
+        let remaining = claim.task.deadline.min(row.expires_at) - claim.now;
         let written = compio::time::timeout(
             Duration::from_millis(remaining as u64),
             storage.put_stream(
@@ -241,11 +249,13 @@ impl WorkflowService {
             ));
         }
         claim.validate_at(tx.now().await?)?;
-        tx.execute(
-            &format!("UPDATE {table} SET state='staged' WHERE app_id=$1 AND id=$2"),
-            &[claim.app.as_str().into(), id.clone().into()],
-        )
-        .await?;
+        tx.database()
+            .collection(models::payloads::Entity::COLLECTION)?
+            .update(
+                value!({"app_id":claim.app.as_str(), "id":id.clone()}),
+                value!({"state":"staged"}),
+            )
+            .await?;
         claim.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(StagedPayload { id, reference })
@@ -297,32 +307,39 @@ impl WorkflowService {
             let now = tx.now().await?;
             let row = payload(&mut tx, &app, &id).await?;
             if !matches!(
-                row.text("state")?.as_str(),
+                row.state.as_str(),
                 "uploading" | "staged" | "deleting" | "deleted"
-            ) || row.integer("expires_at")? > now
+            ) || row.expires_at > now
             {
                 continue;
             }
-            let refs = tx.table("payload_refs");
-            if !tx
-                .query(
-                    &format!(
-                        "SELECT payload_id FROM {refs} WHERE app_id=$1 AND payload_id=$2 LIMIT 1"
-                    ),
-                    &[app.as_str().into(), id.clone().into()],
+            let Output::Rows {
+                rows: references, ..
+            } = tx
+                .database()
+                .collection(models::payload_refs::Entity::COLLECTION)?
+                .find(
+                    value!({"app_id":app.as_str(), "payload_id":id.clone()}),
+                    value!({"select":["payload_id"], "limit":1}),
                 )
                 .await?
-                .is_empty()
-            {
+            else {
+                return Err(WorkflowServiceError::Internal(
+                    "workflow payload reference lookup returned a count".into(),
+                ));
+            };
+            if !references.is_empty() {
                 return Err(WorkflowServiceError::Internal(
                     "referenced payload was scheduled for collection".into(),
                 ));
             }
-            tx.execute(
-                &format!("UPDATE {table} SET state='deleting' WHERE app_id=$1 AND id=$2"),
-                &[app.as_str().into(), id.clone().into()],
-            )
-            .await?;
+            tx.database()
+                .collection(models::payloads::Entity::COLLECTION)?
+                .update(
+                    value!({"app_id":app.as_str(), "id":id.clone()}),
+                    value!({"state":"deleting"}),
+                )
+                .await?;
             tx.commit().await?;
             // The committed deleting state fences all upload and promotion paths.
             storage
@@ -335,7 +352,11 @@ impl WorkflowService {
             // Keep a tombstone and sweep it again. A remote store may finish an
             // already-sent upload after the writer process dies. That object
             // must remain inadmissible and must be collected on a later sweep.
-            tx.execute(&format!("UPDATE {table} SET state='deleted',expires_at=$3 WHERE app_id=$1 AND id=$2 AND state='deleting'"), &[app.as_str().into(),id.into(),deadline(now,policy.payload_staging_retention_ms)?.into()]).await?;
+            tx.database().collection(models::payloads::Entity::COLLECTION)?.execute(Operation::Update {
+                filter:value!({"app_id":app.as_str(), "id":id, "state":"deleting"}),
+                patch:value!({"state":"deleted", "expires_at":deadline(now,policy.payload_staging_retention_ms)?}),
+                many:true,
+            }).await?;
             tx.commit().await?;
             collected += 1;
         }
@@ -364,14 +385,26 @@ impl AppWorkflows {
         lock_app(&mut tx, &self.app).await?;
         let run = lock_run(&mut tx, &self.app, run_id).await?;
         let generation = run.integer("generation")?;
-        let rows = tx.query(
-            &format!("SELECT record FROM {} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND name=$4 AND occurrence=$5", tx.table("steps")),
-            &[self.app.as_str().into(), run_id.into(), generation.into(), name.into(), i64::from(occurrence).into()],
-        ).await?;
+        let rows = tx
+            .database()
+            .entity::<models::steps::Entity>()?
+            .find::<models::StoredStep>(
+                models::steps::app_id
+                    .eq(self.app.as_str())?
+                    .and(models::steps::run_id.eq(run_id)?)
+                    .and(models::steps::generation.eq(generation)?)
+                    .and(models::steps::name.eq(name)?)
+                    .and(models::steps::occurrence.eq(i64::from(occurrence))?),
+                FindOptions {
+                    limit: Some(1),
+                    ..Default::default()
+                },
+            )
+            .await?;
         let row = rows
             .first()
             .ok_or_else(|| not_found("workflow step output"))?;
-        let step: StepCheckpoint = super::app::decode(&row.text("record")?)?;
+        let step: StepCheckpoint = super::app::decode(&row.record)?;
         if step.state != "completed" {
             return Err(not_found("workflow step output"));
         }
@@ -386,7 +419,7 @@ impl AppWorkflows {
                 },
             )
             .await?;
-            if reference_from(&row)? != reference {
+            if reference_from(&row) != reference {
                 return Err(WorkflowServiceError::Unavailable(
                     "workflow step payload reference changed".into(),
                 ));
@@ -450,26 +483,32 @@ async fn attach(
     run_id: &str,
     generation: i64,
     slot: PayloadSlot,
-    row: &Row,
+    row: &models::PayloadRecord,
     now: i64,
 ) -> Result<(), WorkflowServiceError> {
     let (kind, ordinal) = slot.coordinates()?;
-    let table = tx.table("payloads");
-    let refs = tx.table("payload_refs");
-    let id = row.text("id")?;
-    tx.execute(&format!("INSERT INTO {refs} (app_id,run_id,generation,slot,ordinal,payload_id) VALUES ($1,$2,$3,$4,$5,$6)"), &[app.as_str().into(),run_id.into(),generation.into(),kind.into(),ordinal.into(),id.clone().into()]).await?;
-    if row.text("state")? == "staged" {
-        tx.execute(
-            &format!("UPDATE {table} SET state='referenced' WHERE app_id=$1 AND id=$2"),
-            &[app.as_str().into(), id.clone().into()],
-        )
+    let id = &row.id;
+    tx.database()
+        .collection(models::payload_refs::Entity::COLLECTION)?
+        .insert(value!({
+            "app_id":app.as_str(), "run_id":run_id, "generation":generation, "slot":kind,
+            "ordinal":ordinal, "payload_id":id.as_str(),
+        }))
         .await?;
+    if row.state == "staged" {
+        tx.database()
+            .collection(models::payloads::Entity::COLLECTION)?
+            .update(
+                value!({"app_id":app.as_str(), "id":id.as_str()}),
+                value!({"state":"referenced"}),
+            )
+            .await?;
         emit(
             tx,
             app,
             &format!("{id}:retained"),
             "workflow.payload.retained",
-            serde_json::json!({"payloadId":id,"bytes":row.integer("size")?}),
+            serde_json::json!({"payloadId":id,"bytes":row.size}),
             now,
         )
         .await?;
@@ -496,7 +535,7 @@ pub(crate) async fn inherit_child_output(
         now,
     )
     .await?;
-    reference_from(&row)
+    Ok(reference_from(&row))
 }
 
 async fn owned_reference(
@@ -505,11 +544,57 @@ async fn owned_reference(
     run: &Row,
     reference: &WorkflowOutputRef,
     now: i64,
-) -> Result<Row, WorkflowServiceError> {
-    let table = tx.table("payloads");
-    let refs = tx.table("payload_refs");
-    let rows = tx.query(&format!("SELECT p.* FROM {table} p WHERE p.app_id=$1 AND p.hash=$2 AND p.size=$3 AND (p.content_type=$4 OR (p.content_type IS NULL AND $4 IS NULL)) AND ((p.state='staged' AND p.run_id=$5 AND p.generation=$6 AND p.task_id=$7 AND p.expires_at>$8) OR (p.state='referenced' AND EXISTS (SELECT 1 FROM {refs} r WHERE r.app_id=p.app_id AND r.payload_id=p.id AND r.run_id=$5 AND r.generation=$6))) ORDER BY p.id LIMIT 1"),
-        &[app.as_str().into(),reference.hash.clone().into(),reference.size.into(),reference.content_type.clone().into(),run.text("id")?.into(),run.integer("generation")?.into(),run.optional_text("task_id")?.into(),now.into()]).await?;
+) -> Result<models::PayloadRecord, WorkflowServiceError> {
+    let db = tx.database();
+    let object = db.entity::<models::payloads::Entity>()?.alias("p")?;
+    let edge = db.entity::<models::payload_refs::Entity>()?.alias("r")?;
+    let id = run.text("id")?;
+    let generation = run.integer("generation")?;
+    let mut ownership = vec![Predicate::And(vec![
+        object.column(models::payloads::state).eq("referenced")?,
+        edge.column(models::payload_refs::run_id).eq(id.as_str())?,
+    ])];
+    if let Some(task) = run.optional_text("task_id")? {
+        ownership.push(Predicate::And(vec![
+            object.column(models::payloads::state).eq("staged")?,
+            object.column(models::payloads::run_id).eq(id.as_str())?,
+            object.column(models::payloads::generation).eq(generation)?,
+            object.column(models::payloads::task_id).eq(task.as_str())?,
+            object.column(models::payloads::expires_at).gt(now)?,
+        ]));
+    }
+    let rows = db
+        .from(&object)
+        .left_join(
+            &edge,
+            Predicate::And(vec![
+                object
+                    .column(models::payloads::app_id)
+                    .eq_column(edge.column(models::payload_refs::app_id))?,
+                object
+                    .column(models::payloads::id)
+                    .eq_column(edge.column(models::payload_refs::payload_id))?,
+                edge.column(models::payload_refs::run_id).eq(id.as_str())?,
+                edge.column(models::payload_refs::generation)
+                    .eq(generation)?,
+            ]),
+        )?
+        .filter(Predicate::And(vec![
+            object.column(models::payloads::app_id).eq(app.as_str())?,
+            object
+                .column(models::payloads::hash)
+                .eq(reference.hash.as_str())?,
+            object.column(models::payloads::size).eq(reference.size)?,
+            object
+                .column(models::payloads::content_type)
+                .eq(reference.content_type.as_deref())?,
+            Predicate::Or(ownership),
+        ]))
+        .order_by(object.column(models::payloads::id).asc())
+        .select(object.row::<models::PayloadRecord>())?
+        .limit(1)?
+        .all()
+        .await?;
     rows.into_iter()
         .next()
         .ok_or_else(|| not_found("workflow payload"))
@@ -521,30 +606,106 @@ async fn reference_at(
     run_id: &str,
     generation: i64,
     slot: PayloadSlot,
-) -> Result<Row, WorkflowServiceError> {
+) -> Result<models::PayloadRecord, WorkflowServiceError> {
     let (kind, ordinal) = slot.coordinates()?;
-    let table = tx.table("payloads");
-    let refs = tx.table("payload_refs");
-    tx.query(&format!("SELECT p.* FROM {refs} r JOIN {table} p ON p.app_id=r.app_id AND p.id=r.payload_id WHERE r.app_id=$1 AND r.run_id=$2 AND r.generation=$3 AND r.slot=$4 AND r.ordinal=$5 AND p.state='referenced'"), &[app.as_str().into(),run_id.into(),generation.into(),kind.into(),ordinal.into()]).await?.into_iter().next().ok_or_else(|| not_found("workflow payload"))
+    let db = tx.database();
+    let object = db.entity::<models::payloads::Entity>()?.alias("p")?;
+    let edge = db.entity::<models::payload_refs::Entity>()?.alias("r")?;
+    db.from(&edge)
+        .inner_join(
+            &object,
+            Predicate::And(vec![
+                edge.column(models::payload_refs::app_id)
+                    .eq_column(object.column(models::payloads::app_id))?,
+                edge.column(models::payload_refs::payload_id)
+                    .eq_column(object.column(models::payloads::id))?,
+            ]),
+        )?
+        .filter(Predicate::And(vec![
+            edge.column(models::payload_refs::app_id).eq(app.as_str())?,
+            edge.column(models::payload_refs::run_id).eq(run_id)?,
+            edge.column(models::payload_refs::generation)
+                .eq(generation)?,
+            edge.column(models::payload_refs::slot).eq(kind)?,
+            edge.column(models::payload_refs::ordinal).eq(ordinal)?,
+            object.column(models::payloads::state).eq("referenced")?,
+        ]))
+        .select(object.row::<models::PayloadRecord>())?
+        .limit(1)?
+        .all()
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| not_found("workflow payload"))
 }
 
-async fn payload(tx: &mut Transaction, app: &AppId, id: &str) -> Result<Row, WorkflowServiceError> {
-    let table = tx.table("payloads");
-    tx.query(
-        &format!("SELECT * FROM {table} WHERE app_id=$1 AND id=$2"),
-        &[app.as_str().into(), id.into()],
-    )
-    .await?
-    .into_iter()
-    .next()
-    .ok_or_else(|| not_found("workflow payload"))
+async fn payload(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+) -> Result<models::PayloadRecord, WorkflowServiceError> {
+    tx.database()
+        .entity::<models::payloads::Entity>()?
+        .find::<models::PayloadRecord>(
+            models::payloads::app_id
+                .eq(app.as_str())?
+                .and(models::payloads::id.eq(id)?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| not_found("workflow payload"))
 }
-fn reference_from(row: &Row) -> Result<WorkflowOutputRef, WorkflowServiceError> {
-    Ok(WorkflowOutputRef {
-        hash: row.text("hash")?,
-        size: row.integer("size")?,
-        content_type: row.optional_text("content_type")?,
-    })
+fn reference_from(row: &models::PayloadRecord) -> WorkflowOutputRef {
+    WorkflowOutputRef {
+        hash: row.hash.clone(),
+        size: row.size,
+        content_type: row.content_type.clone(),
+    }
+}
+
+async fn payload_usage(tx: &Transaction, app: &AppId) -> Result<(i64, i64), WorkflowServiceError> {
+    let Output::Rows { rows, .. } = tx
+        .database()
+        .collection(models::payloads::Entity::COLLECTION)?
+        .execute(Operation::Aggregate {
+            pipeline: value!([
+                {"$match":{"app_id":app.as_str(), "state":{"$ne":"deleted"}}},
+                {"$group":{"total":{"$sum":"size"}, "objects":{"$count":true}}},
+            ]),
+            options: value!({}),
+        })
+        .await?
+    else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow payload aggregate returned a count".into(),
+        ));
+    };
+    let [row] = rows.as_slice() else {
+        return Err(WorkflowServiceError::Internal(
+            "workflow payload aggregate returned invalid rows".into(),
+        ));
+    };
+    let integer = |name: &str| {
+        // Aggregates may widen an integer input to the ORM's exact decimal value.
+        match &row[name] {
+            Value::Decimal(value) => value.parse::<i64>().ok(),
+            value => value.as_i64(),
+        }
+        .filter(|value| *value >= 0)
+        .ok_or_else(|| WorkflowServiceError::Internal("invalid workflow payload aggregate".into()))
+    };
+    let objects = integer("objects")?;
+    let total = if objects == 0 && row["total"].is_null() {
+        0
+    } else {
+        integer("total")?
+    };
+    Ok((total, objects))
 }
 pub(crate) fn validate_reference(
     reference: &WorkflowOutputRef,
@@ -584,11 +745,11 @@ fn storage_error(error: StorageError) -> WorkflowServiceError {
 async fn open_payload(
     storage: &Storage,
     app: &AppId,
-    row: &Row,
+    row: &models::PayloadRecord,
 ) -> Result<PayloadRead, WorkflowServiceError> {
-    let reference = reference_from(row)?;
+    let reference = reference_from(row);
     let (meta, body) = storage
-        .get_stream(app.as_str(), &row.text("id")?)
+        .get_stream(app.as_str(), &row.id)
         .await
         .map_err(storage_error)?
         .ok_or_else(|| {

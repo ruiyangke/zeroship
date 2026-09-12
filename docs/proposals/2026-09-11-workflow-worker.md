@@ -81,6 +81,12 @@ locks. Native tests preserve foreign-app and unaffected-target authority,
 idempotent revocation and epoch exhaustion behavior. Topic initialization keeps
 its explicit insert-on-conflict statement so issuing another token cannot reset
 a previously revoked epoch.
+Payload admission, lookup, promotion and collection state changes now use ORM
+collections and generated models. Replay and slot reads join payload ownership
+with the complete app and generation scope. Quota aggregation uses native integer
+or exact decimal results without floating-point conversion. Collection discovery
+keeps its host-scoped SQL query; object deletion remains outside the journal
+transaction and retains the durable deleting state and tombstones.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
