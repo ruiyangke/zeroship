@@ -233,23 +233,6 @@ pub fn extract_cas_version(
     Ok(v.as_i64())
 }
 
-/// Whether the filter constrains the entity to one non-null identity.
-pub fn filter_has_id_predicate(filter: &Value) -> bool {
-    let Some(mut id) = filter.get("id") else {
-        return false;
-    };
-    if let Some(operators) = id.as_object() {
-        if operators.len() != 1 {
-            return false;
-        }
-        let Some(value) = operators.get("$eq") else {
-            return false;
-        };
-        id = value;
-    }
-    matches!(id, Value::String(_) | Value::Number(_) | Value::Decimal(_))
-}
-
 fn filter_has_nested_version_predicate(filter: &Value, column: &str) -> bool {
     fn combinator_contains_field(value: &Value, field: &str) -> bool {
         match value {
@@ -435,8 +418,6 @@ mod tests {
             )
             .is_err()
         );
-        assert!(filter_has_id_predicate(&value!({"id":"note_x"})));
-        assert!(!filter_has_id_predicate(&value!({"key":"note_x"})));
         assert_eq!(
             extract_cas_version(&value!({"version":7}), "notes", &value!({})).unwrap(),
             None

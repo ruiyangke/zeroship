@@ -615,10 +615,95 @@ fn validate_select(parts: &SelectParts) -> Result<(), CompileError> {
     for order in &parts.order_by {
         validate_operand(&tables, &order.expression, true)?;
     }
+    let grouped = !parts.group_by.is_empty()
+        || parts
+            .projection
+            .iter()
+            .any(|selected| matches!(selected.expression, ResolvedOperand::Aggregate { .. }))
+        || predicate_mentions_aggregate(&parts.having)
+        || parts
+            .order_by
+            .iter()
+            .any(|order| matches!(order.expression, ResolvedOperand::Aggregate { .. }));
+    if grouped {
+        for selected in &parts.projection {
+            validate_grouped_operand(&selected.expression, &parts.group_by)?;
+        }
+        validate_grouped_predicate(&parts.having, &parts.group_by)?;
+        for order in &parts.order_by {
+            validate_grouped_operand(&order.expression, &parts.group_by)?;
+        }
+    }
     if parts.limit.is_some_and(|value| value < 0) || parts.offset.is_some_and(|value| value < 0) {
         return Err(invalid("select pagination cannot be negative"));
     }
     Ok(())
+}
+
+fn predicate_mentions_aggregate(predicate: &ResolvedPredicate) -> bool {
+    match predicate {
+        ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
+            children.iter().any(predicate_mentions_aggregate)
+        }
+        ResolvedPredicate::Not(child) => predicate_mentions_aggregate(child),
+        ResolvedPredicate::Compare { lhs, rhs, .. } => {
+            matches!(lhs, ResolvedOperand::Aggregate { .. })
+                || matches!(
+                    rhs,
+                    ResolvedPredicateValue::Operand(ResolvedOperand::Aggregate { .. })
+                )
+        }
+        ResolvedPredicate::Membership { lhs, .. }
+        | ResolvedPredicate::Pattern { lhs, .. }
+        | ResolvedPredicate::IsNull { operand: lhs, .. } => {
+            matches!(lhs, ResolvedOperand::Aggregate { .. })
+        }
+        ResolvedPredicate::Const(_) => false,
+    }
+}
+
+fn validate_grouped_predicate(
+    predicate: &ResolvedPredicate,
+    group_by: &[ResolvedOperand],
+) -> Result<(), CompileError> {
+    match predicate {
+        ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
+            for child in children {
+                validate_grouped_predicate(child, group_by)?;
+            }
+        }
+        ResolvedPredicate::Not(child) => validate_grouped_predicate(child, group_by)?,
+        ResolvedPredicate::Compare { lhs, rhs, .. } => {
+            validate_grouped_operand(lhs, group_by)?;
+            if let ResolvedPredicateValue::Operand(rhs) = rhs {
+                validate_grouped_operand(rhs, group_by)?;
+            }
+        }
+        ResolvedPredicate::Membership { lhs, .. }
+        | ResolvedPredicate::Pattern { lhs, .. }
+        | ResolvedPredicate::IsNull { operand: lhs, .. } => {
+            validate_grouped_operand(lhs, group_by)?;
+        }
+        ResolvedPredicate::Const(_) => {}
+    }
+    Ok(())
+}
+
+fn validate_grouped_operand(
+    operand: &ResolvedOperand,
+    group_by: &[ResolvedOperand],
+) -> Result<(), CompileError> {
+    let ResolvedOperand::Column(column) = operand else {
+        return Ok(());
+    };
+    let grouped = group_by.iter().any(|group| {
+        matches!(group, ResolvedOperand::Column(candidate) if Arc::ptr_eq(&column.source.0, &candidate.source.0) && column.index == candidate.index)
+    });
+    if grouped {
+        Ok(())
+    } else {
+        Err(invalid("aggregate select contains an ungrouped column"))
+    }
 }
 
 fn invalid(message: &'static str) -> CompileError {

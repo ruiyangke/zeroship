@@ -1,7 +1,7 @@
 //! Typed mappings over native records and migration-derived column contracts.
+use crate::value::{Record, Value};
 use std::marker::PhantomData;
 use zeroship_data_orm::error::DbError;
-use crate::value::{Record, Value};
 
 /// Collection metadata generated from the deployment's runtime descriptor.
 pub trait Entity: Sized + 'static {
@@ -158,13 +158,12 @@ impl<C: FilterableColumn> Field<C> {
         let value = value
             .encode_value()
             .map_err(|error| field_error::<C>("filter", error))?;
-        let value = if value.is_object() {
-            Value::Object([("$eq".into(), value)].into())
-        } else {
-            value
-        };
         Ok(Filter {
-            value: Value::Object([(C::NAME.into(), value)].into()),
+            predicate: ModelPredicate::Compare {
+                field: C::NAME,
+                op: crate::sql::CompareOp::Eq,
+                value,
+            },
             entity: PhantomData,
         })
     }
@@ -182,8 +181,20 @@ impl<C: UpdatableColumn> Field<C> {
 
 #[derive(Debug)]
 pub struct Filter<E> {
-    value: Value,
+    predicate: ModelPredicate,
     entity: PhantomData<fn() -> E>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ModelPredicate {
+    And(Vec<Self>),
+    Or(Vec<Self>),
+    Compare {
+        field: &'static str,
+        op: crate::sql::CompareOp,
+        value: Value,
+    },
+    Const(bool),
 }
 impl<E> Default for Filter<E> {
     fn default() -> Self {
@@ -193,26 +204,28 @@ impl<E> Default for Filter<E> {
 impl<E> Filter<E> {
     pub fn all() -> Self {
         Self {
-            value: Value::Object(Record::new()),
+            predicate: ModelPredicate::Const(true),
             entity: PhantomData,
         }
     }
     pub fn and(self, other: Self) -> Self {
-        self.combine("$and", other)
+        self.combine(true, other)
     }
     pub fn or(self, other: Self) -> Self {
-        self.combine("$or", other)
+        self.combine(false, other)
     }
-    fn combine(self, operator: &str, other: Self) -> Self {
+    fn combine(self, conjunction: bool, other: Self) -> Self {
         Self {
-            value: Value::Object(
-                [(operator.into(), Value::Array(vec![self.value, other.value]))].into(),
-            ),
+            predicate: if conjunction {
+                ModelPredicate::And(vec![self.predicate, other.predicate])
+            } else {
+                ModelPredicate::Or(vec![self.predicate, other.predicate])
+            },
             entity: PhantomData,
         }
     }
-    pub(crate) fn into_value(self) -> Value {
-        self.value
+    pub(crate) fn into_predicate(self) -> ModelPredicate {
+        self.predicate
     }
 }
 #[derive(Debug)]
@@ -250,23 +263,4 @@ pub struct FindOptions {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
     pub include_deleted: bool,
-}
-impl FindOptions {
-    pub(crate) fn into_value<E: Entity, R: FromRow<E>>(self) -> Value {
-        let mut fields = Record::new();
-        fields.insert(
-            "select".into(),
-            Value::Array(R::COLUMNS.iter().map(|name| Value::from(*name)).collect()),
-        );
-        if let Some(limit) = self.limit {
-            fields.insert("limit".into(), limit.into());
-        }
-        if let Some(offset) = self.offset {
-            fields.insert("offset".into(), offset.into());
-        }
-        if self.include_deleted {
-            fields.insert("include_deleted".into(), true.into());
-        }
-        Value::Object(fields)
-    }
 }

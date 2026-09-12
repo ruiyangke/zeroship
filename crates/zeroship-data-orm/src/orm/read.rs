@@ -67,6 +67,7 @@ pub struct ReadQuery {
     pub order_by: Vec<OrderKey>,
     pub limit: RowLimit,
     pub offset: RowOffset,
+    pub(crate) model_filter: Option<super::model::ModelPredicate>,
 }
 impl ReadQuery {
     pub fn new(source: ReadSource) -> Self {
@@ -80,6 +81,7 @@ impl ReadQuery {
             order_by: Vec::new(),
             limit: RowLimit::default(),
             offset: RowOffset::default(),
+            model_filter: None,
         }
     }
 }
@@ -284,19 +286,30 @@ impl PreparedRead {
         if projected.len() > MAX_READ_FIELDS {
             return Err(invalid("read projection exceeds its field budget"));
         }
-        let filter = if input.source.include_deleted {
-            input.filter
-        } else {
-            Predicate::And(vec![
-                input.filter,
-                visible(&input.source, &sources[0].schema)?,
-            ])
+        let mut filter = match input.model_filter {
+            Some(filter) => crate::crud::predicate::resolve_model(
+                filter,
+                &sources[0].schema,
+                &sources[0].resolved,
+                registration,
+            )?,
+            None => resolve_predicate(&input.filter, &sources, registration)?,
         };
+        if !input.source.include_deleted {
+            filter = ResolvedPredicate::and(vec![
+                filter,
+                resolve_predicate(
+                    &visible(&input.source, &sources[0].schema)?,
+                    &sources,
+                    registration,
+                )?,
+            ]);
+        }
         let statement = SelectStatement::new(SelectParts {
             table: sources[0].resolved.table.clone(),
             joins,
             projection: projected,
-            predicate: resolve_predicate(&filter, &sources, registration)?,
+            predicate: filter,
             group_by: input
                 .group_by
                 .iter()

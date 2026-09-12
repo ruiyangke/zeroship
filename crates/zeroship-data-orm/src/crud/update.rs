@@ -18,7 +18,7 @@ pub(crate) fn build_one(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
-    filter: Value,
+    filter: predicate::Input,
     update: Value,
     generated: &WriteAssignments,
     registration: &SqlRegistration,
@@ -39,7 +39,7 @@ pub(crate) fn build_many(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
-    filter: Value,
+    filter: predicate::Input,
     update: Value,
     generated: &WriteAssignments,
     registration: &SqlRegistration,
@@ -60,14 +60,14 @@ fn build(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
-    filter: Value,
+    filter: predicate::Input,
     update: Value,
     generated: &WriteAssignments,
     first: bool,
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
     let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
-    let predicate = predicate::resolve(filter, schema, &resolved, registration)?;
+    let predicate = filter.resolve(schema, &resolved, registration)?;
     let assignments = resolve_assignments(update, generated, &resolved, registration)?;
     let scope = if first {
         MutationScope::First {

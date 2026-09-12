@@ -208,6 +208,7 @@ pub(crate) struct Syntax {
     pub(crate) first_row_lock: &'static str,
     pub(crate) insensitive_like: &'static str,
     pub(crate) insensitive_like_suffix: &'static str,
+    pub(crate) average_suffix: &'static str,
     pub(crate) array_mutation: fn(
         &mut SqlWriter,
         &Column,
@@ -457,7 +458,7 @@ fn compile_select(
     }
     for (index, selected) in parts.projection.into_iter().enumerate() {
         comma(&mut writer, index);
-        write_operand(&mut writer, &selected.expression);
+        write_operand(&mut writer, syntax, &selected.expression);
         writer.sql.push_str(" AS ");
         writer.identifier(selected.alias.as_str());
     }
@@ -480,7 +481,7 @@ fn compile_select(
         writer.sql.push_str(" GROUP BY ");
         for (index, expression) in parts.group_by.iter().enumerate() {
             comma(&mut writer, index);
-            write_operand(&mut writer, expression);
+            write_operand(&mut writer, syntax, expression);
         }
     }
     if !matches!(parts.having, ResolvedPredicate::Const(true)) {
@@ -491,7 +492,7 @@ fn compile_select(
         writer.sql.push_str(" ORDER BY ");
         for (index, order) in parts.order_by.iter().enumerate() {
             comma(&mut writer, index);
-            write_operand(&mut writer, &order.expression);
+            write_operand(&mut writer, syntax, &order.expression);
             writer.sql.push_str(match order.direction {
                 crate::sql::Direction::Ascending => " ASC",
                 crate::sql::Direction::Descending => " DESC",
@@ -575,7 +576,7 @@ fn write_predicate(
             writer.sql.push(')');
         }
         ResolvedPredicate::Compare { lhs, op, rhs } => {
-            write_operand(writer, &lhs);
+            write_operand(writer, syntax, &lhs);
             writer.sql.push_str(match op {
                 CompareOp::Eq => " = ",
                 CompareOp::Ne => " != ",
@@ -585,7 +586,7 @@ fn write_predicate(
                 CompareOp::Gte => " >= ",
             });
             match rhs {
-                ResolvedPredicateValue::Operand(rhs) => write_operand(writer, &rhs),
+                ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
                 ResolvedPredicateValue::Bind { storage, value } => {
                     write_bind(writer, syntax, storage, value)?
                 }
@@ -593,7 +594,7 @@ fn write_predicate(
         }
         ResolvedPredicate::Membership { lhs, op, values } => {
             let storage = lhs.storage()?;
-            write_operand(writer, &lhs);
+            write_operand(writer, syntax, &lhs);
             writer.sql.push_str(if op == MembershipOp::In {
                 " IN ("
             } else {
@@ -611,7 +612,7 @@ fn write_predicate(
             value,
             escape,
         } => {
-            write_operand(writer, &lhs);
+            write_operand(writer, syntax, &lhs);
             let insensitive = matches!(op, PatternOp::ILike | PatternOp::NotILike);
             let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
             if negated {
@@ -634,7 +635,7 @@ fn write_predicate(
             }
         }
         ResolvedPredicate::IsNull { operand, negated } => {
-            write_operand(writer, &operand);
+            write_operand(writer, syntax, &operand);
             writer
                 .sql
                 .push_str(if negated { " IS NOT NULL" } else { " IS NULL" });
@@ -643,7 +644,7 @@ fn write_predicate(
     Ok(())
 }
 
-fn write_operand(writer: &mut SqlWriter, operand: &ResolvedOperand) {
+fn write_operand(writer: &mut SqlWriter, syntax: Syntax, operand: &ResolvedOperand) {
     match operand {
         ResolvedOperand::Column(column) => {
             if let Some(alias) = column.table().alias() {
@@ -663,11 +664,14 @@ fn write_operand(writer: &mut SqlWriter, operand: &ResolvedOperand) {
                 writer.sql.push_str("DISTINCT ");
             }
             if let Some(column) = column {
-                write_operand(writer, &ResolvedOperand::Column(column.clone()));
+                write_operand(writer, syntax, &ResolvedOperand::Column(column.clone()));
             } else {
                 writer.sql.push('*');
             }
             writer.sql.push(')');
+            if *function == crate::sql::AggregateFunc::Avg {
+                writer.sql.push_str(syntax.average_suffix);
+            }
         }
     }
 }

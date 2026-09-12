@@ -354,3 +354,165 @@ async fn aggregate_read_is_refused_by_the_registered_compiler() {
     assert!(error.to_string().contains("aggregate reads"), "{error}");
     owner.close().await;
 }
+
+#[compio::test]
+async fn dynamic_find_uses_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compiler = CountingCompiler(calls.clone());
+    let registration = SqlRegistration::new(
+        "count-dynamic-find-compilation",
+        crate::sql::compile::SqlDialect::Sqlite,
+        compiler.clone(),
+        FixtureCodecs,
+        compiler.support(),
+    )
+    .unwrap();
+    let database = database_with_registration(&owner, registration).await;
+
+    database
+        .collection("records")
+        .unwrap()
+        .find(value!({"label":"missing"}), value!({}))
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    owner.close().await;
+}
+
+#[compio::test]
+async fn dynamic_find_refuses_a_non_filterable_field() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({"secret":{"type":"string","filterable":false}}),
+    )
+    .await;
+    let error = owner
+        .database
+        .collection("records")
+        .unwrap()
+        .find(value!({"secret":"hidden"}), value!({}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("not filterable"), "{error}");
+    owner.close().await;
+}
+
+#[compio::test]
+async fn typed_update_and_delete_use_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("posts", posts::Entity::schema().clone()).await;
+    let Output::Rows { rows, .. } = owner
+        .database
+        .collection("posts")
+        .unwrap()
+        .insert(value!({"title":"original"}))
+        .await
+        .unwrap()
+    else {
+        panic!("expected inserted row")
+    };
+    let id = rows[0]["id"].as_str().unwrap().to_owned();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compiler = CountingCompiler(calls.clone());
+    let registration = SqlRegistration::new(
+        "count-typed-write-compilation",
+        crate::sql::compile::SqlDialect::Sqlite,
+        compiler.clone(),
+        FixtureCodecs,
+        compiler.support(),
+    )
+    .unwrap();
+    let database = database_with_registration(&owner, registration).await;
+    let posts = database.entity::<posts::Entity>().unwrap();
+
+    let updated: Option<Post> = posts
+        .update(
+            posts::id.eq(id.clone()).unwrap(),
+            posts::title.set("changed".to_owned()).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(updated.unwrap().title, "changed");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+    calls.store(0, Ordering::Relaxed);
+    let deleted: Option<Post> = posts.delete(posts::id.eq(id).unwrap()).await.unwrap();
+    assert_eq!(deleted.unwrap().title, "changed");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    owner.close().await;
+}
+
+#[compio::test]
+async fn dynamic_count_is_refused_by_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let constrained = constrained_database(&owner, "dynamic-count-without-aggregates", |support| {
+        support.aggregate_reads = false
+    })
+    .await;
+
+    let error = constrained
+        .collection("records")
+        .unwrap()
+        .count(value!({}), value!({}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("aggregate reads"), "{error}");
+    owner.close().await;
+}
+
+#[compio::test]
+async fn dynamic_distinct_uses_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compiler = CountingCompiler(calls.clone());
+    let registration = SqlRegistration::new(
+        "count-dynamic-distinct-compilation",
+        crate::sql::compile::SqlDialect::Sqlite,
+        compiler.clone(),
+        FixtureCodecs,
+        compiler.support(),
+    )
+    .unwrap();
+    let database = database_with_registration(&owner, registration).await;
+
+    database
+        .collection("records")
+        .unwrap()
+        .execute(Operation::Distinct {
+            field: "label".into(),
+            filter: value!({}),
+            options: value!({}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    owner.close().await;
+}
+
+#[compio::test]
+async fn dynamic_aggregate_uses_the_registered_compiler() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compiler = CountingCompiler(calls.clone());
+    let registration = SqlRegistration::new(
+        "count-dynamic-aggregate-compilation",
+        crate::sql::compile::SqlDialect::Sqlite,
+        compiler.clone(),
+        FixtureCodecs,
+        compiler.support(),
+    )
+    .unwrap();
+    let database = database_with_registration(&owner, registration).await;
+
+    database
+        .collection("records")
+        .unwrap()
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"records":{"$count":true}}}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    owner.close().await;
+}

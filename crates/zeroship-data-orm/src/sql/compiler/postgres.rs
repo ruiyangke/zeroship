@@ -34,6 +34,7 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     first_row_lock: " FOR UPDATE",
     insensitive_like: "ILIKE",
     insensitive_like_suffix: "",
+    average_suffix: "::double precision",
     array_mutation: write_array_mutation,
 };
 

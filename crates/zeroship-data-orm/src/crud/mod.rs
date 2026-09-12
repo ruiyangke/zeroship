@@ -20,11 +20,13 @@ use crate::protection::{mask_pass, protection_floor, unmask};
 
 pub(crate) mod assignment_pass;
 
+mod aggregate;
 mod bytes_pass;
 mod delete;
 mod identity;
 pub(crate) mod insert;
-mod predicate;
+pub(crate) mod predicate;
+mod read;
 pub mod read_pipeline;
 pub(crate) mod resolved;
 mod update;
@@ -315,20 +317,18 @@ pub async fn run_find(
         });
     // Soft-delete auto-filter gate.
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(plan.include_deleted);
-    let mut sql_filter = filter;
-    lower_filter(route.dialect(), &schema_hint, &mut sql_filter);
-    let bq = compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+    let bq = read::find(
         binding.schema(),
         &coll,
-        &sql_filter,
+        &schema_hint,
+        filter,
         plan.limit,
         plan.offset,
         plan.order_by.as_ref(),
         plan.select.as_ref(),
-        &schema_hint,
         &plan.unmask_columns,
         filter_soft_deleted,
-        route.dialect(),
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
     let rows = exec_query(&route, bq).await?;
@@ -533,11 +533,11 @@ pub async fn run_insert_many(
 /// probe-found-nothing arm below returns `(Vec::new(), false)`, a shape no
 /// `ApplyResult` produces, and the `false` is load-bearing - see the comment at
 /// that return. `actor_id` is eager for the reason given on [`run_insert`].
-pub async fn run_update_one(
+pub(crate) async fn run_update_one(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    filter: Value,
+    filter: predicate::Input,
     update: Value,
     actor_id: Option<String>,
 ) -> Result<(Vec<Value>, bool), DbError> {
@@ -546,8 +546,8 @@ pub async fn run_update_one(
     write_pipeline::inspect_update(&schema, &mut update)?;
     // Detect creator-supplied CAS version + reject
     // the unsupported "version filter without id" shape eagerly.
-    let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some() && !assignment_pass::filter_has_id_predicate(&filter) {
+    let cas_version = extract_cas_version(&filter, &coll, &schema)?;
+    if cas_version.is_some() && !filter.has_non_null_equality("id") {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
@@ -556,21 +556,19 @@ pub async fn run_update_one(
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
+        let target_filter = filter.model_value();
         let target_rows = write_pipeline::resolve_target_row_ids(
             &route,
             route.dialect(),
             &coll,
-            &filter,
+            &target_filter,
             1,
             &schema,
         )
         .await?;
         let Some(target_row) = target_rows.first().cloned() else {
             if let Some(expected_version) = cas_version {
-                let row_id = filter
-                    .as_object()
-                    .and_then(|o| o.get("id"))
-                    .and_then(|v| v.as_str());
+                let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
                 return Err(DbError::version_mismatch(&coll, row_id, expected_version));
             }
             // An absent match has no row to decode or masked value to rehydrate.
@@ -594,13 +592,13 @@ pub async fn run_update_one(
         write_pipeline::ApplyMode::Update { row_pk },
     )
     .await?;
-    let sql_filter = if let Some(target_row) = target_row {
+    let sql_filter: predicate::Input = if let Some(target_row) = target_row {
         let mut sql_filter = crate::value!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
             sql_filter[concurrency_column(&schema)?.expect("CAS column")] =
                 Value::from(expected_version);
         }
-        sql_filter
+        sql_filter.into()
     } else {
         filter.clone()
     };
@@ -649,10 +647,7 @@ pub async fn run_update_one(
     // is missing — the SDK consumer retries either way).
     if let Some(expected_version) = cas_version {
         if result.rows.is_empty() {
-            let row_id = filter
-                .as_object()
-                .and_then(|o| o.get("id"))
-                .and_then(|v| v.as_str());
+            let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
         // The `id` PK ensures at most one row matches
@@ -671,11 +666,11 @@ pub async fn run_update_one(
 }
 
 /// Update matching rows and return the database's affected-row count.
-pub async fn run_update_many(
+pub(crate) async fn run_update_many(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    filter: Value,
+    filter: predicate::Input,
     update: Value,
     actor_id: Option<String>,
 ) -> Result<u64, DbError> {
@@ -687,8 +682,8 @@ pub async fn run_update_many(
     let dialect = route.dialect();
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
-    let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some() && !assignment_pass::filter_has_id_predicate(&filter) {
+    let cas_version = extract_cas_version(&filter, &coll, &schema)?;
+    if cas_version.is_some() && !filter.has_non_null_equality("id") {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
@@ -708,11 +703,12 @@ pub async fn run_update_many(
     if per_row_encrypted_update {
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
         let work_result: Result<u64, DbError> = async {
+            let target_filter = filter.model_value();
             let target_rows = write_pipeline::resolve_target_row_ids(
                 frame.route(),
                 dialect,
                 &coll,
-                &filter,
+                &target_filter,
                 compile::MAX_QUERY_LIMIT + 1,
                 &schema,
             )
@@ -735,10 +731,7 @@ pub async fn run_update_many(
             }
             if target_rows.is_empty() {
                 if let Some(expected_version) = cas_version {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
+                    let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
                     return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                 }
                 return Ok(0);
@@ -778,7 +771,7 @@ pub async fn run_update_many(
                         binding.schema(),
                         &coll,
                         &schema,
-                        row_filter,
+                        row_filter.into(),
                         row_update,
                         &autobump,
                         frame.route().sql_registration(),
@@ -800,10 +793,7 @@ pub async fn run_update_many(
 
             if let Some(expected_version) = cas_version {
                 if affected != target_count as u64 {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
+                    let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
                     return Err(DbError::version_mismatch(&coll, row_id, expected_version));
                 }
             }
@@ -843,14 +833,25 @@ pub async fn run_update_many(
     // A primary-key CAS miss has the same error contract as updateOne.
     if let Some(expected_version) = cas_version {
         if affected == 0 {
-            let row_id = filter
-                .as_object()
-                .and_then(|o| o.get("id"))
-                .and_then(|v| v.as_str());
+            let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
             return Err(DbError::version_mismatch(&coll, row_id, expected_version));
         }
     }
     Ok(affected)
+}
+
+fn extract_cas_version(
+    filter: &predicate::Input,
+    collection: &str,
+    schema: &Value,
+) -> Result<Option<i64>, DbError> {
+    if let Some(filter) = filter.dynamic() {
+        return assignment_pass::extract_cas_version(filter, collection, schema);
+    }
+    let Some(column) = concurrency_column(schema)? else {
+        return Ok(None);
+    };
+    Ok(filter.conjunctive_value(column).and_then(Value::as_i64))
 }
 
 /// Delete one row, applying soft-delete assignments when the descriptor enables them.
@@ -859,6 +860,16 @@ pub fn plan_delete_one(
     route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
+    actor_id: Option<&str>,
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
+    plan_delete_one_input(binding, route, collection, filter.into(), actor_id)
+}
+
+pub(crate) fn plan_delete_one_input(
+    binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
+    collection: &str,
+    filter: predicate::Input,
     actor_id: Option<&str>,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     // Resolve-then-build, folded into the one `Result` `run_op` already
@@ -912,7 +923,7 @@ pub fn plan_delete_many(
                 binding.schema(),
                 collection,
                 &schema,
-                filter,
+                filter.into(),
                 false,
                 route.sql_registration(),
             )
@@ -922,7 +933,7 @@ pub fn plan_delete_many(
             binding.schema(),
             collection,
             &schema,
-            filter,
+            filter.into(),
             soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
             false,
             &autobump,
@@ -945,7 +956,7 @@ pub fn plan_purge_one(
             binding.schema(),
             collection,
             &schema,
-            filter,
+            filter.into(),
             true,
             route.sql_registration(),
         )
@@ -967,7 +978,7 @@ pub fn plan_purge_many(
             binding.schema(),
             collection,
             &schema,
-            filter,
+            filter.into(),
             false,
             route.sql_registration(),
         )
@@ -1001,7 +1012,7 @@ pub fn plan_restore_one(
             binding.schema(),
             collection,
             &schema,
-            filter,
+            filter.into(),
             marker,
             true,
             &autobump,
@@ -1035,7 +1046,7 @@ pub fn plan_restore_many(
             binding.schema(),
             collection,
             &schema,
-            filter,
+            filter.into(),
             marker,
             true,
             &autobump,
@@ -1097,13 +1108,13 @@ pub fn plan_aggregate(
     // `$group.by` / `$sum` / `$sort` on a masked column read the field's own
     // column, which holds the mask - there is no sibling to lower to any more.
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        compile::build_aggregate_with_result_columns(
+        aggregate::build(
             binding.schema(),
             collection,
             pipeline,
             filter_soft_deleted,
             &schema,
-            route.dialect(),
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
@@ -1134,17 +1145,14 @@ pub fn plan_distinct(
     let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
     let distinct_reads_masked_sibling = compile::column_is_masked(field, &schema_hint);
 
-    let mut filter = filter;
-    lower_filter(route.dialect(), &schema_hint, &mut filter);
-
-    let built = compile::build_distinct_with_soft_delete_with_dialect(
+    let built = read::distinct(
         binding.schema(),
         collection,
-        field,
-        &filter,
-        filter_soft_deleted,
         &schema_hint,
-        route.dialect(),
+        field,
+        filter,
+        filter_soft_deleted,
+        route.sql_registration(),
     )
     .map_err(DbError::from)?;
 
@@ -1192,15 +1200,13 @@ pub fn plan_count(
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        let mut filter = filter;
-        lower_filter(route.dialect(), &schema, &mut filter);
-        compile::build_count_with_soft_delete(
+        read::count(
             binding.schema(),
             collection,
             &schema,
-            &filter,
+            filter,
             filter_soft_deleted,
-            route.dialect(),
+            route.sql_registration(),
         )
         .map_err(DbError::from)
     })
