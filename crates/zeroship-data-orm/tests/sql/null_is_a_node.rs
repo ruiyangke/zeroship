@@ -1,6 +1,14 @@
 use zeroship_data_orm::sql::{
     Ident, IdentRole, Literal, LiteralError, LiteralSet, MembershipOp, Operand, Predicate,
 };
+use zeroship_data_orm::value;
+
+#[test]
+fn filter_text_uses_the_validated_literal_boundary() {
+    let error = zeroship_data_orm::sql::filter::decode(&value!({"name":"bad\0value"}))
+        .expect_err("NUL text must be refused before compilation");
+    assert!(error.to_string().contains("NUL"));
+}
 
 fn column(name: &str) -> Operand {
     Operand::column(Ident::parse_as(name, IdentRole::Column).unwrap())

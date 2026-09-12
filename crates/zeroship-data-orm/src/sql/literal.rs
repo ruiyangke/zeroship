@@ -10,6 +10,7 @@
 //! ([`Literal::from_optional`]) forces the caller to say which of the two they
 //! meant.
 
+use crate::value::Value;
 use core::fmt;
 
 /// The largest membership list accepted by the query grammar.
@@ -215,6 +216,35 @@ pub enum Literal {
 }
 
 impl Literal {
+    /// Convert an owned native value into a query literal.
+    ///
+    /// A null remains structural and JSON containers are encoded only because
+    /// SQL JSON parameters require an explicit storage representation.
+    pub fn try_from_value(value: Value) -> Result<Option<Self>, LiteralError> {
+        Ok(Some(match value {
+            Value::Null => return Ok(None),
+            Value::Bool(value) => Self::Bool(value),
+            Value::Number(value) if value.as_i64().is_some() => {
+                Self::Int(value.as_i64().expect("checked integer"))
+            }
+            Value::Number(value) if value.as_u64().is_some() => Self::text(value.to_string())?,
+            Value::Number(value) => Self::Float(Finite::new(
+                value.as_f64().ok_or(LiteralError::NonFiniteFloat)?,
+            )?),
+            Value::String(value) | Value::Decimal(value) => Self::text(value)?,
+            Value::Bytes(value) => Self::Bytes(value),
+            Value::Timestamp(value) => Self::Int(value),
+            Value::Json(value) => {
+                serde_json::from_str::<serde_json::Value>(&value)
+                    .map_err(|_| LiteralError::InvalidJson)?;
+                Self::Json(value)
+            }
+            value @ (Value::Array(_) | Value::Object(_)) => {
+                Self::Json(serde_json::to_string(&value).map_err(|_| LiteralError::InvalidJson)?)
+            }
+        }))
+    }
+
     /// A text value.
     ///
     /// # Errors
@@ -343,6 +373,8 @@ pub enum LiteralError {
     NonFiniteFloat,
     /// A text value carried a NUL byte.
     NulByteInText,
+    /// An encoded JSON value was invalid.
+    InvalidJson,
     /// A membership set had no members. Not representable: see
     /// [`crate::sql::Predicate::membership`], which simplifies that case away
     /// before a set is built.
@@ -368,6 +400,7 @@ impl fmt::Display for LiteralError {
                  including itself",
             ),
             Self::NulByteInText => f.write_str("a text parameter must not contain a NUL byte"),
+            Self::InvalidJson => f.write_str("a JSON parameter must contain valid JSON"),
             Self::EmptyLiteralSet => f.write_str(
                 "a membership set must not be empty; empty membership is a constant, \
                  not an IN list",
