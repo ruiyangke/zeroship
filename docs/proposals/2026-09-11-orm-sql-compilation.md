@@ -31,7 +31,7 @@ These are observations of the current code, not descriptions of the proposal:
 | --- | --- |
 | [Runtime CRUD compilation](../../crates/zeroship-data-orm/src/sql/compile.rs) constructs statements from native records. [Typed plan rendering](../../crates/zeroship-data-orm/src/sql/render/postgres.rs) separately renders reads and writes. | Expressions, statement construction, and compiler guarantees have overlapping implementations. |
 | [Rust filters](../../crates/zeroship-data-orm/src/orm/model.rs) first become dynamic native records; [filter decoding](../../crates/zeroship-data-orm/src/sql/filter.rs) subsequently constructs predicates. | Rust pays for an intermediate filter vocabulary even when the input was typed. This is allocation and conversion, not JSON text serialization. |
-| `build_upsert_with_assignments` accepts `SqlDialect::Mysql` but emits `ON CONFLICT` and `RETURNING` unconditionally. | The runtime compiler exposes an incomplete dialect contract. There is no MySQL runtime adapter. |
+| Runtime `SqlDialect` dispatch currently covers PostgreSQL and SQLite. | Downstream compiler registration still requires replacing this closed dispatch. |
 | Ordinary find compilation interpolates validated pagination values; [relational compilation](../../crates/zeroship-data-orm/src/sql/compile/read.rs) binds them. | Statement shape varies differently between paths. |
 | [Determinism tests](../../crates/zeroship-data-orm/tests/sql/determinism.rs) exercise the standalone renderer. | They do not establish the same property for runtime CRUD compilation. |
 
@@ -373,6 +373,11 @@ compiler, Rust input construction, and SDK filter decoding. Measure allocations,
 compilation work, and statement reuse across equivalent inputs. Keep results in
 benchmark output rather than prose. Do not infer a performance improvement from
 removing code or from a standalone renderer benchmark.
+
+Native collection builders now return `sql::compiler::CompiledQuery`. Its Debug
+output reports SQL and native parameter types; execution can borrow bindings or
+consume the output to transfer its buffers. The typed-plan renderer still uses
+`RenderedSql` and remains part of the output consolidation work.
 
 ## Implementation checklist
 

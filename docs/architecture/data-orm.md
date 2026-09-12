@@ -251,6 +251,10 @@ models remain independent of the backend. Async trait futures are local and
 boxed at that boundary. This preserves compio's thread-local execution model
 without imposing Send or Sync on sessions or V8 state.
 
+Collection compilation returns `sql::compiler::CompiledQuery`. Its Debug output
+includes SQL and native parameter types without parameter contents. Execution
+borrows the bindings or consumes the output through `into_parts`.
+
 Parameters and result records use native `Value` types. Dynamic dispatch does
 not require JSON serialization. Strings and binary buffers remain native;
 JSON encoding is reserved for JSON columns and explicit wire contracts. The

@@ -10,7 +10,7 @@ use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
 pub use crate::value::Value;
 
-use crate::{backend::BackendHandle, sql::compile::BuiltQuery, crud, tx_route::CapturedRoute};
+use crate::{backend::BackendHandle, sql::compiler::CompiledQuery, crud, tx_route::CapturedRoute};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -455,7 +455,7 @@ enum Plan {
         many: bool,
     },
     Mutation {
-        query: BuiltQuery,
+        query: CompiledQuery,
         operation: ChangeOp,
         many: bool,
     },
@@ -463,14 +463,14 @@ enum Plan {
         document: Value,
         conflict_fields: Value,
     },
-    Count(BuiltQuery),
+    Count(CompiledQuery),
     Aggregate {
-        query: BuiltQuery,
+        query: CompiledQuery,
         groups: Vec<String>,
         columns: Option<Vec<String>>,
     },
     Distinct {
-        query: BuiltQuery,
+        query: CompiledQuery,
         masked: bool,
     },
     Search(crud::SearchPlan),

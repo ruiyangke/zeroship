@@ -38,17 +38,16 @@ fn runtime_rendering_uses_each_sources_declared_value_type() {
         let query =
             compile::build_select(&query, &SchemaName::new("app").unwrap(), &sources, dialect)
                 .unwrap();
-        assert!(query.params.contains(&value!("ordinary text")));
-        assert!(!query.sql.contains("ordinary text"));
-        assert!(query.sql.contains("\"c\".\"event_time\""));
+        assert!(query.params().contains(&value!("ordinary text")));
+        assert!(!query.sql().contains("ordinary text"));
+        assert!(query.sql().contains("\"c\".\"event_time\""));
         match dialect {
             compile::SqlDialect::Postgres => {
-                assert!(query.params.contains(&value::Value::Timestamp(0)))
+                assert!(query.params().contains(&value::Value::Timestamp(0)))
             }
             compile::SqlDialect::Sqlite => {
-                assert!(query.params.contains(&value!("1970-01-01T00:00:00.000Z")))
+                assert!(query.params().contains(&value!("1970-01-01T00:00:00.000Z")))
             }
-            _ => unreachable!(),
         }
     }
 }

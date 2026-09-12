@@ -37,7 +37,7 @@ pub async fn exec_mutation_then_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    bq: compile::BuiltQuery,
+    bq: crate::sql::compiler::CompiledQuery,
     op: zeroship_data_orm::cdc::ChangeOp,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_mutation_with_emit(bq, &route, &coll, op, &binding).await?;
@@ -57,7 +57,7 @@ pub async fn exec_aggregate_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    bq: compile::BuiltQuery,
+    bq: crate::sql::compiler::CompiledQuery,
     group_fields: Vec<String>,
     result_columns: Option<Vec<String>>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
@@ -96,7 +96,7 @@ pub async fn exec_distinct_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    bq: compile::BuiltQuery,
+    bq: crate::sql::compiler::CompiledQuery,
     reads_masked_sibling: bool,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
@@ -200,7 +200,7 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
 ///
 /// This type exists because `find` CANNOT be cut the way the nine `plan_*`
 /// functions above were. Those had a synchronous planning prologue that ran to
-/// a `BuiltQuery` before the promise. `find` has no such prologue: its schema
+/// a `CompiledQuery` before the promise. `find` has no such prologue: its schema
 /// resolution and SQL build sit BEHIND `authorize_query_hint(...).await`, so
 /// they cannot be hoisted ahead of the V8 boundary at all. The engine half is
 /// therefore an `async fn`, and this struct carries what must still be read
@@ -856,7 +856,7 @@ pub fn plan_delete_one(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     // Resolve-then-build, folded into the one `Result` `run_op` already
     // rejects on: an undeclared collection cannot be soft-deleted through a
     // filter this deploy has no schema to lower.
@@ -897,7 +897,7 @@ pub fn plan_delete_many(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
@@ -931,7 +931,7 @@ pub fn plan_purge_one(
     route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         lower_filter(route.dialect(), &schema, &mut filter);
@@ -954,7 +954,7 @@ pub fn plan_purge_many(
     route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         lower_filter(route.dialect(), &schema, &mut filter);
@@ -981,7 +981,7 @@ pub fn plan_restore_one(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
@@ -1008,7 +1008,7 @@ pub fn plan_restore_many(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
@@ -1038,7 +1038,7 @@ pub fn plan_restore_many(
 /// method auto-filters for consistency).
 /// The ENGINE half of `aggregate`.
 ///
-/// Returns a PAIR, unlike the seven single-`BuiltQuery` plans in this file:
+/// Returns a PAIR, unlike the seven single-`CompiledQuery` plans in this file:
 /// `build_aggregate_with_result_columns` yields the result-column list alongside
 /// the query, and the adapter needs it to shape the response. `distinct` is the
 /// other pair-returning member of this group.
@@ -1052,7 +1052,7 @@ pub fn plan_aggregate(
     collection: &str,
     pipeline: &Value,
     opts: &Value,
-) -> Result<(compile::BuiltQuery, Option<Vec<String>>), DbError> {
+) -> Result<(crate::sql::compiler::CompiledQuery, Option<Vec<String>>), DbError> {
     // Record into the active query's read-set so the broker can
     // narrow events. If the first stage is `$match`, capture its filter;
     // otherwise record a coarse-grained entry (empty filter) — the
@@ -1098,7 +1098,7 @@ pub fn plan_distinct(
     field: &str,
     filter: Value,
     opts: &Value,
-) -> Result<(compile::BuiltQuery, bool), DbError> {
+) -> Result<(crate::sql::compiler::CompiledQuery, bool), DbError> {
     let include_deleted = opts
         .get("include_deleted")
         .and_then(|v| v.as_bool())
@@ -1144,7 +1144,7 @@ pub fn plan_distinct(
 /// bodies are not - those bodies are query pipeline. The engine must stop
 /// returning `OpResult`/`ResolveValue` and return data the adapter lowers."
 ///
-/// It returns a `BuiltQuery`; `dispatch_count` below owns the promise, the route
+/// It returns a `CompiledQuery`; `dispatch_count` below owns the promise, the route
 /// capture and the `i64 -> ResolveValue` lowering. This is the worked example for
 /// the other sixteen `dispatch_*` functions in this file.
 ///
@@ -1160,7 +1160,7 @@ pub fn plan_count(
     collection: &str,
     filter: Value,
     opts: &Value,
-) -> Result<compile::BuiltQuery, DbError> {
+) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     record_read_set(binding, collection, &filter);

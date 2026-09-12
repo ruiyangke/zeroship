@@ -16,6 +16,7 @@
 mod read;
 pub use read::{ReadSource, build_select};
 
+use crate::sql::compiler::CompiledQuery;
 pub use crate::sql::lifecycle::WriteAssignments;
 use crate::sql::lifecycle::soft_delete_column;
 use crate::value::Value;
@@ -51,15 +52,6 @@ impl std::fmt::Display for QueryError {
             }
         }
     }
-}
-
-/// A built SQL query with native parameters.
-///
-/// Parameters retain native scalar and structured types until driver binding.
-#[derive(Debug)]
-pub struct BuiltQuery {
-    pub sql: String,
-    pub params: Vec<Value>,
 }
 
 /// Runtime SQL dialect. Drivers bind binary parameters directly.
@@ -571,7 +563,7 @@ pub fn build_write_target_probe(
     filter: &Value,
     limit: i64,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     let select = project_read_field("id", schema_hint, None);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
@@ -599,7 +591,7 @@ pub fn build_conflict_probe_with_dialect(
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let obj = filter.as_object().ok_or_else(|| {
@@ -654,7 +646,7 @@ pub fn build_conflict_probe_with_dialect(
         "SELECT \"id\" FROM {schema}.{table} WHERE {} LIMIT 1",
         conditions.join(" AND ")
     );
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build a SELECT over the runtime descriptor's readable fields.
@@ -672,7 +664,7 @@ pub fn build_find_with_schema(
     order_by: Option<&Value>,
     select: Option<&Value>,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_find_with_schema_and_unmask(
         schema_name,
         collection,
@@ -703,7 +695,7 @@ pub fn build_find_with_schema_and_unmask(
     select: Option<&Value>,
     schema_hint: &Value,
     unmask_columns: &[String],
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_find_with_schema_and_unmask_and_soft_delete(
         schema_name,
         collection,
@@ -736,7 +728,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     unmask_columns: &[String],
     filter_soft_deleted: bool,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     let select_expr =
         build_masked_aware_select_expr_with_unmask(select, schema_hint, unmask_columns)?;
     build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
@@ -767,7 +759,7 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     filter_soft_deleted: bool,
     dialect: SqlDialect,
     limit_ceiling: i64,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -805,7 +797,7 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
         sql.push_str(&format!(" OFFSET {off}"));
     }
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Schema-aware SELECT builder with the soft-delete
@@ -841,7 +833,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete(
     schema_hint: &Value,
     unmask_columns: &[String],
     filter_soft_deleted: bool,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         schema_name,
         collection,
@@ -1105,7 +1097,7 @@ pub fn build_count(
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_count_with_soft_delete(
         schema_name,
         collection,
@@ -1127,7 +1119,7 @@ pub fn build_count_with_soft_delete(
     filter: &Value,
     filter_soft_deleted: bool,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -1144,7 +1136,7 @@ pub fn build_count_with_soft_delete(
         sql.push_str(&composed_where);
     }
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build an INSERT query:
@@ -1158,7 +1150,7 @@ pub fn build_insert(
     collection: &str,
     schema_hint: &Value,
     doc: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_insert_with_dialect(
         schema_name,
         collection,
@@ -1178,7 +1170,7 @@ pub fn build_insert_with_dialect(
     schema_hint: &Value,
     doc: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -1235,7 +1227,7 @@ pub fn build_insert_with_dialect(
         placeholders.join(", ")
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 pub fn collect_binary_bind_cols(obj: &crate::value::Record) -> std::collections::HashSet<&str> {
@@ -1366,7 +1358,7 @@ pub fn build_update_one(
     schema_hint: &Value,
     filter: &Value,
     update: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_update_one_with_dialect(
         schema_name,
         collection,
@@ -1389,7 +1381,7 @@ pub fn build_update_one_with_dialect(
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_update_one_with_assignments(
         schema_name,
         collection,
@@ -1410,7 +1402,7 @@ pub fn build_update_one_with_assignments(
     update: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -1434,7 +1426,7 @@ pub fn build_update_one_with_assignments(
         set_clauses.join(", "),
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build an INSERT query for multiple documents:
@@ -1449,7 +1441,7 @@ pub fn build_insert_many(
     collection: &str,
     schema_hint: &Value,
     docs: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_insert_many_with_dialect(
         schema_name,
         collection,
@@ -1466,7 +1458,7 @@ pub fn build_insert_many_with_dialect(
     schema_hint: &Value,
     docs: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -1587,7 +1579,7 @@ pub fn build_insert_many_with_dialect(
         value_groups.join(", ")
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build an UPDATE query for multiple rows (no LIMIT 1):
@@ -1600,7 +1592,7 @@ pub fn build_update_many(
     schema_hint: &Value,
     filter: &Value,
     update: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_update_many_with_dialect(
         schema_name,
         collection,
@@ -1621,7 +1613,7 @@ pub fn build_update_many_with_dialect(
     filter: &Value,
     update: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_update_many_with_assignments(
         schema_name,
         collection,
@@ -1642,7 +1634,7 @@ pub fn build_update_many_with_assignments(
     update: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -1660,7 +1652,7 @@ pub fn build_update_many_with_assignments(
         sql.push_str(&where_clause);
     }
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Delete all matching rows without returning records.
@@ -1670,7 +1662,7 @@ pub fn build_delete_many(
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -1685,7 +1677,7 @@ pub fn build_delete_many(
         sql.push_str(&where_clause);
     }
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build a DELETE query:
@@ -1695,7 +1687,7 @@ pub fn build_delete_one(
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_delete_one_with_dialect(
         schema_name,
         collection,
@@ -1712,7 +1704,7 @@ pub fn build_delete_one_with_dialect(
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -1732,7 +1724,7 @@ pub fn build_delete_one_with_dialect(
         }
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 // Lifecycle mutations use assignments prepared by the ORM.
@@ -1784,7 +1776,7 @@ pub fn build_soft_delete_one_with_assignments(
     filter: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -1816,7 +1808,7 @@ pub fn build_soft_delete_one_with_assignments(
         set_clauses.join(", "),
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Apply soft-delete assignments to matching live rows without returning records.
@@ -1827,7 +1819,7 @@ pub fn build_soft_delete_many_with_assignments(
     filter: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -1851,7 +1843,7 @@ pub fn build_soft_delete_many_with_assignments(
         set_clauses.join(", "),
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Dialect-aware `restore_one` builder. Symmetric to
@@ -1867,7 +1859,7 @@ pub fn build_restore_one_with_assignments(
     filter: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -1893,7 +1885,7 @@ pub fn build_restore_one_with_assignments(
         set_clauses.join(", "),
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Restore matching deleted rows without returning records.
@@ -1904,7 +1896,7 @@ pub fn build_restore_many_with_assignments(
     filter: &Value,
     dialect: SqlDialect,
     assignments: &WriteAssignments,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -1928,7 +1920,7 @@ pub fn build_restore_many_with_assignments(
         set_clauses.join(", "),
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build an aggregate query from a pipeline of stages.
@@ -1950,7 +1942,7 @@ pub fn build_aggregate(
     collection: &str,
     pipeline: &Value,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_aggregate_with_soft_delete(schema_name, collection, pipeline, false, schema_hint)
 }
 
@@ -1965,7 +1957,7 @@ pub fn build_aggregate_with_soft_delete(
     pipeline: &Value,
     filter_soft_deleted: bool,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_aggregate_with_soft_delete_with_dialect(
         schema_name,
         collection,
@@ -1984,7 +1976,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
     filter_soft_deleted: bool,
     schema_hint: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_aggregate_with_result_columns(
         schema_name,
         collection,
@@ -2016,7 +2008,7 @@ pub fn build_aggregate_with_result_columns(
     filter_soft_deleted: bool,
     schema_hint: &Value,
     dialect: SqlDialect,
-) -> Result<(BuiltQuery, Option<Vec<String>>), QueryError> {
+) -> Result<(CompiledQuery, Option<Vec<String>>), QueryError> {
     validate_collection(collection)?;
 
     let schema = crate::sql::compile::quote_ident(schema_name.as_str());
@@ -2250,7 +2242,7 @@ pub fn build_aggregate_with_result_columns(
         sql.push_str(&limit_clause);
     }
 
-    Ok((BuiltQuery { sql, params }, result_columns))
+    Ok((CompiledQuery { sql, params }, result_columns))
 }
 
 /// Build a SELECT DISTINCT query:
@@ -2265,7 +2257,7 @@ pub fn build_distinct(
     field: &str,
     filter: &Value,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_distinct_with_soft_delete(schema_name, collection, field, filter, false, schema_hint)
 }
 
@@ -2277,7 +2269,7 @@ pub fn build_distinct_with_soft_delete(
     filter: &Value,
     filter_soft_deleted: bool,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_distinct_with_soft_delete_with_dialect(
         schema_name,
         collection,
@@ -2298,7 +2290,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     filter_soft_deleted: bool,
     schema_hint: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     validate_read_identifier(field, schema_hint)?;
     validate_value_operation(field, schema_hint)?;
@@ -2325,7 +2317,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     sql.push_str(" ORDER BY ");
     sql.push_str(&build_order_term(field, false, dialect));
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build a pgvector nearest-neighbour search query.
@@ -2369,7 +2361,7 @@ pub fn build_vector_search(
     metric: crate::sql::descriptors::VectorMetric,
     filter: &Value,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     validate_read_identifier(column, schema_hint)?;
     validate_search_limit_bound("search.k", k)?;
@@ -2422,7 +2414,7 @@ pub fn build_vector_search(
     }
     sql.push_str(&format!(" ORDER BY {col} {op} $1::vector LIMIT $2"));
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build the SQL + bind parameters for a spatial within-radius search
@@ -2460,7 +2452,7 @@ pub fn build_spatial_near(
     filter: &Value,
     limit: Option<usize>,
     schema_hint: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     validate_read_identifier(column, schema_hint)?;
 
@@ -2503,7 +2495,7 @@ pub fn build_spatial_near(
     }
     sql.push_str(" ORDER BY _distance_m LIMIT $4");
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 // ---------------------------------------------------------------------------
@@ -2999,7 +2991,7 @@ pub fn build_upsert(
     schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_upsert_with_dialect(
         schema_name,
         collection,
@@ -3046,7 +3038,7 @@ pub fn build_upsert_with_dialect(
     doc: &Value,
     conflict_fields: &Value,
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     build_upsert_with_assignments(
         schema_name,
         collection,
@@ -3069,7 +3061,7 @@ pub fn build_upsert_with_assignments(
     dialect: SqlDialect,
     assignments: &WriteAssignments,
     expected_id: Option<&Value>,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -3177,7 +3169,7 @@ pub fn build_upsert_with_assignments(
         update_clauses.join(", ")
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 /// Build a findOrCreate query. Same shape as [`build_upsert`] but the
@@ -3191,7 +3183,7 @@ pub fn build_find_or_create(
     schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
     let returning = build_returning_expr(schema_hint)?;
 
@@ -3255,7 +3247,7 @@ pub fn build_find_or_create(
         no_op,
     );
 
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }
 
 // ---------------------------------------------------------------------------
@@ -3414,7 +3406,7 @@ mod tests {
         offset: Option<i64>,
         order_by: Option<&Value>,
         select: Option<&Value>,
-    ) -> Result<BuiltQuery, QueryError> {
+    ) -> Result<CompiledQuery, QueryError> {
         build_find_with_schema(
             schema_name,
             collection,
@@ -8155,7 +8147,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Exercise each write shape against the same descriptor.
-    fn every_write_query(schema: &Value) -> Vec<(&'static str, BuiltQuery)> {
+    fn every_write_query(schema: &Value) -> Vec<(&'static str, CompiledQuery)> {
         let mut complete = write_projection_schema();
         complete
             .as_object_mut()
