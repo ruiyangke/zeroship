@@ -1,6 +1,6 @@
 //! Resolved physical statements. Application policy is applied before this boundary.
 
-use super::{Ident, IdentRole, SchemaName, compiler::CompileError, predicate::CompareOp};
+use super::{compiler::CompileError, predicate::CompareOp, Ident, IdentRole, SchemaName};
 use crate::value::Value;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -39,8 +39,8 @@ impl StorageType {
             }
             Self::Decimal => matches!(value, Value::Decimal(_)),
             Self::Json => matches!(value, Value::Json(_) | Value::Array(_) | Value::Object(_)),
-            Self::Vector => matches!(value, Value::Array(_)),
-            Self::GeoPoint => matches!(value, Value::Object(_)),
+            Self::Vector => matches!(value, Value::Array(_) | Value::Bytes(_)),
+            Self::GeoPoint => matches!(value, Value::Object(_) | Value::Bytes(_)),
         }
     }
 
@@ -162,6 +162,58 @@ pub struct ReturnedColumn {
 }
 
 #[derive(Debug)]
+pub struct InsertParts {
+    pub table: Table,
+    pub columns: Vec<Column>,
+    pub rows: Vec<Vec<Expression>>,
+    pub returning: Vec<ReturnedColumn>,
+    pub insert_generated_identity: bool,
+}
+
+#[derive(Debug)]
+pub struct Insert(InsertParts);
+
+impl Insert {
+    pub fn new(mut parts: InsertParts) -> Result<Self, CompileError> {
+        validate_insert(&parts)?;
+        let mut order: Vec<_> = (0..parts.columns.len()).collect();
+        order.sort_by(|left, right| {
+            parts.columns[*left]
+                .name()
+                .cmp(parts.columns[*right].name())
+        });
+        parts.columns = order
+            .iter()
+            .map(|index| parts.columns[*index].clone())
+            .collect();
+        parts.rows = parts
+            .rows
+            .into_iter()
+            .map(|row| {
+                let mut row: Vec<_> = row.into_iter().map(Some).collect();
+                order
+                    .iter()
+                    .map(|index| row[*index].take().expect("validated insert row"))
+                    .collect()
+            })
+            .collect();
+        Ok(Self(parts))
+    }
+
+    pub fn parts(&self) -> &InsertParts {
+        &self.0
+    }
+
+    pub fn into_parts(self) -> InsertParts {
+        self.0
+    }
+
+    pub fn validate(&self) -> Result<(), CompileError> {
+        validate_insert(&self.0)
+    }
+}
+
+#[derive(Debug)]
 pub struct UpsertParts {
     pub table: Table,
     pub insert: Vec<Assignment>,
@@ -177,7 +229,7 @@ pub struct Upsert(UpsertParts);
 
 impl Upsert {
     pub fn new(mut parts: UpsertParts) -> Result<Self, CompileError> {
-        validate(&parts)?;
+        validate_upsert(&parts)?;
         // Input records are unordered; projection and conflict order are retained.
         parts
             .insert
@@ -192,12 +244,13 @@ impl Upsert {
         self.0
     }
     pub fn validate(&self) -> Result<(), CompileError> {
-        validate(&self.0)
+        validate_upsert(&self.0)
     }
 }
 
 #[derive(Debug)]
 pub enum Statement {
+    Insert(Insert),
     Upsert(Upsert),
 }
 
@@ -205,7 +258,42 @@ fn invalid(message: &'static str) -> CompileError {
     CompileError::InvalidStatement(message.into())
 }
 
-fn validate(parts: &UpsertParts) -> Result<(), CompileError> {
+fn validate_insert(parts: &InsertParts) -> Result<(), CompileError> {
+    if parts.columns.is_empty() || parts.rows.is_empty() {
+        return Err(invalid("insert requires columns and rows"));
+    }
+    let mut columns = HashSet::new();
+    for column in &parts.columns {
+        parts.table.check_column(column)?;
+        if !columns.insert(column.index) {
+            return Err(invalid("duplicate insert column"));
+        }
+    }
+    for row in &parts.rows {
+        if row.len() != parts.columns.len() {
+            return Err(invalid("insert row does not match its column list"));
+        }
+        for (column, expression) in parts.columns.iter().zip(row) {
+            validate_insert_expression(column.storage(), expression)?;
+        }
+    }
+    validate_returning(&parts.table, &parts.returning)
+}
+
+fn validate_insert_expression(
+    storage: StorageType,
+    expression: &Expression,
+) -> Result<(), CompileError> {
+    match expression {
+        Expression::Bind(value) if !storage.accepts(value) => Err(invalid(
+            "bound value does not match its physical storage type",
+        )),
+        Expression::Bind(_) | Expression::Null | Expression::Default => Ok(()),
+        _ => Err(invalid("insert values cannot reference an existing row")),
+    }
+}
+
+fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
     if parts.insert.is_empty() || parts.conflict.is_empty() || parts.update.is_empty() {
         return Err(invalid(
             "upsert requires insert values, a conflict target, and an update",
@@ -264,8 +352,16 @@ fn validate(parts: &UpsertParts) -> Result<(), CompileError> {
             ));
         }
     }
-    for field in &parts.returning {
-        parts.table.check_column(&field.column)?;
+    validate_returning(&parts.table, &parts.returning)
+}
+
+fn validate_returning(table: &Table, returning: &[ReturnedColumn]) -> Result<(), CompileError> {
+    let mut columns = HashSet::new();
+    for field in returning {
+        table.check_column(&field.column)?;
+        if !columns.insert(field.column.index) {
+            return Err(invalid("duplicate returning column"));
+        }
         if let Some(alias) = &field.alias {
             Ident::parse_as(alias.as_str(), IdentRole::Alias)?;
         }

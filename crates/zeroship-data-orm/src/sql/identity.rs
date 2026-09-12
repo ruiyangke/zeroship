@@ -1,11 +1,14 @@
 //! Dialect plans for reserving database-generated identities before encryption.
 use crate::sql::compiler::CompiledQuery;
 
+use crate::sql::{
+    compile::{
+        quote_ident, validate_collection, value_column_for_field, QueryError, SqlDialect,
+        MAX_INSERT_MANY_BATCH,
+    },
+    SchemaName,
+};
 use crate::value::Value;
-use crate::sql::{SchemaName, compile::{
-        MAX_INSERT_MANY_BATCH, QueryError, SqlDialect, quote_ident,
-        validate_collection, value_column_for_field,
-    }};
 
 pub fn is_generated(schema: &Value) -> bool {
     schema["id"]["assign"]["by"].as_str() == Some("identity")
@@ -29,7 +32,11 @@ pub fn reserve_sqlite_writer(
     schema: &Value,
 ) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
-    let table = format!("{}.{}", crate::sql::compile::quote_ident(namespace.as_str()), quote_ident(collection));
+    let table = format!(
+        "{}.{}",
+        crate::sql::compile::quote_ident(namespace.as_str()),
+        quote_ident(collection)
+    );
     let id = quote_ident(&value_column_for_field("id", schema));
     Ok(CompiledQuery {
         sql: format!("UPDATE {table} SET {id} = {id} WHERE FALSE"),
@@ -50,7 +57,11 @@ pub fn allocation(
             "identity allocation exceeds the insert batch limit".into(),
         ));
     }
-    let table = format!("{}.{}", crate::sql::compile::quote_ident(namespace.as_str()), quote_ident(collection));
+    let table = format!(
+        "{}.{}",
+        crate::sql::compile::quote_ident(namespace.as_str()),
+        quote_ident(collection)
+    );
     let id = value_column_for_field("id", schema);
     match dialect {
         SqlDialect::Postgres => Ok(Allocation::Sequence(CompiledQuery {
@@ -62,13 +73,5 @@ pub fn allocation(
             has_sequence: CompiledQuery { sql:format!("SELECT name FROM {}.sqlite_schema WHERE type = 'table' AND name = 'sqlite_sequence'", crate::sql::compile::quote_ident(namespace.as_str())), params:vec![] },
             sequence: CompiledQuery { sql:format!("SELECT seq AS id FROM {}.sqlite_sequence WHERE name = $1", crate::sql::compile::quote_ident(namespace.as_str())), params:vec![Value::from(collection)] },
         }),
-    }
-}
-
-pub(crate) fn overriding_clause(schema: &Value, dialect: SqlDialect, has_id: bool) -> &'static str {
-    if dialect == SqlDialect::Postgres && is_generated(schema) && has_id {
-        " OVERRIDING SYSTEM VALUE"
-    } else {
-        ""
     }
 }

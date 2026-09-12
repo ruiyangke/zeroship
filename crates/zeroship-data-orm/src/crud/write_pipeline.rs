@@ -1,7 +1,7 @@
 use crate::value::Value;
 
-use crate::sql::compile;
 use crate::exec::exec_query;
+use crate::sql::compile;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -736,7 +736,7 @@ mod tests {
     use zeroship_data_orm::binding::DbBinding;
 
     use super::{
-        ApplyMode, apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys,
+        apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys, ApplyMode,
     };
     use crate::backend::sqlite::SqliteBackend;
 
@@ -744,30 +744,24 @@ mod tests {
     fn db8_rejects_reserved_and_malformed_user_doc_keys() {
         use crate::value;
         // A normal document passes.
-        assert!(
-            validate_user_doc_keys(
-                &value!({ "name": "a", "ssn": "x" }),
-                &value!({"name":{}, "ssn":{}})
-            )
-            .is_ok()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "name": "a", "ssn": "x" }),
+            &value!({"name":{}, "ssn":{}})
+        )
+        .is_ok());
         // The user must not forge the masked sibling suffix the platform emits.
-        assert!(
-            validate_user_doc_keys(
-                &value!({ "ssn_masked": "x" }),
-                &value!({"name":{}, "ssn":{}})
-            )
-            .is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "ssn_masked": "x" }),
+            &value!({"name":{}, "ssn":{}})
+        )
+        .is_err());
         // Nor a platform-internal `_`-prefixed name (covers `__zsbin__` markers,
         // `__zs_`, synthetic `_rank`/`_score`).
-        assert!(
-            validate_user_doc_keys(
-                &value!({ "__zsbin__ssn": true }),
-                &value!({"name":{}, "ssn":{}})
-            )
-            .is_err()
-        );
+        assert!(validate_user_doc_keys(
+            &value!({ "__zsbin__ssn": true }),
+            &value!({"name":{}, "ssn":{}})
+        )
+        .is_err());
         assert!(
             validate_user_doc_keys(&value!({ "_rank": 1 }), &value!({"name":{}, "ssn":{}}))
                 .is_err()
@@ -888,10 +882,10 @@ mod tests {
         });
     }
 
-    use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
     use crate::encryption;
-    use crate::tests::fixtures::DatabaseFixture;
+    use crate::sql::compile::{build_insert_with_dialect, SqlDialect};
     use crate::tests::fixtures::cache_schema;
+    use crate::tests::fixtures::DatabaseFixture;
     use zeroship_migrate::schema::query::FkEmission;
     fn sqlite_fixture_sql(
         schema: &crate::sql::SchemaName,
@@ -1042,16 +1036,15 @@ mod tests {
             let key_source = encryption::ProjectKeySource::supplied(supplied);
             let binding = DbBinding::cold_start(app_id);
             let collection = "users";
-            let schema =
-                crate::tests::fixtures::schema::generated_fields(crate::value!({
-                    "email": { "type": "string", "required": true, "unique": true },
-                    "name": { "type": "string", "required": true },
-                    "ssn": {
-                        "type": "string",
-                        "encrypted": true,
-                        "mask": { "kind": "last4", "classification": "spi" }
-                    }
-                }));
+            let schema = crate::tests::fixtures::schema::generated_fields(crate::value!({
+                "email": { "type": "string", "required": true, "unique": true },
+                "name": { "type": "string", "required": true },
+                "ssn": {
+                    "type": "string",
+                    "encrypted": true,
+                    "mask": { "kind": "last4", "classification": "spi" }
+                }
+            }));
             let ddl_schema = crate::value!({
                 "email": { "type": "string", "required": true, "unique": true },
                 "name": { "type": "string", "required": true },
@@ -1131,12 +1124,10 @@ mod tests {
             )
             .await;
 
-            // `schema` was moved into `cache_schema`; `ddl_schema` is
-            // its byte-identical twin and is still owned here.
             let insert_built = build_insert_with_dialect(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
-                &ddl_schema,
+                &schema,
                 &insert_doc,
                 SqlDialect::Sqlite,
             )
@@ -1380,8 +1371,7 @@ mod tests {
             // Control: under the mask-declaring descriptor the write prepares,
             // and the mask lands in the field's own column.
             cache_schema(app_id, collection, masked);
-            let mut ok_doc =
-                crate::value!({ "ssn": "123-45-6789", "nickname": "alice" });
+            let mut ok_doc = crate::value!({ "ssn": "123-45-6789", "nickname": "alice" });
             apply(
                 backend.key_store(),
                 SqlDialect::Sqlite,

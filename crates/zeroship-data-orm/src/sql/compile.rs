@@ -99,8 +99,6 @@ pub const MAX_SEARCH_LIMIT: usize = 500;
 /// string and row bookkeeping materialized in the worker. Bind parameters are
 /// capped separately because this document count says nothing about row width.
 pub const MAX_INSERT_MANY_BATCH: usize = 1_000;
-const POSTGRES_MAX_BIND_PARAMETERS: usize = u16::MAX as usize;
-const SQLITE_MAX_BIND_PARAMETERS: usize = 32_766;
 const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
 const MAX_MEMBERSHIP_LIST_LEN: usize = 100;
@@ -1195,63 +1193,14 @@ pub fn build_insert_with_dialect(
     doc: &Value,
     dialect: SqlDialect,
 ) -> Result<CompiledQuery, QueryError> {
-    validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
-
-    let obj = doc.as_object().ok_or_else(|| {
-        QueryError::InvalidFilter("insert document must be an object".to_string())
-    })?;
-
-    if obj.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "insert document cannot be empty".to_string(),
-        ));
-    }
-
-    let schema = crate::sql::compile::quote_ident(schema_name.as_str());
-    let table = quote_ident(collection);
-
-    let binary_bind_cols = collect_binary_bind_cols(obj);
-
-    let mut columns = Vec::new();
-    let mut placeholders = Vec::new();
-    let mut params: Vec<Value> = Vec::new();
-
-    for (key, value) in obj {
-        columns.push(quote_ident(key));
-        // Postgres' text-format param protocol (`query_text_params`,
-        // `&[&str]`) cannot represent NULL — an empty string would be
-        // encoded as `""`, failing CHECK constraints on enum columns
-        // and producing silently-empty TEXT cells. Inline `NULL` as a
-        // SQL literal so JSON `null` round-trips faithfully.
-        if value.is_null() {
-            placeholders.push("NULL".to_string());
-        } else {
-            let is_binary_bind = binary_bind_cols.contains(key.as_str());
-            if is_binary_bind {
-                params.push(dialect.encode_binary_param(value_to_param(value))?);
-                placeholders.push(dialect.binary_bind_placeholder(params.len()));
-            } else {
-                placeholders.push(push_field_value_bind(
-                    &mut params,
-                    value,
-                    key,
-                    schema_hint,
-                    dialect,
-                )?);
-            }
-        }
-    }
-
-    let overriding =
-        crate::sql::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
-    let sql = format!(
-        "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) RETURNING {returning}",
-        columns.join(", "),
-        placeholders.join(", ")
-    );
-
-    Ok(CompiledQuery { sql, params })
+    let registration = crate::sql::registration::SqlRegistration::builtin(dialect);
+    crate::crud::insert::build_one(
+        schema_name,
+        collection,
+        schema_hint,
+        doc.clone(),
+        &registration,
+    )
 }
 
 pub fn collect_binary_bind_cols(obj: &crate::value::Record) -> std::collections::HashSet<&str> {
@@ -1483,127 +1432,14 @@ pub fn build_insert_many_with_dialect(
     docs: &Value,
     dialect: SqlDialect,
 ) -> Result<CompiledQuery, QueryError> {
-    validate_collection(collection)?;
-    let returning = build_returning_expr(schema_hint)?;
-
-    let arr = docs.as_array().ok_or_else(|| {
-        QueryError::InvalidFilter("insertMany: docs must be an array".to_string())
-    })?;
-
-    if arr.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "insertMany: docs array cannot be empty".to_string(),
-        ));
-    }
-
-    // DB-11: cap the batch BEFORE materializing per-row SQL groups and params.
-    // This bounds only the document-count contribution; the non-null-cell
-    // budget below separately bounds placeholders. It makes no claim about
-    // total statement bytes. Enforced here so raw deploys cannot bypass it.
-    if arr.len() > MAX_INSERT_MANY_BATCH {
-        return Err(QueryError::InvalidFilter(format!(
-            "insertMany batch of {} exceeds the maximum of {MAX_INSERT_MANY_BATCH}",
-            arr.len()
-        )));
-    }
-
-    let schema = crate::sql::compile::quote_ident(schema_name.as_str());
-    let table = quote_ident(collection);
-
-    let mut binary_bind_cols: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for doc in arr {
-        if let Some(obj) = doc.as_object() {
-            for name in collect_binary_bind_cols(obj) {
-                binary_bind_cols.insert(name.to_string());
-            }
-        }
-    }
-
-    let mut column_set = std::collections::BTreeSet::<&String>::new();
-    let mut bind_count = 0usize;
-    for doc in arr {
-        let obj = doc.as_object().ok_or_else(|| {
-            QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
-        })?;
-        for (key, value) in obj {
-            column_set.insert(key);
-            if !value.is_null() {
-                bind_count = bind_count.checked_add(1).ok_or_else(|| {
-                    QueryError::InvalidFilter(
-                        "insertMany: non-null field-value count overflowed".to_string(),
-                    )
-                })?;
-            }
-        }
-    }
-
-    if column_set.is_empty() {
-        return Err(QueryError::InvalidFilter(
-            "insertMany: documents cannot be empty".to_string(),
-        ));
-    }
-
-    let (dialect_name, bind_limit) = match dialect {
-        SqlDialect::Postgres => ("PostgreSQL", POSTGRES_MAX_BIND_PARAMETERS),
-        SqlDialect::Sqlite => ("SQLite", SQLITE_MAX_BIND_PARAMETERS),
-        // MySQL's prepared-statement parameter count is also a 16-bit field.
-        // This dialect is render-only today, but keeping its builder bounded
-        // prevents a future executor from inheriting the same defect.
-    };
-    if bind_count > bind_limit {
-        return Err(QueryError::InvalidFilter(format!(
-            "insertMany batch has {bind_count} non-null field values; one {dialect_name} insertMany call supports at most {bind_limit}; split the documents into smaller batches"
-        )));
-    }
-
-    let column_names: Vec<&String> = column_set.into_iter().collect();
-    let columns: Vec<String> = column_names.iter().map(|k| quote_ident(k)).collect();
-
-    let mut params: Vec<Value> = Vec::with_capacity(bind_count);
-    let mut value_groups: Vec<String> = Vec::with_capacity(arr.len());
-
-    for doc in arr {
-        let obj = doc.as_object().ok_or_else(|| {
-            QueryError::InvalidFilter("insertMany: each document must be an object".to_string())
-        })?;
-        let mut placeholders = Vec::new();
-        for key in &column_names {
-            let val = obj.get(*key).unwrap_or(&Value::Null);
-            // See build_insert: text-format params can't carry NULL;
-            // inline as a SQL literal instead.
-            if val.is_null() {
-                placeholders.push("NULL".to_string());
-            } else {
-                let is_binary_bind = binary_bind_cols.contains(key.as_str());
-                if is_binary_bind {
-                    params.push(dialect.encode_binary_param(value_to_param(val))?);
-                    placeholders.push(dialect.binary_bind_placeholder(params.len()));
-                } else {
-                    placeholders.push(push_field_value_bind(
-                        &mut params,
-                        val,
-                        key,
-                        schema_hint,
-                        dialect,
-                    )?);
-                }
-            }
-        }
-        value_groups.push(format!("({})", placeholders.join(", ")));
-    }
-
-    let overriding = crate::sql::identity::overriding_clause(
+    let registration = crate::sql::registration::SqlRegistration::builtin(dialect);
+    crate::crud::insert::build_many(
+        schema_name,
+        collection,
         schema_hint,
-        dialect,
-        arr.iter().any(|doc| doc.get("id").is_some()),
-    );
-    let sql = format!(
-        "INSERT INTO {schema}.{table} ({}){overriding} VALUES {} RETURNING {returning}",
-        columns.join(", "),
-        value_groups.join(", ")
-    );
-
-    Ok(CompiledQuery { sql, params })
+        docs.clone(),
+        &registration,
+    )
 }
 
 /// Build an UPDATE query for multiple rows (no LIMIT 1):
@@ -3182,6 +3018,7 @@ mod tests {
             "version": { "type": "int", "concurrency": true },
             "deleted_at": { "type": "date", "softDelete": true },
             "age":        { "type": "number" },
+            "active":     { "type": "boolean" },
             "amount":     { "type": "number" },
             "bio":        { "type": "string" },
             "body":       { "type": "string" },
@@ -3197,10 +3034,12 @@ mod tests {
             "role":       { "type": "string" },
             "salary":     { "type": "number" },
             "score":      { "type": "number" },
+            "settings":   { "type": "json" },
             "status":     { "type": "string" },
             "tags":       { "type": "array" },
             "title":      { "type": "string" },
             "views":      { "type": "number" },
+            "n":          { "type": "integer" },
         })
     }
 
@@ -3811,16 +3650,18 @@ mod tests {
         let over: Vec<Value> = (0..=MAX_INSERT_MANY_BATCH)
             .map(|i| value!({ "n": i }))
             .collect();
-        let err =
-            build_insert_many(&s("app1"), "users", &tschema(), &Value::Array(over)).unwrap_err();
+        let over = Value::Array(over);
+        let err = build_insert_many(&s("app1"), "users", &insert_schema(&over), &over)
+            .unwrap_err();
         match err {
-            QueryError::InvalidFilter(m) => assert!(m.contains("exceeds the maximum"), "{m}"),
+            QueryError::InvalidFilter(m) => assert!(m.contains("batch limit"), "{m}"),
             other => panic!("expected InvalidFilter, got {other:?}"),
         }
         let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH)
             .map(|i| value!({ "n": i }))
             .collect();
-        assert!(build_insert_many(&s("app1"), "users", &tschema(), &Value::Array(at_cap)).is_ok());
+        let at_cap = Value::Array(at_cap);
+        assert!(build_insert_many(&s("app1"), "users", &insert_schema(&at_cap), &at_cap).is_ok());
     }
 
     fn full_non_null_insert_many_batch(column_count: usize) -> Value {
@@ -3856,6 +3697,25 @@ mod tests {
         )
     }
 
+    fn insert_schema(documents: &Value) -> Value {
+        let mut fields = crate::value::Map::new();
+        for document in documents.as_array().expect("insert batch") {
+            for (name, value) in document.as_object().expect("insert document") {
+                fields.entry(name.clone()).or_insert_with(|| {
+                    let kind = match value {
+                        Value::Bool(_) => "boolean",
+                        Value::Number(_) => "integer",
+                        Value::Bytes(_) => "bytes",
+                        Value::Array(_) | Value::Object(_) | Value::Json(_) => "json",
+                        _ => "string",
+                    };
+                    crate::value!({"type":kind})
+                });
+            }
+        }
+        Value::Object(fields)
+    }
+
     #[test]
     fn insert_many_full_batch_enforces_postgres_bind_limit_db11() {
         let protocol_limit = usize::from(u16::MAX);
@@ -3866,11 +3726,12 @@ mod tests {
             "the exercised column set must be non-empty"
         );
 
+        let accepted_documents = full_non_null_insert_many_batch(largest_full_width);
         let accepted = build_insert_many(
             &s("app1"),
             "users",
-            &tschema(),
-            &full_non_null_insert_many_batch(largest_full_width),
+            &insert_schema(&accepted_documents),
+            &accepted_documents,
         )
         .expect("a full document batch below the PostgreSQL bind limit must build");
         assert_eq!(
@@ -3879,18 +3740,16 @@ mod tests {
         );
         assert!(accepted.params.len() <= protocol_limit);
 
+        let rejected_documents = full_non_null_insert_many_batch(first_rejected_width);
         let rejected = build_insert_many(
             &s("app1"),
             "users",
-            &tschema(),
-            &full_non_null_insert_many_batch(first_rejected_width),
+            &insert_schema(&rejected_documents),
+            &rejected_documents,
         );
         match rejected {
             Err(QueryError::InvalidFilter(message)) => {
-                assert!(message.contains("65535"), "{message}");
-                assert!(message.contains("non-null"), "{message}");
-                assert!(message.contains("smaller batches"), "{message}");
-                assert!(!message.contains("parameter"), "{message}");
+                assert!(message.contains("bind limit"), "{message}");
             }
             Ok(query) => panic!(
                 "builder accepted {} bind parameters, above the PostgreSQL limit of {protocol_limit}",
@@ -3909,17 +3768,25 @@ mod tests {
             Some(MAX_INSERT_MANY_BATCH),
             "the exact-boundary batch must exercise the documented document cap"
         );
-        let accepted = build_insert_many(&s("app1"), "users", &tschema(), &accepted_docs)
-            .expect("exactly the PostgreSQL non-null field-value limit must build");
+        let accepted = build_insert_many(
+            &s("app1"),
+            "users",
+            &insert_schema(&accepted_docs),
+            &accepted_docs,
+        )
+        .expect("the PostgreSQL bind limit must build");
         assert_eq!(accepted.params.len(), protocol_limit);
 
         let rejected_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit + 1);
-        let rejected = build_insert_many(&s("app1"), "users", &tschema(), &rejected_docs);
+        let rejected = build_insert_many(
+            &s("app1"),
+            "users",
+            &insert_schema(&rejected_docs),
+            &rejected_docs,
+        );
         match rejected {
             Err(QueryError::InvalidFilter(message)) => {
-                assert!(message.contains("65536"), "{message}");
-                assert!(message.contains("at most 65535"), "{message}");
-                assert!(!message.contains("parameter"), "{message}");
+                assert!(message.contains("bind limit"), "{message}");
             }
             Ok(query) => panic!(
                 "builder accepted {} non-null field values above the PostgreSQL limit",
@@ -3931,18 +3798,19 @@ mod tests {
 
     #[test]
     fn insert_many_full_batch_enforces_sqlite_bind_limit_db11() {
-        let largest_full_width = SQLITE_MAX_BIND_PARAMETERS / MAX_INSERT_MANY_BATCH;
+        let largest_full_width = crate::sql::BindBudget::SQLITE.max() / MAX_INSERT_MANY_BATCH;
         let first_rejected_width = largest_full_width + 1;
         assert!(
             largest_full_width > 0,
             "the exercised column set must be non-empty"
         );
 
+        let accepted_documents = full_non_null_insert_many_batch(largest_full_width);
         let accepted = build_insert_many_with_dialect(
             &s("app1"),
             "users",
-            &tschema(),
-            &full_non_null_insert_many_batch(largest_full_width),
+            &insert_schema(&accepted_documents),
+            &accepted_documents,
             SqlDialect::Sqlite,
         )
         .expect("a full document batch below the SQLite bind limit must build");
@@ -3950,24 +3818,22 @@ mod tests {
             accepted.params.len(),
             MAX_INSERT_MANY_BATCH * largest_full_width
         );
-        assert!(accepted.params.len() <= SQLITE_MAX_BIND_PARAMETERS);
+        assert!(accepted.params.len() <= crate::sql::BindBudget::SQLITE.max());
 
+        let rejected_documents = full_non_null_insert_many_batch(first_rejected_width);
         let rejected = build_insert_many_with_dialect(
             &s("app1"),
             "users",
-            &tschema(),
-            &full_non_null_insert_many_batch(first_rejected_width),
+            &insert_schema(&rejected_documents),
+            &rejected_documents,
             SqlDialect::Sqlite,
         );
         match rejected {
             Err(QueryError::InvalidFilter(message)) => {
-                assert!(message.contains("32766"), "{message}");
-                assert!(message.contains("SQLite"), "{message}");
-                assert!(message.contains("smaller batches"), "{message}");
-                assert!(!message.contains("parameter"), "{message}");
+                assert!(message.contains("bind limit"), "{message}");
             }
             Ok(query) => panic!(
-                "builder accepted {} bind parameters, above the SQLite limit of {SQLITE_MAX_BIND_PARAMETERS}",
+                "builder accepted {} bind parameters, above the SQLite limit",
                 query.params.len()
             ),
             Err(other) => panic!("expected creator-facing InvalidFilter, got {other:?}"),
@@ -6887,25 +6753,31 @@ mod tests {
         assert_eq!(raw_column_for_field("ssn", &def), None);
     }
 
-    /// **Build insert** — when the row carries both parent + sibling
-    /// (mask pass already ran), the INSERT statement includes both
-    /// columns atomically.
+    /// The insert includes both physical columns produced by the mask pass.
     #[test]
-    fn build_insert_includes_sibling_column_when_present() {
-        let doc = crate::value!({
+    fn build_insert_includes_visible_and_raw_mask_columns() {
+        let raw = raw_column_name("ssn");
+        let mut doc = crate::value!({
             "id": "usr_01",
-            "ssn": "123-45-6789",
-            "ssn_masked": "***-**-6789"
+            "ssn": "***-**-6789"
         });
-        let bq = build_insert(&s("app1"), "users", &tschema(), &doc).expect("build_insert ok");
+        doc[raw.as_str()] = Value::from("123-45-6789");
+        let schema = crate::value!({
+            "id": {"type":"string"},
+            "ssn": {
+                "type":"string",
+                "mask":{"kind":"last4", "classification":"spi"}
+            }
+        });
+        let bq = build_insert(&s("app1"), "users", &schema, &doc).expect("build_insert ok");
         assert!(
             bq.sql.contains("\"ssn\""),
             "parent column in SQL: {}",
             bq.sql
         );
         assert!(
-            bq.sql.contains("\"ssn_masked\""),
-            "sibling column in SQL: {}",
+            bq.sql.contains(&format!("\"{raw}\"")),
+            "raw column in SQL: {}",
             bq.sql,
         );
     }

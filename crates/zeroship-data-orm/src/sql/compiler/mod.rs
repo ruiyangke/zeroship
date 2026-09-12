@@ -2,13 +2,13 @@
 
 mod query;
 mod postgres;
+mod shared;
 mod sqlite;
-mod upsert;
 mod writer;
 pub use query::{CompiledQuery, ParameterType};
 pub use postgres::PostgresCompiler;
 pub use sqlite::SqliteCompiler;
-pub use upsert::{Requirements, SqlCompiler, SqlSupport};
+pub use shared::{Requirements, SqlCompiler, SqlSupport};
 pub(crate) use writer::{ParameterSlot, SqlWriter};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
