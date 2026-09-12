@@ -1536,7 +1536,7 @@ as text and holds no foreign key into them.
 
 ## Encrypted and Masked Fields (Shipped Reference)
 
-This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/compile.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
+This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/sql/mapping.rs`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.
 
 The migration engine records physical placement in each field's runtime
 `storage` mapping. Default reads use `storage.valueColumn`; authorized unmasking
@@ -1547,10 +1547,16 @@ that the raw column is inaccessible to ordinary creator queries.
 `t.encrypted(...)` applies a full mask with `pii` classification by default.
 `.mask({ kind: "none" })` opts into plaintext reads and suppresses masked
 storage. Both operations follow the runtime descriptor rather than naming a
-mask column from a suffix (`crates/zeroship-data-orm/src/sql/compile.rs`,
+mask column from a suffix (`crates/zeroship-data-orm/src/sql/mapping.rs`,
 `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
 
-On writes, `apply_mask_on_write` computes the mask from plaintext, not from a later read-path decrypt, and a separate relocation stage - the ONE stage that owns physical placement, running after the encryption and bytes passes - moves the finished value to the raw column and writes the mask into the field's own. Encrypted columns use the encryption pass sidechannel, plain masked columns read directly from `row[col]`, `null` and absent values relocate nothing and write no mask, and `kind: "none"` skips the field entirely (`crates/zeroship-data-orm/src/protection/mask_pass.rs`). The shipped built-ins are `full`, `last4`, `first4`, `email`, `name`, `date-year`, `date-decade`, and `none` (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`).
+On writes, `apply_mask_on_write` computes the mask from plaintext. After the
+encryption and byte passes, relocation follows the descriptor's `storage`
+mapping: the finished value moves to `storage.rawColumn` and the mask remains
+in `storage.valueColumn`. Null and absent values relocate nothing, and
+`kind: "none"` skips masking (`crates/zeroship-data-orm/src/protection/mask_pass.rs`).
+The mask kinds are defined together in `sdks/db/src/types.ts` and
+`crates/zeroship-data-orm/src/protection/mask_pass.rs`.
 
 Default reads surface `MaskedValue<T>`, not plaintext. The Rust read path wraps a masked cell in the `__zsmask__` sentinel shape, then the runtime rehydrates that sentinel into a native `MaskedValue` v8 class before user code sees the row (`crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`). The shipped surface is intentionally coercion-safe: `masked` and `classification` are readable, `_meta` carries `{ collection, row_pk, column }`, and `toString()` / `toJSON()` return the masked string (`crates/zeroship-data-v8/src/v8_classes/masked_value.rs`, `sdks/db/src/types.ts`).
 
