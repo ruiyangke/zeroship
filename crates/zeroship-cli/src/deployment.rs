@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore, Manifest};
+use zeroship_bundle::{verify_deployment_manifest, BlobStore, LocalDiskBlobStore};
 use zeroship_core::app_id::AppId;
 use zeroship_workflow::{service::BundleExecutable, WorkflowServiceError};
 
@@ -50,9 +50,9 @@ impl AppDeployment {
         let ingested = zeroship_bundle::ingest(&self.blobs, &app.uuid(), &archive)
             .await
             .map_err(|_| unavailable())?;
-        let manifest: Manifest =
-            serde_json::from_str(&ingested.manifest_json).map_err(|_| unavailable())?;
-        let deploy_hash = manifest.deploy_hash.clone().ok_or_else(unavailable)?;
+        let deploy_hash = ingested.deploy_hash;
+        let manifest = verify_deployment_manifest(ingested.manifest_json.as_bytes(), &deploy_hash)
+            .map_err(|_| unavailable())?;
         let executable =
             BundleExecutable::load(&manifest, self.blobs.as_ref(), max_source_bytes).await?;
         Ok(LoadedApp {

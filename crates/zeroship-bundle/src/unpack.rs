@@ -448,7 +448,7 @@ fn collect_expected_hashes(manifest: &Manifest) -> Result<HashSet<String>, Inges
 /// the build pipeline must produce the same canonical form to get a
 /// reproducible deploy_hash, and stripping unknown fields would
 /// silently break that invariant.
-fn canonical_manifest_for_hash(manifest_bytes: &[u8]) -> Result<Vec<u8>, IngestError> {
+pub(crate) fn canonical_manifest_for_hash(manifest_bytes: &[u8]) -> Result<Vec<u8>, IngestError> {
     let mut value: Value = serde_json::from_slice(manifest_bytes)
         .map_err(|e| IngestError::bad("invalid manifest", format!("canonical parse: {e}")))?;
     if let Value::Object(map) = &mut value {
