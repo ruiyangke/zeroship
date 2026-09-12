@@ -22,32 +22,33 @@ pub mod render;
 pub mod search;
 pub mod write;
 
+pub use compiler::BindBudget;
 pub use ident::{Ident, IdentError, IdentRole, MAX_IDENT_BYTES};
 pub use literal::{
-    Finite, Finite32, Literal, LiteralError, LiteralSet, MAX_MEMBERSHIP_LIST_LEN, MAX_VECTOR_DIMS,
-    QueryVector,
+    Finite, Finite32, Literal, LiteralError, LiteralSet, QueryVector, MAX_MEMBERSHIP_LIST_LEN,
+    MAX_VECTOR_DIMS,
 };
-pub use path::{FieldPath, JsonKey, MAX_JSON_KEY_BYTES, MAX_PATH_SEGMENTS, PathError};
+pub use path::{FieldPath, JsonKey, PathError, MAX_JSON_KEY_BYTES, MAX_PATH_SEGMENTS};
 pub use plan::{
-    DbPlan, Direction, MAX_ROW_LIMIT, MAX_ROW_OFFSET, NullOrder, OrderKey, PlanError, RowLimit,
-    RowOffset, Select, SelectBuilder,
+    DbPlan, Direction, NullOrder, OrderKey, PlanError, RowLimit, RowOffset, Select, SelectBuilder,
+    MAX_ROW_LIMIT, MAX_ROW_OFFSET,
 };
 pub use predicate::{
-    AggregateFunc, AggregateRef, CompareOp, EscapeChar, MAX_PREDICATE_DEPTH, MembershipOp, Operand,
-    PatternOp, Predicate, PredicateError, RangeBounds, TextPattern,
+    AggregateFunc, AggregateRef, CompareOp, EscapeChar, MembershipOp, Operand, PatternOp,
+    Predicate, PredicateError, RangeBounds, TextPattern, MAX_PREDICATE_DEPTH,
 };
 pub use projection::{
     Exposure, ProjectedField, Projection, ProjectionError, ProjectionKind, ProjectionSource,
     SearchScalarKind,
 };
 pub use search::{
-    GeoPoint, MAX_RADIUS_METRES, RadiusMetres, Search, SearchBuilder, SearchCriterion, SearchError,
-    VectorMetric,
+    GeoPoint, RadiusMetres, Search, SearchBuilder, SearchCriterion, SearchError, VectorMetric,
+    MAX_RADIUS_METRES,
 };
 pub use write::{
-    Arithmetic, ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, Delete,
-    DeleteBuilder, Insert, InsertBuilder, MAX_INSERT_ROWS, Returning, Update, UpdateBuilder,
-    WriteError, WriteValue,
+    Arithmetic, ArithmeticOp, Assignment, ColumnAssignment, ColumnValue, Delete, DeleteBuilder,
+    Insert, InsertBuilder, Returning, Update, UpdateBuilder, WriteError, WriteValue,
+    MAX_INSERT_ROWS,
 };
 
 /// Catalog facts used by runtime protection and decoding.
@@ -55,19 +56,18 @@ pub mod catalog;
 /// Runtime SQL compilation from validated collection operations.
 pub mod compile;
 pub mod compiler;
-pub mod statement;
-pub mod registration;
 pub mod descriptors;
 pub mod lifecycle;
 pub mod mask_codec;
+pub mod registration;
 pub mod schema_error;
+pub mod statement;
 pub use zeroship_core::schema_name::SchemaName;
 
 /// SDK filter decoding into typed predicates.
 pub mod filter;
 
 pub mod sqlite_values;
-
 
 mod array_update;
 pub mod codecs;
