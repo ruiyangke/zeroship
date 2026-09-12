@@ -17,10 +17,10 @@ use zeroship_data_orm::binding::DbBinding;
 
 use super::dispatch::{
     dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
-    dispatch_delete_one, dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many,
-    dispatch_near, dispatch_purge_many, dispatch_purge_one, dispatch_restore_many,
-    dispatch_restore_one, dispatch_search, dispatch_unmask_field, dispatch_update_many,
-    dispatch_update_one, dispatch_upsert,
+    dispatch_delete_one, dispatch_distinct, dispatch_exists, dispatch_find, dispatch_find_one,
+    dispatch_insert, dispatch_insert_many, dispatch_near, dispatch_purge_many, dispatch_purge_one,
+    dispatch_restore_many, dispatch_restore_one, dispatch_search, dispatch_unmask_field,
+    dispatch_update_many, dispatch_update_one, dispatch_upsert,
 };
 use crate::op_error::ToOpError;
 use crate::v8_bridge::{read_native_arg, refuse_if_query_capability};
@@ -97,7 +97,7 @@ impl Collection {
             self.binding.clone(),
             &self.name,
             zeroship_data_orm::orm::Operation::Read(Box::new(query)),
-            false,
+            super::dispatch::OutputMode::Many,
         )
         .into())
     }
@@ -118,6 +118,60 @@ impl Collection {
             Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
         };
         dispatch_find(scope, self.binding.clone(), &self.name, filter_v, opts_v).into()
+    }
+
+    #[v8_method]
+    fn get<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        id_or_filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> Result<v8::Local<'s, v8::Value>, OpError> {
+        let input = match read_native_arg(scope, Some(id_or_filter)) {
+            Ok(value) => value,
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        let filter = match input {
+            Value::Object(_) => input,
+            id => {
+                let mut filter = zeroship_data_orm::value::Map::new();
+                filter.insert("id".to_string(), id);
+                Value::Object(filter)
+            }
+        };
+        let mut options = match read_native_arg(scope, Some(opts)) {
+            Ok(Value::Null) => zeroship_data_orm::value::Map::new(),
+            Ok(Value::Object(options)) => options,
+            Ok(_) => return Err(OpError::type_error("get: opts must be an object")),
+            Err(error) => return Ok(crate::v8_bridge::throw_decode_error(scope, &error)),
+        };
+        options.insert("limit".to_string(), Value::from(1_i64));
+        Ok(dispatch_find_one(
+            scope,
+            self.binding.clone(),
+            &self.name,
+            filter,
+            Value::Object(options),
+        )
+        .into())
+    }
+
+    #[v8_method]
+    fn exists<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        filter: v8::Local<v8::Value>,
+        opts: v8::Local<v8::Value>,
+    ) -> v8::Local<'s, v8::Value> {
+        let filter = match read_native_arg(scope, Some(filter)) {
+            Ok(value) => value,
+            Err(error) => return crate::v8_bridge::throw_decode_error(scope, &error),
+        };
+        let options = match read_native_arg(scope, Some(opts)) {
+            Ok(value) => value,
+            Err(error) => return crate::v8_bridge::throw_decode_error(scope, &error),
+        };
+        dispatch_exists(scope, self.binding.clone(), &self.name, filter, options).into()
     }
 
     #[v8_method]
