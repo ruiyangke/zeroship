@@ -20,9 +20,9 @@ use zeroship_data_orm::error::DbError;
 
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
-use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
 #[cfg(test)]
 use zeroship_data_orm::sql::mapping;
+use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
 
 pub(crate) mod context;
 pub mod op_error;
@@ -94,10 +94,11 @@ impl NativePlugin for DbPlugin {
         v8_classes::db::mint_db(scope, app_id)
     }
 
-    fn bind_runtime_descriptor(
+    fn bind_runtime_descriptor<'s>(
         &self,
-        scope: &mut v8::PinScope<'_, '_>,
+        scope: &mut v8::PinScope<'s, '_>,
         app_id: &str,
+        namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         // The runtime validates the complete descriptor before invoking this
@@ -105,6 +106,11 @@ impl NativePlugin for DbPlugin {
         // context anyway, so a future validator change cannot publish a
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
+        validate_native_collection_names(scope, namespace, &schemas)?;
+        let collection_names = schemas
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect::<Vec<_>>();
         // Same refusal as `mint_db`: an app id that is not a legal schema name
         // has no binding to key the descriptor under, so publish nothing rather
         // than key it under a schema that cannot be addressed.
@@ -112,6 +118,7 @@ impl NativePlugin for DbPlugin {
             .ok_or_else(|| format!("app id {app_id:?} is not a legal database schema name"))?;
         zeroship_data_orm::descriptor::install_collections(&binding, schemas)
             .map_err(|error| error.to_string())?;
+        install_native_collection_properties(scope, namespace, &collection_names)?;
         Ok(())
     }
 
@@ -123,6 +130,51 @@ impl NativePlugin for DbPlugin {
         });
         metrics::stamp(self.meter.clone());
     }
+}
+
+fn validate_native_collection_names(
+    scope: &mut v8::PinScope<'_, '_>,
+    namespace: v8::Local<'_, v8::Object>,
+    schemas: &[(String, zeroship_data_orm::value::Value)],
+) -> Result<(), String> {
+    for (name, _) in schemas {
+        let key = v8::String::new(scope, name)
+            .ok_or_else(|| format!("could not allocate collection name {name:?}"))?;
+        match namespace.has(scope, key.into()) {
+            Some(true) => {
+                return Err(format!(
+                    "collection {name:?} collides with the native env.db API"
+                ));
+            }
+            Some(false) => {}
+            None => return Err(format!("could not inspect collection name {name:?}")),
+        }
+    }
+    Ok(())
+}
+
+fn install_native_collection_properties<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    namespace: v8::Local<'s, v8::Object>,
+    collection_names: &[String],
+) -> Result<(), String> {
+    for name in collection_names {
+        let collection = v8_classes::db::collection_for_namespace(scope, namespace, name)?;
+        let key = v8::String::new(scope, name)
+            .ok_or_else(|| format!("could not allocate collection name {name:?}"))?;
+        let installed = namespace.define_own_property(
+            scope,
+            key.into(),
+            collection.into(),
+            // The bootstrap still replaces this value with its SDK facade.
+            // Add DONT_DELETE when that installer is removed.
+            v8::PropertyAttribute::READ_ONLY,
+        );
+        if installed != Some(true) {
+            return Err(format!("could not install collection {name:?} on env.db"));
+        }
+    }
+    Ok(())
 }
 
 fn descriptor_schemas(
@@ -159,7 +211,7 @@ mod runtime_descriptor_binding_tests {
     use std::collections::HashMap;
 
     use zeroship_data_orm::value;
-    use zeroship_runtime::{RuntimeState, SharedState, init_v8};
+    use zeroship_runtime::{init_v8, EnvSnapshot, ModuleEntry, Runtime, RuntimeState, SharedState};
 
     use super::*;
 
@@ -186,6 +238,115 @@ mod runtime_descriptor_binding_tests {
         })
         .expect("db service")
         .plugin()
+    }
+
+    fn runtime_descriptor(collection: &str) -> String {
+        serde_json::json!({
+            "version": 2,
+            "collections": {
+                collection: {
+                    "fields": {
+                        "id": { "type": "string", "required": true, "primaryKey": true },
+                        "title": { "type": "string", "required": true }
+                    },
+                    "options": {
+                        "softDelete": false,
+                        "versioning": false,
+                        "strictness": "strict"
+                    },
+                    "indexes": []
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn declared_collections_exist_natively_during_creator_module_evaluation() {
+        crate::tests::fixtures::reset_context();
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+import { env } from "zeroship";
+const direct = env.db.todos;
+const property = Object.getOwnPropertyDescriptor(env.db, "todos");
+globalThis.__nativeCollectionAtEvaluation = JSON.stringify({
+    visible: direct != null,
+    hasFind: typeof direct?.find === "function",
+    sameIdentity: direct === env.db.collection("todos"),
+    enumerable: property?.enumerable === true,
+    readOnly: property?.writable === false,
+});
+export default { fetch() { return new Response("ok"); } };
+"#
+            .into(),
+        }];
+        let runtime = Runtime::builder()
+            .modules(modules)
+            .env_vars(HashMap::from([("APP_ID".to_string(), APP.to_string())]))
+            .plugins(vec![plugin() as std::sync::Arc<dyn NativePlugin>])
+            .runtime_descriptor(Some(runtime_descriptor("todos")))
+            .build();
+
+        runtime
+            .initialize(&EnvSnapshot::empty())
+            .expect("native collection descriptor must initialize");
+        let observed = runtime.with_scope(|scope| {
+            let global = scope.get_current_context().global(scope);
+            let key = v8::String::new(scope, "__nativeCollectionAtEvaluation").unwrap();
+            global
+                .get(scope, key.into())
+                .expect("creator module observation")
+                .to_rust_string_lossy(scope)
+        });
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&observed).unwrap(),
+            serde_json::json!({
+                "visible": true,
+                "hasFind": true,
+                "sameIdentity": true,
+                "enumerable": true,
+                "readOnly": true,
+            })
+        );
+    }
+
+    #[test]
+    fn descriptor_name_collision_rejects_before_creator_module_evaluation() {
+        crate::tests::fixtures::reset_context();
+        init_v8();
+        let modules = vec![ModuleEntry {
+            specifier: "index.js".into(),
+            source: r#"
+globalThis.__creatorEvaluatedAfterDbCollision = true;
+export default { fetch() { return new Response("unreachable"); } };
+"#
+            .into(),
+        }];
+        let runtime = Runtime::builder()
+            .modules(modules)
+            .env_vars(HashMap::from([("APP_ID".to_string(), APP.to_string())]))
+            .plugins(vec![plugin() as std::sync::Arc<dyn NativePlugin>])
+            .runtime_descriptor(Some(runtime_descriptor("transaction")))
+            .build();
+
+        let error = runtime
+            .initialize(&EnvSnapshot::empty())
+            .expect_err("native Db API collision must reject runtime initialization");
+        assert!(error.contains("transaction"), "{error}");
+        assert!(error.contains("collides"), "{error}");
+        let creator_evaluated = runtime.with_scope(|scope| {
+            let global = scope.get_current_context().global(scope);
+            let key = v8::String::new(scope, "__creatorEvaluatedAfterDbCollision").unwrap();
+            global
+                .get(scope, key.into())
+                .is_some_and(|value| value.is_true())
+        });
+        assert!(
+            !creator_evaluated,
+            "descriptor collisions must fail before creator code can publish state"
+        );
     }
 
     #[test]
@@ -215,10 +376,15 @@ mod runtime_descriptor_binding_tests {
                 }
             }
         });
-        plugin()
+        let plugin = plugin();
+        let namespace = plugin
+            .build_instance(scope, APP)
+            .expect("native db namespace");
+        plugin
             .bind_runtime_descriptor(
                 scope,
                 APP,
+                namespace,
                 Some(&serde_json::to_value(&runtime_descriptor).unwrap()),
             )
             .expect("bind descriptor");
@@ -239,8 +405,16 @@ mod runtime_descriptor_binding_tests {
         invalid["collections"]["users"]["fields"] = value!({
             "key": { "type": "string", "required": true, "primaryKey": true }
         });
-        let error = plugin()
-            .bind_runtime_descriptor(scope, APP, Some(&serde_json::to_value(&invalid).unwrap()))
+        let replacement_namespace = plugin
+            .build_instance(scope, APP)
+            .expect("replacement native db namespace");
+        let error = plugin
+            .bind_runtime_descriptor(
+                scope,
+                APP,
+                replacement_namespace,
+                Some(&serde_json::to_value(&invalid).unwrap()),
+            )
             .expect_err("renamed identity must fail at native installation");
         assert!(error.contains("id"), "{error}");
         assert_eq!(
@@ -270,15 +444,19 @@ mod runtime_descriptor_binding_tests {
             }
         });
         let plugin = plugin();
+        let namespace = plugin
+            .build_instance(scope, APP)
+            .expect("native db namespace");
         plugin
             .bind_runtime_descriptor(
                 scope,
                 APP,
+                namespace,
                 Some(&serde_json::to_value(&runtime_descriptor).unwrap()),
             )
             .expect("bind descriptor");
         plugin
-            .bind_runtime_descriptor(scope, APP, None)
+            .bind_runtime_descriptor(scope, APP, namespace, None)
             .expect("bind schema-less runtime");
 
         let binding = zeroship_data_orm::binding::DbBinding::new(
