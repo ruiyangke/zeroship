@@ -70,6 +70,10 @@ same Rust backend. Named step output reads resolve the current generation under
 the restart fence, with bounded buffering and verified content. The service V8
 binding checks its app scope against the host's immutable runtime identity
 before evaluating creator modules; environment variables confer no authority.
+The shared executor now hydrates referenced input before loading app code and
+resolves lazy output reads through the assignment's captured journal and live
+task lease. Required payload failures interrupt V8 and leave the frontier
+retryable rather than becoming a caught app exception or terminal journal entry.
 The worker polling loop, public HTTP ingress, retention of
 completed run graphs and interpreter cutover remain in progress. The
 current runtime still uses Control and the local mini-engine.
