@@ -1,25 +1,21 @@
 //! P4 native login + consent front door for the platform OP `/authorize` flow.
 
 use crate::common;
+use common::{auth_server::AuthServer, database::Database};
 
 use std::sync::Arc;
 
-use compio_postgres::{connect, Client, NoTls};
+use compio_postgres::Client;
 use http::Method;
-use ntex::web;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::{password, totp};
 use zeroship_auth::oidc::Issuer;
-use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::{sessions as session_store, totp as totp_store};
 
-use common::{
-    location, pkce_challenge_s256, pkce_verifier, read_set_cookie, test_auth_config_with,
-};
+use common::{location, pkce_challenge_s256, pkce_verifier, read_set_cookie};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/native-cb";
@@ -35,33 +31,18 @@ struct TokenResponse {
 }
 
 struct Fixture {
-    srv: ntex::web::test::TestServer,
-    auth_base: String,
-    db: Arc<Client>,
-    cfg: Arc<zeroship_auth::config::AuthConfig>,
+    server: AuthServer,
+    db: Client,
     client_id: String,
-    app_id: Uuid,
     user_id: Uuid,
     email: String,
-    http: cyper::Client,
 }
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Self {
-        let db_url = db_url();
-        let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(err) = pg_connection.run().await {
-                eprintln!("[op_login_consent_test] pg connection error: {err}");
-            }
-        })
-        .detach();
-        let db = Arc::new(pg_client);
+    async fn boot(database: &Database) -> Self {
+        let db = database.connect().await;
         let issuer = Arc::new(test_issuer());
-        common::publish_op_key_once(&issuer, &db)
-            .await
-            .expect("publish active OP key");
 
         let user_id = Uuid::new_v4();
         let app_id = Uuid::new_v4();
@@ -69,49 +50,20 @@ impl Fixture {
         let email = format!("p4-{}@zeroship.test", Uuid::new_v4().simple());
         seed_user_client(&db, user_id, app_id, &client_id, &email).await;
 
-        let cfg_inner = test_auth_config_with(
-            &db_url,
+        let server = AuthServer::configured(
+            database,
+            Some(issuer),
             &["--google-client-id", "mock-google-client"],
-        );
-        let cfg = Arc::new(cfg_inner);
-        let cfg_state = cfg.clone();
-        let db_state = db.clone();
-        let issuer_state = issuer.clone();
-        let refresh_pool_state =
-            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-        let srv = web::test::server(move || {
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            let issuer_state = issuer_state.clone();
-            let refresh_pool_state = refresh_pool_state.clone();
-            async move {
-                web::App::new()
-                    .state(cfg_state)
-                    .state(db_state)
-                    .state(issuer_state)
-                    .state(refresh_pool_state)
-                    .middleware(SecurityHeaders::default())
-                    .configure(server::configure(true, false))
-            }
-        })
+        )
         .await;
 
         Self {
-            auth_base: srv.url("").trim_end_matches('/').to_string(),
-            srv,
+            server,
             db,
-            cfg,
             client_id,
-            app_id,
             user_id,
             email,
-            http: cyper::Client::new(),
         }
-    }
-
-    async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, self.user_id, self.app_id, &self.client_id).await;
-        drop(self.srv);
     }
 
     async fn create_session_cookie(&self) -> String {
@@ -155,722 +107,841 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn end_to_end_native_authorize_login_consent_token_flow() {
-    let fx = Fixture::boot().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path(&fx.client_id, "openid email", &verifier, "state-e2e", Some("nonce-e2e"));
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-e2e",
+            Some("nonce-e2e"),
+        );
 
-    let resp = get(&fx, &authorize_path, None).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    let login_loc = location(&resp);
-    assert!(login_loc.starts_with("/login?return_to="), "login redirect: {login_loc}");
-    assert_eq!(relative_query_param(&login_loc, "return_to").as_deref(), Some(authorize_path.as_str()));
+        let resp = get(&fx, &authorize_path, None).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        let login_loc = location(&resp);
+        assert!(
+            login_loc.starts_with("/login?return_to="),
+            "login redirect: {login_loc}"
+        );
+        assert_eq!(
+            relative_query_param(&login_loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
 
-    let login_get = get(&fx, &login_loc, None).await;
-    assert_eq!(login_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
-    let login_body = form(&[
-        ("csrf", csrf.as_str()),
-        ("email", fx.email.as_str()),
-        ("password", PASSWORD),
-        ("return_to", authorize_path.as_str()),
-    ]);
-    let login_post = post_form(&fx, "/login", &login_body, Some(&format!("__Host-zsidp_csrf={csrf}"))).await;
-    assert_eq!(login_post.status().as_u16(), 303);
-    assert_eq!(location(&login_post), authorize_path);
-    let session = read_set_cookie(&login_post, "__Host-zsidp_session").expect("native session cookie");
-    let cookies = format!("__Host-zsidp_session={session}");
+        let login_get = get(&fx, &login_loc, None).await;
+        assert_eq!(login_get.status().as_u16(), 200);
+        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
+        let login_body = form(&[
+            ("csrf", csrf.as_str()),
+            ("email", fx.email.as_str()),
+            ("password", PASSWORD),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let login_post = post_form(
+            &fx,
+            "/login",
+            &login_body,
+            Some(&format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(login_post.status().as_u16(), 303);
+        assert_eq!(location(&login_post), authorize_path);
+        let session =
+            read_set_cookie(&login_post, "__Host-zsidp_session").expect("native session cookie");
+        let cookies = format!("__Host-zsidp_session={session}");
 
-    let after_login = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(after_login.status().as_u16(), 303);
-    let consent_loc = location(&after_login);
-    assert!(consent_loc.starts_with("/consent?return_to="), "consent redirect: {consent_loc}");
+        let after_login = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(after_login.status().as_u16(), 303);
+        let consent_loc = location(&after_login);
+        assert!(
+            consent_loc.starts_with("/consent?return_to="),
+            "consent redirect: {consent_loc}"
+        );
 
-    let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
-    assert_eq!(consent_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("consent csrf");
-    let accept_body = form(&[
-        ("csrf", csrf.as_str()),
-        ("return_to", authorize_path.as_str()),
-    ]);
-    let accept = post_form(
-        &fx,
-        "/consent/accept",
-        &accept_body,
-        Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
-    )
+        let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
+        assert_eq!(consent_get.status().as_u16(), 200);
+        let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("consent csrf");
+        let accept_body = form(&[
+            ("csrf", csrf.as_str()),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let accept = post_form(
+            &fx,
+            "/consent/accept",
+            &accept_body,
+            Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(accept.status().as_u16(), 303);
+        assert_eq!(location(&accept), authorize_path);
+        assert_grant_and_relay_alias(&fx).await;
+
+        let final_authorize = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(final_authorize.status().as_u16(), 303);
+        let callback = location(&final_authorize);
+        assert!(callback.starts_with(REDIRECT_URI), "callback: {callback}");
+        let code = absolute_query_param(&callback, "code").expect("authorization code");
+        assert_eq!(
+            absolute_query_param(&callback, "state").as_deref(),
+            Some("state-e2e")
+        );
+        assert_eq!(
+            absolute_query_param(&callback, "iss").as_deref(),
+            Some(ISSUER)
+        );
+
+        let token = exchange_code(&fx, &code, &verifier).await;
+        assert_eq!(token.token_type, "Bearer");
+        assert!(token.scope.contains("openid"));
+        assert!(!token.access_token.is_empty());
+        assert!(!token.id_token.is_empty());
+    })
     .await;
-    assert_eq!(accept.status().as_u16(), 303);
-    assert_eq!(location(&accept), authorize_path);
-    assert_grant_and_relay_alias(&fx).await;
-
-    let final_authorize = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(final_authorize.status().as_u16(), 303);
-    let callback = location(&final_authorize);
-    assert!(callback.starts_with(REDIRECT_URI), "callback: {callback}");
-    let code = absolute_query_param(&callback, "code").expect("authorization code");
-    assert_eq!(absolute_query_param(&callback, "state").as_deref(), Some("state-e2e"));
-    assert_eq!(absolute_query_param(&callback, "iss").as_deref(), Some(ISSUER));
-
-    let token = exchange_code(&fx, &code, &verifier).await;
-    assert_eq!(token.token_type, "Bearer");
-    assert!(token.scope.contains("openid"));
-    assert!(!token.access_token.is_empty());
-    assert!(!token.id_token.is_empty());
-
-    fx.cleanup().await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn idp_hint_google_redirects_native_authorize_to_provider_start() {
-    let fx = Fixture::boot().await;
-    let authorize_path = format!(
-        "{}&idp_hint=google&prompt=login",
-        authorize_path(
-            &fx.client_id,
-            "openid email",
-            &pkce_verifier(),
-            "state-idp-hint",
-            Some("nonce-idp-hint"),
-        )
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let authorize_path = format!(
+            "{}&idp_hint=google&prompt=login",
+            authorize_path(
+                &fx.client_id,
+                "openid email",
+                &pkce_verifier(),
+                "state-idp-hint",
+                Some("nonce-idp-hint"),
+            )
+        );
 
-    let resp = get(&fx, &authorize_path, None).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    let loc = location(&resp);
-    assert!(
-        loc.starts_with("/oauth/google/start?"),
-        "idp_hint should route to google start, got {loc}"
-    );
-    assert_eq!(
-        relative_query_param(&loc, "return_to").as_deref(),
-        Some(authorize_path.as_str())
-    );
-    assert_eq!(relative_query_param(&loc, "prompt").as_deref(), Some("login"));
-    assert_eq!(relative_query_param(&loc, "max_age").as_deref(), Some("0"));
+        let resp = get(&fx, &authorize_path, None).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        let loc = location(&resp);
+        assert!(
+            loc.starts_with("/oauth/google/start?"),
+            "idp_hint should route to google start, got {loc}"
+        );
+        assert_eq!(
+            relative_query_param(&loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
+        assert_eq!(
+            relative_query_param(&loc, "prompt").as_deref(),
+            Some("login")
+        );
+        assert_eq!(relative_query_param(&loc, "max_age").as_deref(), Some("0"));
 
-    let provider_start = get(&fx, &loc, None).await;
-    assert_eq!(provider_start.status().as_u16(), 302);
-    let upstream = location(&provider_start);
-    assert!(
-        upstream.starts_with(fx.cfg.settings.google_auth_url.get().as_str()),
-        "provider start should redirect to upstream google authorize, got {upstream}"
-    );
-    assert_eq!(
-        absolute_query_param(&upstream, "prompt").as_deref(),
-        Some("login")
-    );
-    assert_eq!(
-        absolute_query_param(&upstream, "max_age").as_deref(),
-        Some("0")
-    );
-
-    fx.cleanup().await;
+        let provider_start = get(&fx, &loc, None).await;
+        assert_eq!(provider_start.status().as_u16(), 302);
+        let upstream = location(&provider_start);
+        assert!(
+            upstream.starts_with(fx.server.config.settings.google_auth_url.get().as_str()),
+            "provider start should redirect to upstream google authorize, got {upstream}"
+        );
+        assert_eq!(
+            absolute_query_param(&upstream, "prompt").as_deref(),
+            Some("login")
+        );
+        assert_eq!(
+            absolute_query_param(&upstream, "max_age").as_deref(),
+            Some("0")
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn idp_hint_unconfigured_provider_falls_back_to_native_login_form() {
-    let fx = Fixture::boot().await;
-    let authorize_path = format!(
-        "{}&idp_hint=github&prompt=login",
-        authorize_path(
-            &fx.client_id,
-            "openid email",
-            &pkce_verifier(),
-            "state-idp-hint-disabled",
-            Some("nonce-idp-hint-disabled"),
-        )
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let authorize_path = format!(
+            "{}&idp_hint=github&prompt=login",
+            authorize_path(
+                &fx.client_id,
+                "openid email",
+                &pkce_verifier(),
+                "state-idp-hint-disabled",
+                Some("nonce-idp-hint-disabled"),
+            )
+        );
 
-    let resp = get(&fx, &authorize_path, None).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    let loc = location(&resp);
-    assert!(
-        !loc.starts_with("/oauth/github/start?"),
-        "disabled idp_hint must not route to github start: {loc}"
-    );
-    assert!(
-        loc.starts_with("/login?return_to="),
-        "disabled idp_hint should fall back to login, got {loc}"
-    );
-    assert_eq!(
-        relative_query_param(&loc, "return_to").as_deref(),
-        Some(authorize_path.as_str())
-    );
+        let resp = get(&fx, &authorize_path, None).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        let loc = location(&resp);
+        assert!(
+            !loc.starts_with("/oauth/github/start?"),
+            "disabled idp_hint must not route to github start: {loc}"
+        );
+        assert!(
+            loc.starts_with("/login?return_to="),
+            "disabled idp_hint should fall back to login, got {loc}"
+        );
+        assert_eq!(
+            relative_query_param(&loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
 
-    let login_get = get(&fx, &loc, None).await;
-    assert_eq!(login_get.status().as_u16(), 200);
-    assert!(
-        read_set_cookie(&login_get, "__Host-zsidp_csrf").is_some(),
-        "login form should render with a csrf cookie"
-    );
-
-    fx.cleanup().await;
+        let login_get = get(&fx, &loc, None).await;
+        assert_eq!(login_get.status().as_u16(), 200);
+        assert!(
+            read_set_cookie(&login_get, "__Host-zsidp_csrf").is_some(),
+            "login form should render with a csrf cookie"
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_authorize_echoes_state_verbatim() {
-    let fx = Fixture::boot().await;
-    let verifier = pkce_verifier();
-    let state = "  tok with spaces  ";
-    let authorize_path = authorize_path(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        state,
-        Some("nonce-verbatim"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let state = "  tok with spaces  ";
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            state,
+            Some("nonce-verbatim"),
+        );
 
-    let login_redirect = get(&fx, &authorize_path, None).await;
-    assert_eq!(login_redirect.status().as_u16(), 303);
-    let login_loc = location(&login_redirect);
-    assert!(login_loc.starts_with("/login?return_to="));
-    assert_eq!(
-        relative_query_param(&login_loc, "return_to").as_deref(),
-        Some(authorize_path.as_str())
-    );
+        let login_redirect = get(&fx, &authorize_path, None).await;
+        assert_eq!(login_redirect.status().as_u16(), 303);
+        let login_loc = location(&login_redirect);
+        assert!(login_loc.starts_with("/login?return_to="));
+        assert_eq!(
+            relative_query_param(&login_loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
 
-    let cookies = fx.create_session_cookie().await;
-    let consent_redirect = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(consent_redirect.status().as_u16(), 303);
-    let consent_loc = location(&consent_redirect);
-    assert!(consent_loc.starts_with("/consent?return_to="));
-    assert_eq!(
-        relative_query_param(&consent_loc, "return_to").as_deref(),
-        Some(authorize_path.as_str())
-    );
+        let cookies = fx.create_session_cookie().await;
+        let consent_redirect = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(consent_redirect.status().as_u16(), 303);
+        let consent_loc = location(&consent_redirect);
+        assert!(consent_loc.starts_with("/consent?return_to="));
+        assert_eq!(
+            relative_query_param(&consent_loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
 
-    fx.insert_grant(&["openid", "email"]).await;
-    let final_authorize = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(final_authorize.status().as_u16(), 303);
-    let callback = location(&final_authorize);
-    assert!(callback.starts_with(REDIRECT_URI), "callback: {callback}");
-    assert_eq!(absolute_query_param(&callback, "state").as_deref(), Some(state));
-
-    fx.cleanup().await;
+        fx.insert_grant(&["openid", "email"]).await;
+        let final_authorize = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(final_authorize.status().as_u16(), 303);
+        let callback = location(&final_authorize);
+        assert!(callback.starts_with(REDIRECT_URI), "callback: {callback}");
+        assert_eq!(
+            absolute_query_param(&callback, "state").as_deref(),
+            Some(state)
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_covered_short_circuits_and_new_scope_bounces() {
-    let fx = Fixture::boot().await;
-    fx.insert_grant(&["openid", "email"]).await;
-    let cookies = fx.create_session_cookie().await;
-    let verifier = pkce_verifier();
-    let covered = authorize_path(&fx.client_id, "openid email", &verifier, "state-covered", Some("nonce-covered"));
-    let resp = get(&fx, &covered, Some(&cookies)).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    assert!(
-        location(&resp).starts_with(REDIRECT_URI),
-        "covered consent must issue code directly"
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        fx.insert_grant(&["openid", "email"]).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let covered = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-covered",
+            Some("nonce-covered"),
+        );
+        let resp = get(&fx, &covered, Some(&cookies)).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        assert!(
+            location(&resp).starts_with(REDIRECT_URI),
+            "covered consent must issue code directly"
+        );
 
-    let new_scope = authorize_path(
-        &fx.client_id,
-        "openid email read:notes",
-        &pkce_verifier(),
-        "state-new-scope",
-        Some("nonce-new"),
-    );
-    let resp = get(&fx, &new_scope, Some(&cookies)).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    assert!(
-        location(&resp).starts_with("/consent?return_to="),
-        "new uncovered scope must prompt for consent"
-    );
-
-    fx.cleanup().await;
+        let new_scope = authorize_path(
+            &fx.client_id,
+            "openid email read:notes",
+            &pkce_verifier(),
+            "state-new-scope",
+            Some("nonce-new"),
+        );
+        let resp = get(&fx, &new_scope, Some(&cookies)).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        assert!(
+            location(&resp).starts_with("/consent?return_to="),
+            "new uncovered scope must prompt for consent"
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_without_session_redirects_login_required_to_rp() {
-    let fx = Fixture::boot().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path_with_prompt(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        "state-none-login-required",
-        Some("nonce-none-login-required"),
-        Some("none"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path_with_prompt(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-none-login-required",
+            Some("nonce-none-login-required"),
+            Some("none"),
+        );
 
-    let resp = get(&fx, &authorize_path, None).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    assert!(
-        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
-        "prompt=none must not render the login form"
-    );
-    let loc = location(&resp);
-    assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
-    assert_eq!(
-        absolute_query_param(&loc, "error").as_deref(),
-        Some("login_required")
-    );
-    assert_eq!(
-        absolute_query_param(&loc, "state").as_deref(),
-        Some("state-none-login-required")
-    );
-    assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
-
-    fx.cleanup().await;
+        let resp = get(&fx, &authorize_path, None).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        assert!(
+            read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
+            "prompt=none must not render the login form"
+        );
+        let loc = location(&resp);
+        assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
+        assert_eq!(
+            absolute_query_param(&loc, "error").as_deref(),
+            Some("login_required")
+        );
+        assert_eq!(
+            absolute_query_param(&loc, "state").as_deref(),
+            Some("state-none-login-required")
+        );
+        assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_with_session_but_no_consent_redirects_consent_required_to_rp() {
-    let fx = Fixture::boot().await;
-    let cookies = fx.create_session_cookie().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path_with_prompt(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        "state-none-consent-required",
-        Some("nonce-none-consent-required"),
-        Some("none"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path_with_prompt(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-none-consent-required",
+            Some("nonce-none-consent-required"),
+            Some("none"),
+        );
 
-    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    assert!(
-        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
-        "prompt=none must not render the consent form"
-    );
-    let loc = location(&resp);
-    assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
-    assert_eq!(
-        absolute_query_param(&loc, "error").as_deref(),
-        Some("consent_required")
-    );
-    assert_eq!(
-        absolute_query_param(&loc, "state").as_deref(),
-        Some("state-none-consent-required")
-    );
-
-    fx.cleanup().await;
+        let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        assert!(
+            read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
+            "prompt=none must not render the consent form"
+        );
+        let loc = location(&resp);
+        assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
+        assert_eq!(
+            absolute_query_param(&loc, "error").as_deref(),
+            Some("consent_required")
+        );
+        assert_eq!(
+            absolute_query_param(&loc, "state").as_deref(),
+            Some("state-none-consent-required")
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_with_session_and_prior_consent_issues_code_silently() {
-    let fx = Fixture::boot().await;
-    fx.insert_grant(&["openid", "email"]).await;
-    let cookies = fx.create_session_cookie().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path_with_prompt(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        "state-none-success",
-        Some("nonce-none-success"),
-        Some("none"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        fx.insert_grant(&["openid", "email"]).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path_with_prompt(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-none-success",
+            Some("nonce-none-success"),
+            Some("none"),
+        );
 
-    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    assert!(
-        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
-        "silent success must not render UI"
-    );
-    let loc = location(&resp);
-    assert!(loc.starts_with(REDIRECT_URI), "callback: {loc}");
-    assert!(
-        absolute_query_param(&loc, "code").is_some(),
-        "silent authorize must issue a code"
-    );
-    assert!(absolute_query_param(&loc, "error").is_none());
-    assert_eq!(
-        absolute_query_param(&loc, "state").as_deref(),
-        Some("state-none-success")
-    );
-
-    fx.cleanup().await;
+        let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        assert!(
+            read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
+            "silent success must not render UI"
+        );
+        let loc = location(&resp);
+        assert!(loc.starts_with(REDIRECT_URI), "callback: {loc}");
+        assert!(
+            absolute_query_param(&loc, "code").is_some(),
+            "silent authorize must issue a code"
+        );
+        assert!(absolute_query_param(&loc, "error").is_none());
+        assert_eq!(
+            absolute_query_param(&loc, "state").as_deref(),
+            Some("state-none-success")
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_combined_with_login_redirects_invalid_request_to_rp() {
-    let fx = Fixture::boot().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path_with_prompt(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        "state-none-combo",
-        Some("nonce-none-combo"),
-        Some("none login"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path_with_prompt(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-none-combo",
+            Some("nonce-none-combo"),
+            Some("none login"),
+        );
 
-    let resp = get(&fx, &authorize_path, None).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    let loc = location(&resp);
-    assert!(loc.starts_with(REDIRECT_URI), "prompt combo redirect: {loc}");
-    assert_eq!(
-        absolute_query_param(&loc, "error").as_deref(),
-        Some("invalid_request")
-    );
-    assert_eq!(
-        absolute_query_param(&loc, "state").as_deref(),
-        Some("state-none-combo")
-    );
-
-    fx.cleanup().await;
+        let resp = get(&fx, &authorize_path, None).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        let loc = location(&resp);
+        assert!(
+            loc.starts_with(REDIRECT_URI),
+            "prompt combo redirect: {loc}"
+        );
+        assert_eq!(
+            absolute_query_param(&loc, "error").as_deref(),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            absolute_query_param(&loc, "state").as_deref(),
+            Some("state-none-combo")
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_none_invalid_pkce_redirects_error_to_rp_without_rendering() {
-    let fx = Fixture::boot().await;
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer
-        .append_pair("client_id", &fx.client_id)
-        .append_pair("response_type", "code")
-        .append_pair("scope", "openid email")
-        .append_pair("redirect_uri", REDIRECT_URI)
-        .append_pair("state", "state-none-invalid-pkce")
-        .append_pair("nonce", "nonce-none-invalid-pkce")
-        .append_pair("prompt", "none")
-        .append_pair("code_challenge", "not-a-valid-s256-challenge")
-        .append_pair("code_challenge_method", "S256");
-    let authorize_path = format!("/oauth2/authorize?{}", serializer.finish());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer
+            .append_pair("client_id", &fx.client_id)
+            .append_pair("response_type", "code")
+            .append_pair("scope", "openid email")
+            .append_pair("redirect_uri", REDIRECT_URI)
+            .append_pair("state", "state-none-invalid-pkce")
+            .append_pair("nonce", "nonce-none-invalid-pkce")
+            .append_pair("prompt", "none")
+            .append_pair("code_challenge", "not-a-valid-s256-challenge")
+            .append_pair("code_challenge_method", "S256");
+        let authorize_path = format!("/oauth2/authorize?{}", serializer.finish());
 
-    let resp = get(&fx, &authorize_path, None).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    assert!(
-        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
-        "prompt=none invalid request must not render local UI"
-    );
-    let loc = location(&resp);
-    assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
-    assert_eq!(
-        absolute_query_param(&loc, "error").as_deref(),
-        Some("invalid_request")
-    );
-    assert_eq!(
-        absolute_query_param(&loc, "state").as_deref(),
-        Some("state-none-invalid-pkce")
-    );
-    assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
-    let body = resp.text().await.expect("prompt=none redirect body");
-    assert!(
-        body.is_empty()
-            || (!body.contains("\"error\"")
-                && !body.contains("error_description")
-                && !body.contains("<form")),
-        "prompt=none invalid request rendered a local body: {body}"
-    );
-
-    fx.cleanup().await;
+        let resp = get(&fx, &authorize_path, None).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        assert!(
+            read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
+            "prompt=none invalid request must not render local UI"
+        );
+        let loc = location(&resp);
+        assert!(loc.starts_with(REDIRECT_URI), "prompt=none redirect: {loc}");
+        assert_eq!(
+            absolute_query_param(&loc, "error").as_deref(),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            absolute_query_param(&loc, "state").as_deref(),
+            Some("state-none-invalid-pkce")
+        );
+        assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
+        let body = resp.text().await.expect("prompt=none redirect body");
+        assert!(
+            body.is_empty()
+                || (!body.contains("\"error\"")
+                    && !body.contains("error_description")
+                    && !body.contains("<form")),
+            "prompt=none invalid request rendered a local body: {body}"
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_login_forces_login_screen_even_with_valid_session() {
-    let fx = Fixture::boot().await;
-    let cookies = fx.create_session_cookie().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path_with_prompt(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        "state-prompt-login",
-        Some("nonce-prompt-login"),
-        Some("login"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path_with_prompt(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-prompt-login",
+            Some("nonce-prompt-login"),
+            Some("login"),
+        );
 
-    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    let login_loc = location(&resp);
-    assert!(
-        login_loc.starts_with("/login?return_to="),
-        "prompt=login must force login, got {login_loc}"
-    );
-    assert_eq!(
-        relative_query_param(&login_loc, "return_to").as_deref(),
-        Some(authorize_path.as_str())
-    );
+        let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        let login_loc = location(&resp);
+        assert!(
+            login_loc.starts_with("/login?return_to="),
+            "prompt=login must force login, got {login_loc}"
+        );
+        assert_eq!(
+            relative_query_param(&login_loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
 
-    let login_get = get(&fx, &login_loc, Some(&cookies)).await;
-    assert_eq!(login_get.status().as_u16(), 200);
-    assert!(
-        read_set_cookie(&login_get, "__Host-zsidp_csrf").is_some(),
-        "login form should render with a csrf cookie"
-    );
-
-    fx.cleanup().await;
+        let login_get = get(&fx, &login_loc, Some(&cookies)).await;
+        assert_eq!(login_get.status().as_u16(), 200);
+        assert!(
+            read_set_cookie(&login_get, "__Host-zsidp_csrf").is_some(),
+            "login form should render with a csrf cookie"
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn prompt_consent_forces_consent_screen_even_with_prior_grant() {
-    let fx = Fixture::boot().await;
-    fx.insert_grant(&["openid", "email"]).await;
-    let cookies = fx.create_session_cookie().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path_with_prompt(
-        &fx.client_id,
-        "openid email",
-        &verifier,
-        "state-prompt-consent",
-        Some("nonce-prompt-consent"),
-        Some("consent"),
-    );
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        fx.insert_grant(&["openid", "email"]).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path_with_prompt(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-prompt-consent",
+            Some("nonce-prompt-consent"),
+            Some("consent"),
+        );
 
-    let resp = get(&fx, &authorize_path, Some(&cookies)).await;
-    assert_eq!(resp.status().as_u16(), 303);
-    let consent_loc = location(&resp);
-    assert!(
-        consent_loc.starts_with("/consent?return_to="),
-        "prompt=consent must force consent, got {consent_loc}"
-    );
-    assert_eq!(
-        relative_query_param(&consent_loc, "return_to").as_deref(),
-        Some(authorize_path.as_str())
-    );
+        let resp = get(&fx, &authorize_path, Some(&cookies)).await;
+        assert_eq!(resp.status().as_u16(), 303);
+        let consent_loc = location(&resp);
+        assert!(
+            consent_loc.starts_with("/consent?return_to="),
+            "prompt=consent must force consent, got {consent_loc}"
+        );
+        assert_eq!(
+            relative_query_param(&consent_loc, "return_to").as_deref(),
+            Some(authorize_path.as_str())
+        );
 
-    let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
-    assert_eq!(consent_get.status().as_u16(), 200);
-    assert!(
-        read_set_cookie(&consent_get, "__Host-zsidp_csrf").is_some(),
-        "consent form should render with a csrf cookie"
-    );
-
-    fx.cleanup().await;
+        let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
+        assert_eq!(consent_get.status().as_u16(), 200);
+        assert!(
+            read_set_cookie(&consent_get, "__Host-zsidp_csrf").is_some(),
+            "consent form should render with a csrf cookie"
+        );
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
-    let fx = Fixture::boot().await;
-    let cookies = fx.create_session_cookie().await;
-    let verifier = pkce_verifier();
-    let authorize_path = authorize_path(&fx.client_id, "openid email", &verifier, "state-deny", Some("nonce-deny"));
-    let consent_loc = format!(
-        "/consent?{}",
-        url::form_urlencoded::Serializer::new(String::new())
-            .append_pair("return_to", &authorize_path)
-            .finish()
-    );
-    let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
-    assert_eq!(consent_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
-    let body = form(&[
-        ("csrf", csrf.as_str()),
-        ("return_to", authorize_path.as_str()),
-    ]);
-    let deny = post_form(
-        &fx,
-        "/consent/deny",
-        &body,
-        Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
-    )
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let cookies = fx.create_session_cookie().await;
+        let verifier = pkce_verifier();
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &verifier,
+            "state-deny",
+            Some("nonce-deny"),
+        );
+        let consent_loc = format!(
+            "/consent?{}",
+            url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("return_to", &authorize_path)
+                .finish()
+        );
+        let consent_get = get(&fx, &consent_loc, Some(&cookies)).await;
+        assert_eq!(consent_get.status().as_u16(), 200);
+        let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let deny = post_form(
+            &fx,
+            "/consent/deny",
+            &body,
+            Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(deny.status().as_u16(), 303);
+        let loc = location(&deny);
+        assert!(loc.starts_with(REDIRECT_URI), "deny location: {loc}");
+        assert_eq!(
+            absolute_query_param(&loc, "error").as_deref(),
+            Some("access_denied")
+        );
+        assert_eq!(
+            absolute_query_param(&loc, "state").as_deref(),
+            Some("state-deny")
+        );
+    })
     .await;
-    assert_eq!(deny.status().as_u16(), 303);
-    let loc = location(&deny);
-    assert!(loc.starts_with(REDIRECT_URI), "deny location: {loc}");
-    assert_eq!(absolute_query_param(&loc, "error").as_deref(), Some("access_denied"));
-    assert_eq!(absolute_query_param(&loc, "state").as_deref(), Some("state-deny"));
-
-    fx.cleanup().await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn open_redirect_guards_keep_login_and_consent_on_safe_targets() {
-    let fx = Fixture::boot().await;
-    // Each iteration consumes a LOGIN_EIP rate-limit token (capacity 5), so keep
-    // this to ≤5 distinct full-login vectors. The exhaustive control-char matrix
-    // (NUL/TAB/CR/LF/DEL) is unit-tested in `return_to::tests`; here we prove the
-    // e2e WIRING: off-origin forms fall back, and one CRLF vector pins MED-1
-    // (an interior CR/LF must not ride a "valid" return_to into the redirect).
-    for bad in [
-        "//evil.com",
-        "https://evil.com",
-        "/safe\\evil",
-        "/me\r\nSet-Cookie: zs=1",
-    ] {
-        let login_get = get(&fx, &format!("/login?return_to={}", urlencoding(bad)), None).await;
-        assert_eq!(login_get.status().as_u16(), 200);
-        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("csrf");
-        let body = form(&[
-            ("csrf", csrf.as_str()),
-            ("email", fx.email.as_str()),
-            ("password", PASSWORD),
-            ("return_to", bad),
-        ]);
-        let post = post_form(&fx, "/login", &body, Some(&format!("__Host-zsidp_csrf={csrf}"))).await;
-        assert_eq!(post.status().as_u16(), 303);
-        assert_eq!(location(&post), "/me", "bad return_to {bad:?} must fall back");
-    }
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        // Each iteration consumes a LOGIN_EIP rate-limit token (capacity 5), so keep
+        // this to ≤5 distinct full-login vectors. The exhaustive control-char matrix
+        // (NUL/TAB/CR/LF/DEL) is unit-tested in `return_to::tests`; here we prove the
+        // e2e WIRING: off-origin forms fall back, and one CRLF vector pins MED-1
+        // (an interior CR/LF must not ride a "valid" return_to into the redirect).
+        for bad in [
+            "//evil.com",
+            "https://evil.com",
+            "/safe\\evil",
+            "/me\r\nSet-Cookie: zs=1",
+        ] {
+            let login_get = get(&fx, &format!("/login?return_to={}", urlencoding(bad)), None).await;
+            assert_eq!(login_get.status().as_u16(), 200);
+            let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("csrf");
+            let body = form(&[
+                ("csrf", csrf.as_str()),
+                ("email", fx.email.as_str()),
+                ("password", PASSWORD),
+                ("return_to", bad),
+            ]);
+            let post = post_form(
+                &fx,
+                "/login",
+                &body,
+                Some(&format!("__Host-zsidp_csrf={csrf}")),
+            )
+            .await;
+            assert_eq!(post.status().as_u16(), 303);
+            assert_eq!(
+                location(&post),
+                "/me",
+                "bad return_to {bad:?} must fall back"
+            );
+        }
 
-    let cookies = fx.create_session_cookie().await;
-    let valid_path = authorize_path(&fx.client_id, "openid email", &pkce_verifier(), "state-open", Some("nonce-open"));
-    let consent_get = get(
-        &fx,
-        &format!("/consent?{}", form(&[("return_to", valid_path.as_str())])),
-        Some(&cookies),
-    )
+        let cookies = fx.create_session_cookie().await;
+        let valid_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-open",
+            Some("nonce-open"),
+        );
+        let consent_get = get(
+            &fx,
+            &format!("/consent?{}", form(&[("return_to", valid_path.as_str())])),
+            Some(&cookies),
+        )
+        .await;
+        assert_eq!(consent_get.status().as_u16(), 200);
+        let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
+        let body = form(&[("csrf", csrf.as_str()), ("return_to", "https://evil.com")]);
+        let accept = post_form(
+            &fx,
+            "/consent/accept",
+            &body,
+            Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        // Rejected — never an off-origin redirect. The Location is the safe
+        // fallback or an error page, but must never be the attacker's absolute URL.
+        assert!(
+            !location(&accept).starts_with("http"),
+            "consent accept must not redirect off-origin: {}",
+            location(&accept)
+        );
+    })
     .await;
-    assert_eq!(consent_get.status().as_u16(), 200);
-    let csrf = read_set_cookie(&consent_get, "__Host-zsidp_csrf").expect("csrf");
-    let body = form(&[("csrf", csrf.as_str()), ("return_to", "https://evil.com")]);
-    let accept = post_form(
-        &fx,
-        "/consent/accept",
-        &body,
-        Some(&format!("{cookies}; __Host-zsidp_csrf={csrf}")),
-    )
-    .await;
-    // Rejected — never an off-origin redirect. The Location is the safe
-    // fallback or an error page, but must never be the attacker's absolute URL.
-    assert!(
-        !location(&accept).starts_with("http"),
-        "consent accept must not redirect off-origin: {}",
-        location(&accept)
-    );
-
-    fx.cleanup().await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consent_requires_session_and_csrf() {
-    let fx = Fixture::boot().await;
-    let authorize_path = authorize_path(&fx.client_id, "openid email", &pkce_verifier(), "state-gates", Some("nonce-gates"));
-    let consent_loc = format!("/consent?{}", form(&[("return_to", authorize_path.as_str())]));
-    let no_session = get(&fx, &consent_loc, None).await;
-    assert_eq!(no_session.status().as_u16(), 303);
-    assert!(location(&no_session).starts_with("/login?return_to="));
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-gates",
+            Some("nonce-gates"),
+        );
+        let consent_loc = format!(
+            "/consent?{}",
+            form(&[("return_to", authorize_path.as_str())])
+        );
+        let no_session = get(&fx, &consent_loc, None).await;
+        assert_eq!(no_session.status().as_u16(), 303);
+        assert!(location(&no_session).starts_with("/login?return_to="));
 
-    let body = form(&[("return_to", authorize_path.as_str())]);
-    let no_csrf = post_form(&fx, "/consent/accept", &body, None).await;
-    assert_eq!(no_csrf.status().as_u16(), 403);
+        let body = form(&[("return_to", authorize_path.as_str())]);
+        let no_csrf = post_form(&fx, "/consent/accept", &body, None).await;
+        assert_eq!(no_csrf.status().as_u16(), 403);
 
-    let cookies = fx.create_session_cookie().await;
-    let body = form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]);
-    let bad_csrf = post_form(&fx, "/consent/accept", &body, Some(&format!("{cookies}; __Host-zsidp_csrf=right"))).await;
-    assert_eq!(bad_csrf.status().as_u16(), 403);
+        let cookies = fx.create_session_cookie().await;
+        let body = form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]);
+        let bad_csrf = post_form(
+            &fx,
+            "/consent/accept",
+            &body,
+            Some(&format!("{cookies}; __Host-zsidp_csrf=right")),
+        )
+        .await;
+        assert_eq!(bad_csrf.status().as_u16(), 403);
 
-    // /consent/deny is equally CSRF-gated (LOW-3): a session with a mismatched
-    // token is rejected, so a cross-site forced deny is impossible.
-    let deny_bad_csrf = post_form(
-        &fx,
-        "/consent/deny",
-        &form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]),
-        Some(&format!("{cookies}; __Host-zsidp_csrf=right")),
-    )
+        // /consent/deny is equally CSRF-gated (LOW-3): a session with a mismatched
+        // token is rejected, so a cross-site forced deny is impossible.
+        let deny_bad_csrf = post_form(
+            &fx,
+            "/consent/deny",
+            &form(&[("csrf", "wrong"), ("return_to", authorize_path.as_str())]),
+            Some(&format!("{cookies}; __Host-zsidp_csrf=right")),
+        )
+        .await;
+        assert_eq!(deny_bad_csrf.status().as_u16(), 403);
+    })
     .await;
-    assert_eq!(deny_bad_csrf.status().as_u16(), 403);
-
-    fx.cleanup().await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_consent_rejects_scope_outside_client_registration() {
-    let fx = Fixture::boot().await;
-    let cookies = fx.create_session_cookie().await;
-    // The client is registered for openid/profile/email only; `payments:charge`
-    // is over-broad. `load_native_consent_context` must reject it (LOW-3) BEFORE
-    // rendering the grant form, so an attacker-widened return_to can never put a
-    // scope the client isn't allowed in front of the user to approve.
-    let over_broad = authorize_path(
-        &fx.client_id,
-        "openid email payments:charge",
-        &pkce_verifier(),
-        "state-ob",
-        Some("nonce-ob"),
-    );
-    let resp = get(
-        &fx,
-        &format!("/consent?{}", form(&[("return_to", over_broad.as_str())])),
-        Some(&cookies),
-    )
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let cookies = fx.create_session_cookie().await;
+        // The client is registered for openid/profile/email only; `payments:charge`
+        // is over-broad. `load_native_consent_context` must reject it (LOW-3) BEFORE
+        // rendering the grant form, so an attacker-widened return_to can never put a
+        // scope the client isn't allowed in front of the user to approve.
+        let over_broad = authorize_path(
+            &fx.client_id,
+            "openid email payments:charge",
+            &pkce_verifier(),
+            "state-ob",
+            Some("nonce-ob"),
+        );
+        let resp = get(
+            &fx,
+            &format!("/consent?{}", form(&[("return_to", over_broad.as_str())])),
+            Some(&cookies),
+        )
+        .await;
+        // The grant page sets a CSRF cookie; the rejection error page does not —
+        // the absence of `__Host-zsidp_csrf` proves the consent form was NOT rendered.
+        assert!(
+            read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
+            "over-broad scope must render the error page, not the consent grant form"
+        );
+        // And it must never bounce to the RP carrying a code.
+        assert_ne!(resp.status().as_u16(), 303);
+    })
     .await;
-    // The grant page sets a CSRF cookie; the rejection error page does not —
-    // the absence of `__Host-zsidp_csrf` proves the consent form was NOT rendered.
-    assert!(
-        read_set_cookie(&resp, "__Host-zsidp_csrf").is_none(),
-        "over-broad scope must render the error page, not the consent grant form"
-    );
-    // And it must never bounce to the RP carrying a code.
-    assert_ne!(resp.status().as_u16(), 303);
-
-    fx.cleanup().await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn totp_login_preserves_native_return_to() {
-    let fx = Fixture::boot().await;
-    let secret = totp::generate_secret();
-    let key = totp::key_from_config(fx.cfg.settings.totp_enc_key.expose_str()).expect("totp key");
-    totp_store::enroll(
-        &fx.db,
-        fx.user_id,
-        &totp::encrypt_secret(&key, fx.user_id, &secret).expect("encrypt totp"),
-        // First enrollment for a freshly created fixture user: nothing confirmed
-        // to replace.
-        false,
-    )
-    .await
-    .expect("enroll totp");
-    let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
-    totp_store::confirm(&fx.db, fx.user_id, &hashes)
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let secret = totp::generate_secret();
+        let key = totp::key_from_config(fx.server.config.settings.totp_enc_key.expose_str())
+            .expect("totp key");
+        totp_store::enroll(
+            &fx.db,
+            fx.user_id,
+            &totp::encrypt_secret(&key, fx.user_id, &secret).expect("encrypt totp"),
+            // First enrollment for a freshly created fixture user: nothing confirmed
+            // to replace.
+            false,
+        )
         .await
-        .expect("confirm totp");
+        .expect("enroll totp");
+        let (_, hashes) = totp::generate_backup_codes().expect("backup codes");
+        totp_store::confirm(&fx.db, fx.user_id, &hashes)
+            .await
+            .expect("confirm totp");
 
-    let authorize_path = authorize_path(&fx.client_id, "openid email", &pkce_verifier(), "state-totp", Some("nonce-totp"));
-    let login_get = get(&fx, &format!("/login?{}", form(&[("return_to", authorize_path.as_str())])), None).await;
-    let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
-    let body = form(&[
-        ("csrf", csrf.as_str()),
-        ("email", fx.email.as_str()),
-        ("password", PASSWORD),
-        ("return_to", authorize_path.as_str()),
-    ]);
-    let password_step = post_form(&fx, "/login", &body, Some(&format!("__Host-zsidp_csrf={csrf}"))).await;
-    assert_eq!(password_step.status().as_u16(), 200);
-    assert!(
-        read_set_cookie(&password_step, "__Host-zsidp_session").is_none(),
-        "password step must not mint a session before TOTP"
-    );
-    let csrf = read_set_cookie(&password_step, "__Host-zsidp_csrf").expect("totp csrf");
-    let stash = read_set_cookie(&password_step, "__Host-zsidp_2fa").expect("totp stash");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock")
-        .as_secs();
-    let code = totp::code_at(&secret, now);
-    let body = form(&[
-        ("csrf", csrf.as_str()),
-        ("code", code.as_str()),
-        ("return_to", authorize_path.as_str()),
-    ]);
-    let done = post_form(
-        &fx,
-        "/login/2fa",
-        &body,
-        Some(&format!("__Host-zsidp_csrf={csrf}; __Host-zsidp_2fa={stash}")),
-    )
+        let authorize_path = authorize_path(
+            &fx.client_id,
+            "openid email",
+            &pkce_verifier(),
+            "state-totp",
+            Some("nonce-totp"),
+        );
+        let login_get = get(
+            &fx,
+            &format!("/login?{}", form(&[("return_to", authorize_path.as_str())])),
+            None,
+        )
+        .await;
+        let csrf = read_set_cookie(&login_get, "__Host-zsidp_csrf").expect("login csrf");
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("email", fx.email.as_str()),
+            ("password", PASSWORD),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let password_step = post_form(
+            &fx,
+            "/login",
+            &body,
+            Some(&format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(password_step.status().as_u16(), 200);
+        assert!(
+            read_set_cookie(&password_step, "__Host-zsidp_session").is_none(),
+            "password step must not mint a session before TOTP"
+        );
+        let csrf = read_set_cookie(&password_step, "__Host-zsidp_csrf").expect("totp csrf");
+        let stash = read_set_cookie(&password_step, "__Host-zsidp_2fa").expect("totp stash");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs();
+        let code = totp::code_at(&secret, now);
+        let body = form(&[
+            ("csrf", csrf.as_str()),
+            ("code", code.as_str()),
+            ("return_to", authorize_path.as_str()),
+        ]);
+        let done = post_form(
+            &fx,
+            "/login/2fa",
+            &body,
+            Some(&format!(
+                "__Host-zsidp_csrf={csrf}; __Host-zsidp_2fa={stash}"
+            )),
+        )
+        .await;
+        assert_eq!(done.status().as_u16(), 303);
+        assert_eq!(location(&done), authorize_path);
+        assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
+    })
     .await;
-    assert_eq!(done.status().as_u16(), 303);
-    assert_eq!(location(&done), authorize_path);
-    assert!(read_set_cookie(&done, "__Host-zsidp_session").is_some());
-
-    fx.cleanup().await;
-}
-
-fn db_url() -> String {
-    crate::common::test_database_url()
 }
 
 fn test_issuer() -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[16; 32]);
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
@@ -901,7 +972,7 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
         &[
             &app_id,
             &format!("p4-native-app-{}", app_id.simple()),
-            &project_id
+            &project_id,
         ],
     )
     .await
@@ -952,33 +1023,6 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
     .expect("seed app identity");
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
-    let _ = db
-        .execute("DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1", &[&client_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.oauth_grants WHERE client_id = $1", &[&client_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1", &[&client_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.idp_sessions WHERE user_id = $1", &[&user_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1", &[&client_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
-        .await;
-}
-
 fn authorize_path(
     client_id: &str,
     scope: &str,
@@ -1018,8 +1062,9 @@ fn authorize_path_with_prompt(
 #[allow(clippy::future_not_send)]
 async fn get(fx: &Fixture, path: &str, cookie: Option<&str>) -> cyper::Response {
     let mut req = fx
+        .server
         .http
-        .request(Method::GET, format!("{}{}", fx.auth_base, path))
+        .request(Method::GET, format!("{}{}", fx.server.auth_base, path))
         .expect("build GET");
     if let Some(cookie) = cookie {
         req = req.header("cookie", cookie).expect("cookie");
@@ -1028,31 +1073,14 @@ async fn get(fx: &Fixture, path: &str, cookie: Option<&str>) -> cyper::Response 
 }
 
 #[allow(clippy::future_not_send)]
-/// A client IP unique to this RUN, stable within it. See `post_form`.
-fn run_client_ip() -> String {
-    static IP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    IP.get_or_init(|| {
-        let b = *Uuid::new_v4().as_bytes();
-        format!("127.{}.{}.{}", b[0].max(1), b[1].max(1), b[2].max(1))
-    })
-    .clone()
-}
-
 async fn post_form(fx: &Fixture, path: &str, body: &str, cookie: Option<&str>) -> cyper::Response {
     let mut req = fx
+        .server
         .http
-        .request(Method::POST, format!("{}{}", fx.auth_base, path))
+        .request(Method::POST, format!("{}{}", fx.server.auth_base, path))
         .expect("build POST")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");
-    // A client IP unique to this RUN. `/login` rate-limits per client ip, and
-    // with no header every POST in every run shares ONE bucket in
-    // `zeroship.rate_limits`. Invisible while each run had a private database.
-    // MEASURED 2026-08-20 with two runs sharing one: 429 where this file
-    // asserts 303, at three separate call sites.
-    req = req
-        .header("x-forwarded-for", run_client_ip())
-        .expect("x-forwarded-for");
     if let Some(cookie) = cookie {
         req = req.header("cookie", cookie).expect("cookie");
     }
@@ -1096,7 +1124,9 @@ async fn assert_grant_and_relay_alias(fx: &Fixture) {
         .await
         .expect("identity row")
         .get("relay_email");
-    assert!(alias.as_deref().is_some_and(|value| value.ends_with("@relay.zeroship.localhost")));
+    assert!(alias
+        .as_deref()
+        .is_some_and(|value| value.ends_with("@relay.zeroship.localhost")));
 }
 
 fn form(pairs: &[(&str, &str)]) -> String {
@@ -1108,7 +1138,10 @@ fn form(pairs: &[(&str, &str)]) -> String {
 }
 
 fn sorted_scopes(scopes: &[&str]) -> Vec<String> {
-    let mut scopes = scopes.iter().map(|scope| (*scope).to_string()).collect::<Vec<_>>();
+    let mut scopes = scopes
+        .iter()
+        .map(|scope| (*scope).to_string())
+        .collect::<Vec<_>>();
     scopes.sort();
     scopes.dedup();
     scopes

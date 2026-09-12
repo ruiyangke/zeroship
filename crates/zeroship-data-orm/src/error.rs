@@ -634,7 +634,6 @@ impl DbError {
     }
 }
 
-
 /// Add context to database failure messages while preserving their classification.
 /// Structured validation, configuration and policy errors retain their original bodies.
 pub fn prefix_message(err: &mut DbError, prefix: &str) {
@@ -718,42 +717,20 @@ impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
 // boundary. Builder errors are user-input refusals (bad filter, bad
 // collection name, bad identifier) — modelled as `ValidationFailed`
 // with a static code the SDK can branch on.
-impl From<zeroship_data_sql::compile::QueryError> for DbError {
-    fn from(e: zeroship_data_sql::compile::QueryError) -> Self {
-        use zeroship_data_sql::compile::QueryError;
-        // `ReservedSystemFieldName` carries a fixed hint
-        // listing the seven system fields so SDK consumers see the same
-        // remediation message Rust prints in test failures. The other
-        // three variants carry no hint (builder errors are deterministic
-        // identifier shape complaints — the message is self-explanatory).
+impl From<crate::sql::compile::QueryError> for DbError {
+    fn from(e: crate::sql::compile::QueryError) -> Self {
+        use crate::sql::compile::QueryError;
         let (code, msg, hint) = match e {
             QueryError::InvalidFilter(m) => ("invalid_filter", m, None),
             QueryError::InvalidCollection(m) => ("invalid_collection", m, None),
             QueryError::InvalidIdent(m) => ("invalid_identifier", m, None),
-            QueryError::ReservedSystemFieldName(m) => (
-                "reserved_system_field_name",
-                m,
-                Some(
-                    "System fields (id, created_at, updated_at, created_by, \
-                     updated_by, version, deleted_at) are managed by the \
-                     platform and cannot be overridden."
-                        .to_string(),
-                ),
+            QueryError::ReservedIdPrefix(m) => (
+                "reserved_id_prefix", m,
+                Some("Choose an ID prefix outside the platform-reserved namespace.".into()),
             ),
-            // UPDATE patch attempted to overwrite an
-            // immutable write-once system field (`id`, `created_at`,
-            // `created_by`). Distinct code so SDK consumers can branch
-            // (e.g. surface a "you can't change the id of a row"
-            // remediation) without substring-matching the message.
-            QueryError::ImmutableSystemField(m) => (
-                "immutable_system_field",
-                m,
-                Some(
-                    "Fields `id`, `created_at`, `created_by` are write-once \
-                     and set automatically on INSERT. They cannot be modified \
-                     via UPDATE."
-                        .to_string(),
-                ),
+            QueryError::ImmutableAssignedField(m) => (
+                "immutable_assigned_field", m,
+                Some("This field is assigned by its descriptor and cannot be changed through UPDATE.".into()),
             ),
         };
         DbError::ValidationFailed {
@@ -765,27 +742,27 @@ impl From<zeroship_data_sql::compile::QueryError> for DbError {
 }
 
 // The mask-sentinel codec
-// (`zeroship_data_sql::mask_codec::parse_mask_sentinel`) was relocated into the
-// leaf crate and returns [`zeroship_data_sql::schema_error::MaskSentinelError`] whose
+// (`crate::sql::mask_codec::parse_mask_sentinel`) was relocated into the
+// leaf crate and returns [`crate::sql::schema_error::MaskSentinelError`] whose
 // `.message` already carries the `mask_sentinel_malformed: …` prefix the SDK
 // contract + introspector expect. The pre-extraction parser returned
 // `DbError::internal(<that same message>)`; this `From` reproduces it exactly,
 // so the `mask_sentinel_malformed` code-discriminator the SDK round-trips is
 // preserved.
-impl From<zeroship_data_sql::schema_error::MaskSentinelError> for DbError {
-    fn from(e: zeroship_data_sql::schema_error::MaskSentinelError) -> Self {
+impl From<crate::sql::schema_error::MaskSentinelError> for DbError {
+    fn from(e: crate::sql::schema_error::MaskSentinelError) -> Self {
         DbError::internal(e.message)
     }
 }
 
-impl From<zeroship_data_sql::codecs::CodecError> for DbError {
-    fn from(error: zeroship_data_sql::codecs::CodecError) -> Self {
+impl From<crate::sql::codecs::CodecError> for DbError {
+    fn from(error: crate::sql::codecs::CodecError) -> Self {
         match error {
-            zeroship_data_sql::codecs::CodecError::Internal { message } => Self::internal(message),
-            zeroship_data_sql::codecs::CodecError::Validation { code, message } => {
+            crate::sql::codecs::CodecError::Internal { message } => Self::internal(message),
+            crate::sql::codecs::CodecError::Validation { code, message } => {
                 Self::validation(code, message)
             }
-            zeroship_data_sql::codecs::CodecError::Decode { column, reason } => {
+            crate::sql::codecs::CodecError::Decode { column, reason } => {
                 Self::row_decode(&column, reason)
             }
         }
@@ -843,5 +820,11 @@ mod isolation_level_tests {
         ] {
             assert_eq!(IsolationLevel::parse(level.ansi_name()).unwrap(), level);
         }
+    }
+}
+
+impl From<zeroship_core::schema_name::SchemaNameError> for DbError {
+    fn from(error: zeroship_core::schema_name::SchemaNameError) -> Self {
+        crate::sql::compile::QueryError::InvalidCollection(error.to_string()).into()
     }
 }

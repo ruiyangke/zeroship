@@ -3,7 +3,7 @@
  */
 
 /** Scalar value that can appear in a filter or document at the native boundary. */
-type ZeroshipScalar = string | number | boolean | null;
+type ZeroshipScalar = string | number | bigint | boolean | null;
 
 /**
  * Postgres transaction isolation level. The canonical wire spelling is

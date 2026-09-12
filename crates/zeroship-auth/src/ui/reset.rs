@@ -10,7 +10,7 @@
 //! redirects to `/login`.
 //!
 //! The limiter and the token pre-check both sit ahead of the hash on
-//! purpose. Argon2id at 19 MiB plus a slot in the blocking pool shared with
+//! purpose. Argon2id plus a slot in the blocking pool shared with
 //! `/login` and `/link` is far too much to spend on a request that a garbage
 //! token was always going to lose, and the CSRF pair a GET hands out is
 //! reusable (double-submit), so nothing else bounds the flood.
@@ -33,13 +33,12 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::audit::{self, AuditEvent};
-use crate::config::AuthConfig;
 use crate::csrf;
 use crate::error::{AuthError, Result};
 use crate::headers;
 use crate::identity::{password, password_reset};
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::ui::ResetPage;
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 
 #[derive(Debug, Deserialize)]
 pub struct ResetQuery {
@@ -58,8 +57,8 @@ pub struct ResetForm {
 //
 // ntex's per-thread service futures are intentionally `!Send`.
 #[allow(clippy::unused_async, clippy::future_not_send)]
-pub async fn get(query: Query<ResetQuery>, cfg: State<Arc<AuthConfig>>) -> HttpResponse {
-    render_form(&cfg, &query.token, None)
+pub async fn get(query: Query<ResetQuery>) -> HttpResponse {
+    render_form(&query.token, None)
 }
 
 /// `/reset` POST: validate CSRF + length, rate-limit, decline a dead token,
@@ -70,10 +69,24 @@ pub async fn get(query: Query<ResetQuery>, cfg: State<Arc<AuthConfig>>) -> HttpR
 pub async fn post(
     req: HttpRequest,
     form: Form<ResetForm>,
-    cfg: State<Arc<AuthConfig>>,
     db: State<Arc<compio_postgres::Client>>,
 ) -> HttpResponse {
-    // 1. CSRF.
+    submit(&req, &form, db.as_ref(), hash_password).await
+}
+
+/// Keep the expensive operation behind request validation. The caller owns
+/// the hashing operation, so observing it never needs process-wide state.
+#[allow(
+    clippy::future_not_send,
+    reason = "ntex requests and database connections stay on their owning runtime"
+)]
+async fn submit(
+    req: &HttpRequest,
+    form: &ResetForm,
+    db: &compio_postgres::Client,
+    hash: impl AsyncFnOnce(String) -> Result<String>,
+) -> HttpResponse {
+    // Validate CSRF.
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -84,41 +97,36 @@ pub async fn post(
         .as_deref()
         .is_none_or(|c| !csrf::matches(&form.csrf, c))
     {
-        return render_form(&cfg, &form.token, Some("invalid request"));
+        return render_form(&form.token, Some("invalid request"));
     }
 
-    // 2. NIST 800-63B Rev 4: 15-character minimum (same rule as /signup).
-    //    Count chars, not bytes — multibyte passphrases aren't penalised.
+    // Apply the same password minimum as /signup, counting characters so
+    // multibyte passphrases aren't penalised for their encoding.
     if form.password.chars().count() < crate::identity::password::MIN_PASSWORD_CHARS {
-        return render_form(
-            &cfg,
-            &form.token,
-            Some("password must be at least 15 characters"),
-        );
+        return render_form(&form.token, Some("password must be at least 15 characters"));
     }
 
-    // 3. Rate-limit per IP before the CPU-bound hash, the same placement
+    // Rate-limit per IP before the CPU-bound hash, the same placement
     //    /signup and /link use. Keyed on the forwarded client IP (auth runs
     //    behind the gateway, so the socket peer is the gateway and keying on
     //    it would make this one global bucket).
-    let ip = headers::client_ip(&req);
+    let ip = headers::client_ip(req);
     let reset_ip_key = format!("reset_ip:{ip}");
-    match rate_limit::consume(db.as_ref(), &reset_ip_key, Quota::RESET_IP).await {
+    match rate_limit::consume(db, &reset_ip_key, Quota::RESET_IP).await {
         Ok(RateLimitDecision::Allowed) => {}
         Ok(RateLimitDecision::Throttled(_)) => {
             audit::emit(
-                db.as_ref(),
+                db,
                 &AuditEvent {
                     event_type: "password_reset_throttled",
                     outcome: "failure",
                     auth_method: Some("password_reset"),
                     detail: serde_json::json!({ "bucket": "reset_per_ip" }),
-                    ..AuditEvent::from_request(&req)
+                    ..AuditEvent::from_request(req)
                 },
             )
             .await;
             return render_form_with_status(
-                &cfg,
                 &form.token,
                 Some("too many attempts, try again later"),
                 StatusCode::TOO_MANY_REQUESTS,
@@ -126,51 +134,42 @@ pub async fn post(
         }
         Err(e) => {
             tracing::error!(error = %e, bucket = %reset_ip_key, "password_reset rate-limit consume failed");
-            return render_form(&cfg, &form.token, Some("internal error"));
+            return render_form(&form.token, Some("internal error"));
         }
     }
 
-    // 4. Decline a token that already has no live row, before paying for the
-    //    hash. Step 6 is still the authority: it consumes the token and sets
+    // Decline a token that already has no live row, before paying for the
+    //    hash. Atomic completion below remains authoritative: it consumes the token and sets
     //    the password in one statement, and a token that passes here but
     //    loses that race is rejected there. This only means a flood of
-    //    never-issued tokens costs a primary-key lookup instead of 19 MiB and
+    //    never-issued tokens costs a primary-key lookup instead of Argon2 and
     //    a blocking-pool slot shared with /login and /link.
-    match password_reset::is_live(db.as_ref(), &form.token).await {
+    match password_reset::is_live(db, &form.token).await {
         Ok(true) => {}
-        Ok(false) => return reject_dead_token(db.as_ref(), &cfg, &form.token, &req).await,
+        Ok(false) => return reject_dead_token(db, &form.token, req).await,
         Err(e) => {
             tracing::error!(error = %e, "password_reset token pre-check failed");
-            return render_form(&cfg, &form.token, Some("internal error"));
+            return render_form(&form.token, Some("internal error"));
         }
     }
 
-    // 5. Hash on spawn_blocking — Argon2id is CPU-bound and synchronous;
-    //    parking the ntex event loop is a non-starter (same constraint as
-    //    /login and /signup).
-    let password_clone = form.password.clone();
-    let phc = match compio::runtime::spawn_blocking(move || password::hash(&password_clone)).await
-    {
-        Ok(Ok(p)) => p,
-        Ok(Err(e)) => {
+    let phc = match hash(form.password.clone()).await {
+        Ok(phc) => phc,
+        Err(e) => {
             tracing::error!(error = %e, "password_reset hash failed");
-            return render_form(&cfg, &form.token, Some("internal error"));
-        }
-        Err(_) => {
-            tracing::error!("password_reset hash spawn_blocking panicked");
-            return render_form(&cfg, &form.token, Some("internal error"));
+            return render_form(&form.token, Some("internal error"));
         }
     };
 
-    // 6. Atomically consume the reset token with the password update,
+    // Atomically consume the reset token with the password update,
     //    then audit, revoke existing sessions, and consume outstanding
     //    email tokens in one transaction.
-    let completed = match complete_password_reset(db.as_ref(), &form.token, &phc, &req).await {
+    let completed = match complete_password_reset(db, &form.token, &phc, req).await {
         Ok(Some(completed)) => completed,
-        Ok(None) => return reject_dead_token(db.as_ref(), &cfg, &form.token, &req).await,
+        Ok(None) => return reject_dead_token(db, &form.token, req).await,
         Err(e) => {
             tracing::error!(error = %e, "password_reset completion failed");
-            return render_form(&cfg, &form.token, Some("internal error"));
+            return render_form(&form.token, Some("internal error"));
         }
     };
     let revoked = completed.counts;
@@ -184,13 +183,20 @@ pub async fn post(
         "password_reset revoked sessions and stale tokens"
     );
 
-    // 7. Redirect to /login. The user signs in fresh with the new
+    // Redirect to /login. The user signs in fresh with the new
     //    credential — we intentionally don't auto-mint a session here
     //    (a reset link clicked from a different browser shouldn't
     //    silently log you in on that other browser).
     let mut resp = HttpResponse::Found();
     resp.header(LOCATION, HeaderValue::from_static("/login"));
     resp.finish()
+}
+
+/// Argon2 is CPU-bound; keep it off the request's event loop.
+async fn hash_password(password: String) -> Result<String> {
+    compio::runtime::spawn_blocking(move || password::hash(&password))
+        .await
+        .map_err(|_| AuthError::Internal("password_reset hash worker panicked".to_owned()))?
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,7 +341,6 @@ async fn complete_password_reset_tx(
 /// outside: same audit event, same page, same status. Only the cost differs.
 async fn reject_dead_token(
     db: &compio_postgres::Client,
-    cfg: &AuthConfig,
     token: &str,
     req: &HttpRequest,
 ) -> HttpResponse {
@@ -350,19 +355,14 @@ async fn reject_dead_token(
         },
     )
     .await;
-    render_form(cfg, token, Some("reset link invalid or expired"))
+    render_form(token, Some("reset link invalid or expired"))
 }
 
-fn render_form(cfg: &AuthConfig, token: &str, error: Option<&str>) -> HttpResponse {
-    render_form_with_status(cfg, token, error, StatusCode::OK)
+fn render_form(token: &str, error: Option<&str>) -> HttpResponse {
+    render_form_with_status(token, error, StatusCode::OK)
 }
 
-fn render_form_with_status(
-    _cfg: &AuthConfig,
-    token: &str,
-    error: Option<&str>,
-    status: StatusCode,
-) -> HttpResponse {
+fn render_form_with_status(token: &str, error: Option<&str>, status: StatusCode) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     // Independent per-response CSP script nonce — must NOT be the CSRF token
     // (which is also a non-HttpOnly cookie + plaintext form field). See L3.
@@ -408,10 +408,9 @@ mod tests {
             use serde::Deserialize;
             // Mirror the way ntex's Query<T> extractor decodes the URL
             // query: pairs → MapDeserializer → T.
-            let pairs: Vec<(String, String)> =
-                url::form_urlencoded::parse(q.as_bytes())
-                    .into_owned()
-                    .collect();
+            let pairs: Vec<(String, String)> = url::form_urlencoded::parse(q.as_bytes())
+                .into_owned()
+                .collect();
             let de = serde::de::value::MapDeserializer::new(pairs.into_iter());
             ResetQuery::deserialize(de)
         }
@@ -457,3 +456,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "reset/tests.rs"]
+mod request_tests;

@@ -14,13 +14,13 @@ use crate::tests::fixtures::DatabaseFixture;
 #[test]
 fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
     Host::test(|_| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "name": {"type": "string"},
             // `_masked` is reserved for Path B sibling columns.
             "card_pan_masked": {"type": "string"},
         });
         let result = fixture_table_sql(
-            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+            &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "cards",
             &schema,
             &FkEmission::Inline,
@@ -37,13 +37,13 @@ fn p55_pr1_build_create_table_refuses_masked_suffix_field_sqlite() {
 #[test]
 fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
     Host::test(|_| {
-        let schema = zeroship_data_sql::value!({
+        let schema = crate::value!({
             "name": {"type": "string"},
             // `phi` collides with the platform classification taxonomy.
             "phi": {"type": "string"},
         });
         let result = fixture_table_sql(
-            &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+            &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "patients",
             &schema,
             &FkEmission::Inline,
@@ -61,9 +61,9 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
 /// SQLite engine accepts, and PRAGMA `table_info` reports all 7 system
 /// fields after execution.
 #[test]
-fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
+fn sqlite_ddl_has_seven_assigned_field_columns_end_to_end() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::SqlDialect;
+        use crate::sql::compile::SqlDialect;
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -72,11 +72,11 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
                 .await
                 .expect("ensure_app_schema");
 
-            let schema = zeroship_data_sql::value!({
+            let schema = crate::value!({
                 "title": { "type": "string", "required": true },
             });
             let sql = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -142,7 +142,7 @@ fn sqlite_ddl_has_seven_system_field_columns_end_to_end() {
 #[test]
 fn freshly_created_table_has_three_indexes_end_to_end() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::SqlDialect;
+        use crate::sql::compile::SqlDialect;
         use zeroship_migrate::schema::query::index_name;
 
         host.run(async {
@@ -153,9 +153,9 @@ fn freshly_created_table_has_three_indexes_end_to_end() {
                 .expect("ensure_app_schema");
 
             let sql = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
-                &zeroship_data_sql::value!({}),
+                &crate::value!({}),
                 &FkEmission::Inline,
                 SqlDialect::Sqlite,
             )

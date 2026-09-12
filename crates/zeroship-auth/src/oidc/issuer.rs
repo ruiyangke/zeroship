@@ -439,27 +439,6 @@ impl Issuer {
         self.register_signed_token(db, signed).await
     }
 
-    /// Sign an unregistered access token in debug-only fixture code.
-    ///
-    /// Protocol code must use [`Self::issue_access_token`] so a stale process
-    /// cannot release a token after its registry row becomes `retired`.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_access_token_fixture(
-        &self,
-        mint: &AccessTokenMint<'_>,
-    ) -> Result<String> {
-        let subject = self.pairwise_subject(mint.user_id, mint.sector);
-        self.build_access_token_with_subject(
-            &subject,
-            mint.audience,
-            mint.client_id,
-            mint.scopes,
-            mint.ttl_secs,
-        )
-        .map(|signed| signed.token)
-    }
-
     /// Issue an RFC 9068 access token for a platform principal. This is used by
     /// first-party resource servers such as control where `sub` is the global
     /// principal UUID, not an end-user pairwise app subject.
@@ -483,23 +462,6 @@ impl Issuer {
             mint.ttl_secs,
         )?;
         self.register_signed_token(db, signed).await
-    }
-
-    /// Sign an unregistered principal token in debug-only fixture code.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_principal_access_token_fixture(
-        &self,
-        mint: &PrincipalAccessTokenMint<'_>,
-    ) -> Result<String> {
-        self.build_access_token_with_subject(
-            mint.principal_id,
-            mint.audience,
-            mint.client_id,
-            mint.scopes,
-            mint.ttl_secs,
-        )
-        .map(|signed| signed.token)
     }
 
     fn build_access_token_with_subject(
@@ -577,29 +539,6 @@ impl Issuer {
             mint.ttl_secs,
         )?;
         self.register_signed_token(db, signed).await
-    }
-
-    /// Sign an unregistered ID token in debug-only fixture code.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_id_token_fixture(&self, mint: &IdTokenMint<'_>) -> Result<String> {
-        let subject = self.pairwise_subject(mint.user_id, mint.sector);
-        self.build_id_token_with_subject(
-            &subject,
-            mint.client_id,
-            mint.sid,
-            mint.nonce,
-            mint.access_token,
-            mint.auth_time,
-            mint.amr,
-            mint.acr,
-            mint.email,
-            mint.email_verified,
-            mint.name,
-            mint.picture,
-            mint.ttl_secs,
-        )
-        .map(|signed| signed.token)
     }
 
     /// Issue an OIDC Core ID token for a platform principal. This is used only
@@ -730,16 +669,6 @@ impl Issuer {
         )?;
         let signed = self.build_logout_token(mint)?;
         self.register_signed_token(db, signed).await
-    }
-
-    /// Sign an unregistered logout token in debug-only fixture code.
-    #[cfg(debug_assertions)]
-    #[doc(hidden)]
-    pub fn sign_unregistered_logout_token_fixture(
-        &self,
-        mint: &LogoutTokenMint<'_>,
-    ) -> Result<String> {
-        self.build_logout_token(mint).map(|signed| signed.token)
     }
 
     fn build_logout_token(&self, mint: &LogoutTokenMint<'_>) -> Result<SignedJwt> {

@@ -37,9 +37,23 @@ import {
 // schema() values at the type layer. Importing all three from the
 // published entry keeps this helper on the same module instance as
 // every test file that calls `schema(...)`.
-import { SchemaBuilder } from "@zeroship/db";
+import { SchemaBuilder, t } from "@zeroship/db";
 import type { Db, SchemaInput } from "@zeroship/db";
 import type { NativeDb } from "../src/native.js";
+
+export const generatedSchema = {
+  id: t.string().required().primaryKey().assigned({ by: "typedId", on: "insert" }),
+  created_at: t.timestamp().required().assigned({ by: "now", on: "insert" }),
+  updated_at: t.timestamp().required().assigned({ by: "now", on: "write" }),
+  created_by: t.string().nullable().required().assigned({ by: "actor", on: "insert" }),
+  updated_by: t.string().nullable().required().assigned({ by: "actor", on: "write" }),
+  version: t.number().required().assigned({ by: "increment(1)", on: "write" }),
+  deleted_at: t.timestamp().nullable().required().assigned({ by: "now", on: "delete" }),
+};
+
+type FixtureSchemas<T> = {
+  [K in keyof T]: T[K] extends SchemaBuilder<infer F> ? SchemaBuilder<F & typeof generatedSchema> : T[K] & typeof generatedSchema
+};
 
 /**
  * Build the descriptor the toolchain would have emitted for `schemas`.
@@ -62,11 +76,15 @@ export function descriptorFor(schemas: Record<string, unknown>): RuntimeSchemaDe
     const fields = builder ? builder.fields : declared;
     const options = builder?.options;
 
+    const normalized = normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]);
+    const generated = normalizeSchema(generatedSchema);
+    if (options?.softDelete) generated.deleted_at.softDelete = true;
+    if (options?.versioning) generated.version.concurrency = true;
     collections[name] = {
       // The descriptor carries wire FieldDefs, not `t.*` builders.
       // `normalizeSchema` is the same conversion the installer applies to
       // descriptor fields, so running it here is idempotent downstream.
-      fields: normalizeSchema(fields as Parameters<typeof normalizeSchema>[0]),
+      fields: { ...generated, ...normalized },
       options: {
         softDelete: options?.softDelete ?? false,
         versioning: options?.versioning ?? false,
@@ -88,7 +106,7 @@ export function installSchemaForTest<
 >(
   schemas: T,
   opts: { native: NativeDb; naming?: InstallSchemaOptions["naming"] },
-): Db<T> {
+): Db<FixtureSchemas<T>> {
   installSchema(schemas as never, opts.native, {
     descriptor: descriptorFor(schemas),
     ...(opts.naming ? { naming: opts.naming } : {}),
@@ -96,5 +114,5 @@ export function installSchemaForTest<
   // The installer plants the per-collection wrappers and the `transaction` /
   // `live` extensions on the native handle as own properties, so the handle
   // itself is the `Db<T>` the call sites (`db.users.find(...)`) expect.
-  return opts.native as unknown as Db<T>;
+  return opts.native as unknown as Db<FixtureSchemas<T>>;
 }

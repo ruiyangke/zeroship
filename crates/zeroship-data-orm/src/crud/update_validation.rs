@@ -3,7 +3,8 @@ use crate::error::DbError;
 use crate::protection::protection_floor::{
     descriptor_declares_encryption, descriptor_declares_mask,
 };
-use zeroship_data_sql::{update, value::Value};
+use crate::value::Value;
+use crate::sql::update;
 
 pub(super) fn validate(schema: &Value, patch: &Value) -> Result<(), DbError> {
     for assignment in update::assignments(patch)? {

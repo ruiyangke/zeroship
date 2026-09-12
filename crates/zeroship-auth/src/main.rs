@@ -545,7 +545,7 @@ mod tests {
         validate_startup_secrets(&cfg).expect("a strong totp key boots");
 
         // Does NOT cover: that the key actually decrypts a stored TOTP secret.
-        // That is `totp_store_test.rs`.
+        // That is `tests/store/totp.rs`.
     }
 
     // The `--check-config` case the deleted `is_secret_ref` dance existed for: a

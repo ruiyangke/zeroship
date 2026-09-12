@@ -581,9 +581,7 @@ postgres = "unsupported"
 sqlite = "unsupported"
 mysql = "unsupported"
 
-# addConstraint — simple single-column id FK and unique are portable; check,
-# exclusion, composite FK, and non-id FK are PG-only; user PK and no-local-column
-# FK are refused everywhere.
+# Constraint support depends on structure and online-adoption options.
 [[row]]
 kind = "addConstraint"
 variant = "fkSimple"
@@ -591,9 +589,7 @@ postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
-# SQLite's addConstraint rebuild lane covers FOREIGN KEYS only (`IrConstraintKind::Fk`);
-# a UNIQUE constraint falls through to the PG-shaped renderer and is refused. MEASURED
-# against a live SQLite: the three fk* variants APPLY, `unique` refuses. Per-variant.
+# SQLite rebuilds foreign keys; adding other constraints has separate support.
 [[row]]
 kind = "addConstraint"
 variant = "unique"
@@ -622,15 +618,8 @@ postgres = "portable"
 sqlite = "portable"
 mysql = "portable"
 
-[[row]]
-kind = "addConstraint"
-variant = "fkNonId"
-postgres = "portable"
-sqlite = "portable"
-mysql = "portable"
-
 # fkNotValid — NOT VALID online constraint adoption on a FK; PG-only (SQLite/MySQL
-# have no NOT VALID). Composite/non-id notValid FKs collapse to this variant (all
+# have no NOT VALID). Composite notValid FKs collapse to this variant (all
 # PG-only), keeping op-level Support::decision() == validate.
 [[row]]
 kind = "addConstraint"

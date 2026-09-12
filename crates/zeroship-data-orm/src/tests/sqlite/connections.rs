@@ -273,8 +273,13 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             // path a CRUD op takes. Calling `backend.execute_fixture` directly would test
             // a layer BELOW the one that knows the app_id, and so could not observe
             // whether the data plane binds the file for itself.
+            crate::tests::fixtures::cache_schema(
+                app,
+                collection,
+                crate::value!({"body":{"type":"string"}}),
+            );
             host.exec_mutation_with_emit(
-                zeroship_data_sql::compile::BuiltQuery {
+                crate::sql::compiler::CompiledQuery {
                     sql: format!(
                         r#"INSERT INTO "{app}"."{collection}" (id, body)
                        VALUES ('note_1', 'hello')"#
@@ -291,7 +296,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             let rows = host
                 .exec_query(
                     app,
-                    zeroship_data_sql::compile::BuiltQuery {
+                    crate::sql::compiler::CompiledQuery {
                         sql: format!(
                             r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#
                         ),

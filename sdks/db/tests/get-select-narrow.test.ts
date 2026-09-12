@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * get(idOrFilter, { select }) narrowing — compile-time assertions
  * dressed as runtime tests. The bodies are trivial; the value is that
@@ -36,7 +37,7 @@ describe("get(...) select narrowing", () => {
   test("get with select returns Pick<Row, K> | null", async () => {
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
         age: t.number(),
@@ -63,7 +64,7 @@ describe("get(...) select narrowing", () => {
   test("get without select returns Row<S> | null", async () => {
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -83,7 +84,7 @@ describe("get(...) select narrowing", () => {
   test("get with orderBy but no select still returns Row<S> | null", async () => {
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },
@@ -100,7 +101,7 @@ describe("get(...) select narrowing", () => {
   test("get returns null when nothing matched", async () => {
     const Users = model(
       "users",
-      {
+      { ...generatedSchema,
         email: t.string().required().unique(),
         name: t.string().required(),
       },

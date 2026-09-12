@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * **P7 PR 3** — SDK-side cascade of the `id: string` (typed_id) shape.
  *
@@ -10,7 +11,7 @@
  *   mint required).
  *
  * Mirrors the Rust-side `dispatch_insert` auto-mint pass landed in this
- * PR (see `crates/zeroship-data-orm/src/crud/system_fields_pass.rs`).
+ * PR (see `crates/zeroship-data-orm/src/crud/assignment_pass.rs`).
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -91,7 +92,7 @@ describe("P7 PR 3 — Collection.get(string) routes through the loader", () => {
     });
     const Posts = model(
       "posts",
-      { title: t.string().required() },
+      { ...generatedSchema, title: t.string().required() },
       native,
     );
     const [a, b] = await Promise.all([
@@ -119,9 +120,9 @@ describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
   test("row_id_type_is_string", () => {
     type UserSchema = { name: TypeBuilder<string, true> };
     // Compile-time check via assignability — the literal succeeds iff
-    // `Row<UserSchema>['id']` accepts a string. A pre-PR 3 build of the
+    // `Row<UserSchema & typeof generatedSchema>['id']` accepts a string. A pre-PR 3 build of the
     // SDK would refuse this assignment (id was `number`).
-    const row: Row<UserSchema> = {
+    const row: Row<UserSchema & typeof generatedSchema> = {
       name: "alice",
       id: "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
       created_at: 1700000000000,
@@ -157,7 +158,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
     } as unknown as NativeDb;
     const Posts = model(
       "posts",
-      { title: t.string().required() },
+      { ...generatedSchema, title: t.string().required() },
       native,
     );
 
@@ -185,7 +186,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
     } as unknown as NativeDb;
     const Posts = model(
       "posts",
-      { title: t.string().required() },
+      { ...generatedSchema, title: t.string().required() },
       native,
     );
     const { data, error } = await Posts.insert({ title: "no id supplied" });
@@ -204,7 +205,7 @@ describe("P7 PR 3 — insert returns the platform-minted id", () => {
       // the closure already ran by this line.
       (receivedDoc as unknown as AnyRec).id,
       undefined,
-      "SDK must NOT mint id client-side — Rust does it (see system_fields_pass)",
+      "SDK must NOT mint id client-side — Rust does it (see assignment_pass)",
     );
     assert.equal(data!.id, "post_MINTED_BY_RUST");
   });

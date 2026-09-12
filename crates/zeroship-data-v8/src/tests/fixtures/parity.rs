@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use zeroship_data_sql::value::{Value, value};
+use zeroship_data_orm::value::{Value, value};
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
@@ -46,6 +46,13 @@ pub const DEV_APP_ID: &str = "default";
 fn matrix_schema() -> Value {
     value!({
         "_meta": {"strictness": "lenient"},
+        "id": {"type": "string", "readOnly": true},
+        "created_at": {"type": "date", "readOnly": true},
+        "updated_at": {"type": "date", "readOnly": true},
+        "created_by": {"type": "string", "readOnly": true},
+        "updated_by": {"type": "string", "readOnly": true},
+        "version": {"type": "int", "readOnly": true},
+        "deleted_at": {"type": "date", "readOnly": true},
         "title": {"type": "string", "required": true},
         "flag": {"type": "boolean", "required": true},
         "meta": {"type": "object", "required": true},
@@ -171,7 +178,6 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &s
         crate::tests::fixtures::grant_all_runtime_table_columns(&pool, app_id, collection).await;
     });
 }
-
 
 const SHIM: &str = r#"
 async function _shimRpc(name, input, ctx) {
@@ -390,7 +396,13 @@ const _procedures = { seed, transactionMatrix, typedRoundTrip };
 }
 
 pub fn runtime_descriptor(collection: &str, schema: &Value) -> String {
-    let mut fields = schema.clone();
+    let mut fields = super::schema::generated_fields(schema.clone());
+    for field in fields.as_object_mut().unwrap().values_mut() {
+        if let Some(definition) = field.as_object_mut() {
+            definition.shift_remove("softDelete");
+            definition.shift_remove("concurrency");
+        }
+    }
     let strictness = fields
         .as_object_mut()
         .and_then(|map| map.shift_remove("_meta"))

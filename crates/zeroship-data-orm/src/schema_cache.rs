@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::error::DbError;
 
@@ -139,7 +139,7 @@ mod tests {
     use super::*;
 
     fn binding(app: &str, deploy: &str) -> DbBinding {
-        let schema = zeroship_data_sql::SchemaName::new(app).expect("fixture schema name");
+        let schema = crate::sql::SchemaName::new(app).expect("fixture schema name");
         DbBinding::new(app, deploy, schema)
     }
 
@@ -152,13 +152,13 @@ mod tests {
         cache.replace_for_binding(
             &a,
             vec![
-                ("users".into(), zeroship_data_sql::value!({"v": 1})),
-                ("posts".into(), zeroship_data_sql::value!({"v": 1})),
+                ("users".into(), crate::value!({"v": 1})),
+                ("posts".into(), crate::value!({"v": 1})),
             ],
         );
         cache.replace_for_binding(
             &b,
-            vec![("users".into(), zeroship_data_sql::value!({"v": 9}))],
+            vec![("users".into(), crate::value!({"v": 9}))],
         );
 
         // Replacing app_a with a SHORTER list must drop `posts` and must not
@@ -166,12 +166,12 @@ mod tests {
         // plain `clear()` would break.
         cache.replace_for_binding(
             &a,
-            vec![("users".into(), zeroship_data_sql::value!({"v": 2}))],
+            vec![("users".into(), crate::value!({"v": 2}))],
         );
 
         assert_eq!(
             cache.get(&a, "users").as_deref(),
-            Some(&zeroship_data_sql::value!({"v": 2})),
+            Some(&crate::value!({"v": 2})),
             "the surviving collection must carry the NEW value"
         );
         assert!(
@@ -180,7 +180,7 @@ mod tests {
         );
         assert_eq!(
             cache.get(&b, "users").as_deref(),
-            Some(&zeroship_data_sql::value!({"v": 9})),
+            Some(&crate::value!({"v": 9})),
             "a different binding must be untouched by the replace"
         );
     }
@@ -193,7 +193,7 @@ mod tests {
 
         cache.replace_for_binding(
             &old,
-            vec![("users".into(), zeroship_data_sql::value!({"v": 1}))],
+            vec![("users".into(), crate::value!({"v": 1}))],
         );
 
         assert!(
@@ -215,8 +215,8 @@ mod tests {
         cache.replace_for_binding(
             &a,
             vec![
-                ("users".into(), zeroship_data_sql::value!({})),
-                ("posts".into(), zeroship_data_sql::value!({})),
+                ("users".into(), crate::value!({})),
+                ("posts".into(), crate::value!({})),
             ],
         );
 
@@ -246,7 +246,7 @@ mod tests {
         let a = binding("app_a", "d1");
         cache.replace_for_binding(
             &a,
-            vec![("users".into(), zeroship_data_sql::value!({"v": 1}))],
+            vec![("users".into(), crate::value!({"v": 1}))],
         );
 
         let err = cache
@@ -267,7 +267,7 @@ mod tests {
     fn empty_replacement_leaves_the_binding_schema_less() {
         let mut cache = SchemaCache::new();
         let a = binding("app_a", "d1");
-        cache.replace_for_binding(&a, vec![("users".into(), zeroship_data_sql::value!({}))]);
+        cache.replace_for_binding(&a, vec![("users".into(), crate::value!({}))]);
         cache.replace_for_binding(&a, vec![]);
         assert!(cache.get(&a, "users").is_none());
         assert!(cache.entries_for_binding(&a).is_empty());

@@ -7657,18 +7657,12 @@ fn validate_op_support(
 
     fn fk_features(
         columns: &[String],
-        references_columns: &[String],
         mut check: impl FnMut(Feature) -> Result<(), AuthoringError>,
     ) -> Result<(), AuthoringError> {
         if columns.is_empty() {
             check(Feature::ForeignKeyNoLocalColumn)?;
         } else if columns.len() != 1 {
             check(Feature::CompositeForeignKey)?;
-        }
-        if !(references_columns.is_empty()
-            || (references_columns.len() == 1 && references_columns[0] == "id"))
-        {
-            check(Feature::NonIdForeignKey)?;
         }
         Ok(())
     }
@@ -7776,13 +7770,12 @@ fn validate_op_support(
                     IrConstraintKind::Check { .. } => check(Feature::TableLevelCheck)?,
                     IrConstraintKind::Fk {
                         columns,
-                        references_columns,
                         deferrable,
                         initially_deferred,
                         ..
                     } => {
                         check(Feature::TableLevelForeignKey)?;
-                        fk_features(columns, references_columns, &mut check)?;
+                        fk_features(columns, &mut check)?;
                         fk_deferrable_consistency(deferrable, initially_deferred)?;
                     }
                     IrConstraintKind::Unique { .. } => check(Feature::TableLevelUnique)?,
@@ -7885,13 +7878,12 @@ fn validate_op_support(
         Op::AddConstraint { constraint, .. } => match &constraint.kind {
             IrConstraintKind::Fk {
                 columns,
-                references_columns,
                 deferrable,
                 initially_deferred,
                 not_valid,
                 ..
             } => {
-                fk_features(columns, references_columns, &mut check)?;
+                fk_features(columns, &mut check)?;
                 fk_deferrable_consistency(deferrable, initially_deferred)?;
                 if *not_valid == Some(true) {
                     check(Feature::ConstraintNotValid)?;
@@ -9024,67 +9016,9 @@ fn validate_default_expr(
     walk(expr, target_dialect, op_index)
 }
 
-/// Validate one [`IrColumn`](crate::model::ir::IrColumn)'s
-/// declared-only facets (`value_format` / `id_prefix` / `vector_metric`) against
-/// their bounds.
-///
-/// Three fail-closed checks, with the IR's hand-crafted-IR envelope threat model in
-/// mind (the closed-enum + `deny_unknown_fields` design):
-///
-/// 1. **`id_prefix`** - a legacy internal platform-ID prefix, distinct from
-///    TypeID, which must obey the internal `^[a-z][a-z0-9_]*$`
-///    charset rule + reserved-prefix deny-list (`usr`, ...) the runtime enforces via
-///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth
-///    in this crate, whose deny-list is
-///    [`crate::schema::query::RESERVED_ID_PREFIXES`]), PLUS a
-///    [`MAX_ID_PREFIX_LEN`] length bound so a
-///    hand-authored prefix keeps the compact `<prefix>_<22 base62 UUIDv7>` shape.
-///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
-///    BEFORE lower - never a render-time surprise minting colliding `usr_...` ids.
-/// 2. **`value_format`** - TypeID prefixes obey the distinct TypeID 0.3 grammar;
-///    TypeID and ULID formats co-occur only with exact
-///    [`ColType::Text`](crate::model::ir::ColType::Text) storage and never with
-///    `caseSensitive:false`.
-/// 3. **`vector_metric`** - structurally bounded by the closed
-///    [`crate::model::ir::VectorMetric`] enum at deserialize; the only authoring error
-///    left is CO-OCCURRENCE: a metric carried on a non-`Vector` column is
-///    meaningless (the opclass has no vector to apply to) and is refused
-///    ([`CODE_VECTOR_METRIC_MISPLACED`]) so a hand-crafted artifact cannot ride a
-///    dead field in.
-/// 4. **`references.name`** - an optional explicit foreign-key constraint name
-///    must be a non-empty portable bare identifier no longer than the registry's
-///    generated-identifier budget.
-///
-/// # Where the reserved-prefix list's peers live
-///
-/// This paragraph said the list was "kept in step with `system_fields_pass`'s
-/// `RESERVED_AUTO_PREFIXES`" until 2026-09-04. `RESERVED_AUTO_PREFIXES` has
-/// never existed anywhere in `crates/`, `sdks/` or `packages/` - that comment
-/// was its only occurrence. `system_fields_pass` is real
-/// (`crates/zeroship-data-orm/src/crud/system_fields_pass.rs`) and holds no
-/// prefix list at all: its `prefix_for_collection` routes every declared and
-/// every derived prefix through the runtime's `validate_id_prefix`.
-///
-/// The list has TWO real peers, and both are copies rather than references:
-///
-/// * `zeroship_data_sql::compile::RESERVED_ID_PREFIXES` - the runtime data plane's,
-///   which `system_fields_pass` reaches. Bound to this one over both the
-///   constant and the accept/refuse verdict by
-///   `zeroship-data-sql/src/compile.rs`'s `mod reserved_id_prefix_parity`.
-/// * `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts` - the SDK's build-time
-///   fence. UNBOUND: nothing relates it to either Rust list.
-///
-/// The exposure is DIVERGENCE, not shrinkage. A shrink was already caught on both
-/// sides - this crate's `p2a_create_table_rejects_a_reserved_id_prefix` and the
-/// runtime's `p7_id_prefix_decl_with_reserved_usr_is_rejected` each assert their
-/// own validator refuses `usr`. What nothing held was the two lists differing
-/// while each stays self-consistent: measured 2026-09-04, adding one entry here
-/// alone left all 894 of this crate's `--lib` tests green. That state gives a
-/// creator a prefix one side accepts and the other refuses at apply time.
-///
-/// # Errors
-/// [`CODE_INVALID_ID_PREFIX`] / [`CODE_INVALID_TYPE_ID_PREFIX`] /
-/// [`CODE_VECTOR_METRIC_MISPLACED`] / [`CODE_OP_INVALID`] as above.
+/// Validate declared column facets, their bounds, and compatible storage types.
+/// ID-prefix reservations use `schema::query::validate_id_prefix`; runtime parity
+/// is checked by `zeroship-data-sql`'s `reserved_id_prefix_parity` tests.
 fn validate_column_facets(
     vendors: VendorSet,
     col: &crate::model::ir::IrColumn,
@@ -9493,7 +9427,7 @@ fn validate_identity_placement(
 /// `ColRef` is rejected with the structured [`AuthoringError`] (rule (c)) at apply -
 /// NOT as an opaque raw DB error mid-statement.
 ///
-/// `live_columns` maps a target table -> its live column names (system fields
+/// `live_columns` maps a target table -> its live column names (injected columns
 /// included). An op whose table is absent from the map keeps the structural-only
 /// scope (the (c) check is skipped - the caller could not resolve that table).
 /// Non-DML / non-`setColumnType` ops are revalidated structurally (a),(b),(d)
@@ -9535,7 +9469,7 @@ pub fn validate_ir_resolved(
 /// an opaque raw DB `column does not exist` error mid-statement (the (c) check
 /// runs "at apply/render time").
 ///
-/// `live_columns` maps a target table -> its live column names (system fields
+/// `live_columns` maps a target table -> its live column names (injected columns
 /// included). An op whose table is ABSENT from the map keeps the structural-only
 /// scope (the (c) check is skipped - the caller could not resolve that table; the
 /// (a)/(b)/(d) structural checks still run). A non-DML / non-`setColumnType` op
@@ -12798,8 +12732,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_ir_create_table_partial_index_resolves_system_fields_in_scope() {
-        // The profile resolver materializes the seven platform system fields
+    fn validate_ir_create_table_partial_index_resolves_injected_columns_in_scope() {
+        // The profile resolver materializes the declared policy columns
         // before validation/lowering. A legitimate soft-delete partial-unique index
         // `WHERE deleted_at IS NULL` references the resolved column and MUST
         // resolve in rule (c) scope, not be rejected.
@@ -12859,18 +12793,18 @@ mod tests {
         .expect("resolve confined table shape");
         assert!(
             validate_ir(crate::test_fixtures::VENDORS, &ir, &POSTGRES).is_ok(),
-            "a partial index on `deleted_at` must resolve system fields (PG)"
+            "a partial index on `deleted_at` must resolve injected columns (PG)"
         );
         assert!(
             validate_ir(crate::test_fixtures::VENDORS, &ir, &SQLITE).is_ok(),
-            "a partial index on `deleted_at` must resolve system fields (SQLite)"
+            "a partial index on `deleted_at` must resolve injected columns (SQLite)"
         );
     }
 
     #[test]
     fn validate_ir_create_table_still_rejects_truly_unknown_column() {
-        // The system-field union must NOT loosen the gate for a genuinely unknown
-        // column - `ghost` is neither declared nor a system field.
+        // The injected-column union must NOT loosen the gate for a genuinely unknown
+        // column - `ghost` is neither declared nor an injected column.
         let ir = ir_with(vec![Op::CreateTable {
             attributes: zeroship_migrate_ir::attribute::CreateTableAttributes::new(),
             name: "users".into(),
@@ -14665,7 +14599,7 @@ mod tests {
         );
     }
 
-    /// **The system columns the charter injects must NOT be refused.**
+    /// **The injected columns the charter injects must NOT be refused.**
     ///
     /// `validate_field_name_for_declaration` additionally fences the policy-injected
     /// set. Calling it from this pre-injection gate - or moving the gate after
@@ -14688,7 +14622,7 @@ mod tests {
             ))];
             validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
                 .unwrap_or_else(|e| {
-                    panic!("the injected system column `{injected}` must not be refused: {e}")
+                    panic!("the injected column `{injected}` must not be refused: {e}")
                 });
         }
     }

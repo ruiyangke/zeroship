@@ -10,11 +10,9 @@
 //! fleet-wide boot failure discovered at deploy time. Here the same defect is a
 //! compile error on the machine that wrote it.
 //!
-//! WHAT THIS IS NOT. Validation is per FILE, so it cannot rule on whether a
-//! file is in `PLATFORM_POLICY_SOURCES` - a policy that is valid and loaded by
-//! nobody still authorizes nothing. `engine`'s
-//! `every_policy_file_on_disk_is_wired_into_the_loaded_set` and
-//! `tests/organization_policy_ladder_gate.sh` rule on that.
+//! Validation checks each file independently. The authorization tests exercise
+//! the policy set returned by `engine::load_platform_policies` and require its
+//! expected grants and refusals.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};

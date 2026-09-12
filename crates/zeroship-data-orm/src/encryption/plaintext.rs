@@ -1,7 +1,7 @@
 //! Native plaintext encoding selected by the logical field type.
 
 use base64::Engine as _;
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::error::DbError;
 
@@ -85,7 +85,7 @@ impl PlaintextType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
 
     #[test]
     fn encrypted_plaintext_round_trips_native_values_from_field_types() {

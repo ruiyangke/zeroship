@@ -260,7 +260,7 @@ async fn locked_account_recovers_via_password_reset() {
         .await
         .expect("issue reset token");
     let new_phc = password::hash(NEW_PW).expect("hash new password");
-    let completed = password_reset::complete(&pg, &issued.raw, &new_phc)
+    let completed = password_reset::complete(pg.as_ref(), &issued.raw, &new_phc)
         .await
         .expect("complete reset")
         .expect("reset must complete");

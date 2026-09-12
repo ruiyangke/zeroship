@@ -1653,7 +1653,7 @@ addresses we assigned, a trust root we issued, and a membership list we control.
 Paying that complexity for discovery problems we do not have is a bad trade
 before any dependency question arises. It also arrives on a tokio reactor, which
 AGENTS.md permits only as a `[dev-dependencies]` exemption, with
-`tests/zero_tokio_gate.sh` enforcing both directions. That is the second reason
+`cargo xtask test repository` enforcing both directions. That is the second reason
 and should not be the argument that gets made.
 
 **etcd.** Rejected because its job is already done here, and because its known

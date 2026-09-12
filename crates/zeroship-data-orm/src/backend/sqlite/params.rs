@@ -1,6 +1,6 @@
 //! Bind native values without formatting ordinary columns as text.
 use rusqlite::types::{ToSql, ToSqlOutput};
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 pub(crate) struct Parameter<'a>(pub &'a Value);
 impl ToSql for Parameter<'_> {
@@ -41,7 +41,8 @@ impl ToSql for Parameter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::{SchemaName, compile, value};
+    use crate::value;
+    use crate::sql::{SchemaName, compile};
 
     #[test]
     fn json_scalars_keep_their_json_type_and_text_remains_text() {

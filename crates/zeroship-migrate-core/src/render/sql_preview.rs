@@ -88,7 +88,7 @@ pub struct PreviewOpts {
     /// The composed policy whose inject rules shape every previewed create-table
     /// operation. The preview runs the table-shape resolve itself against this
     /// policy, so an envelope may arrive raw or already resolved. It is mandatory;
-    /// preview has no ambient system-field profile. It does NOT drive anything
+    /// preview has no ambient injected-column profile. It does NOT drive anything
     /// beyond create-table injection and the lowering context.
     pub effective_policy: zeroship_migrate_policy::EffectivePolicy,
 }

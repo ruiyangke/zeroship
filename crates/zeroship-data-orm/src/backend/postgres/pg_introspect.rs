@@ -2,12 +2,12 @@
 //!
 //! **PG TIER.** Catalog SQL, [`compio_postgres::Pool`], PostgreSQL row
 //! decoding, and PostgreSQL foreign-key action codes are vendor mechanics.
-//! The neutral schema snapshot and metadata stay in `zeroship-data-sql`; this
+//! The neutral schema snapshot and metadata stay in `zeroship-data-orm::sql`; this
 //! module populates those values from PostgreSQL without embedding the driver
 //! in the shared schema floor.
 
 use compio_postgres::Pool;
-use zeroship_data_sql::catalog::{
+use crate::sql::catalog::{
     ColumnInfo, EncryptionMeta, ForeignKeyInfo, IndexInfo, LiveSchema, MaskMeta,
 };
 
@@ -126,10 +126,10 @@ SELECT c.relname AS table_name,
         let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
             // The mask sentinel belongs to the visible field column.
-            if comment.starts_with(zeroship_data_sql::mask_codec::MASK_SENTINEL_PREFIX) {
+            if comment.starts_with(crate::sql::mask_codec::MASK_SENTINEL_PREFIX) {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
-            } else if comment.starts_with(zeroship_data_sql::mask_codec::ENC_SENTINEL_PREFIX) {
-                match zeroship_data_sql::mask_codec::parse_encryption_sentinel(comment) {
+            } else if comment.starts_with(crate::sql::mask_codec::ENC_SENTINEL_PREFIX) {
+                match crate::sql::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
                         // Malformed sentinels are logged and omitted from the recovered metadata.
@@ -179,7 +179,7 @@ SELECT c.relname AS table_name,
         };
         let sibling = masked_column;
         let (kind, classification) =
-            match zeroship_data_sql::mask_codec::parse_mask_sentinel(&sentinel) {
+            match crate::sql::mask_codec::parse_mask_sentinel(&sentinel) {
                 Ok(p) => p,
                 Err(e) => {
                     // Surface a malformed sentinel as a tracing::warn.
@@ -204,7 +204,7 @@ SELECT c.relname AS table_name,
             kind,
             classification,
             // The OTHER column of the pair: the one holding the real value.
-            sibling_column: zeroship_data_sql::compile::raw_column_name(&sibling),
+            sibling_column: crate::sql::compile::raw_column_name(&sibling),
         });
     }
 

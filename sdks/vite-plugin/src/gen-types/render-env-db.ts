@@ -29,6 +29,7 @@ export interface RuntimeFieldDef {
   encrypted?: boolean;
   idPrefix?: string;
   refTarget?: string;
+  refColumn?: string;
   onDelete?: string;
   onUpdate?: string;
   deferrable?: boolean;
@@ -63,22 +64,6 @@ export interface RuntimeDescriptor {
   version?: number;
   collections?: Record<string, RuntimeCollection>;
 }
-
-/**
- * The 7 platform-injected system columns. They live in `schema.runtime.json`
- * (the runtime installs them), but they are elided from the `env.db.ts` literal
- * because `@zeroship/db` already infers them onto every row - re-declaring them
- * would let a hand edit disagree with the platform.
- */
-const SYSTEM_FIELDS: ReadonlySet<string> = new Set([
-  "id",
-  "created_at",
-  "updated_at",
-  "created_by",
-  "updated_by",
-  "version",
-  "deleted_at",
-]);
 
 /**
  * The banner both schema sources carry. It names the toolchain, not a source,
@@ -126,7 +111,6 @@ export function renderGeneratedEnvDb(descriptor: RuntimeDescriptor): string {
 
     body += `  ${jsKey(collection)}: ${needsBuilder ? "defineSchema({" : "{"}\n`;
     for (const [column, def] of Object.entries(coll.fields ?? {})) {
-      if (SYSTEM_FIELDS.has(column)) continue;
       body += `    ${jsKey(column)}: ${renderBuilderChain(def)},\n`;
     }
     body += needsBuilder ? `  })${renderCollectionChains(options, indexes)}` : "  }";
@@ -288,6 +272,8 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   }
   if (def.default !== undefined) chain += `.default(${renderDefaultValue(def.default)})`;
 
+  if (def.primaryKey === true) chain += ".primaryKey()";
+  if (def.assign !== undefined) chain += `.assigned(${JSON.stringify(def.assign)})`;
   return chain;
 }
 
@@ -306,10 +292,11 @@ function renderIdBase(def: RuntimeFieldDef): string {
   return typeof def.idPrefix === "string" ? `t.id(${jsStr(def.idPrefix)})` : "t.id()";
 }
 
-/** `t.ref(target, { onDelete?, onUpdate?, deferrable? })` - the FK base. */
+/** Preserve the reference target and its constraint options. */
 function renderRefBase(def: RuntimeFieldDef): string {
   const target = typeof def.refTarget === "string" ? def.refTarget : "";
   const opts: string[] = [];
+  if (typeof def.refColumn === "string") opts.push(`column: ${jsStr(def.refColumn)}`);
   if (typeof def.onDelete === "string") opts.push(`onDelete: ${jsStr(def.onDelete)}`);
   if (typeof def.onUpdate === "string") opts.push(`onUpdate: ${jsStr(def.onUpdate)}`);
   if (typeof def.deferrable === "boolean") opts.push(`deferrable: ${def.deferrable}`);

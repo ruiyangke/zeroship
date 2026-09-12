@@ -201,20 +201,11 @@ services:
   # gateway, worker and auth - none of which migrate anything - so the Dockerfile
   # grew a `migrate` target and this service builds it.
   #
-  # The apply is idempotent: every journal version is a hash of owner_app plus the
-  # migration name, so a re-run re-derives the same versions and skips every
-  # applied file. Measured 2026-08-28 on the host against a PostgreSQL 17.11
-  # cluster created for the run: 35 of 35 files applied and exit 0, then an
-  # immediate second run reported `"applied":[]` for all 35 and exited 0.
-  # Destructive in-place evolutions in the committed set are approved by
-  # construction (`--approve`) - this operator-side one-shot treats the committed
+  # `cargo xtask test migrations` verifies the host CLI's apply, durable journal
+  # and repeat-apply contract against an owned database. It does not build this
+  # image. Destructive in-place evolutions in the committed set are approved by
+  # construction (`--approve`): this operator one-shot treats the committed
   # migrations as the intended apply.
-  #
-  # THAT SENTENCE PREVIOUSLY CLAIMED THE SAME RESULT AND WAS NOT A MEASUREMENT.
-  # On the day it was written the corpus could not be applied by any Node applier:
-  # all 35 files imported `@zeroship/migrate`, which resolves to nothing outside
-  # the V8 module map of a binary that had just been deleted. It is re-derived now
-  # by `tests/platform_migration_corpus_gate.sh` rather than asserted here.
   #
   # A DATABASE THE OLD BINARY MIGRATED NEEDS ONE MANUAL ADOPTION, and it is
   # deliberately not automatic. Its journal holds versions this corpus does not

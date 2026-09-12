@@ -9,7 +9,7 @@ use compio_postgres::Pool;
 
 use zeroship_data_orm::binding::DbBinding;
 
-use zeroship_data_sql::value::value;
+use crate::value::value;
 
 /// Test gate for `vector_search_returns_k_nearest`.
 ///
@@ -139,7 +139,7 @@ fn vector_search_returns_k_nearest() {
                     query: &query,
                     k: 10,
                     metric: VectorMetric::Cosine,
-                    filter: &zeroship_data_sql::value::Value::Null,
+                    filter: &crate::value::Value::Null,
                     schema: &zeroship_data_orm::descriptor::collection_schema(
                         &DbBinding::cold_start(app),
                         coll,
@@ -157,7 +157,7 @@ fn vector_search_returns_k_nearest() {
                 .iter()
                 .filter_map(|r| {
                     r.get("id")
-                        .and_then(zeroship_data_sql::value::Value::as_i64)
+                        .and_then(crate::value::Value::as_i64)
                 })
                 .collect();
             assert!(
@@ -269,8 +269,8 @@ fn pgvector_extension_missing_reports_typed_error() {
                         query: &[0.0f32; 8],
                         k: 10,
                         metric: VectorMetric::Cosine,
-                        filter: &zeroship_data_sql::value::Value::Null,
-                        schema: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
+                        schema: &crate::value::Value::Null,
                     },
                 )
                 .await
@@ -445,7 +445,7 @@ fn near_returns_within_radius() {
             crate::tests::fixtures::cache_schema(
                 app,
                 coll,
-                value!({ "location": { "type": "geoPoint" } }),
+                value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }),
             );
 
             crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
@@ -504,9 +504,9 @@ fn near_returns_within_radius() {
                     column: "location",
                     point: london,
                     radius_m: 1000.0,
-                    filter: &zeroship_data_sql::value::Value::Null,
+                    filter: &crate::value::Value::Null,
                     limit: None,
-                    schema: &value!({ "location": { "type": "geoPoint" } }),
+                    schema: &value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }),
                 },
             )
             .await
@@ -516,7 +516,7 @@ fn near_returns_within_radius() {
                 .iter()
                 .filter_map(|r| {
                     r.get("id")
-                        .and_then(zeroship_data_sql::value::Value::as_i64)
+                        .and_then(crate::value::Value::as_i64)
                 })
                 .collect();
             let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
@@ -607,9 +607,9 @@ fn postgis_extension_missing_reports_typed_error() {
                         column: "any",
                         point: GeoPoint { lat: 0.0, lng: 0.0 },
                         radius_m: 1000.0,
-                        filter: &zeroship_data_sql::value::Value::Null,
+                        filter: &crate::value::Value::Null,
                         limit: None,
-                        schema: &zeroship_data_sql::value::Value::Null,
+                        schema: &crate::value::Value::Null,
                     },
                 )
                 .await

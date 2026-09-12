@@ -24,7 +24,7 @@
 //! `migrate` service / `deploy/ops/db-migrate.sh`).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -131,7 +131,10 @@ pub async fn issue(db: &Client, user_id: Uuid, email: &str) -> Result<IssuedToke
 /// # Errors
 ///
 /// [`AuthError::Db`] on PG failure.
-pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken>> {
+pub async fn redeem(
+    db: &(impl GenericClient + ?Sized),
+    raw_token: &str,
+) -> Result<Option<RedeemedToken>> {
     let token_hash = sha256(raw_token);
     let rows = db
         .query(
@@ -162,7 +165,7 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
 ///
 /// [`AuthError::Db`] on PG failure.
 pub async fn redeem_and_mark_verified(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     raw_token: &str,
 ) -> Result<Option<RedeemedToken>> {
     let token_hash = sha256(raw_token);

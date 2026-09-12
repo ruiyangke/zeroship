@@ -1871,6 +1871,9 @@ importers:
       acorn:
         specifier: ^8.16.0
         version: 8.16.0
+      smol-toml:
+        specifier: 1.8.0
+        version: 1.8.0
       tsx:
         specifier: 'catalog:'
         version: 4.21.0

@@ -401,8 +401,9 @@ fn runtime_options_reach_both_artifacts_per_field_and_survive_a_rename() {
   {"op":"renameTable","table":"boxes","to":"crates"}
 ]"#,
     );
+    let (ops, policy) = support::lifecycle_fixture(&ops, SCHEMA);
     for dialect in DIALECTS {
-        let (runtime, env_db_ts) = artifacts(&ops, dialect, &support::no_inject(SCHEMA));
+        let (runtime, env_db_ts) = artifacts(&ops, dialect, &policy);
         assert_options(&runtime, "crates", true, true, "lenient");
         // The `env.db.ts` half reads the SAME map through `render_runtime_options`,
         // and it is the only thing the map reaches in that artifact.
@@ -700,11 +701,16 @@ fn measure_corpus() -> Vec<String> {
     let open = support::no_inject(SCHEMA);
     for (name, source) in CARRIERS {
         let ops = parse(source);
+        let (ops, policy) = if *name == "runtime_options_then_rename" {
+            support::lifecycle_fixture(&ops, SCHEMA)
+        } else {
+            (ops, open.clone())
+        };
         for dialect in DIALECTS {
             corpus_lines(
                 &format!("carrier:{name}"),
                 &ops,
-                &open,
+                &policy,
                 dialect,
                 &mut measured,
             );
@@ -940,12 +946,22 @@ fn the_move_added_no_refusal_that_the_old_path_did_not_already_make() {
     let confined = support::confined_charter();
     let open = support::no_inject(SCHEMA);
 
+    let (_, lifecycle_policy) = support::lifecycle_fixture(&[], SCHEMA);
     let mut cases: Vec<(String, Vec<Op>, &EffectivePolicy)> = Vec::new();
     for stem in STEMS {
         cases.push((format!("fixture:{stem}"), read_stem(stem), &confined));
     }
     for (name, source) in CARRIERS {
-        cases.push((format!("carrier:{name}"), parse(source), &open));
+        let ops = parse(source);
+        let (ops, policy) = if *name == "runtime_options_then_rename" {
+            (
+                support::lifecycle_fixture(&ops, SCHEMA).0,
+                &lifecycle_policy,
+            )
+        } else {
+            (ops, &open)
+        };
+        cases.push((format!("carrier:{name}"), ops, policy));
     }
     for (name, source) in REFUSAL_PROBES {
         cases.push((format!("probe:{name}"), parse(source), &open));

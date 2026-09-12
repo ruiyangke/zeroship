@@ -7,7 +7,7 @@ use uuid::Uuid;
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
-use zeroship_data_sql::SchemaName;
+use zeroship_core::schema_name::SchemaName;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -205,9 +205,7 @@ pub enum ApplyRequestError {
     Connect(compio_postgres::Error),
     #[error("inspect migration database schema: {0}")]
     InspectSchema(compio_postgres::Error),
-    /// `reason` is a rendered string rather than a `#[source]` because
-    /// `zeroship_data_sql::compile::QueryError` implements `Display` but not
-    /// `std::error::Error`, so it cannot be a source in this chain.
+    /// The derived physical schema name was invalid.
     #[error("app schema name {schema:?} is not a legal identifier: {reason}")]
     SchemaName { schema: String, reason: String },
     #[error("database {database_id} has not been created")]
@@ -1540,7 +1538,7 @@ pub fn runtime_role_provisioning_sql(
     schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
-    let schema_q = schema.quoted();
+    let schema_q = quote_ident(schema.as_str());
     let role_name = per_app_role_name(schema.as_str())?;
     let role_q = quote_ident(&role_name);
     let template_q = quote_ident(APP_ROLE_TEMPLATE);

@@ -145,7 +145,7 @@ describe("installSchema", () => {
     const innerNative = makeMockNative();
     let caught: unknown = null;
     const collection = {
-      fields: { name: { type: "string", required: true } },
+      fields: { id: { type: "string", required: true, primaryKey: true }, name: { type: "string", required: true } },
       options: { softDelete: false, versioning: false },
       indexes: [],
     };

@@ -7,7 +7,8 @@
 use crate::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
 use async_trait::async_trait;
 use std::{any::Any, fmt::Debug, ops::Deref, rc::Rc};
-use zeroship_data_sql::{compile::SqlDialect, value::Value};
+use crate::value::Value;
+use crate::sql::{compile::SqlDialect};
 
 /// Cancellation can either deliver an interrupt or also finish rollback.
 #[derive(Debug)]

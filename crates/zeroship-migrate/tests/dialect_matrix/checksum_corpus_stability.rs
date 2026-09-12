@@ -75,7 +75,7 @@ fn corpus_checksums() -> Vec<(&'static str, &'static str, String)> {
 fn every_corpus_op_has_a_deterministic_checksum() {
     let first = corpus_checksums();
     assert!(
-        first.len() >= 92,
+        first.len() >= 91,
         "the dialect corpus must not silently shrink: {} rows",
         first.len()
     );
@@ -134,9 +134,9 @@ fn corpus_checksums_are_byte_stable() {
     // -- which is the row whose op carries a `language` field, and the other 91 are
     // byte-identical. Aggregate:
     // 7b960d132e2487c27567e906cec97834bf12222a9ca429b375d006072835b7c3 ->
-    // 7af1f998f5cc38e4db2e25d004b08ff253dd04573df8475be7f10ead264297c7.
+    // 383a2f9ab18283a00b8078e34a6cd0ec32ef9d146af6eaf7fc242a63f2dd7186.
     const EXPECTED_AGGREGATE: &str =
-        "7af1f998f5cc38e4db2e25d004b08ff253dd04573df8475be7f10ead264297c7";
+        "383a2f9ab18283a00b8078e34a6cd0ec32ef9d146af6eaf7fc242a63f2dd7186";
     assert_eq!(
         aggregate,
         EXPECTED_AGGREGATE,

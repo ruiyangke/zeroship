@@ -252,10 +252,6 @@ fn unsupported_reason(
             "pk" => "addConstraint user PRIMARY KEY is inconsistent today and fold refuses it",
             "fkNoLocalColumn" => "addConstraint(fk) with no local column is unsupported",
             "fkComposite" => "multi-column foreign keys are unsupported on this target",
-            "fkNonId" => "foreign keys referencing non-id columns are unsupported on this target",
-            // Only the non-FK variants need the rebuild. `fkSimple`,
-            // `fkComposite` and `fkNonId` all APPLY on SQLite (measured
-            // against a live database), so this is a per-variant gap.
             "check" | "exclusion" | "unique" | "fkNotValid" => backend_refusal(),
             _ => NEVER_REFUSED,
         },
@@ -803,23 +799,12 @@ fn add_constraint_variant(kind: &IrConstraintKind) -> &'static str {
         IrConstraintKind::Check { .. } => "check",
         IrConstraintKind::Fk { columns, .. } if columns.is_empty() => "fkNoLocalColumn",
         IrConstraintKind::Exclusion { .. } => "exclusion",
-        // `NOT VALID` online adoption is PostgreSQL-only. It takes precedence
-        // over the composite/non-id FK sub-shapes (all likewise PG-only), so a
-        // `notValid` FK reports the single PG-only `fkNotValid` variant - keeping
-        // the op-level `Support::decision()` PG-only (and thus == validate, like
-        // `fkComposite`), robust regardless of corpus sampling order.
+        // Online adoption takes precedence over the key shape.
         IrConstraintKind::Fk {
             not_valid: Some(true),
             ..
         } => "fkNotValid",
         IrConstraintKind::Fk { columns, .. } if columns.len() != 1 => "fkComposite",
-        IrConstraintKind::Fk {
-            references_columns, ..
-        } if !(references_columns.is_empty()
-            || (references_columns.len() == 1 && references_columns[0] == "id")) =>
-        {
-            "fkNonId"
-        }
         IrConstraintKind::Fk { .. } => "fkSimple",
         IrConstraintKind::Unique { .. } => "unique",
     }

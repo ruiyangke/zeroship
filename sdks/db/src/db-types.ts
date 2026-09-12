@@ -49,11 +49,14 @@
  */
 
 import type { Collection } from "./collection";
+import type { AliasedCollection, ReadFrom } from "./read";
 import type { LiveOptions, LiveQuery } from "./live";
+import type { PaginationResult } from "./query";
 import type {
   PlainObject,
   Result,
   Row,
+  RowId,
   RowInput,
   UpsertOptions,
   UpdateExpression,
@@ -88,12 +91,6 @@ export type SchemaInput =
 // Transaction surface — TxCollection / TxQuery / TransactionOptions
 // ---------------------------------------------------------------------------
 
-type TxPaginationResult<P> = {
-  page: P[];
-  continueCursor: string;
-  isDone: boolean;
-};
-
 /**
  * A typed collection inside a transaction — same API as Collection but
  * throws on error instead of returning Result. Generic over schema
@@ -106,42 +103,43 @@ type TxPaginationResult<P> = {
  * consumers compiling (joined fields degrade to `PlainObject`).
  */
 export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A>;
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<Pick<Row<S>, K> | null>;
   get<W extends WithSpec>(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> },
   ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
   find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
-  update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
+  update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  delete(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  purge(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  purge(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   purgeMany(filter?: Filter<S>): Promise<{ purgedCount: number }>;
-  restore(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  restore(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
   distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
   bulkUnmask(
     items: ReadonlyArray<{
-      id: string;
+      id: RowId<S>;
       columns: readonly (string & keyof Row<S>)[];
     }>,
     opts: { actor: import("./types").Actor; reason?: string },
-  ): Promise<Map<string, Record<string, unknown>>>;
+  ): Promise<Map<RowId<S>, Record<string, unknown>>>;
   search(
     args: {
       vector: number[];
@@ -171,12 +169,12 @@ export type TxQuery<
   skip(n: number): TxQuery<S, P, AllSchemas>;
   select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
   select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
-  after(id: string): TxQuery<S, P, AllSchemas>;
+  after(id: RowId<S>): TxQuery<S, P, AllSchemas>;
   with<W extends WithSpec>(spec: W): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   paginate(opts: {
     cursor?: string | null;
     numItems: number;
-  }): Promise<TxPaginationResult<P>>;
+  }): Promise<PaginationResult<P>>;
   /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
    *  the tx callback on a native error (tx unwraps Result). */
   first(): Promise<P | null>;
@@ -242,7 +240,8 @@ export type Collections<T extends Record<string, SchemaInput>> = {
  * Rust as of P9 PR 3); `live` wraps the subscription primitives.
  */
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  from: ReadFrom;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   /**
    * Reactive query layer. Runs `queryFn`, yields the initial result,
    * then re-runs and yields a fresh result on every change to any

@@ -19,13 +19,11 @@ pub struct DbService {
 }
 impl DbService {
     pub fn new(config: DbServiceConfig) -> Result<Arc<Self>, DbError> {
-        let assignments = zeroship_data_orm::system_shape_charter::AssignmentPlan::load()?;
         Ok(Arc::new(Self {
             plugin: Arc::new(DbPlugin::new(
                 config.connection,
                 config.cdc_relay,
                 config.meter,
-                assignments,
                 config.project_keys,
             )),
         }))

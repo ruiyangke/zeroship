@@ -40,7 +40,7 @@ fn adapter_has_no_backend_dependencies_exports_or_concrete_knowledge() {
     }
     let files = tree("zeroship-data-v8");
     assert!(!files.is_empty());
-    let owner = Regex::new(r"\b(zeroship_data_orm|zeroship_data_sql|backend)\b").unwrap();
+    let owner = Regex::new(r"\b(zeroship_data_orm|backend)\b").unwrap();
     for (path, source) in files {
         assert!(
             !source.names_any(DRIVERS) && !source.names_any(&["BackendUrl"]),
@@ -69,19 +69,19 @@ fn adapter_boundary_checks_reject_forbidden_controls() {
     ] {
         assert!(adapter_dependency_forbidden(name));
     }
-    for name in ["zeroship-data-orm", "zeroship-data-sql", "zeroship-runtime"] {
+    for name in ["zeroship-data-orm", "zeroship-runtime"] {
         assert!(!adapter_dependency_forbidden(name));
     }
     for input in [
         "pub use zeroship_data_orm::cdc::broker;",
-        "pub use zeroship_data_sql as sql;",
+        "pub use zeroship_data_orm::sql;",
         "pub\nuse\nbackend::pg_row_json;",
     ] {
         assert!(!source::parse(input).public_uses.is_empty());
     }
     for input in [
         "use zeroship_data_orm::cdc::broker;",
-        "pub(crate) use zeroship_data_sql::compile;",
+        "pub(crate) use zeroship_data_orm::sql::compile;",
     ] {
         assert!(source::parse(input).public_uses.is_empty());
     }
@@ -163,7 +163,13 @@ fn dependency_closures_preserve_library_and_service_boundaries() {
         .into_iter()
         .map(|p| p["name"].as_str().unwrap())
         .collect();
-    for name in ["zeroship-data-sql", "zeroship-data-macros"] {
+    assert!(!members.contains("zeroship-data-sql"), "SQL belongs to the ORM package");
+    for name in ["zeroship-core", "zeroship-migrate-server"] {
+        assert!(members.contains(name));
+        let closure = repo::normal_closure(name);
+        assert!(!closure.contains("zeroship-data-orm"), "{name} must not depend on ORM execution");
+    }
+    for name in ["zeroship-data-macros"] {
         assert!(members.contains(name));
         let closure = repo::normal_closure(name);
         for forbidden in [
@@ -177,6 +183,15 @@ fn dependency_closures_preserve_library_and_service_boundaries() {
             assert!(!closure.contains(forbidden), "{name} reaches {forbidden}");
         }
     }
+    let closure = repo::normal_closure("zeroship-data-macros");
+    assert!(
+        !closure.contains("zeroship-data-sql"),
+        "macros must validate descriptors without depending on SQL"
+    );
+    assert!(
+        closure.contains("syn"),
+        "macro parsing must be in the closure"
+    );
     let closure = repo::normal_closure("zeroship-data-orm");
     for forbidden in ["zeroship-runtime", "zeroship-data-v8", "v8"] {
         assert!(!closure.contains(forbidden), "ORM reaches {forbidden}");
@@ -228,7 +243,7 @@ fn vendor_tier(path: &std::path::Path) -> bool {
 #[test]
 fn driver_names_stay_inside_backend_modules() {
     let mut examined = 0;
-    for name in ["zeroship-data-v8", "zeroship-data-orm", "zeroship-data-sql"] {
+    for name in ["zeroship-data-v8", "zeroship-data-orm"] {
         for (path, source) in tree(name) {
             if vendor_tier(&path) {
                 continue;
@@ -340,7 +355,7 @@ fn shared_execution_keeps_sql_and_driver_work_at_their_boundaries() {
         ("transaction/driver.rs", "SAVEPOINT"),
         ("transaction/driver.rs", "ROLLBACK TO SAVEPOINT"),
         ("transaction/driver.rs", "RELEASE SAVEPOINT"),
-        ("crud/system_fields_pass.rs", "UPDATE"),
+        ("crud/assignment_pass.rs", "UPDATE"),
     ];
     let baseline: BTreeSet<_> = baseline
         .into_iter()
@@ -356,6 +371,9 @@ fn shared_execution_keeps_sql_and_driver_work_at_their_boundaries() {
             continue;
         }
         let file = path.strip_prefix(&root).unwrap().to_str().unwrap();
+        if file.starts_with("sql/") {
+            continue;
+        }
         for verb in sql_verbs(&source) {
             total += 1;
             vendor += usize::from(file == "auth/bootstrap.rs");

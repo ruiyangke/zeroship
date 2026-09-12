@@ -61,6 +61,7 @@ function makeFailingNative(err: Error) {
 }
 
 const schemaUsers = {
+  id: t.string().required().primaryKey(),
   email: t.string().required().unique(),
   name: t.string().required(),
 };

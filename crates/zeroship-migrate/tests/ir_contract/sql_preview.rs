@@ -887,67 +887,25 @@ fn string_length_renders_bounded_varchar_across_dialects() {
     );
 }
 
-/// A constraint body is built once in PostgreSQL spelling and re-quoted for MySQL.
-/// That rewrite must not let an identifier become SQL structure: a column carrying a
-/// backtick used to close the identifier early and contribute an index the author
-/// never declared, and one carrying an apostrophe used to swallow the closing quote.
 #[test]
-fn mysql_constraint_requoting_escapes_hostile_identifiers() {
-    let ir = r#"{
-  "ir_version": 1,
-  "name": "hostile",
-  "ops": [
-    {"op":"createTable","name":"t","columns":[
-      {"name":"COLNAME","type":{"string":{"length":64}}}
-    ],"constraints":[
-      {"name":"u1","kind":{"kind":"unique","columns":["COLNAME"]}}
-    ]}
-  ]
-}"#;
-    let render = |col: &str| -> String {
-        let raw: MigrationIr =
-            serde_json::from_str(&ir.replace("COLNAME", col)).expect("hostile IR parses");
-        let resolved = resolve_create_table_policy(&raw, &support::confined_charter(), "public")
-            .expect("hostile IR resolves");
-        let json = serde_json::to_string(&resolved).expect("resolved IR serializes");
-        render_ir_envelope_sql(
+fn mysql_preview_rejects_nonportable_column_identifiers() {
+    for column in ["it's", "a`), KEY `k2` (`id"] {
+        let ir = serde_json::json!({
+            "ir_version": 1, "name": "hostile", "ops": [{
+                "op": "createTable", "name": "t",
+                "columns": [{"name": column, "type": "text"}],
+                "constraints": [{"name": "u1", "kind": {"kind": "unique", "columns": [column]}}],
+            }],
+        });
+        let error = render_ir_envelope_sql(
             zeroship_migrate::shipping_vendors(),
-            &json,
+            &ir.to_string(),
             &zeroship_migrate_mysql::DIALECT,
             &opts(),
         )
-        .expect("hostile IR renders offline")
-        .lines()
-        .find(|l| l.starts_with("CREATE TABLE"))
-        .expect("a CREATE TABLE statement")
-        .to_string()
-    };
-
-    // An apostrophe is an ordinary character inside a quoted identifier, so the
-    // identifier must still close on its own delimiter.
-    let apostrophe = render("it's");
-    assert!(
-        apostrophe.contains("UNIQUE (`it's`)"),
-        "apostrophe column must close its identifier: {apostrophe}"
-    );
-    assert!(
-        !apostrophe.contains('"'),
-        "no PostgreSQL quoting may survive into MySQL DDL: {apostrophe}"
-    );
-
-    // A backtick is the MySQL delimiter, so it must be doubled rather than emitted
-    // raw. Undoubled, `a`), KEY `k2` (`id` closes the identifier and injects an index.
-    let backtick = render("a`), KEY `k2` (`id");
-    assert!(
-        backtick.contains("UNIQUE (`a``), KEY ``k2`` (``id`)"),
-        "backtick column must be doubled inside the constraint: {backtick}"
-    );
-    assert_eq!(
-        backtick.matches("KEY ``k2``").count(),
-        backtick.matches("k2").count(),
-        "every occurrence of the authored name stays escaped, so none of it becomes \
-         a KEY clause: {backtick}"
-    );
+        .expect_err("preview validates authoring identifiers before emitting SQL");
+        assert!(error.contains("invalid field name"), "{error}");
+    }
 }
 
 /// The offline preview renders the statement APPLY will run, which means it runs the

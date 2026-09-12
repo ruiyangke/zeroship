@@ -6,7 +6,8 @@ use crate::{
     executor::ScopedExecutor,
 };
 use async_trait::async_trait;
-use zeroship_data_sql::{SchemaName, compile::SqlDialect, value::Value};
+use crate::value::Value;
+use crate::sql::{SchemaName, compile::SqlDialect};
 
 #[async_trait(?Send)]
 impl ScopedExecutor for PostgresBackend {
@@ -27,6 +28,15 @@ impl ScopedExecutor for PostgresBackend {
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
         self.query_roled_values(schema, sql, params).await
+    }
+    async fn exec(
+        &self,
+        _app_id: &str,
+        schema: &SchemaName,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        super::pg_autocommit::roled_execute(self.pool(), schema, sql, params).await
     }
     async fn open_tx_session(
         &self,

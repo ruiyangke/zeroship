@@ -1,7 +1,7 @@
 //! Typed mappings over native records and migration-derived column contracts.
 use std::marker::PhantomData;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::value::{Record, Value};
+use crate::value::{Record, Value};
 
 /// Collection metadata generated from the deployment's runtime descriptor.
 pub trait Entity: Sized + 'static {
@@ -16,6 +16,7 @@ pub trait Column: 'static {
 pub trait ReadableColumn: Column {}
 pub trait FilterableColumn: Column {}
 pub trait WritableColumn: Column {}
+pub trait UpdatableColumn: WritableColumn {}
 pub trait DefaultableColumn: WritableColumn {}
 /// An insert derive implements this for each field it supplies.
 pub trait HasColumn<C: Column> {}
@@ -64,7 +65,7 @@ impl<C: DefaultableColumn, T: EncodeValue<C::SqlType>> DefaultInput<C> for Defau
 pub trait ChangeInput<C: Column> {
     fn encode_change(self, record: &mut Record) -> Result<(), DbError>;
 }
-impl<C: WritableColumn, T: EncodeValue<C::SqlType>> ChangeInput<C> for Change<T> {
+impl<C: UpdatableColumn, T: EncodeValue<C::SqlType>> ChangeInput<C> for Change<T> {
     fn encode_change(self, record: &mut Record) -> Result<(), DbError> {
         encode_change::<C, T>(record, self)
     }
@@ -125,7 +126,7 @@ where
 }
 pub fn encode_change<C, T>(record: &mut Record, value: Change<T>) -> Result<(), DbError>
 where
-    C: WritableColumn,
+    C: UpdatableColumn,
     T: EncodeValue<C::SqlType>,
 {
     if let Change::Set(value) = value {
@@ -168,7 +169,7 @@ impl<C: FilterableColumn> Field<C> {
         })
     }
 }
-impl<C: WritableColumn> Field<C> {
+impl<C: UpdatableColumn> Field<C> {
     pub fn set<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Patch<C::Entity>, DbError> {
         let mut fields = Record::new();
         encode_field::<C, _>(&mut fields, value)?;

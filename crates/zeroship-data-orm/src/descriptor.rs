@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -15,7 +15,7 @@ pub fn install_collections(
 ) -> Result<(), DbError> {
     let mut names = std::collections::HashSet::new();
     for (name, schema) in &collections {
-        crate::compile::validate_collection(name)?;
+        crate::sql::compile::validate_collection(name)?;
         if !names.insert(name) {
             return Err(DbError::internal(
                 "duplicate collection in the runtime descriptor",
@@ -24,11 +24,52 @@ pub fn install_collections(
         let fields = schema
             .as_object()
             .ok_or_else(|| DbError::internal("collection descriptor must be an object"))?;
+        crate::sql::descriptors::validate_collection_identity(schema).map_err(
+            |message| {
+                DbError::validation("invalid_collection_identity", format!("{name}: {message}"))
+            },
+        )?;
+        let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
+        crate::sql::lifecycle::soft_delete_column(schema)?;
+        crate::sql::lifecycle::concurrency_column(schema)?;
         for (name, definition) in fields {
-            if crate::compile::is_schema_metadata_key(name) {
+            for (role, event, generator) in [
+                (
+                    "softDelete",
+                    zeroship_migrate_policy::AssignmentEvent::Delete,
+                    "now",
+                ),
+                (
+                    "concurrency",
+                    zeroship_migrate_policy::AssignmentEvent::Write,
+                    "increment",
+                ),
+            ] {
+                if definition.get(role).and_then(Value::as_bool) == Some(true)
+                    && !assignments.columns().iter().any(|column| {
+                        column.name == *name
+                            && column.on == event
+                            && match generator {
+                                "now" => {
+                                    column.by == zeroship_migrate_policy::AssignmentGenerator::Now
+                                }
+                                _ => matches!(
+                                    column.by,
+                                    zeroship_migrate_policy::AssignmentGenerator::Increment(_)
+                                ),
+                            }
+                    })
+                {
+                    return Err(DbError::validation(
+                        "invalid_column_role",
+                        format!("'{name}' requires a matching generator for {role}"),
+                    ));
+                }
+            }
+            if crate::sql::compile::is_schema_metadata_key(name) {
                 continue;
             }
-            crate::compile::validate_field_name(name)?;
+            crate::sql::compile::validate_field_name(name)?;
             if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some()
                 && definition.get("unique").and_then(Value::as_bool) == Some(true)
             {
@@ -68,7 +109,72 @@ pub fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
+
+    fn identity_corpus() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/data/collection-identity.json"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn invalid_identity_cannot_replace_installed_collections() {
+        crate::tests::fixtures::reset_engine();
+        let binding = DbBinding::cold_start("app_identity_contract");
+        let valid = value!({"id":{"type":"string", "required":true, "primaryKey":true}});
+        install_collections(&binding, vec![("entries".into(), valid.clone())]).unwrap();
+        let corpus = identity_corpus();
+        let cases = corpus["invalid"].as_object().unwrap();
+        assert!(!cases.is_empty(), "invalid fixtures must not be empty");
+        for (name, case) in cases {
+            let err = install_collections(
+                &binding,
+                vec![
+                    ("replacement".into(), valid.clone()),
+                    ("invalid".into(), Value::from(case["fields"].clone())),
+                ],
+            )
+            .unwrap_err();
+            match err {
+                DbError::ValidationFailed {
+                    code: "invalid_collection_identity",
+                    message,
+                    ..
+                } => assert_eq!(
+                    message,
+                    format!("invalid: {}", case["error"].as_str().unwrap()),
+                    "{name}"
+                ),
+                error => panic!("{name}: expected invalid_collection_identity, got {error:?}"),
+            }
+            assert_eq!(
+                collection_schema(&binding, "entries").unwrap().as_ref(),
+                &valid
+            );
+            assert!(collection_schema(&binding, "replacement").is_err());
+            assert!(collection_schema(&binding, "invalid").is_err());
+        }
+    }
+
+    #[test]
+    fn valid_identity_descriptors_are_installed_unchanged() {
+        crate::tests::fixtures::reset_engine();
+        let binding = DbBinding::cold_start("app_explicit_identity");
+        let corpus = identity_corpus();
+        let cases = corpus["valid"].as_object().unwrap();
+        assert!(!cases.is_empty(), "valid fixtures must not be empty");
+        for (name, case) in cases {
+            let fields = Value::from(case["fields"].clone());
+            install_collections(&binding, vec![("entries".into(), fields.clone())])
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert_eq!(
+                collection_schema(&binding, "entries").unwrap().as_ref(),
+                &fields,
+                "{name}"
+            );
+        }
+    }
 
     #[test]
     fn an_undeclared_collection_is_a_typed_error_not_a_missing_schema() {
@@ -97,12 +203,12 @@ mod tests {
         let pinned = DbBinding::new(
             "app_two_deploys",
             "deploy_pinned",
-            zeroship_data_sql::SchemaName::new("app_two_deploys").unwrap(),
+            crate::sql::SchemaName::new("app_two_deploys").unwrap(),
         );
         let current = DbBinding::new(
             "app_two_deploys",
             "deploy_current",
-            zeroship_data_sql::SchemaName::new("app_two_deploys").unwrap(),
+            crate::sql::SchemaName::new("app_two_deploys").unwrap(),
         );
         zeroship_data_orm::schema_cache::with_mut(|c| {
             c.insert_one(

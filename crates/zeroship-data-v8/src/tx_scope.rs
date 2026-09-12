@@ -239,7 +239,7 @@ mod tests {
         zeroship_data_orm::binding::DbBinding::new(
             "app_a",
             zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_data_sql::SchemaName::new("app_a").expect("fixture schema name"),
+            zeroship_data_orm::sql::SchemaName::new("app_a").expect("fixture schema name"),
         )
     }
 
@@ -296,7 +296,7 @@ mod tests {
         let other = zeroship_data_orm::binding::DbBinding::new(
             "app_other",
             zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_data_sql::SchemaName::new("app_other").expect("fixture schema name"),
+            zeroship_data_orm::sql::SchemaName::new("app_other").expect("fixture schema name"),
         );
         assert!(super::capture_route(scope, &other).in_tx());
         super::leave(scope, prev);

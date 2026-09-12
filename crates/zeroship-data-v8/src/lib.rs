@@ -11,7 +11,6 @@
 #![recursion_limit = "256"]
 #![deny(private_interfaces, private_bounds)]
 
-use std::rc::Rc;
 use zeroship_data_orm::connection::ConnectionFactory;
 
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
@@ -21,10 +20,8 @@ use zeroship_data_orm::error::DbError;
 
 // Private imports used to compose ORM operations with isolate state.
 use zeroship_data_orm::cdc::{broker, read_set};
-use zeroship_data_orm::{
-    backend, descriptor, metrics, system_shape_charter, transaction, tx_route,
-};
-use zeroship_data_sql::compile;
+use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
+use zeroship_data_orm::sql::compile;
 
 pub(crate) mod context;
 pub mod op_error;
@@ -56,21 +53,18 @@ pub struct DbPlugin {
     project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
     meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-    assignments: system_shape_charter::AssignmentPlan,
 }
 impl DbPlugin {
     pub(crate) fn new(
         connection: ConnectionFactory,
         cdc_relay: Option<zeroship_data_orm::cdc::relay::RelayConfig>,
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
-        assignments: system_shape_charter::AssignmentPlan,
         project_keys: std::sync::Arc<zeroship_data_orm::encryption::SuppliedProjectKeys>,
     ) -> Self {
         Self {
             connection,
             cdc_relay,
             meter,
-            assignments,
             project_keys,
         }
     }
@@ -127,13 +121,12 @@ impl NativePlugin for DbPlugin {
             context.set_cdc_relay(self.cdc_relay.clone());
         });
         metrics::stamp(self.meter.clone());
-        system_shape_charter::stamp(Rc::new(self.assignments.clone()));
     }
 }
 
 fn descriptor_schemas(
     descriptor: Option<&serde_json::Value>,
-) -> Result<Vec<(String, zeroship_data_sql::value::Value)>, String> {
+) -> Result<Vec<(String, zeroship_data_orm::value::Value)>, String> {
     let Some(descriptor) = descriptor else {
         return Ok(Vec::new());
     };
@@ -153,7 +146,7 @@ fn descriptor_schemas(
                 })?;
             Ok((
                 name.clone(),
-                zeroship_data_sql::value::to_value(fields).map_err(|e| e.to_string())?,
+                zeroship_data_orm::value::to_value(fields).map_err(|e| e.to_string())?,
             ))
         })
         .collect()
@@ -163,9 +156,8 @@ fn descriptor_schemas(
 mod runtime_descriptor_binding_tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
-    use std::rc::Rc;
 
-    use zeroship_data_sql::value;
+    use zeroship_data_orm::value;
     use zeroship_runtime::{RuntimeState, SharedState, init_v8};
 
     use super::*;
@@ -177,7 +169,7 @@ mod runtime_descriptor_binding_tests {
         let mut env = HashMap::new();
         env.insert("APP_ID".to_string(), APP.to_string());
         env.insert("ZEROSHIP_DEPLOY_ID".to_string(), DEPLOY.to_string());
-        let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
+        let state: SharedState = std::rc::Rc::new(RefCell::new(RuntimeState::new(env, None, None)));
         scope.set_slot(state);
     }
 
@@ -210,7 +202,7 @@ mod runtime_descriptor_binding_tests {
             "collections": {
                 "users": {
                     "fields": {
-                        "id": { "type": "id", "idPrefix": "usr" },
+                        "id": { "type": "id", "idPrefix": "usr", "required": true, "primaryKey": true },
                         "email": { "type": "string", "required": true }
                     },
                     "options": {
@@ -233,7 +225,7 @@ mod runtime_descriptor_binding_tests {
         let binding = zeroship_data_orm::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_data_sql::SchemaName::new(APP).unwrap(),
+            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
         );
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
@@ -241,6 +233,18 @@ mod runtime_descriptor_binding_tests {
             schema.as_ref(),
             &runtime_descriptor["collections"]["users"]["fields"],
             "native boot must publish the descriptor's field map verbatim"
+        );
+        let mut invalid = runtime_descriptor.clone();
+        invalid["collections"]["users"]["fields"] = value!({
+            "key": { "type": "string", "required": true, "primaryKey": true }
+        });
+        let error = plugin()
+            .bind_runtime_descriptor(scope, APP, Some(&serde_json::to_value(&invalid).unwrap()))
+            .expect_err("renamed identity must fail at native installation");
+        assert!(error.contains("id"), "{error}");
+        assert_eq!(
+            descriptor::collection_schema(&binding, "users").unwrap(),
+            schema
         );
     }
 
@@ -258,7 +262,7 @@ mod runtime_descriptor_binding_tests {
             "version": 2,
             "collections": {
                 "stale": {
-                    "fields": { "id": { "type": "id" } },
+                    "fields": { "id": { "type": "id", "required": true, "primaryKey": true } },
                     "options": { "softDelete": false, "versioning": false },
                     "indexes": []
                 }
@@ -279,7 +283,7 @@ mod runtime_descriptor_binding_tests {
         let binding = zeroship_data_orm::binding::DbBinding::new(
             APP,
             DEPLOY,
-            zeroship_data_sql::SchemaName::new(APP).unwrap(),
+            zeroship_data_orm::sql::SchemaName::new(APP).unwrap(),
         );
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");

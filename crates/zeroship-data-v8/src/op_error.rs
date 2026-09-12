@@ -534,14 +534,7 @@ mod tests {
         }
     }
 
-    /// `From<QueryError>` collapses the builder's four error kinds
-    /// onto a `ValidationFailed` with a stable static code the SDK
-    /// branches on. Each kind must map to a distinct code.
-    ///
-    /// The three legacy kinds carry no hint; the new
-    /// `ReservedSystemFieldName` variant carries a fixed hint listing
-    /// all seven system fields (covered separately by
-    /// `from_query_error_reserved_system_field_carries_hint`).
+    /// SQL validation categories retain distinct error codes.
     #[test]
     fn from_query_error_assigns_distinct_codes() {
         let cases = [
@@ -570,86 +563,38 @@ mod tests {
         }
     }
 
-    /// `ReservedSystemFieldName` maps to a distinct
-    /// `reserved_system_field_name` code and carries a hint enumerating
-    /// the seven system fields.
     #[test]
-    fn from_query_error_reserved_system_field_carries_hint() {
-        let qe = crate::compile::QueryError::ReservedSystemFieldName(
-            "Field name 'id' is reserved".into(),
-        );
-        let db = DbError::from(qe);
-        match db {
-            DbError::ValidationFailed { code, hint, .. } => {
-                assert_eq!(code, "reserved_system_field_name");
-                let hint = hint.expect("reserved-system-field error must carry a hint");
-                for name in [
-                    "id",
-                    "created_at",
-                    "updated_at",
-                    "created_by",
-                    "updated_by",
-                    "version",
-                    "deleted_at",
-                ] {
-                    assert!(
-                        hint.contains(name),
-                        "hint must list system field {name:?}; got: {hint}"
-                    );
-                }
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
+    fn reserved_prefix_and_assigned_field_errors_carry_actionable_hints() {
+        for (query_error, expected_code, word) in [
+            (
+                crate::compile::validate_id_prefix("usr").unwrap_err(),
+                "reserved_id_prefix",
+                "prefix",
+            ),
+            (
+                crate::compile::QueryError::ImmutableAssignedField(
+                    "field 'born' is assigned".into(),
+                ),
+                "immutable_assigned_field",
+                "descriptor",
+            ),
+        ] {
+            let DbError::ValidationFailed { code, hint, .. } = DbError::from(query_error) else {
+                panic!("validation error")
+            };
+            assert_eq!(code, expected_code);
+            assert!(hint.unwrap().contains(word));
         }
-    }
-
-    /// Relocated from `query.rs`'s test module
-    /// (which moved to the leaf crate `zeroship-data-sql`, where `DbError`
-    /// is not nameable). Pins the end-to-end lift: the schema-crate
-    /// validator `validate_field_name_for_declaration` rejects a reserved
-    /// system field, and `From<QueryError> for DbError` (which lives here)
-    /// stamps `code = "reserved_system_field_name"` + a hint listing all 7
-    /// system fields. Behaviour-identical to the pre-extraction test.
-    #[test]
-    fn system_field_reservation_error_carries_correct_code() {
-        let err = crate::compile::validate_field_name_for_declaration("id").unwrap_err();
-        let db_err = DbError::from(err);
-        match db_err {
-            DbError::ValidationFailed { code, hint, .. } => {
-                assert_eq!(code, "reserved_system_field_name");
-                let hint = hint.expect("reservation hint required for SDK remediation");
-                for name in crate::compile::SYSTEM_FIELD_NAMES {
-                    assert!(
-                        hint.contains(name),
-                        "reservation hint must list all 7 system fields; missing {name:?}"
-                    );
-                }
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
-    }
-
-    // ---- New typed-error helpers ------------------------
-
-    /// `ImmutableSystemField` maps to the `immutable_system_field`
-    /// code with a hint listing the three write-once names.
-    #[test]
-    fn from_query_error_immutable_system_field_carries_hint() {
-        let qe = crate::compile::QueryError::ImmutableSystemField(
-            "UPDATE patch attempted to overwrite immutable system field `id`".into(),
-        );
-        let db = DbError::from(qe);
-        match db {
-            DbError::ValidationFailed { code, hint, .. } => {
-                assert_eq!(code, "immutable_system_field");
-                let hint = hint.expect("immutable-system-field must carry a hint");
-                for name in ["id", "created_at", "created_by"] {
-                    assert!(
-                        hint.contains(name),
-                        "hint must list immutable field {name:?}; got: {hint}"
-                    );
-                }
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
+        for name in [
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "version",
+            "deleted_at",
+        ] {
+            crate::compile::validate_field_name_for_declaration(name).unwrap();
         }
     }
 

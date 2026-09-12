@@ -9,7 +9,7 @@ use crate::render::declarative::{CollectionDescriptor, FieldDescriptor};
 use crate::test_fixtures::{POSTGRES, SQLITE};
 use serde_json::json;
 
-/// Render declared fields without injected system columns.
+/// Render declared fields without injected columns.
 fn descriptor_for(
     fields: Vec<FieldDescriptor>,
     dialect: &zeroship_migrate_ir::dialect::DialectId,

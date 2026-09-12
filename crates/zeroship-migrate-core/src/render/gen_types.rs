@@ -37,6 +37,9 @@ pub const ENV_DTS_FILE: &str = "env.db.ts";
 /// A `gen-types` emitter error (fold / IO / drift).
 #[derive(Debug, thiserror::Error)]
 pub enum GenTypesError {
+    /// Lifecycle options could not resolve a unique generated field.
+    #[error("gen-types: {0}")]
+    RuntimeMetadata(String),
     /// The producer that turns a declared descriptor set into ops refused the set.
     #[error("gen-types: produce ops from declared descriptors failed: {0}")]
     Produce(crate::ProduceError),
@@ -78,6 +81,8 @@ pub struct GeneratedArtifacts {
 pub(crate) struct RuntimeCollectionMetadata {
     pub(crate) options: crate::TableRuntimeOptions,
     pub(crate) indexes: Vec<RuntimeIndexDescriptor>,
+    pub(crate) assignments: BTreeMap<String, zeroship_migrate_policy::Assignment>,
+    pub(crate) primary_key: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,8 +232,7 @@ fn stamp_physical_storage(fields: &Value) -> Value {
         def_obj.insert("projectable".to_string(), Value::Bool(true));
         def_obj.insert(
             "storage".to_string(),
-            serde_json::to_value(field_storage(field, def))
-                .expect("FieldStorage serializes"),
+            serde_json::to_value(field_storage(field, def)).expect("FieldStorage serializes"),
         );
         out.insert(field.clone(), Value::Object(def_obj));
     }
@@ -330,27 +334,94 @@ pub(crate) fn derived_unique_index_name(vendors: VendorSet, table: &str, field: 
 fn render_runtime_descriptor_v2(
     defs: &BTreeMap<String, Value>,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
-) -> Value {
+) -> Result<Value, GenTypesError> {
+    use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
+    for (name, meta) in metadata {
+        for (enabled, role, event) in [
+            (
+                meta.options.soft_delete,
+                "softDelete",
+                AssignmentEvent::Delete,
+            ),
+            (
+                meta.options.versioning,
+                "concurrency",
+                AssignmentEvent::Write,
+            ),
+        ] {
+            if enabled
+                && meta
+                    .assignments
+                    .values()
+                    .filter(|assignment| {
+                        assignment.on == event
+                            && match event {
+                                AssignmentEvent::Delete => {
+                                    assignment.by == AssignmentGenerator::Now
+                                }
+                                _ => matches!(assignment.by, AssignmentGenerator::Increment(_)),
+                            }
+                    })
+                    .count()
+                    != 1
+            {
+                return Err(GenTypesError::RuntimeMetadata(format!(
+                    "collection '{name}' requires an unambiguous {role} generator"
+                )));
+            }
+        }
+    }
     let mut metadata = metadata.clone();
     let collections = defs
         .iter()
         .map(|(name, fields)| {
             let meta = metadata.remove(name).unwrap_or_default();
+            let mut fields = stamp_physical_storage(fields);
+            if let Some(fields) = fields.as_object_mut() {
+                for (field, definition) in fields {
+                    let definition = definition.as_object_mut().expect("field descriptor");
+                    if meta.primary_key.contains(field) {
+                        definition.insert("primaryKey".into(), Value::Bool(true));
+                    }
+                    if let Some(assignment) = meta.assignments.get(field) {
+                        definition.insert(
+                            "assign".into(),
+                            serde_json::to_value(assignment).expect("assignment serializes"),
+                        );
+                        definition.insert("writable".into(), Value::Bool(false));
+                        if meta.options.soft_delete
+                            && assignment.on == zeroship_migrate_policy::AssignmentEvent::Delete
+                            && assignment.by == zeroship_migrate_policy::AssignmentGenerator::Now
+                        {
+                            definition.insert("softDelete".into(), Value::Bool(true));
+                        }
+                        if meta.options.versioning
+                            && assignment.on == zeroship_migrate_policy::AssignmentEvent::Write
+                            && matches!(
+                                assignment.by,
+                                zeroship_migrate_policy::AssignmentGenerator::Increment(_)
+                            )
+                        {
+                            definition.insert("concurrency".into(), Value::Bool(true));
+                        }
+                    }
+                }
+            }
             (
                 name.clone(),
                 RuntimeCollectionDescriptorV2 {
-                    fields: stamp_physical_storage(fields),
+                    fields,
                     options: (&meta.options).into(),
                     indexes: meta.indexes,
                 },
             )
         })
         .collect();
-    serde_json::to_value(RuntimeSchemaDescriptorV2 {
+    Ok(serde_json::to_value(RuntimeSchemaDescriptorV2 {
         version: 2,
         collections,
     })
-    .expect("runtime descriptor v2 serializes")
+    .expect("runtime descriptor v2 serializes"))
 }
 
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
@@ -478,7 +549,7 @@ pub fn render_schema_export(
     // (a) RuntimeSchemaDescriptor v2 - fields plus their physical storage mapping and
     // read-surface capabilities, plus runtime-visible collection options and plain
     // indexes.
-    let runtime_value = render_runtime_descriptor_v2(&field_defs, &metadata);
+    let runtime_value = render_runtime_descriptor_v2(&field_defs, &metadata)?;
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
@@ -499,7 +570,7 @@ pub fn render_schema_export(
 /// source). This turns the descriptors into `createTable` ops via
 /// [`crate::descriptors_to_create_ops`] - which resolves each descriptor's
 /// table shape under the supplied `effective` policy (injecting the confined
-/// system columns/indexes/PK the caller's charter declares) - and then routes
+/// injected columns/indexes/PK the caller's charter declares) - and then routes
 /// through the SAME [`render_artifacts`] tail. So the manual and generated paths
 /// are byte-identical for equivalent schemas, PROVIDED both are driven by an
 /// `EffectivePolicy` that injects the same shape (the generated path resolves the
@@ -1645,11 +1716,7 @@ fn js_key(s: &str) -> String {
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
-    if is_ident {
-        s.to_string()
-    } else {
-        js_str(s)
-    }
+    if is_ident { s.to_string() } else { js_str(s) }
 }
 
 /// The structured outcome of a `--check` drift comparison for one file.
@@ -2066,7 +2133,8 @@ mod tests {
         let value = render_runtime_descriptor_v2(
             &folded.project_field_defs(crate::test_fixtures::VENDORS),
             &folded.project_runtime_metadata(crate::test_fixtures::VENDORS),
-        );
+        )
+        .unwrap();
         assert_eq!(value["version"], 2);
         let fields = &value["collections"]["hits"]["fields"];
         let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "hits")
@@ -2090,6 +2158,71 @@ mod tests {
             value["collections"]["hits"]["options"]["strictness"],
             "strict"
         );
+    }
+
+    #[test]
+    fn runtime_lifecycle_metadata_uses_generators_and_explicit_options() {
+        use zeroship_migrate_policy::{Assignment, AssignmentEvent, AssignmentGenerator};
+        let fields = BTreeMap::from([(
+            "entries".into(),
+            serde_json::json!({
+                "key":{"type":"string"}, "removed":{"type":"date"}, "revision":{"type":"integer"},
+                "deleted_at":{"type":"string"}, "version":{"type":"string"}
+            }),
+        )]);
+        let mut metadata = BTreeMap::from([(
+            "entries".into(),
+            RuntimeCollectionMetadata {
+                primary_key: vec!["key".into()],
+                assignments: BTreeMap::from([
+                    (
+                        "key".into(),
+                        Assignment {
+                            by: AssignmentGenerator::TypedId,
+                            on: AssignmentEvent::Insert,
+                        },
+                    ),
+                    (
+                        "removed".into(),
+                        Assignment {
+                            by: AssignmentGenerator::Now,
+                            on: AssignmentEvent::Delete,
+                        },
+                    ),
+                    (
+                        "revision".into(),
+                        Assignment {
+                            by: AssignmentGenerator::Increment(2),
+                            on: AssignmentEvent::Write,
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            },
+        )]);
+        let disabled = render_runtime_descriptor_v2(&fields, &metadata).unwrap();
+        let disabled = &disabled["collections"]["entries"]["fields"];
+        assert_eq!(disabled["key"]["primaryKey"], true);
+        assert_eq!(
+            disabled["revision"]["assign"],
+            serde_json::json!({"by":"increment(2)", "on":"write"})
+        );
+        assert!(disabled["removed"].get("softDelete").is_none());
+        assert!(disabled["revision"].get("concurrency").is_none());
+        metadata.get_mut("entries").unwrap().options.soft_delete = true;
+        metadata.get_mut("entries").unwrap().options.versioning = true;
+        let enabled = render_runtime_descriptor_v2(&fields, &metadata).unwrap();
+        let enabled = &enabled["collections"]["entries"]["fields"];
+        assert_eq!(enabled["removed"]["softDelete"], true);
+        assert_eq!(enabled["revision"]["concurrency"], true);
+        assert!(enabled["deleted_at"].get("assign").is_none());
+        assert!(enabled["version"].get("assign").is_none());
+        metadata
+            .get_mut("entries")
+            .unwrap()
+            .assignments
+            .remove("revision");
+        assert!(render_runtime_descriptor_v2(&fields, &metadata).is_err());
     }
 
     #[test]

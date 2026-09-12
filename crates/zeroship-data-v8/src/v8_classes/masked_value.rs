@@ -40,7 +40,7 @@
 #![allow(unsafe_code)]
 
 use crate::op_error::ToOpError;
-use zeroship_data_sql::value::Value;
+use zeroship_data_orm::value::Value;
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue};
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
@@ -201,7 +201,7 @@ impl MaskedValue {
                 Err(e) => return crate::v8_bridge::throw_decode_error(scope, &e),
             };
             let opts_v = if arg1.is_null_or_undefined() {
-                Value::Object(zeroship_data_sql::value::Map::new())
+                Value::Object(zeroship_data_orm::value::Map::new())
             } else {
                 match decode_native(scope, arg1) {
                     Ok(v) => v,
@@ -212,7 +212,7 @@ impl MaskedValue {
         } else {
             // Single-column path: arg0 is `opts`.
             let opts_v = if arg0.is_null_or_undefined() {
-                Value::Object(zeroship_data_sql::value::Map::new())
+                Value::Object(zeroship_data_orm::value::Map::new())
             } else {
                 match decode_native(scope, arg0) {
                     Ok(v) => v,
@@ -238,7 +238,7 @@ impl MaskedValue {
         opts: v8::Local<v8::Value>,
     ) -> v8::Local<'s, v8::Value> {
         let mut opts_v = if opts.is_null_or_undefined() {
-            Value::Object(zeroship_data_sql::value::Map::new())
+            Value::Object(zeroship_data_orm::value::Map::new())
         } else {
             match decode_native(scope, opts) {
                 Ok(v) => v,
@@ -456,7 +456,7 @@ impl MaskedValue {
                     // `Record<col, plaintext>`, not the wider
                     // `Record<row_pk, Record<col, plaintext>>` shape.
                     let cols_map = result.results.get(&row_pk).cloned().unwrap_or_default();
-                    let mut payload = zeroship_data_sql::value::Map::new();
+                    let mut payload = zeroship_data_orm::value::Map::new();
                     for (col, pt) in cols_map {
                         payload.insert(col, pt);
                     }

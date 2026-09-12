@@ -54,12 +54,8 @@
 # `zs_suite_db_resolve`: the override is a flag so a gate cannot be redirected
 # by a variable left in a shell nobody remembers exporting it in.
 #
-# `--dsn` is the same escape hatch tests/platform_migration_corpus_gate.sh
-# carries, and it exists for the case that machine has: the overlay names a
-# SHARED server, and someone working on this gate needs to migrate a database
-# without writing to one. It bypasses the overlay and the derived name; it
-# bypasses NO arm - the corpus reconciliation still runs, so pointing it at an
-# unmigrated database fails rather than passes.
+# `--dsn` selects a caller-owned database instead of the shared overlay and
+# derived name. Corpus reconciliation still runs against that database.
 # ============================================================================
 set -uo pipefail
 
@@ -176,8 +172,8 @@ fi
 # re-apply alike (the second reports `"applied":[]` for each), so the count of
 # its report lines is the count of files it ruled on for THIS database.
 # Reconciled against the files on disk, because an applier that exits 0 having
-# quietly skipped a file is exactly the shape
-# tests/platform_migration_corpus_gate.sh was written for.
+# quietly skipped a file must fail. The native platform corpus test also
+# reconciles its journal identities: `cargo xtask test migrations`.
 corpus_files="$(find "$ROOT/db/migrations-ts" -maxdepth 1 -name '*.ts' | wc -l | tr -d ' ')"
 applied_files="$(grep -c '^apply ' "$MIGRATE_LOG")"
 if [ "$corpus_files" -lt 1 ]; then

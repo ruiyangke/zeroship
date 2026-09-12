@@ -73,7 +73,7 @@ primary_key = ["id"]
 author_primary_key = "forbid"
 columns = [
   # The three NOT NULL columns carry defaults because the data plane does not
-  # send them. crud/system_fields_pass.rs omits created_at/updated_at/version
+  # send them. The ORM assignment pass omits database-defaulted fields
   # from every INSERT by design and relies on the DDL to supply the canonical
   # value; without these the first insert into any migration-created table fails
   # with "null value in column created_at violates not-null constraint".

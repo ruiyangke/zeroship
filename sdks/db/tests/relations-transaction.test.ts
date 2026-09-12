@@ -5,6 +5,7 @@ import { loadRelations } from "../src/collection/relations.js";
 test("eager relations share a transaction connection without overlapping queries", async () => {
   let busy = false;
   const target = {
+    _schema: { id: { type: "string" as const, primaryKey: true } },
     async find() {
       assert.equal(busy, false, "the transaction connection is already in use");
       busy = true;

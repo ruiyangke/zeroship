@@ -9,7 +9,7 @@
 //! # Why raw SQL and not a schema-derived builder
 //!
 //! Two earlier versions of this fixture derived the DDL: first by driving the
-//! migration engine, then by calling `zeroship-data-sql`'s emitter. Both made the
+//! migration engine, then by calling `zeroship-data-orm::sql`'s emitter. Both made the
 //! test depend on the very layer under test to describe its own fixture, so a
 //! wrong emitter produced a wrong table AND a matching expectation, and the test
 //! still passed. Written out, the DDL is an independent statement of what the

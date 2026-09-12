@@ -220,7 +220,6 @@ compio-s3 = { path = "libs/compio-s3" }
 # Public ORM, model derives, and pure runtime SQL compilation.
 zeroship-data-orm = { path = "crates/zeroship-data-orm" }
 zeroship-data-macros = { path = "crates/zeroship-data-macros" }
-zeroship-data-sql = { path = "crates/zeroship-data-sql" }
 # The CDC relay SERVICE, a peer of `zeroship-migrate-server` and NOT a library
 # tier. Its entry here exists so ONE crate can name it -
 # `zeroship-config-contract`, which is `class = "test-dev-tool"` and links every

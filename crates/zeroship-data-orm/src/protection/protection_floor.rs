@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -47,7 +47,7 @@ fn floor_key(binding: &DbBinding) -> DbBinding {
 }
 
 /// Reduce a `LiveSchema` to the protected columns alone.
-fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionFloor {
+fn floor_from_live(live: &crate::sql::catalog::LiveSchema) -> ProtectionFloor {
     let mut out: ProtectionFloor = HashMap::new();
     for (table, columns) in &live.tables {
         let protected: HashMap<String, StoredProtection> = columns
@@ -76,12 +76,12 @@ fn floor_from_live(live: &zeroship_data_sql::catalog::LiveSchema) -> ProtectionF
 /// field's own name. A fence that accepted `kind: "none"` would refuse the
 /// one-key deletion and wave through the one-word edit that does the same thing.
 pub(crate) fn descriptor_declares_mask(def: &Value) -> bool {
-    zeroship_data_sql::descriptors::effective_mask(def).is_some()
+    crate::sql::descriptors::effective_mask(def).is_some()
 }
 
 /// Whether the descriptor enables encryption, matching the write pipeline.
 pub(crate) fn descriptor_declares_encryption(def: &Value) -> bool {
-    zeroship_data_sql::descriptors::is_encrypted(def)
+    crate::sql::descriptors::is_encrypted(def)
 }
 
 /// Resolve (and memoise) this binding's protection floor.
@@ -188,19 +188,19 @@ pub fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::catalog::WrappedType;
-    use zeroship_data_sql::catalog::{
+    use crate::sql::catalog::WrappedType;
+    use crate::sql::catalog::{
         Classification, ColumnInfo, EncryptionMeta, LiveSchema, MaskKind, MaskMeta,
     };
 
-    use zeroship_data_sql::value;
+    use crate::value;
 
     fn masked_column() -> ColumnInfo {
         ColumnInfo {
             mask: Some(MaskMeta {
                 kind: MaskKind::Last4,
                 classification: Classification::Pci,
-                sibling_column: zeroship_data_sql::compile::raw_column_name("ssn"),
+                sibling_column: crate::sql::compile::raw_column_name("ssn"),
             }),
             ..Default::default()
         }
@@ -356,12 +356,12 @@ mod tests {
         let pinned = DbBinding::new(
             "app_floor",
             "deploy_1",
-            zeroship_data_sql::SchemaName::new("app_floor").unwrap(),
+            crate::sql::SchemaName::new("app_floor").unwrap(),
         );
         let current = DbBinding::new(
             "app_floor",
             "deploy_2",
-            zeroship_data_sql::SchemaName::new("app_floor").unwrap(),
+            crate::sql::SchemaName::new("app_floor").unwrap(),
         );
         assert_ne!(
             floor_key(&pinned),

@@ -28,7 +28,7 @@ pub use postgres::lock_guard::LockGuard;
 pub use postgres::{PgLockManager, lock_guard, pg_autocommit, pg_introspect, pg_session_sql};
 pub use postgres::{PostgresBackend, pg_error, pg_row_json};
 pub use sqlite::SqliteBackend;
-pub use zeroship_data_sql::descriptors::{GeoPoint, VectorMetric};
+pub use crate::sql::descriptors::{GeoPoint, VectorMetric};
 #[cfg(test)]
 mod tests {
 

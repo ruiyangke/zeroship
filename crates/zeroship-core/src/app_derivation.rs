@@ -2,14 +2,8 @@
 //!
 //! # Why this module exists
 //!
-//! `crates/zeroship-data-sql/src/schema_name.rs` enumerates what a single app-id
-//! string simultaneously is: tenant identity, `PostgreSQL` schema name,
-//! role-name stem, encryption salt, publication key, replication-slot key,
-//! `SQLite` `ATTACH` alias, transaction-lane key, broker routing key and CDC
-//! event stamp - "and every site compiles with either meaning". Today those
-//! derivations are spelled at the sites that need them, over a `Uuid` or a
-//! `&str`, so the day the id changes shape each site is independently either
-//! right or silently wrong.
+//! App identity seeds database names, roles, routing keys, and other scopes.
+//! Keeping those derivations together makes each use of its spelling explicit.
 //!
 //! Every function here takes an [`AppId`] and returns one derived identifier.
 //! That makes the derivations enumerable, gives each one a name a reviewer can
@@ -103,8 +97,7 @@ pub enum DerivationError {
 /// on it; this is that derivation, hoisted so the data plane and the migration
 /// service cannot answer the question differently.
 ///
-/// The result is not a `zeroship_data_sql::SchemaName`: this crate is below that
-/// one, and the validation belongs at the mint, not here.
+/// The caller validates the derived spelling with [`crate::schema_name::SchemaName`].
 #[must_use]
 pub fn schema_name(app: &AppId) -> String {
     app.as_str().to_owned()

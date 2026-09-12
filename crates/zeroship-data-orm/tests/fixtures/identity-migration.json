@@ -1,0 +1,20 @@
+{
+  "ir_version": 1,
+  "name": "identity_fixture",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "records",
+      "columns": [
+        {"name":"id", "type":"bigInt", "nullable":false, "identity":{"always":true}},
+        {"name":"label", "type":"text", "nullable":false},
+        {"name":"secret", "type":{"encrypted":{"of":"text"}}, "mask":{"kind":"none", "classification":"pii"}}
+      ],
+      "primaryKey": ["id"]
+    },
+    {
+      "op":"createIndex", "table":"records", "name":"records_label_key",
+      "columns":[{"kind":"column", "name":"label"}], "unique":true
+    }
+  ]
+}

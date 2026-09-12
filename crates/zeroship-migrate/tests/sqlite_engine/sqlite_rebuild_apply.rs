@@ -2323,6 +2323,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],

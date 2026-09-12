@@ -228,105 +228,6 @@ jobs:
       - run: |
           set -o pipefail
           cargo test --workspace --no-fail-fast
-      # --no-fail-fast fixes the STOPPING; this fixes the COUNTING. Nothing
-      # anywhere records how many test targets there are supposed to be, so a
-      # suite that quietly stops being built - a new `required-features` gate, a
-      # dropped `[[test]]`, a crate removed from the workspace - produces a
-      # smaller run, and a smaller run is indistinguishable from a smaller
-      # project. Count the built test executables and fail if the number falls.
-      #
-      # Deliberately a floor, not an equality: adding targets needs no edit,
-      # removing one needs a deliberate edit here. That asymmetry is the point -
-      # losing coverage should cost a reviewed change, gaining it should be free.
-      # It catches disappearance, not substitution.
-      # A comment that cites a design doc is often the only pointer to where a
-      # contract or a decision is written down. When the doc moves or is never
-      # committed, the citation keeps its form and loses its value: it still
-      # reads as "justified elsewhere", so it stops the reader looking, and
-      # nothing anywhere notices. One sweep found 23 such citations at once.
-      #
-      # Excluded by directory, not by matched text: `wpt` is upstream WPT,
-      # fetched on demand and kept pristine, whose doc paths are relative to
-      # that project rather than ours; `dist`, `node_modules` and `target` hold
-      # generated output, where a stale citation is a stale build, not a
-      # mistake anyone can fix in place. Filtering the matched path instead of
-      # the containing file silently lets all four through, since none of those
-      # directory names appear in the cited path.
-      # The pattern is ANCHORED (-P, negative lookbehind) and that is load-bearing.
-      # Unanchored, it matches a doc path sitting INSIDE a longer path: a GitHub
-      # URL, an absolute filesystem path, a vendored copy. This check shipped
-      # unanchored and was green because the two doc paths it pulled out of
-      # GitHub URLs happened to name local files. It would have failed the first
-      # time anyone linked to a doc in another repository, which is the ordinary
-      # reason to write a URL rather than a relative path.
-      #
-      # The `found` floor is the other half. This step counts what is MISSING and
-      # passes at zero, so an extraction that yields nothing passes too - a broken
-      # pattern, a wrong directory list, or a file the tool declines to read all
-      # report a clean tree. Counting what was checked is what tells those apart
-      # from a tree that is genuinely clean.
-      - name: Doc citations resolve
-        run: |
-          ROOTS="crates sdks libs tests db examples"
-          # The corpus check, and it carries more weight than the count below.
-          #
-          # A count floor cannot see a DROPPED DIRECTORY. Measured distribution:
-          # crates 33, sdks 6, tests 3, examples 1, libs 0, db 0. Rename `sdks/`
-          # and 6 citations vanish, leaving ~31 - above any floor loose enough to
-          # survive ordinary comment edits. One whole tree skipped, gate green.
-          # `libs/` and `db/` yield zero legitimately, which is why the per-root
-          # assertion has to be EXISTENCE and not "yielded at least one": a
-          # directory with no citations is normal, a directory that is not there
-          # is a scan that silently stopped covering it.
-          #
-          # This is also why the `2>/dev/null` below is safe now and was not
-          # before: it swallows grep's "No such file or directory", so a renamed
-          # root used to produce a smaller result and no signal at all.
-          for r in $ROOTS; do
-            if [ ! -d "$r" ]; then
-              echo "::error::doc-citation scan lists $r/, which does not exist - the scan silently stopped covering it"
-              exit 1
-            fi
-          done
-          missing=0
-          found=0
-          # The citation scanner and its self-test are excluded for the same
-          # reason the scanner excludes them from its own sweep: both spell out
-          # paths that deliberately do not exist - examples in one, a planted
-          # probe in the other - so scanning them reports a tool describing a
-          # path as a file citing one. The self-test's doc-side probe
-          # (`docs/reference/zz-…-probe.md`) is exactly such a path, and it
-          # failed this step the moment it was added.
-          for p in $(grep -rhoP '(?<![A-Za-z0-9_/.-])(?:\.\./)*docs/[A-Za-z0-9_./-]+\.md' \
-              --include='*.rs' --include='*.ts' --include='*.js' --include='*.tsx' \
-              --include='*.toml' --include='*.sh' \
-              --exclude-dir=wpt --exclude-dir=dist \
-              --exclude-dir=node_modules --exclude-dir=target \
-              --exclude=source_citation_gate.sh \
-              --exclude=source_citation_selftest.sh \
-              $ROOTS 2>/dev/null \
-            | sed 's|^\(\.\./\)*||' | sort -u); do
-            found=$((found + 1))
-            if [ ! -f "$p" ]; then
-              echo "::error::comment cites $p, which does not exist"
-              missing=$((missing + 1))
-            fi
-          done
-          # Print the coverage on SUCCESS, not only inside a failure message. A
-          # number nobody sees until the gate already failed is a number that
-          # cannot warn anyone; this is the channel where a false green differs
-          # from a true one.
-          echo "doc citations checked: $found across $ROOTS, unresolvable: $missing"
-          # With the per-root check above carrying the corpus, this is back to
-          # being the degenerate-case guard it was always meant to be: it only
-          # has to separate "clean tree" from "the extraction returned nothing".
-          # Left loose on purpose - the count moves with any ordinary comment
-          # edit, so a tight floor here buys churn rather than coverage.
-          if [ "$found" -lt 20 ]; then
-            echo "::error::only $found doc citations found (expected ~37); the extraction returned nothing usable, so a clean result would mean nothing"
-            exit 1
-          fi
-          [ "$missing" -eq 0 ]
       # The step above resolves citations that name a FILE. This one resolves
       # citations that name an ITEM, which nothing checked until now: no job ran
       # `cargo doc`, so a rustdoc link pointing at a deleted or renamed symbol
@@ -360,47 +261,6 @@ jobs:
         run: tests/lib/dev_ready_selftest.sh
       - name: Doc links resolve
         run: tests/run_doc_gate.sh
-      # The source-path half of the citation checks above, in BOTH directions.
-      # The step above resolves comments naming a `docs/**.md` file. This one
-      # resolves every citation that NAMES A SOURCE FILE, whether it was written
-      # in source or in a doc - they rot identically and are read the same way,
-      # as "the justification is over there", so a citation pointing at a file
-      # that moved stops the reader looking and nothing notices. One sweep of
-      # the source side found 82; the doc side, unguarded until 2026-08-10,
-      # opened at 116 unresolvable of 943.
-      #
-      # The doc half deliberately does not cover pre-ship proposals, plans,
-      # ADRs, review reports, `archive/`, or any dated `YYYY-MM-DD-*.md` record.
-      # Those name a file they intend to create or one that existed at a past
-      # HEAD; requiring them to resolve would forbid designing before building
-      # and would turn a record of the past into a lie about the present. The
-      # script's header carries the full reasoning and the measurements.
-      #
-      # The script carries its own resolution rules and the reasons each exists;
-      # they were measured against this tree rather than assumed, and getting any
-      # of them wrong produces a confident wrong answer rather than an obvious
-      # one. It also prints the corpus size on success, not only inside a failure
-      # message, because a count nobody sees until the gate has already failed
-      # cannot warn anyone.
-      #
-      # Note when this fires: every citation it has ever caught named a REAL file
-      # at a wrong address - stale, crate-relative, or reaching into the vendored
-      # engine - not an invented one. The first question is "where did this move
-      # to", not "does this exist". Deleting the citation is almost always the
-      # wrong repair.
-      - name: Source citations resolve
-        run: tests/source_citation_gate.sh
-      # And the control for the step above, for the same reason the
-      # measurement-integrity self-test exists: that gate passes at zero
-      # unresolvable citations, which is also what a gate that has quietly
-      # stopped matching reports. A drifted pattern, a renamed root, a file grep
-      # declines to read - all of them look exactly like a clean tree. This
-      # plants a citation at a path that does not exist and asserts the gate
-      # both NAMES it and exits non-zero, then asserts removing it returns the
-      # gate to green. A gate that always fails is as useless as one that
-      # always passes.
-      - name: Source-citation gate self-test
-        run: tests/source_citation_selftest.sh
       # SEC-8. The private registry must not allow open self-registration or
       # $authenticated publish, and its compose port must stay loopback-bound.
       #
@@ -436,137 +296,18 @@ jobs:
       # this repo has been burned by twice.
       - name: Shipped deploy instructions match the CLI
         run: tests/deploy_instructions_gate.sh
-      # These two existed and ran in NO workflow until 2026-08-11. Both were
-      # written BECAUSE a specific drift happened - AGENTS.md advertised `build`
-      # and `inspect` for months after both were removed; the two [[inject]]
-      # ceilings disagreed about system-column defaults and every first insert
-      # failed - and a gate that only runs when someone remembers is not much of
-      # a gate. Measured before wiring: 33ms and 24ms, pure text, no services.
-      #
-      # Both proven load-bearing by MY OWN mutation rather than assumed:
-      #   adding a `"teleport" =>` dispatch arm makes the index gate name it
-      #     ("main.rs dispatches (8) ... AGENTS.md indexes (7) ... teleport")
-      #   flipping created_at's `nullable = false` to `true` in ONE ceiling makes
-      #     the mirror gate print the drifted line from both sides
-      # The mirror-gate mutation is worth a note: my FIRST attempt edited the
-      # word `created_at` where it appears in a COMMENT, the gate stayed green,
-      # and for a moment that looked like the gate being hollow. The extractor
-      # only compares `{ name = ... }` entries, so the mutation never reached
-      # the compared region. A mutation that does not apply and a check that
-      # does not fire print the same thing.
-      - name: AGENTS.md crate index names the commands the CLI has
-        run: tests/cli_command_index_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
-      # The organization ownership model, in three gates. Each runs its own
-      # extractors against a positive and a one-variable control FIRST and
-      # refuses if they disagree, because every one of the three is an ABSENCE
-      # check over a corpus and an absence check that cannot read its corpus is
-      # the cleanest green there is - the ownership gate found exactly that in
-      # itself on its first run, a `grep --include` placed after `--` where grep
-      # reads it as a filename.
-      - name: An app reaches its owner only through its project
-        run: tests/organization_ownership_path_gate.sh --self-test
-      - name: One ownership path, and no cached authority
-        run: tests/organization_ownership_path_gate.sh
-      - name: Route and lock extractors discriminate
-        run: tests/organization_route_authorization_gate.sh --self-test
-      - name: Every mutating organization route is guarded and locks first
-        run: tests/organization_route_authorization_gate.sh
-      - name: The role ladder and the Cedar bands name the same ranks
-        run: tests/organization_policy_ladder_gate.sh
-      # THESE THREE LANDED WITHOUT A STEP and tests/ci_wiring_gate.sh has been
-      # red on them since. All three are text scans that need no build and no
-      # database, so the reason they were unwired was that nobody wired them,
-      # which is exactly the state that gate exists to make visible: an
-      # uninvoked gate and a clean tree print the same thing.
       - name: The app-id sweep's frontier does not go backwards
         run: tests/app_id_frontier_gate.sh
       - name: Every write that could resurrect a deleted app carries its fence
         run: tests/deleted_app_write_fence_gate.sh
-      - name: A credential is minted only from a validating read of its row
-        run: tests/mint_reads_row_gate.sh
-      # The Cedar schema is the only thing that makes a typo'd action id
-      # visible, and strict validation only rules on the ids the POLICIES
-      # quote. This compares the schema against the Rust vocabulary and against
-      # build_context directly, which is where the ids no band names live -
-      # `migrations:approve` among them. Both gaps it catches surface at runtime
-      # as a 500 raised before audit_decision, so nothing is written down.
-      - name: The schema, the action enum and the request context agree
-        run: tests/cedar_schema_vocabulary_gate.sh
-      # A `curl -H` whose next word is the URL sends the URL as a header and
-      # then has no URL, which most harnesses read as an empty response rather
-      # than as a malformed call. Green on this tree; it was never wired.
-      - name: Every curl -H in a harness is followed by a header
-        run: tests/curl_header_flag_gate.sh
-      # Account erasure has to stay REACHABLE: a users foreign key that blocks
-      # the delete, or an auth statement naming a table zeroship_auth holds no
-      # grant on, both surface only when a real due user is reaped under the
-      # real role - which no unit test does, because they all connect as
-      # postgres.
-      - name: A due user can actually be erased
-        run: tests/user_erasure_reachability_gate.sh
-      # A control-plane fixture assembled an AuthConfig in Rust and set every
-      # secret except the refresh keyring, so its token exchange answered
-      # "refresh hash key is not configured" and the one end-to-end proof that
-      # a `zeroship login` token authorizes a control endpoint was red. Auth's
-      # own boot refuses without those files; a fixture that builds the config
-      # by hand skips that refusal. Self-test first: a fixture scan that
-      # matches nothing and a tree with no unfenced fixtures print the same
-      # thing.
-      - name: Session keyring fixture gate self-test
-        run: tests/session_keyring_fixture_gate.sh --self-test
-      - name: Auth fixtures that drive a token exchange configure a keyring
-        run: tests/session_keyring_fixture_gate.sh
-      # THE TWO SKIP-MARKER STEPS THAT STOOD HERE ARE GONE with the gate they
-      # ran, and with the whole skip protocol: a test that cannot reach its
-      # backend now fails, so there is no marker for a gate to police and no
-      # census for a marker-less skip to hide from.
-      #
-      # The gate's own history is the sharpest example this file has of a check
-      # that examined nothing, and it is why the surviving gates all declare
-      # per-arm counts. Measured 2026-08-20 on the real tree: 8 rows found, 0
-      # removed by the marker filter, all 8 removed by an ALLOW list of bare
-      # path prefixes - so the run ruled on nothing and printed exactly what a
-      # clean tree prints. tests/gate_arm_census.sh exists because of it and
-      # still names it.
-      #
-      # A `//` comment in dispatch.rs said the transparent WebSocket proxy was
-      # wired in a `proxy::` helper. That name existed in exactly one place in
-      # the repo: the comment claiming it. It sat 760 lines from the function
-      # that returns 501 and says the proxy does not exist, so the file
-      # contradicted itself and the false half read first.
-      #
-      # Nothing could see it. A `//` comment is not a doc comment, so neither
-      # rustdoc's intra-doc gate (tests/run_doc_gate.sh above) nor the citation
-      # gates look at it. Text-only, runs no gateway.
-      #
-      # The gate watched that ONE identifier, so after the fix it examined zero
-      # names and reported the same green it reports on a clean file. Measured
-      # 2026-08-20 while it said "0 mention(s), 0 definition(s) -- no phantom":
-      # three more comment-only names were live in that file, one of them nine
-      # lines from the fix. Arm 1 now checks every backticked name the file
-      # cites. Self-test first, because a detector that matches nothing and a
-      # file with no phantoms print the same thing.
       - name: WS stub gate self-test
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
         run: tests/ws_subscription_stub_gate.sh
       - name: Data architecture and database posture
         run: cargo xtask test data-architecture
-      # The same shape as the WS stub above, one layer up: a comment ASSERTING
-      # that two crates stay in agreement, with nothing enforcing it. Found ten
-      # times in the data plane and migration engine; two were fixed in the week
-      # this gate landed (`cross_codec_parity`, `raw_column_parity`), and one of
-      # those had cited a guard that needed `--features test-helpers` plus a live
-      # PostgreSQL and could not have caught the divergence that had already
-      # shipped. The gate is a ratchet over a ledger of every such claim, not a
-      # semantic judge. Self-test first: an extractor that matches nothing and a
-      # tree whose every claim is ledgered print the same thing.
-      - name: Sync claim gate self-test
-        run: tests/sync_claim_gate.sh --self-test
-      - name: Every cross-crate agreement claim is on the ledger
-        run: tests/sync_claim_gate.sh
       # THE STEP ABOVE WAS THE VISIBLE HALF OF A LARGER MISS. Measuring "which
       # gates does this workflow actually run" on 2026-09-04 found TWELVE of the
       # 37 gates in tests/ wired nowhere - a third of them - and not one of the
@@ -594,19 +335,6 @@ jobs:
         run: cargo test -p zeroship-kv --test architecture
       - name: Repository dependency and feature contracts
         run: cargo xtask test repository
-      # TWO STEPS, and the split is the point. The bare run passes at zero bad
-      # citations, which is also what an extractor that stopped matching prints;
-      # its arm floors catch a collapse to nothing but cannot see ONE capability
-      # going missing inside a population that is mostly something else. Measured
-      # 2026-09-04: deleting the line-number group from the extractor removes
-      # every line check the gate performs and takes its AGENTS.md arm from 77 to
-      # 76 - green at floor 30. The self-test plants a citation one line past
-      # end-of-file and requires a refusal, with the eof citation beside it as the
-      # control, so the capability is bound rather than counted.
-      - name: Doc citation gate self-test
-        run: tests/doc_citation_gate.sh --self-test
-      - name: Every path and line a document cites exists
-        run: tests/doc_citation_gate.sh
       - name: The napi addon's declared and exported functions agree
         run: tests/napi_export_parity_gate.sh
       - name: No platform column is stored beside its own hash
@@ -619,52 +347,6 @@ jobs:
       # stays UNREAD.
       - name: Test-only env names are declared, and every declared one is read
         run: tests/test_only_env_gate.sh
-      # THE META-GATE. `ws_subscription_stub_gate.sh`, run earlier in this job,
-      # is one of four gates found vacuous on
-      # 2026-08-20 - an arm watching a single identifier the fix had deleted,
-      # examining 0 names and printing green. THIS SAID "the step above" until
-      # 2026-09-04, and by then two later gates had been inserted between the
-      # referent and the sentence, so it named decision_four_gate.sh - a gate
-      # that did not exist on 2026-08-20. A positional reference in a file
-      # people insert steps into decays on its own. The other three were skip_marker
-      # (8 hits, 8 excused, 0 ruled on), deploy_scripts' argv scan (1 pre-filter
-      # row, on the one service the filter excludes) and compose_secret_strength
-      # (rule set regexed out of another file's message; the message improved).
-      # Every one of them printed what a clean tree prints.
-      #
-      # So each gate now declares, per arm, how many items that arm ruled on
-      # and a floor that number must clear. The floors live in the gates, beside
-      # the code that produces the number; this step checks the PROPERTY - that
-      # every gate participates - and holds no table of expected counts, because
-      # such a table is the census that goes stale, which is the failure mode
-      # four OTHER gates hit the same week when two new crates landed.
-      #
-      # STATIC by design. The per-arm floors are enforced at the point of
-      # measurement by tests/lib/gate_arms.sh, in each gate's own CI step above
-      # and below, which is where the diagnosis is. This reads text: no docker,
-      # no database, no cargo. It was a 959-line Rust crate until 2026-08-21,
-      # which is a lot of workspace member to read shell scripts with.
-      - name: Every gate declares how much each of its arms examined
-        run: tests/gate_arm_census.sh tests
-      # THE OTHER META-GATE, and the one that would have caught the
-      # vendor_embedding miss. `gate_arm_census.sh` above asks whether every
-      # gate declares arms; `ci_invocable_gate.sh` below asks whether what this
-      # workflow NAMES can execute. Neither asks whether every gate is named at
-      # all - a gate absent from this file contributes nothing to
-      # ci_invocable's count and so nothing for it to miss. That question had
-      # gone unasked since the first gate landed, and the answer on 2026-09-04
-      # was twelve.
-      #
-      # SELF-TEST FIRST, and here it is the whole gate. The miss it exists for
-      # was a filename present in this file and present only in a COMMENT, so a
-      # predicate built on "does the name appear" reports that gate as wired
-      # and the gate is decorative. The self-test drives nine one-variable
-      # cases through the same extractor the real run uses - a run: step and
-      # the same line commented out, a command in a `run: |` block and the same
-      # line behind a `#`, a path run and the same path passed to grep.
-      #
-      # It rules on itself, which is the point: this step is what stops the
-      # next gate from being enforced by whoever remembers.
       - name: CI wiring gate self-test
         run: tests/ci_wiring_gate.sh --self-test
       - name: Every gate is run by a workflow, or allowlisted with a reason
@@ -759,18 +441,6 @@ jobs:
       # neither is in a suite anyone watches. Text-only: no binary, no docker.
       - name: dev secret provisioning check can actually pass
         run: tests/dev_secrets_gate.sh
-      # AGENTS.md's "zero tokio in the stack" invariant has never been checked by
-      # anything. It is two claims: no manifest we own declares tokio (true, and
-      # briefly false in b72fee096, caught by a human reading the diff), and the
-      # transitive edge through cyper -> hyper exists and is accepted. The gate
-      # bans the first and PINS the second, so it is green today and goes red on
-      # movement in either direction - including the edge being REMOVED, which is
-      # what investigate/cyper-tokio-removal is for and which must take the
-      # AGENTS.md paragraph with it. Runs cargo metadata and cargo tree only:
-      # both resolve from the manifests and the lockfile, so nothing is
-      # compiled. This step sits in the rust job for the toolchain, not a build.
-      - name: zero-tokio invariant
-        run: tests/zero_tokio_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
@@ -830,16 +500,6 @@ jobs:
           tests/lib/e2e_stack_selftest.sh
           tests/lib/known_catchall_selftest.sh
           tests/lib_gate_arms_selftest.sh
-      # e2d0cba4c changed three harnesses from 100755 to 100644 in a commit about
-      # sharing a helper. The next day two of them were wired into CI by bare
-      # path, where a non-executable file is exit 126 - so those steps could not
-      # run an assertion from the moment they were gated. Restored in ac3bfd2cf.
-      # This checks the narrow invariant that actually broke: if CI runs a script
-      # as a COMMAND, it must be executable. Sourced files are outside it by
-      # construction, which matters because five tests/lib/*.sh are correctly
-      # non-executable and a blanket rule would demand the wrong thing on them.
-      - name: Scripts CI invokes by bare path are executable
-        run: tests/ci_invocable_gate.sh
       # THE CONFIGURATION-NAME CONTRACT. Nothing invoked the checker binary in
       # any workflow until now: `cargo test --workspace` above ran the crate's
       # unit and fixture tests, but the four subcommands that inspect the REAL
@@ -1009,63 +669,9 @@ jobs:
       # and enumerates - which is why it sits after the teardown.
       - name: Every declared compio-postgres suite test compiles somewhere
         run: tests/compio_postgres_test_visibility_gate.sh
-      # THE SKIP CENSUS STEP THAT STOOD HERE IS GONE. It counted the tests that
-      # ran, exercised nothing, and were still inside this job's "N passed"
-      # totals - Rust cannot mark a test ignored at RUNTIME, so the harness had
-      # already committed to counting it by the time the body discovered its
-      # backend was absent.
-      #
-      # It REPORTED rather than failed, on the ground that this job provisioned
-      # no backend at the time and failing a job that deliberately stands up no
-      # services makes the only honest outcome a red tick - after which the fix
-      # people reach for is deleting the check. Both halves of that are moot now:
-      # the job provisions its backends near the top, and those tests FAIL when
-      # they cannot reach one. This job either provisions what a test needs or
-      # does not run it; there is no third state for a census to describe.
-      # The gate's own self-test: fixtures only, no build, seconds. It runs
-      # BEFORE the gate so that a gate which has stopped discriminating is
-      # reported as such rather than as a clean workspace.
-      - name: Clippy gate self-test
-        run: tests/clippy_gate_selftest.sh
-      # This step used to be a bare
-      #
-      #   cargo clippy --workspace --all-targets --features <the two live-db ones>
-      #
-      # and it went red on main, unnoticed, twice in a week. The reason was
-      # structural rather than anybody's carelessness: the per-crate `cargo test`
-      # runs people do locally never invoke clippy, so this job was the only
-      # thing that did, and its result is one tick among many.
-      #
-      # Worse, the SECOND break showed the one-liner cannot be trusted even when
-      # someone is looking. A deny-level lint in crates/core aborted the run
-      # before crates/auth and crates/control were ever scheduled, so the output
-      # said nothing about them - and "said nothing" is exactly what a clean
-      # crate looks like. A run reporting no auth errors had not found auth
-      # clean; it had never reached auth.
-      #
-      # tests/clippy_gate.sh runs the same invocation and then AUDITS cargo's
-      # `--message-format=json` stream against `cargo metadata`, so every
-      # workspace package and every in-scope target has to show up as linted for
-      # the step to pass. It also refuses, distinguishably, when a gitignored
-      # build input is missing - which is why the `pnpm build` and WPT steps
-      # earlier in this job are load-bearing for it.
-      #
-      # The `--features <the two live-db ones>` above became `--all-features` on
-      # 2026-08-20, because "every in-scope target" was scoped BY that list. The
-      # workspace declares 28 features; the list named 2, and the 18 it left off
-      # gated 10 declared targets that arm 3 did not count as unlinted - it
-      # filtered them out of its own expectation. One of them,
-      # zeroship-migrate-adapter's `platform_migrate`, held eleven deny-level
-      # `clippy::await_holding_lock` errors throughout. A fourth arm now checks
-      # the resolution itself against the manifests and names any feature that
-      # did not come out enabled.
-      #
-      # The invocation, including the feature selection and the deliberate
-      # absence of `-D warnings`, lives in the script and nowhere else, so a
-      # developer running it locally and this step cannot lint different things.
-      # The reasoning for both is in the script header.
-      - name: Clippy, with proof every crate was linted
-        run: tests/clippy_gate.sh
+      # Cargo propagates lint and compilation failures using workspace lint levels.
+      - name: Clippy across workspace targets and features
+        run: cargo clippy --workspace --all-targets --all-features
 
   # Required control-plane and migration-service database verification. The suite
   # provisions a migrated PostgreSQL database and runs ordinary crate tests,

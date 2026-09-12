@@ -1,0 +1,16 @@
+error[E0599]: the method `set` exists for struct `zeroship_data_orm::orm::Field<id>`, but its trait bounds were not satisfied
+ --> tests/ui/set_manual_id.rs:6:33
+  |
+3 | schema!(pub models = "../fixtures/manual-id.runtime.json");
+  | --------------------------------------------------------- doesn't satisfy `id: UpdatableColumn`
+...
+6 |     let _ = models::records::id.set("replacement");
+  |                                 ^^^ method cannot be called on `zeroship_data_orm::orm::Field<id>` due to unsatisfied trait bounds
+  |
+  = note: the following trait bounds were not satisfied:
+          `id: UpdatableColumn`
+note: the trait `UpdatableColumn` must be implemented
+ --> src/orm/model.rs
+  |
+  | pub trait UpdatableColumn: WritableColumn {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

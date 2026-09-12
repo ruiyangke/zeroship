@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use compio_postgres::{Client, NoTls};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{pkcs8::EncodePrivateKey, SigningKey};
 use ntex::web::{self, test};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -23,7 +23,7 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::password;
-use zeroship_auth::oidc::{BrokerSecrets, Issuer, PrincipalAccessTokenMint};
+use zeroship_auth::oidc::{BrokerSecrets, Issuer};
 use zeroship_auth::server;
 use zeroship_bundle::{AssetEntry, Manifest, RequiredPrincipal, ResourceEntry, StaticAction};
 use zeroship_gateway::blob_cache::{BlobCache, DiskBlobCache};
@@ -31,9 +31,9 @@ use zeroship_gateway::enforce;
 use zeroship_gateway::idempotency;
 use zeroship_gateway::oidc_rp::{BrokerSecret, BrowserAuthorizeParams, OidcRp, TokenSet};
 use zeroship_gateway::proxy::HashRing;
-use zeroship_gateway::sessions::{NewSession, create, revoke_app_sessions_for_user};
+use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
 use zeroship_gateway::sync::RouteCache;
-use zeroship_gateway::{GateConfig, GateState, session_token};
+use zeroship_gateway::{session_token, GateConfig, GateState};
 
 /// The test's own oracle for "is this audit row still live", replacing the
 /// crate's deleted `sessions::validate`. That function had no production
@@ -933,18 +933,42 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     )
     .await;
 
-    let wrong_resource_audience = format!("app:{}", Uuid::new_v4());
-    let scopes = vec!["openid".to_string(), "email".to_string()];
-    let global_user = Uuid::new_v4().to_string();
-    let wrong_aud_token = issuer
-        .sign_unregistered_principal_access_token_fixture(&PrincipalAccessTokenMint {
-            principal_id: &global_user,
-            audience: &wrong_resource_audience,
-            client_id: &client_id,
-            scopes: &scopes,
-            ttl_secs: Some(300),
-        })
-        .expect("mint wrong-audience access token");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock")
+        .as_secs();
+    let mut claims = serde_json::json!({
+        "iss": issuer.issuer(),
+        "sub": issuer.pairwise_subject(&Uuid::new_v4().to_string(), SECTOR),
+        "aud": format!("app:{app_id}"),
+        "client_id": client_id,
+        "scope": "openid email",
+        "iat": now,
+        "exp": now + 300,
+        "jti": Uuid::new_v4().to_string(),
+    });
+    let key = signing.to_pkcs8_der().expect("fixture signing key");
+    let key = jsonwebtoken::EncodingKey::from_ed_der(key.as_bytes());
+    let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA);
+    header.typ = Some(zeroship_auth::oidc::ACCESS_TOKEN_TYP.to_owned());
+    header.kid = Some(issuer.kid().to_owned());
+    let accepted = jsonwebtoken::encode(&header, &claims, &key).expect("sign accepted claims");
+    let control = test::TestRequest::get()
+        .uri("/private")
+        .header(http::header::HOST, APP_HOST)
+        .header(http::header::AUTHORIZATION, format!("Bearer {accepted}"))
+        .to_request();
+    let response = test::call_service(&app, control).await;
+    assert_eq!(
+        response.status().as_u16(),
+        200,
+        "matching audience must authenticate"
+    );
+    assert_eq!(test::read_body(response).await.as_ref(), b"ok");
+
+    claims["aud"] = serde_json::json!(format!("app:{}", Uuid::new_v4()));
+    let wrong_aud_token = jsonwebtoken::encode(&header, &claims, &key)
+        .expect("sign otherwise-identical claims for another audience");
 
     let req = test::TestRequest::get()
         .uri("/private")

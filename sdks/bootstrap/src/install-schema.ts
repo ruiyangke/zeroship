@@ -24,6 +24,9 @@ import {
   exitTransactionScope,
   captureNativeTransaction,
   Collection,
+  readFrom,
+  type ReadFrom,
+  type AliasedCollection,
   type NativeDb,
   type NativeTransactionFn,
   Query,
@@ -39,18 +42,20 @@ import {
   type NamedIndexSpec,
   type Result,
   type Row,
+  type RowId,
+  type TxCollection,
+  type TxQuery,
+  type TransactionOptions,
+  type PaginationResult,
   type RowInput,
   type UpsertOptions,
   type UpdateExpression,
   type Filter,
-  type IsolationLevel,
   type WithSpec,
-  type WithRelations,
   type PlainObject,
   type FieldDef,
-  CONFINED_SYSTEM_SHAPE_COLUMN_NAMES,
-  CONFINED_SYSTEM_SHAPE_ASSIGNMENTS,
 } from "@zeroship/db/internal";
+export type { TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
 
 // ---------------------------------------------------------------------------
 // normalizeSchema + expandUnionToFlatColumns (moved from @zeroship/db/schema)
@@ -225,61 +230,7 @@ function isFieldDef(value: unknown): value is FieldDef {
   return isPlainRecord(value) && typeof value.type === "string";
 }
 
-/**
- * The platform-managed column names, taken from the operator charter
- * (`policies/confined-system-shape.inject.toml`) via its generated projection.
- * Creator schemas cannot declare fields with these names; fencing at
- * schema-declaration time surfaces the failure in `pnpm dev` rather than after
- * a worker round-trip.
- *
- * **This used to be seven string literals restating the charter**, with a
- * doc-comment asking the reader to keep them in step with the Rust side by
- * hand. It is now derived, so an eighth platform column is a charter line and
- * `tests/inject_policy_mirror_gate.sh` fails if the projection goes stale
- * against the fragment. The hand-sync instruction is gone because there is
- * nothing left to sync.
- */
-const SYSTEM_FIELD_NAMES: readonly string[] = CONFINED_SYSTEM_SHAPE_COLUMN_NAMES;
-
-/**
- * Copy a descriptor-supplied `FieldDef`, stamping the charter's assignment onto
- * it when the field IS one of the platform's columns.
- *
- * **The authority is the charter, not the descriptor, and that is the point.**
- * `crates/zeroship-migrate-server/src/apply.rs` says outright that the
- * descriptor is client-declared - a creator who hand-edits the generated files
- * can make them agree about a lie - so a binding read out of the descriptor
- * would be a binding the creator controls. Reading it from the operator charter
- * instead means a hand-edited `.zship` cannot re-point who computes `id`.
- *
- * Matching is by COLUMN NAME because that is what a v2 descriptor is keyed by:
- * its fields are already-resolved wire `FieldDef`s under snake_case column
- * names (see `RuntimeCollectionDescriptorV2`). A creator's own field never
- * reaches this branch under a platform name - `normalizeSchema` refuses those
- * below - so a match here is a platform column, not a collision.
- *
- * An `assign` already present on the def is left alone rather than overwritten,
- * so that when the descriptor starts carrying bindings itself (the mirror the
- * worker verifies) this function does not silently mask a disagreement between
- * the two. Today no descriptor carries one.
- */
-function withPlatformAssignment(name: string, def: FieldDef): FieldDef {
-  const assign = CONFINED_SYSTEM_SHAPE_ASSIGNMENTS[name];
-  if (assign === undefined || def.assign !== undefined) return { ...def };
-  return { ...def, assign };
-}
-
-/**
- * Converts a SchemaInput into a NormalizedSchema. Every field value
- * must be a `TypeBuilder` produced by the `t.*` API (or the whole
- * input may be a single top-level `t.union(...)` — proposal §C2).
- * Any other shape throws.
- *
- * **P7 PR 1** — refuses any field whose name collides with a
- * platform system field. The Rust-side `field_to_column` would also
- * refuse such schemas at descriptor-install time; throwing here lets
- * `pnpm dev` surface the error immediately on first build.
- */
+/** Normalize builders and generated field descriptors without injecting fields. */
 export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
   // C2 — top-level discriminated union.
   if (isTypeBuilder(input)) {
@@ -298,50 +249,9 @@ export function normalizeSchema(input: SchemaInputOrUnion): NormalizedSchema {
 
   const fields = input as SchemaFieldRecord;
   for (const [key, rawVal] of Object.entries(fields)) {
-    // **Migration-first cutover (P4b)** — the bundled RuntimeSchemaDescriptor
-    // supplies platform-generated wire `FieldDef`s (not t.* builders). They
-    // legitimately carry system fields (id/created_at/version/…) the migration
-    // fold materialised, so they bypass the creator-facing system-field fence
-    // below (which guards only user-authored t.* schemas) AND the
-    // "must be a t.* builder" check. Pass them through verbatim. A TypeBuilder
-    // is never an `isFieldDef` candidate here (the `!isTypeBuilder` guard keeps
-    // user schemas on the strict path even if a builder exposed a string
-    // `type`).
     if (!isTypeBuilder(rawVal) && isFieldDef(rawVal)) {
-      result[key] = withPlatformAssignment(key, rawVal as FieldDef);
+      result[key] = { ...(rawVal as FieldDef) };
       continue;
-    }
-    // **P7 PR 1** — refuse creator-declared fields whose names collide
-    // with the seven platform system fields. The Rust-side validator
-    // (`validate_field_name_for_declaration`) enforces the same fence
-    // while installing the descriptor; the SDK-side check surfaces the error at
-    // `pnpm dev` build time so creators don't wait for a worker
-    // round-trip. Error code mirrors the Rust-side
-    // `RESERVED_SYSTEM_FIELD_NAME`.
-    if (SYSTEM_FIELD_NAMES.includes(key)) {
-      // Sanctioned exception: `id: t.id("prefix")` is a PREFIX
-      // DECLARATION for the always-present system `id` PK column — not
-      // an attempt to override the column. Allow it through ONLY when
-      // the value is a `type:"id"` builder; the `{type:"id", idPrefix}`
-      // def then reaches the runtime descriptor so the auto-mint pass can
-      // read the declared prefix. Any other type
-      // declared under `id`, and all six other system names, stay
-      // rejected. The Rust column emitter skips this field (no duplicate
-      // `id` column) and its validator mirrors the `usr` fence.
-      const isIdPrefixDecl =
-        key === "id" &&
-        isTypeBuilder(rawVal) &&
-        rawVal.toFieldDef().type === "id";
-      if (!isIdPrefixDecl) {
-        throw Object.assign(
-          new Error(
-            `Field name "${key}" is reserved for platform system fields. ` +
-              `System fields (${SYSTEM_FIELD_NAMES.join(", ")}) are managed by ` +
-              `the platform and cannot be overridden.`,
-          ),
-          { code: "RESERVED_SYSTEM_FIELD_NAME" as const },
-        );
-      }
     }
     if (!isTypeBuilder(rawVal)) {
       throw Object.assign(
@@ -591,37 +501,6 @@ export function model<S extends Record<string, unknown>>(
   // both record-of-fields and a top-level `t.union(...)` input.
   const normalized = normalizeSchema(schema as Parameters<typeof normalizeSchema>[0]);
 
-  // Both injections below run AFTER `normalizeSchema`, which is where
-  // `withPlatformAssignment` stamps the charter's `assign` onto a platform
-  // column. So each must take the stamp explicitly, or it arrives with no
-  // `assign` and `validateDoc` falls through to the `default` arm - which
-  // MATERIALISES the value into the caller's document.
-  //
-  // That is harmless for `deletedAt`, which declares no default, and is not for
-  // `version`: its `default: 1` is the DDL seed, and the design forbids that key
-  // reaching `build_upsert`, where the generic loop emits
-  // `"version" = EXCLUDED."version"` while the auto-bump emits a second
-  // assignment to the same column - two assignments to one column in one
-  // `DO UPDATE SET`, which PostgreSQL refuses. Measured before this fix: an
-  // insert reached the native op as `{"title":"hello","version":1}`.
-
-  // When soft delete is enabled, inject the deletedAt field into the schema
-  if (softDelete && !normalized.deletedAt) {
-    normalized.deletedAt = withPlatformAssignment("deletedAt", {
-      type: "date",
-      required: false,
-    });
-  }
-
-  // D4 — when versioning is enabled, inject a `version` column.
-  if (versioning && !normalized.version) {
-    normalized.version = withPlatformAssignment("version", {
-      type: "number",
-      required: false,
-      default: 1,
-    });
-  }
-
   return new Collection<S>(name, normalized, native, {
     naming: namingStrategy,
     softDelete,
@@ -672,108 +551,6 @@ export type ValidateSchemaShape<T> = {
           : `Schema "${K & string}" must be a field map of t.* builders, a schema(...) builder, or a top-level t.union(...).`;
 };
 
-type TxPaginationResult<P> = {
-  page: P[];
-  continueCursor: string;
-  isDone: boolean;
-};
-
-/**
- * A typed collection inside a transaction — same API as Collection but
- * throws on error instead of returning Result. Generic over schema
- * shape S.
- */
-export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
-  insert(row: RowInput<S>): Promise<Row<S>>;
-  insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
-  get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
-  ): Promise<Pick<Row<S>, K> | null>;
-  get<W extends WithSpec>(
-    idOrFilter: string | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> },
-  ): Promise<(Row<S> & WithRelations<S, W, AllSchemas>) | null>;
-  get(
-    idOrFilter: string | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> },
-  ): Promise<Row<S> | null>;
-  exists(filter: Filter<S>): Promise<boolean>;
-  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
-  upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
-  update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
-  updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
-  deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  purge(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
-  purgeMany(filter?: Filter<S>): Promise<{ purgedCount: number }>;
-  restore(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
-  restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
-  count(filter?: Filter<S>): Promise<number>;
-  distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
-  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
-  bulkUnmask(
-    items: ReadonlyArray<{
-      id: string;
-      columns: readonly (string & keyof Row<S>)[];
-    }>,
-    opts: { actor: Record<string, unknown>; reason?: string },
-  ): Promise<Map<string, Record<string, unknown>>>;
-  search(
-    args: {
-      vector: number[];
-      k?: number;
-      metric?: "cosine" | "l2" | "innerProduct";
-      column?: string;
-      filter?: Filter<S>;
-    },
-  ): Promise<(Row<S> & { _distance?: number })[]>;
-  near(args: {
-    field: keyof S & string;
-    point: { lat: number; lng: number };
-    radius: number;
-    filter?: Filter<S>;
-    limit?: number;
-  }): Promise<(Row<S> & { _distance_m: number })[]>;
-};
-
-/** Query inside a transaction — same chainable API but resolves to data directly */
-export type TxQuery<
-  S = PlainObject,
-  P = Row<S>,
-  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
-> = {
-  sort(s: Record<string, number> | string): TxQuery<S, P, AllSchemas>;
-  limit(n: number): TxQuery<S, P, AllSchemas>;
-  skip(n: number): TxQuery<S, P, AllSchemas>;
-  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
-  after(id: string): TxQuery<S, P, AllSchemas>;
-  with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  paginate(opts: {
-    cursor?: string | null;
-    numItems: number;
-  }): Promise<TxPaginationResult<P>>;
-  /** **P9 PR 1** — first matching row or `null`; throws on native error. */
-  first(): Promise<P | null>;
-  /** **P9 PR 1** — strict exactly-one; throws `NotFoundError` on zero or
-   *  `NotUniqueError` on >1 matches. */
-  unique(): Promise<P>;
-  /** **P9 PR 1** — last matching row in the current sort, or `null`;
-   *  throws `InvalidOperationError` if no sort was set. */
-  last(): Promise<P | null>;
-  then<TResult1 = P[], TResult2 = never>(
-    resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
-    reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
-  ): Promise<TResult1 | TResult2>;
-};
-
-/** Options for the transaction method. */
-export interface TransactionOptions {
-  isolationLevel?: IsolationLevel;
-}
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
@@ -785,7 +562,8 @@ export type Collections<T extends Record<string, SchemaInput>> = {
 };
 
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  from: ReadFrom;
+  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   live: <R>(queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown }, options?: LiveOptions) => LiveQuery<R>;
 };
 
@@ -802,12 +580,12 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
 
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   async function getImpl(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<unknown> {
     const colAny = collection as unknown as {
       get(
-        idOrFilter: string | Filter<S>,
+        idOrFilter: RowId<S> | Filter<S>,
         opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
       ): Promise<Result<Row<S> | null>>;
     };
@@ -815,6 +593,7 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   }
 
   const tx: TxCollection<S> = {
+    as: alias => collection.as(alias),
     async insert(row: RowInput<S>) {
       return unwrap(await collection.insert(row));
     },
@@ -836,25 +615,25 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async upsert(row: RowInput<S>, options: UpsertOptions<S>) {
       return unwrap(await collection.upsert(row, options));
     },
-    async update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>) {
+    async update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>) {
       return unwrap(await collection.update(idOrFilter, patch));
     },
     async updateMany(filter: Filter<S>, patch: UpdateExpression<S>) {
       return unwrap(await collection.updateMany(filter, patch));
     },
-    async delete(idOrFilter: string | Filter<S>) {
+    async delete(idOrFilter: RowId<S> | Filter<S>) {
       return unwrap(await collection.delete(idOrFilter));
     },
     async deleteMany(filter: Filter<S>) {
       return unwrap(await collection.deleteMany(filter));
     },
-    async purge(idOrFilter: string | Filter<S>) {
+    async purge(idOrFilter: RowId<S> | Filter<S>) {
       return unwrap(await collection.purge(idOrFilter));
     },
     async purgeMany(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.purgeMany(filter));
     },
-    async restore(idOrFilter: string | Filter<S>) {
+    async restore(idOrFilter: RowId<S> | Filter<S>) {
       return unwrap(await collection.restore(idOrFilter));
     },
     async restoreMany(filter: Filter<S> = {} as Filter<S>) {
@@ -900,14 +679,14 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
     limit(n: number) { query.limit(n); return wrapped; },
     skip(n: number) { query.skip(n); return wrapped; },
     select: selectImpl as TxQuery<S, Row<S>>["select"],
-    after(id: string) { query.after(id); return wrapped; },
+    after(id: RowId<S>) { query.after(id); return wrapped; },
     with: ((spec: WithSpec) => {
       (query as unknown as { with(s: WithSpec): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
     async paginate(
       opts: Parameters<Query<S, Row<S>>["paginate"]>[0],
-    ): Promise<TxPaginationResult<Row<S>>> {
+    ): Promise<PaginationResult<Row<S>>> {
       return unwrap(await query.paginate(opts));
     },
     // **P9 PR 1** — Result→throw shims for the new terminals so the
@@ -992,6 +771,7 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
   "openSubscription",
   "transaction",
   "live",
+  "from",
 ]);
 
 let _installInFlight = false;
@@ -1124,7 +904,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
   const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
   for (const [name, col] of Object.entries(collections)) {
-    (txCollections as Record<string, TxCollection<unknown>>)[name] =
+    (txCollections as Record<string, unknown>)[name] =
       createTxCollection(col as Collection<unknown>);
   }
 
@@ -1173,7 +953,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // wrappers add the field-mapping + throwing contract the callback
   // expects).
   async function transactionImpl<R>(
-    fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>,
+    fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>,
     txOptions?: TransactionOptions,
   ): Promise<Result<R>> {
     if (nativeTransaction === undefined) {
@@ -1224,7 +1004,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         // The native view's collections share the tx connection, so we
         // hand the creator our SDK-wrapped `txCollections` (Result→throw
         // + field mapping). `rawTxView` is intentionally unused.
-        (_rawTxView: unknown) => fn(txCollections),
+        async (_rawTxView: unknown) => {
+          let active = true;
+          const from: ReadFrom<true> = source => readFrom(native, source, true, () => active);
+          try { return await fn({ ...txCollections, from }); }
+          finally { active = false; }
+        },
         opts,
       )) as R;
       return ok(bodyResult);
@@ -1276,6 +1061,12 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     }
     Object.defineProperty(target, "transaction", {
       value: transactionImpl,
+      configurable: true,
+      enumerable: true,
+      writable: false,
+    });
+    Object.defineProperty(target, "from", {
+      value: (source: AliasedCollection<unknown>) => readFrom(native, source),
       configurable: true,
       enumerable: true,
       writable: false,

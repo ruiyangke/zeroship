@@ -3,7 +3,8 @@ use crate::{driver::*, error::*};
 use async_trait::async_trait;
 use compio_postgres::{CancelToken, Pool, PoolConnection};
 use std::rc::Rc;
-use zeroship_data_sql::{compile::SqlDialect, value::Value};
+use crate::value::Value;
+use crate::sql::{compile::SqlDialect};
 
 #[derive(Debug)]
 struct PgCancellation {

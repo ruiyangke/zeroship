@@ -845,7 +845,7 @@ pub fn compute_diff(
         let desired_columns = desired_physical_columns(schema, inject);
         for col in live_cols.keys() {
             // Compare against the physical desired shape, not just the
-            // creator-declared field map. System fields and generated
+            // creator-declared field map. Injected columns and generated
             // siblings are platform-owned columns that must survive
             // restart-time schema validation.
             if desired_columns.contains(col) {
@@ -1285,7 +1285,7 @@ mod tests {
 
     #[test]
     fn platform_system_columns_do_not_become_destructive_drops() {
-        // A persisted dev DB contains platform-owned system columns on
+        // A persisted dev DB contains platform-owned injected columns on
         // every creator table. User schemas never redeclare these
         // fields, so restart-time validation must not treat them as
         // undeclared user columns to drop.
@@ -1324,7 +1324,7 @@ mod tests {
         assert!(
             !ops.iter()
                 .any(|op| matches!(op.change_kind, ChangeKind::DropColumn)),
-            "system columns must survive schema revalidation without destructive drops: {ops:?}"
+            "injected columns must survive schema revalidation without destructive drops: {ops:?}"
         );
     }
 
