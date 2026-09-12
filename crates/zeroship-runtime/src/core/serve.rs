@@ -45,6 +45,8 @@ use futures::{FutureExt, pin_mut};
 #[derive(Clone)]
 pub struct ServerOptions {
     pub port: u16,
+    /// Trusted logical app identity supplied by the host.
+    pub app_id: Option<uuid::Uuid>,
     /// Number of worker threads. 0 = auto-detect from available parallelism.
     pub workers: usize,
     /// Per-request CPU time limit (enforced by V8 interrupt).
@@ -85,6 +87,7 @@ impl Default for ServerOptions {
     fn default() -> Self {
         Self {
             port: 3000,
+            app_id: None,
             workers: 0,
             cpu_limit: None,
             wall_timeout: None,
@@ -209,6 +212,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
     if num_workers <= 1 {
         if let Err(e) = run_single_worker(
             options.port,
+            options.app_id,
             false,
             None,
             options.cpu_limit,
@@ -235,6 +239,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             let wall_timeout = options.wall_timeout;
             let heap_limit_bytes = options.heap_limit_bytes;
             let port = options.port;
+            let app_id = options.app_id;
             let worker_env = options.env_vars.clone();
             let worker_plugins = options.plugins.clone();
             let handle = std::thread::Builder::new()
@@ -242,6 +247,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
                 .spawn(move || {
                     run_single_worker(
                         port,
+                        app_id,
                         true,
                         Some(i),
                         cpu_limit,
@@ -1828,6 +1834,7 @@ async fn accept_loop(
 #[allow(clippy::too_many_arguments)]
 fn run_single_worker(
     port: u16,
+    app_id: Option<uuid::Uuid>,
     use_reuseport: bool,
     worker_id: Option<usize>,
     cpu_limit: Option<Duration>,
@@ -1873,7 +1880,7 @@ fn run_single_worker(
                 tracing::info!(port, addr = %format!("http://0.0.0.0:{port}"), "runtime listening");
             }
 
-            let runtime = Runtime::builder()
+            let mut builder = Runtime::builder()
                 .modules(modules)
                 .env_vars(env_vars)
                 .runtime_descriptor(runtime_descriptor)
@@ -1882,8 +1889,11 @@ fn run_single_worker(
                     wall_timeout,
                     heap_limit_bytes,
                 })
-                .plugins(plugins)
-                .build();
+                .plugins(plugins);
+            if let Some(app_id) = app_id {
+                builder = builder.app_id(app_id);
+            }
+            let runtime = builder.build();
 
             // Start the async event loop pump (timers, fetch, streams).
             // (Warmup removed — `call_fetch_handler` initializes lazily via

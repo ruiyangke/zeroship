@@ -44,6 +44,21 @@ pub fn run() -> Result<()> {
         cargo().args([
             "test",
             "-p",
+            "zeroship-cli",
+            "--bin",
+            "zeroship",
+            "workflow::tests",
+        ]),
+        "local workflow identity, retained code and background worker contracts",
+    )?;
+    checked(
+        cargo().args(["test", "-p", "zeroship-cli", "--test", "workflow_local"]),
+        "CLI workflow binding and process recovery",
+    )?;
+    checked(
+        cargo().args([
+            "test",
+            "-p",
             "zeroship-runtime",
             "--test",
             "workflow_dispatch",

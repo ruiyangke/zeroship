@@ -69,7 +69,7 @@ function hook(plugin: any, name: string): AnyFn {
 
 function makeServerStub(root: string) {
   return {
-    watcher: { add() {} },
+    watcher: { add() {}, on() {}, off() {} },
     middlewares: { use() {} },
     environments: {},
     config: { root },

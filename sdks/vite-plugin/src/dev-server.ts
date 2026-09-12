@@ -4,7 +4,7 @@
 // with the Vite Environment API.
 
 import type { Plugin, ViteDevServer } from "vite";
-import { resolve, dirname } from "node:path";
+import { resolve, dirname, relative, extname } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { ChildProcess, spawn } from "node:child_process";
@@ -35,6 +35,8 @@ import {
   createZeroshipEnvironmentOptions,
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
+import { buildWorkflowBundle } from "./workflow-bundle.js";
+import { WorkflowPublisher } from "./workflow-publisher.js";
 import {
   defaultProjectConfig,
   type ProjectConfigHolder,
@@ -557,6 +559,8 @@ export function devServerPlugin(
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
   let restartRuntimeForDescriptorChange: (() => void) | null = null;
+  let workflowPublisher: WorkflowPublisher | undefined;
+  let workflowPublicationStopped: Promise<void> = Promise.resolve();
 
   // Migration-first gen-types. The absolute migrations dir is resolved in
   // configureServer (once `root` is known) so the `hotUpdate` branch can match
@@ -809,6 +813,47 @@ export function devServerPlugin(
         let spawnInFlight = false;
         let tornDown = false;
 
+        const dependencies = new Set<string>();
+        if (serverEntry) {
+          workflowPublisher = new WorkflowPublisher(
+            resolve(root, ".zeroship/workflows.zship"),
+            async () => {
+              await bootRegenDone;
+              return buildWorkflowBundle({
+                root, entry: serverEntry, project: projectConfig,
+                runtimeDescriptor: runtimeDescriptorJson,
+              });
+            },
+            files => {
+              dependencies.clear();
+              for (const file of files) dependencies.add(file);
+              server.watcher.add(files);
+            },
+          );
+        }
+        const refreshWorkflows = () => {
+          void workflowPublisher?.refresh().then(() => {
+            if (!tornDown && !serverProcess && !spawnInFlight) {
+              resetSupervisorForDescriptorChange();
+              runSpawn();
+            }
+          }).catch(error => {
+            console.warn(`[zeroship] workflow build failed: ${(error as Error).message}`);
+          });
+        };
+        const workflowSourceChanged = (_event: string, file: string) => {
+          if (tornDown || !workflowPublisher) return;
+          if (migrationsAbs && isUnderMigrationsDir(file, migrationsAbs)) return;
+          const path = relative(root, file);
+          if (path.split(/[\\/]/).some(part => part === ".zeroship" || part === "node_modules")) return;
+          if (isUnderMigrationsDir(file, resolve(root, projectConfig.build.dist))) return;
+          if (isUnderMigrationsDir(file, resolve(root, projectConfig.migrations.out))) return;
+          // Hidden host state is not an input unless the compiler observed it.
+          if (!dependencies.has(file) && path.split(/[\\/]/).some(part => part.startsWith("."))) return;
+          if (dependencies.has(file) || /\.(?:[cm]?[jt]sx?|json)$/.test(extname(file))) refreshWorkflows();
+        };
+        server.watcher.on("all", workflowSourceChanged);
+
         /**
          * Distinguish "never came up" from "ran, then died".
          *
@@ -915,6 +960,9 @@ export function devServerPlugin(
         // SIGKILL has no graceful window left to protect.
         const killChild = () => {
           tornDown = true;
+          server.watcher.off("all", workflowSourceChanged);
+          workflowPublicationStopped = workflowPublisher?.close() ?? Promise.resolve();
+          workflowPublisher = undefined;
           if (restartTimer) {
             clearTimeout(restartTimer);
             restartTimer = null;
@@ -942,6 +990,11 @@ export function devServerPlugin(
           // Wait for the boot-time gen-types regen so the child is spawned WITH a
           // fresh runtime descriptor (the pre-in-process CLI path was synchronous).
           await bootRegenDone;
+          const publisher = workflowPublisher;
+          await publisher?.refresh().catch(error => {
+            if (!existsSync(publisher.path)) throw error;
+            console.warn(`[zeroship] workflow build failed; starting with the retained archive: ${(error as Error).message}`);
+          });
           if (tornDown) return;
 
           // Resolve the actual listening port from the HTTP server.
@@ -1004,7 +1057,8 @@ export function devServerPlugin(
             const spawnedAt = Date.now();
             const child = spawn(
               cmd,
-              ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1"],
+              ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1",
+                ...(workflowPublisher ? [`--workflow-bundle=${workflowPublisher.path}`] : [])],
               {
                 cwd: root,
                 stdio: ["ignore", "pipe", "pipe"],
@@ -1197,6 +1251,8 @@ export function devServerPlugin(
     },
 
     async hotUpdate({ file }: { file: string }) {
+      // Retained workflow build output must not invalidate the live app graph.
+      if (isUnderMigrationsDir(file, resolve(root, ".zeroship"))) return;
       // Migration-first gen-types: a change under the migrations dir regenerates
       // the typed `env.db` surface. A successfully generated descriptor is
       // immutable runtime input, so replace the child and let native boot bind
@@ -1217,6 +1273,9 @@ export function devServerPlugin(
         );
         if (generated && descriptorJson !== runtimeDescriptorJson) {
           runtimeDescriptorJson = descriptorJson;
+          await workflowPublisher?.refresh().catch(error => {
+            console.warn(`[zeroship] workflow build failed: ${(error as Error).message}`);
+          });
           restartRuntimeForDescriptorChange?.();
         }
         return;
@@ -1235,8 +1294,9 @@ export function devServerPlugin(
       }
     },
 
-    buildEnd() {
+    async buildEnd() {
       disposeRuntime?.();
+      await workflowPublicationStopped;
     },
   };
 

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "blob fixtures use their owning compio runtime"
+)]
+
 use serde_json::json;
 use zeroship_bundle::{
     sha256_hex, BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry, WorkerCode,

@@ -42,9 +42,5 @@ futures = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 
-[dev-dependencies]
-tar = { workspace = true }
-zstd = { workspace = true }
-
 [lints]
 workspace = true

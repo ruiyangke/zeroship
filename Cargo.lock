@@ -7879,7 +7879,6 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
- "tar",
  "tempfile",
  "toml 0.8.23",
  "url",
@@ -7896,7 +7895,6 @@ dependencies = [
  "zeroship-storage-v8",
  "zeroship-workflow",
  "zeroship-workflow-v8",
- "zstd",
 ]
 
 [[package]]
