@@ -1,11 +1,11 @@
 //! `zeroship.idp_sessions` CRUD — the `IdP` login session at `auth.zeroship.ai`.
 
 use compio_postgres::Client;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
-const CREATE_SESSION_SQL: &str =
-    "INSERT INTO zeroship.idp_sessions \
+const CREATE_SESSION_SQL: &str = "INSERT INTO zeroship.idp_sessions \
         (user_id, auth_method, amr, acr, credential_version, idle_expires_at, abs_expires_at) \
      SELECT id, $2, $3, $4, credential_version, \
             NOW() + ($5::text || ' minutes')::interval, \
@@ -21,8 +21,7 @@ const CREATE_SESSION_SQL: &str =
      RETURNING id, user_id, auth_method, amr, acr, credential_version, \
                idle_expires_at, abs_expires_at";
 
-const VALIDATE_SESSION_SQL: &str =
-    "UPDATE zeroship.idp_sessions \
+const VALIDATE_SESSION_SQL: &str = "UPDATE zeroship.idp_sessions \
      SET idle_expires_at = NOW() + ($2::text || ' minutes')::interval \
      FROM zeroship.users \
      WHERE zeroship.idp_sessions.id = $1 \
@@ -41,7 +40,7 @@ const VALIDATE_SESSION_SQL: &str =
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: uuid::Uuid,
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     pub auth_method: String,
     pub amr: Vec<String>,
     pub acr: Option<String>,
@@ -52,7 +51,7 @@ pub struct Session {
 
 #[derive(Debug)]
 pub struct CreateSession<'a> {
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     pub auth_method: &'a str,
     pub amr: Vec<String>,
     pub acr: Option<&'a str>,
@@ -71,7 +70,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
         .query(
             CREATE_SESSION_SQL,
             &[
-                &params.user_id,
+                &params.user_id.as_str(),
                 &params.auth_method,
                 &params.amr,
                 &params.acr,
@@ -87,7 +86,7 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
         .ok_or_else(|| AuthError::Db("sessions create: empty return".into()))?;
     Ok(Session {
         id: row.get("id"),
-        user_id: row.get("user_id"),
+        user_id: crate::user_id::from_row(row, "user_id", "sessions create")?,
         auth_method: row.get("auth_method"),
         amr: row.get("amr"),
         acr: row.try_get("acr").ok(),
@@ -119,23 +118,24 @@ pub async fn validate(conn: &Client, id: uuid::Uuid) -> Result<Option<Session>> 
     let rows = conn
         .query(
             VALIDATE_SESSION_SQL,
-            &[
-                &id,
-                &crate::sessions::login::IDLE_MINUTES.to_string(),
-            ],
+            &[&id, &crate::sessions::login::IDLE_MINUTES.to_string()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("sessions validate: {e}")))?;
-    Ok(rows.first().map(|row| Session {
-        id: row.get("id"),
-        user_id: row.get("user_id"),
-        auth_method: row.get("auth_method"),
-        amr: row.get("amr"),
-        acr: row.try_get("acr").ok(),
-        credential_version: row.get("credential_version"),
-        idle_expires_at: row.get("idle_expires_at"),
-        abs_expires_at: row.get("abs_expires_at"),
-    }))
+    rows.first()
+        .map(|row| {
+            Ok(Session {
+                id: row.get("id"),
+                user_id: crate::user_id::from_row(row, "user_id", "sessions validate")?,
+                auth_method: row.get("auth_method"),
+                amr: row.get("amr"),
+                acr: row.try_get("acr").ok(),
+                credential_version: row.get("credential_version"),
+                idle_expires_at: row.get("idle_expires_at"),
+                abs_expires_at: row.get("abs_expires_at"),
+            })
+        })
+        .transpose()
 }
 
 /// Which session table a [`SessionSummary`] / revoke targets.
@@ -195,7 +195,7 @@ pub struct SessionSummary {
 /// # Errors
 ///
 /// `AuthError::Db` on PG failure.
-pub async fn list_by_user(conn: &Client, user_id: uuid::Uuid) -> Result<Vec<SessionSummary>> {
+pub async fn list_by_user(conn: &Client, user_id: &UserId) -> Result<Vec<SessionSummary>> {
     let rows = conn
         .query(
             "SELECT id, 'idp' AS kind, NULL::uuid AS app_id, \
@@ -216,7 +216,7 @@ pub async fn list_by_user(conn: &Client, user_id: uuid::Uuid) -> Result<Vec<Sess
                AND idle_expires_at > NOW() \
                AND abs_expires_at > NOW() \
              ORDER BY created_at DESC",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("sessions list_by_user: {e}")))?;
@@ -291,7 +291,7 @@ pub struct RevokedSession {
 /// `AuthError::Db` on PG failure.
 pub async fn revoke_one_for_user(
     conn: &Client,
-    user_id: uuid::Uuid,
+    user_id: &UserId,
     session_id: uuid::Uuid,
     kind: SessionKind,
 ) -> Result<Option<RevokedSession>> {
@@ -301,7 +301,7 @@ pub async fn revoke_one_for_user(
                 .execute(
                     "UPDATE zeroship.idp_sessions SET revoked_at = NOW() \
                      WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL",
-                    &[&session_id, &user_id],
+                    &[&session_id, &user_id.as_str()],
                 )
                 .await
                 .map_err(|e| AuthError::Db(format!("sessions revoke_one_for_user idp: {e}")))?;
@@ -316,7 +316,7 @@ pub async fn revoke_one_for_user(
                     "DELETE FROM zeroship.gateway_sessions \
                      WHERE id = $1 AND user_id = $2 \
                      RETURNING app_id",
-                    &[&session_id, &user_id],
+                    &[&session_id, &user_id.as_str()],
                 )
                 .await
                 .map_err(|e| AuthError::Db(format!("sessions revoke_one_for_user app: {e}")))?;

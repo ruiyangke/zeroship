@@ -24,12 +24,12 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password_reset};
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::store::users;
-use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
-use zeroship_mailer::{Address, Mailer};
 use crate::ui::ForgotPage;
 use sha2::{Digest, Sha256};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
+use zeroship_mailer::templates::{build_email, PasswordResetHtml, PasswordResetText};
+use zeroship_mailer::{Address, Mailer};
 
 #[derive(Debug, Deserialize)]
 pub struct ForgotForm {
@@ -158,7 +158,7 @@ pub async fn post(
                     vec!["password-reset".into()],
                 );
                 if let Err(e) = mailer.send(db.as_ref(), msg).await {
-                    tracing::warn!(error = %e, user_id = %u.id, "password_reset email send failed");
+                    tracing::warn!(error = %e, user_id = u.id.as_str(), "password_reset email send failed");
                 }
 
                 audit::emit(
@@ -173,7 +173,7 @@ pub async fn post(
                 .await;
             }
             Err(e) => {
-                tracing::error!(error = %e, user_id = %u.id, "password_reset token issue failed");
+                tracing::error!(error = %e, user_id = u.id.as_str(), "password_reset token issue failed");
             }
         }
     } else {

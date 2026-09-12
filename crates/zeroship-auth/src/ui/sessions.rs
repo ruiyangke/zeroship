@@ -50,7 +50,7 @@ use crate::store::sessions::{self, SessionKind, SessionSummary};
 /// The caller's resolved identity for a `/me/sessions` request: the user id
 /// plus the id of their current (cookie) session, so the list can flag it.
 struct Caller {
-    user_id: uuid::Uuid,
+    user_id: zeroship_core::UserId,
     current_session_id: uuid::Uuid,
 }
 
@@ -78,7 +78,7 @@ pub async fn list(
         return unauthorized();
     };
 
-    let summaries = match sessions::list_by_user(db.as_ref(), caller.user_id).await {
+    let summaries = match sessions::list_by_user(db.as_ref(), &caller.user_id).await {
         Ok(v) => v,
         Err(e) => {
             tracing::error!(error = %e, "sessions::list_by_user failed");
@@ -89,8 +89,8 @@ pub async fn list(
     let views: Vec<SessionView> = summaries
         .into_iter()
         .map(|summary| {
-            let current = summary.kind == SessionKind::Idp
-                && summary.id == caller.current_session_id;
+            let current =
+                summary.kind == SessionKind::Idp && summary.id == caller.current_session_id;
             SessionView { summary, current }
         })
         .collect();
@@ -149,7 +149,7 @@ pub async fn revoke(
     };
 
     // 4. Revoke — scoped to `user_id = caller` in SQL (the IDOR guard).
-    match sessions::revoke_one_for_user(db.as_ref(), caller.user_id, session_id, kind).await {
+    match sessions::revoke_one_for_user(db.as_ref(), &caller.user_id, session_id, kind).await {
         Ok(revoked) => {
             // 5. Carry the revocation to whoever enforces it. Deleting the row
             //    above is bookkeeping on BOTH arms: an IdP session's RPs hold
@@ -173,7 +173,7 @@ pub async fn revoke(
                                 db.as_ref(),
                                 issuer.as_ref(),
                                 app_id,
-                                caller.user_id,
+                                &caller.user_id,
                             )
                             .await
                         }
@@ -217,10 +217,7 @@ pub async fn revoke(
 /// missing/invalid/expired. `validate` slides the idle window, so hitting
 /// this surface counts as activity — same as `/me`.
 #[allow(clippy::future_not_send)]
-async fn resolve_caller(
-    req: &HttpRequest,
-    db: &compio_postgres::Client,
-) -> Option<Caller> {
+async fn resolve_caller(req: &HttpRequest, db: &compio_postgres::Client) -> Option<Caller> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -277,7 +274,11 @@ mod tests {
         let mk = |id, kind| SessionSummary {
             id,
             kind,
-            app_id: if kind == SessionKind::App { Some(app_id) } else { None },
+            app_id: if kind == SessionKind::App {
+                Some(app_id)
+            } else {
+                None
+            },
             created_at: now,
             last_seen_at: now,
             expires_at: now,

@@ -30,10 +30,10 @@ use crate::csrf;
 use crate::headers;
 use crate::identity::eligibility;
 use crate::oidc::device_token::{self, DeviceApproval};
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::sessions::login as session_cookie;
 use crate::store::sessions;
 use crate::ui::{DevicePage, DeviceScopeView};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_authz::Scope;
 
 #[derive(Debug, Deserialize)]
@@ -75,9 +75,7 @@ pub async fn get(
         );
     }
     match device_token::pending_user_code_details(db.as_ref(), user_code).await {
-        Ok(Some(details)) => {
-            render_form(user_code, None, StatusCode::OK, Some(&details))
-        }
+        Ok(Some(details)) => render_form(user_code, None, StatusCode::OK, Some(&details)),
         Ok(None) => {
             if let Some(resp) =
                 rate_limit_failed_get_user_code_attempt(db.as_ref(), &req, cfg.as_ref()).await
@@ -130,12 +128,7 @@ pub async fn post(
     // CSRF double-submit — enforced FIRST, before any state change, exactly
     // like the login/signup/consent/reset siblings.
     if !csrf_valid(&req, &form) {
-        return render_form(
-            "",
-            Some("invalid request"),
-            StatusCode::FORBIDDEN,
-            None,
-        );
+        return render_form("", Some("invalid request"), StatusCode::FORBIDDEN, None);
     }
 
     let user_code = form.user_code.trim();
@@ -172,8 +165,7 @@ pub async fn post(
     };
     let Some(pending) = pending else {
         if let Some(resp) =
-            rate_limit_failed_user_code_attempt(db.as_ref(), &req, session.as_ref())
-                .await
+            rate_limit_failed_user_code_attempt(db.as_ref(), &req, session.as_ref()).await
         {
             return resp;
         }
@@ -189,9 +181,9 @@ pub async fn post(
         return redirect("/login");
     };
 
-    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), session.user_id).await {
+    if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &session.user_id).await {
         if !e.is_account_state() {
-            tracing::error!(error = %e, user_id = %session.user_id, "device grant eligibility check failed");
+            tracing::error!(error = %e, user_id = session.user_id.as_str(), "device grant eligibility check failed");
             return render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -208,19 +200,14 @@ pub async fn post(
     }
 
     if form.confirm.as_deref() != Some("authorize") {
-        return render_form(
-            user_code,
-            None,
-            StatusCode::OK,
-            Some(&pending),
-        );
+        return render_form(user_code, None, StatusCode::OK, Some(&pending));
     }
 
     match device_token::approve_user_code(
         db.as_ref(),
         user_code,
         &pending.provider,
-        session.user_id,
+        &session.user_id,
         session.id,
         session.credential_version,
     )
@@ -232,8 +219,7 @@ pub async fn post(
         }
         Ok(DeviceApproval::NotFound) => {
             if let Some(resp) =
-                rate_limit_failed_user_code_attempt(db.as_ref(), &req, Some(&session))
-                    .await
+                rate_limit_failed_user_code_attempt(db.as_ref(), &req, Some(&session)).await
             {
                 return resp;
             }
@@ -245,7 +231,7 @@ pub async fn post(
             )
         }
         Err(e) => {
-            tracing::error!(error = %e, user_id = %session.user_id, "native device grant approval failed");
+            tracing::error!(error = %e, user_id = session.user_id.as_str(), "native device grant approval failed");
             render_form(
                 user_code,
                 Some("invalid or expired code"),
@@ -284,9 +270,8 @@ async fn rate_limit_failed_user_code_attempt(
 ) -> Option<HttpResponse> {
     let ip = headers::client_ip(req);
     if let Some(session) = session {
-        let key = format!("device:user_ip:{}:{ip}", session.user_id);
-        if let Some(resp) = consume_failed_attempt_bucket(db, &key, Quota::LOGIN_EIP).await
-        {
+        let key = format!("device:user_ip:{}:{ip}", session.user_id.as_str());
+        if let Some(resp) = consume_failed_attempt_bucket(db, &key, Quota::LOGIN_EIP).await {
             return Some(resp);
         }
     }
@@ -393,7 +378,9 @@ fn render_form(
         error,
         csrf: &csrf_token,
         confirm: details.is_some(),
-        client_id: details.map(|details| details.client_id.as_str()).unwrap_or(""),
+        client_id: details
+            .map(|details| details.client_id.as_str())
+            .unwrap_or(""),
         client_name: details.map(confirmation_client_name).unwrap_or(""),
         scopes: &scopes,
     };
@@ -413,7 +400,11 @@ fn device_scope_views(scopes: &[String]) -> Vec<DeviceScopeView> {
             scope: scope.clone(),
             label: standard_scope_label(scope)
                 .map(str::to_string)
-                .or_else(|| Scope::parse(scope).ok().map(|scope| scope.human_label().to_string()))
+                .or_else(|| {
+                    Scope::parse(scope)
+                        .ok()
+                        .map(|scope| scope.human_label().to_string())
+                })
                 .unwrap_or_else(|| scope.clone()),
         })
         .collect()
@@ -508,7 +499,10 @@ mod tests {
             body.contains("Enter the code shown on your device"),
             "{body}"
         );
-        assert!(body.contains(r#"<form method="POST" action="/device">"#), "{body}");
+        assert!(
+            body.contains(r#"<form method="POST" action="/device">"#),
+            "{body}"
+        );
         assert!(
             body.contains(r#"name="user_code" value="""#),
             "native GET should continue ignoring verification_uri_complete user_code: {body}"
@@ -545,7 +539,10 @@ mod tests {
         for scope in ["apps:archive", "apps:deploy", "apps:read", "apps:write"] {
             assert!(body.contains(scope), "scope {scope} missing from {body}");
         }
-        assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
+        assert!(
+            body.contains(r#"name="confirm" value="authorize""#),
+            "{body}"
+        );
         assert!(body.contains(r#"name="csrf""#), "{body}");
     }
 
@@ -608,7 +605,13 @@ mod tests {
         assert!(body.contains("oac_test"), "{body}");
         assert!(body.contains("Read app metadata"), "{body}");
         assert!(body.contains("apps:read"), "{body}");
-        assert!(body.contains(r#"name="confirm" value="authorize""#), "{body}");
-        assert!(body.contains(r#"name="user_code" value="BCDF-GHJK-LMNP""#), "{body}");
+        assert!(
+            body.contains(r#"name="confirm" value="authorize""#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"name="user_code" value="BCDF-GHJK-LMNP""#),
+            "{body}"
+        );
     }
 }
