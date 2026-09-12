@@ -5,6 +5,10 @@ import type { Filter } from "@zeroship/db";
 
 const fields = {
   name: t.string().required(),
+  enabled: t.boolean(),
+  payload: t.json(),
+  embedding: t.vector(2),
+  location: t.geoPoint(),
   emailMasked: t.string().mask({ kind: "email" }),
   ssnRandom: t.encrypted({  }),
   secondSecret: t.encrypted({  }),
@@ -15,6 +19,15 @@ type UserFilter = Filter<typeof fields>;
 
 const okLike: UserFilter = { name: { $like: "A%" } };
 const okMaskedLike: UserFilter = { emailMasked: { $ilike: "%@example.com" } };
+const okJsonEquality: UserFilter = { payload: { $eq: { key: true } } };
+// @ts-expect-error booleans have equality operators but no ordering operators
+const badBooleanRange: UserFilter = { enabled: { $gt: false } };
+// @ts-expect-error JSON values have equality operators but no ordering operators
+const badJsonRange: UserFilter = { payload: { $lt: { key: true } } };
+// @ts-expect-error vectors use search rather than ordinary comparison operators
+const badVectorEquality: UserFilter = { embedding: { $eq: [1, 2] } };
+// @ts-expect-error geographic points use near rather than ordinary comparison operators
+const badGeoEquality: UserFilter = { location: { $eq: { lat: 1, lng: 2 } } };
 // @ts-expect-error encrypted fields cannot be filtered
 const badEncryptedValue: UserFilter = { secondSecret: "secret" };
 // @ts-expect-error encrypted fields cannot be filtered
@@ -35,10 +48,15 @@ void badRandomValue;
 void badRandomEq;
 void badDetLike;
 void badDetRange;
+void badBooleanRange;
+void badJsonRange;
+void badVectorEquality;
+void badGeoEquality;
 
 test("Filter<S> matches the encrypted-field runtime fence", () => {
   assert.ok(okLike);
   assert.ok(okMaskedLike);
+  assert.ok(okJsonEquality);
   assert.ok(badEncryptedValue);
   assert.ok(badEncryptedEq);
   assert.ok(badEncryptedIn);

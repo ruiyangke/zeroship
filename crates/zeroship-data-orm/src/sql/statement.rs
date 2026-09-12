@@ -55,6 +55,17 @@ impl StorageType {
     fn accepts_arithmetic(self, value: &Value) -> bool {
         self.numeric() && self.accepts(value)
     }
+
+    fn supports_equality(self) -> bool {
+        !matches!(self, Self::Vector | Self::GeoPoint)
+    }
+
+    fn supports_ordering(self) -> bool {
+        matches!(
+            self,
+            Self::Integer | Self::Real | Self::Text | Self::Timestamp
+        )
+    }
 }
 
 fn valid_decimal(value: &str) -> bool {
@@ -1135,9 +1146,19 @@ fn validate_predicate_for_tables(
                 pending.extend(children.iter().map(|child| (child, depth + 1)));
             }
             ResolvedPredicate::Not(child) => pending.push((child, depth + 1)),
-            ResolvedPredicate::Compare { lhs, rhs, .. } => {
+            ResolvedPredicate::Compare { lhs, op, rhs } => {
                 validate_operand(tables, lhs, allow_aggregate)?;
                 let lhs_storage = lhs.storage()?;
+                let supported = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                    lhs_storage.supports_equality()
+                } else {
+                    lhs_storage.supports_ordering()
+                };
+                if !supported {
+                    return Err(invalid(
+                        "comparison operator is not portable for this storage type",
+                    ));
+                }
                 match rhs {
                     ResolvedPredicateValue::Operand(rhs) => {
                         validate_operand(tables, rhs, allow_aggregate)?;
@@ -1161,7 +1182,8 @@ fn validate_predicate_for_tables(
             ResolvedPredicate::Membership { lhs, values, .. } => {
                 validate_operand(tables, lhs, allow_aggregate)?;
                 let storage = lhs.storage()?;
-                if values.is_empty()
+                if !storage.supports_equality()
+                    || values.is_empty()
                     || values
                         .iter()
                         .any(|value| value.is_null() || !storage.accepts(value))

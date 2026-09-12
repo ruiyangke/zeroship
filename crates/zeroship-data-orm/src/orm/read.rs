@@ -763,20 +763,68 @@ fn validate_predicate(
             Predicate::Not(child) => stack.push(child),
             Predicate::Compare {
                 lhs: Operand::Path(a),
+                op,
                 rhs: Operand::Path(b),
-                ..
             } => {
                 for path in [a, b] {
                     check_field(path, sources, true)?;
+                    check_predicate_operator(path, sources, comparison_operator(*op))?;
                 }
                 if scalar_kind(a, sources)? != scalar_kind(b, sources)? {
                     return Err(invalid("join columns have incompatible types"));
                 }
             }
+            Predicate::Compare { lhs, op, rhs } => {
+                for operand in [lhs, rhs] {
+                    if let Operand::Path(path) = operand {
+                        check_predicate_operator(path, sources, comparison_operator(*op))?;
+                    }
+                }
+            }
+            Predicate::Membership {
+                lhs: Operand::Path(path),
+                ..
+            } => {
+                check_predicate_operator(
+                    path,
+                    sources,
+                    crate::sql::descriptors::PredicateOperator::Equality,
+                )?;
+            }
+            Predicate::Pattern {
+                lhs: Operand::Path(path),
+                ..
+            } => {
+                check_predicate_operator(
+                    path,
+                    sources,
+                    crate::sql::descriptors::PredicateOperator::Pattern,
+                )?;
+            }
             _ => {}
         }
     }
     Ok(())
+}
+
+fn comparison_operator(op: crate::sql::CompareOp) -> crate::sql::descriptors::PredicateOperator {
+    if matches!(op, crate::sql::CompareOp::Eq | crate::sql::CompareOp::Ne) {
+        crate::sql::descriptors::PredicateOperator::Equality
+    } else {
+        crate::sql::descriptors::PredicateOperator::Ordering
+    }
+}
+
+fn check_predicate_operator(
+    path: &FieldPath,
+    sources: &[SourceLayout],
+    operator: crate::sql::descriptors::PredicateOperator,
+) -> Result<(), DbError> {
+    let source = source_for(path, sources)?;
+    let definition = &source.schema[path.root().as_str()];
+    crate::sql::descriptors::supports_predicate_operator(definition, operator)
+        .then_some(())
+        .ok_or_else(|| invalid("predicate operator is not supported for this field type"))
 }
 fn scalar_kind<'a>(path: &FieldPath, sources: &'a [SourceLayout]) -> Result<&'a str, DbError> {
     let source = source_for(path, sources)?;
@@ -866,6 +914,7 @@ fn decode_scalars(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::CompareOp;
     use crate::value;
 
     fn source(schema: Value) -> SourceLayout {
@@ -924,6 +973,44 @@ mod tests {
                 .map(String::from)
                 .into()
         );
+    }
+
+    #[test]
+    fn read_predicates_enforce_the_portable_operator_matrix() {
+        let sources = vec![source(value!({
+            "id": {"type":"string"},
+            "enabled": {"type":"boolean"},
+            "amount": {"type":"decimal"},
+            "payload": {"type":"json"},
+            "embedding": {"type":"vector", "vectorDims":2},
+            "location": {"type":"geoPoint"}
+        }))];
+        let literal =
+            |value| Operand::Lit(crate::sql::Literal::try_from_value(value).unwrap().unwrap());
+        for (field, op, value) in [
+            ("enabled", CompareOp::Gt, value!(false)),
+            ("amount", CompareOp::Lt, Value::Decimal("10.5".into())),
+            ("payload", CompareOp::Gte, value!({"key":true})),
+            ("embedding", CompareOp::Eq, value!([1, 2])),
+            ("location", CompareOp::Eq, value!({"lat":1,"lng":2})),
+        ] {
+            let predicate = Predicate::compare(
+                Operand::Path(sources[0].source.column(field).unwrap()),
+                op,
+                literal(value),
+            );
+            assert!(
+                validate_predicate(&predicate, &sources, false).is_err(),
+                "{field}"
+            );
+        }
+
+        let predicate = Predicate::compare(
+            Operand::Path(sources[0].source.column("payload").unwrap()),
+            CompareOp::Eq,
+            literal(value!({"key":true})),
+        );
+        assert!(validate_predicate(&predicate, &sources, false).is_ok());
     }
 
     #[test]

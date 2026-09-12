@@ -237,6 +237,7 @@ pub(crate) struct Syntax {
     pub(crate) insensitive_like: &'static str,
     pub(crate) insensitive_like_suffix: &'static str,
     pub(crate) average_suffix: &'static str,
+    pub(crate) structural_json_equality: bool,
     pub(crate) vector_distance: fn(
         &mut SqlWriter,
         &Column,
@@ -686,6 +687,13 @@ pub(crate) fn write_predicate(
             writer.sql.push(')');
         }
         ResolvedPredicate::Compare { lhs, op, rhs } => {
+            if lhs.storage()? == StorageType::Json
+                && syntax.structural_json_equality
+                && matches!(op, CompareOp::Eq | CompareOp::Ne)
+            {
+                write_structural_json_equality(writer, syntax, &lhs, rhs, op == CompareOp::Ne)?;
+                return Ok(());
+            }
             write_operand(writer, syntax, &lhs);
             writer.sql.push_str(match op {
                 CompareOp::Eq => " = ",
@@ -704,6 +712,27 @@ pub(crate) fn write_predicate(
         }
         ResolvedPredicate::Membership { lhs, op, values } => {
             let storage = lhs.storage()?;
+            if storage == StorageType::Json && syntax.structural_json_equality {
+                writer.sql.push('(');
+                for (index, value) in values.into_iter().enumerate() {
+                    if index > 0 {
+                        writer.sql.push_str(if op == MembershipOp::In {
+                            " OR "
+                        } else {
+                            " AND "
+                        });
+                    }
+                    write_structural_json_equality(
+                        writer,
+                        syntax,
+                        &lhs,
+                        ResolvedPredicateValue::Bind { storage, value },
+                        op == MembershipOp::NotIn,
+                    )?;
+                }
+                writer.sql.push(')');
+                return Ok(());
+            }
             write_operand(writer, syntax, &lhs);
             writer.sql.push_str(if op == MembershipOp::In {
                 " IN ("
@@ -751,6 +780,29 @@ pub(crate) fn write_predicate(
                 .push_str(if negated { " IS NOT NULL" } else { " IS NULL" });
         }
     }
+    Ok(())
+}
+
+fn write_structural_json_equality(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    lhs: &ResolvedOperand,
+    rhs: ResolvedPredicateValue,
+    negated: bool,
+) -> Result<(), CompileError> {
+    if negated {
+        writer.sql.push_str("NOT ");
+    }
+    writer.sql.push_str("zeroship_json_equal(");
+    write_operand(writer, syntax, lhs);
+    writer.sql.push_str(", ");
+    match rhs {
+        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
+        ResolvedPredicateValue::Bind { storage, value } => {
+            write_bind(writer, syntax, storage, value)?;
+        }
+    }
+    writer.sql.push(')');
     Ok(())
 }
 
