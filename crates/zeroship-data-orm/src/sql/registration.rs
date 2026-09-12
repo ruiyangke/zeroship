@@ -177,7 +177,9 @@ impl SqlRegistration {
 
     pub fn compile(&self, statement: Statement) -> Result<CompiledQuery, CompileError> {
         self.check(&Requirements::for_statement(&statement))?;
-        self.compiler.compile(statement, &self.effective)
+        let query = self.compiler.compile(statement, &self.effective)?;
+        self.check_output(&query)?;
+        Ok(query)
     }
 
     pub fn compile_identity_allocation(
@@ -188,8 +190,25 @@ impl SqlRegistration {
             identity_allocation: true,
             ..Requirements::default()
         })?;
-        self.compiler
-            .compile_identity_allocation(request, &self.effective)
+        let plan = self
+            .compiler
+            .compile_identity_allocation(request, &self.effective)?;
+        if let Some(reservation) = &plan.reservation {
+            self.check_output(reservation)?;
+        }
+        match &plan.allocation {
+            crate::sql::compiler::IdentityReadPlan::Rows(query) => self.check_output(query)?,
+            crate::sql::compiler::IdentityReadPlan::MaximumAndCounter {
+                maximum,
+                counter_exists,
+                counter,
+            } => {
+                self.check_output(maximum)?;
+                self.check_output(counter_exists)?;
+                self.check_output(counter)?;
+            }
+        }
+        Ok(plan)
     }
 
     pub fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
@@ -210,6 +229,15 @@ impl SqlRegistration {
         rows: &mut [Value],
     ) -> Result<(), crate::sql::codecs::CodecError> {
         crate::sql::codecs::decode_rows(self, schema, rows)
+    }
+
+    fn check_output(&self, query: &CompiledQuery) -> Result<(), CompileError> {
+        if query.params().len() > self.effective.max_bind_parameters {
+            return Err(CompileError::BindLimitExceeded {
+                limit: self.effective.max_bind_parameters,
+            });
+        }
+        Ok(())
     }
 }
 
