@@ -97,13 +97,15 @@ fn erasure_catalog_check_agrees_with_postgres_delete_behavior() {
             client
                 .batch_execute(&format!(
                     "CREATE TABLE erasure_fixture.reference (
-                         user_id uuid DEFAULT '00000000-0000-0000-0000-000000000000',
+                         user_id text COLLATE \"C\" DEFAULT 'usr_0000000000000000000000001',
                          version bigint {nullability} DEFAULT 0,
                          CONSTRAINT erasure_probe FOREIGN KEY (user_id, version)
                              REFERENCES zeroship.users (id, credential_version) ON DELETE {action}
                      );
-                     INSERT INTO zeroship.users (email, name)
-                         VALUES ('erasure-catalog@zeroship.test', 'Erasure catalog control');
+                     INSERT INTO zeroship.users (id, email, name)
+                         VALUES ('usr_0000000000000000000000001',
+                                 'erasure-catalog@zeroship.test',
+                                 'Erasure catalog control');
                      INSERT INTO erasure_fixture.reference
                          SELECT id, credential_version FROM zeroship.users
                          WHERE email = 'erasure-catalog@zeroship.test';"
