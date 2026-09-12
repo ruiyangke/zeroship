@@ -73,6 +73,13 @@ customer database operations. The V8 adapter executes app code and returns
 outcomes to the worker engine. Customer isolation and storage placement are
 host configuration, never an argument chosen by app code.
 
+Persistence is being migrated onto the existing Rust ORM. Platform services and
+the customer worker are native ORM consumers; V8 is an adapter to that same
+library. Workflow code must not maintain PostgreSQL and SQLite implementations
+of connection management, parameter binding, row decoding or transaction cleanup.
+The ORM migration described below is an implementation target, not completed
+production behavior.
+
 | Component | Responsibility |
 | --- | --- |
 | Platform Control | Authorize app management and deployment, distribute trusted placement and policy metadata, and accept infrastructure usage records. No workflow journal connection or payload credentials. |
@@ -192,6 +199,58 @@ definer-rights wrapper or worker-minted service capability creates a fictitious
 boundary around them. A compromised worker process is outside the V8 app
 isolation boundary and can reach credentials owned by that worker.
 
+## ORM migration
+
+The worker host supplies the app's resolved ORM database binding and customer
+object storage. A workflow repository expresses journal operations against that
+binding. The ORM selects PostgreSQL or SQLite from normal host configuration and
+owns connections, native values, statement execution and transaction settlement.
+The CLI uses this composition alongside its ordinary app services; it does not
+resolve a separate workflow database or introduce another database lifecycle.
+
+```text
+Customer worker
+  workflow repository ----+
+  app Rust operations ----+--> zeroship-data-orm --> configured customer database
+  app V8 database binding-+
+```
+
+Use existing ORM model and collection operations for supported reads, inserts,
+updates, deletes and transactional changes. Query compilation belongs to the
+ORM. Parameterized SQL remains only where the existing public API cannot express
+the required operation or internal table contract. In particular, preserve
+database-time lease checks, affected-row compare-and-set decisions, app locking,
+generation fencing and atomic history/reference updates during the conversion.
+A read followed by an unconditional write is not a substitute for an atomic claim.
+
+The current collection API applies reserved-name validation to Rust callers as
+well as V8 callers. It also enforces descriptor-defined identity and mutation
+rules. Platform use of the Rust ORM is supported, but it does not implicitly
+grant collection access to reserved workflow tables. Keep these tables reserved;
+do not rename them into creator-visible collections, rewrite compiled table names
+or add a parallel query builder in workflow to evade validation. Use the existing
+host-scoped ORM execution/session interface for operations that cannot yet use
+collection APIs, and keep the remaining SQL explicit and reviewable. This is
+backend reuse, not a claim that collection migration is complete.
+
+Do not modify `zeroship-data-orm` as part of this workflow work. Missing ORM
+capabilities are recorded as dependencies rather than implemented as workflow
+database adapters. Reconcile with the existing ORM API on the development base
+before introducing a consumer; inherited ORM changes remain owned by that work.
+
+The conversion must preserve ordinary customer-role permissions, native app
+isolation, rollback after cancellation, and refusal of indeterminate commits.
+Opening a workflow repository does not provision PostgreSQL roles or tables.
+The canonical migration DSL continues to own the journal schema. Local setup
+may initialize the reserved journal alongside business data through the shared
+host setup, without deleting or replacing that data.
+
+Native contracts must execute the same workflow operations through the ORM on
+PostgreSQL and SQLite. Testcontainers owns required database services. Exercise
+shared app storage, concurrent claims, stale completions, transaction failure
+and restart recovery before removing the workflow-owned adapters. Example
+acceptance tests remain self-contained Vitest and Playwright projects.
+
 ## Journal and task ownership
 
 The authoritative tables live in the customer's database under reserved
@@ -205,8 +264,8 @@ required records.
 The canonical migration DSL owns PostgreSQL and SQLite schema generation.
 Provisioning receives a validated customer schema binding. Runtime startup
 verifies readiness, and claiming a task never creates tables. An incompatible
-local database requires an explicit workflow reset; it is never silently
-replaced or reopened through the old engine.
+local database requires an explicit operator action; startup never silently
+replaces it or reopens it through the old engine.
 
 ```text
 start(input)
@@ -299,8 +358,12 @@ that race a task completion are resolved transactionally. Pausing or cancelling
 must not erase a signal or a pending child transition. Restart requires
 quiescence and retains only the explicitly selected immutable replay prefix.
 
-Workflow classes ship inside the app's normal `.zship` deployment. A run pins
-the trusted app identity, deployment identity and deployment hash. Its worker
+Workflow classes ship inside the app's normal `.zship` deployment. Each run
+generation pins the trusted app identity and an immutable app deployment ID.
+The existing deployment manifest supplies the canonical content hash, and the
+normal bundle loader verifies it. Do not duplicate that hash as a separate
+workflow-owned version contract. The deployment ID must permanently resolve to
+the same artifact; deployments cannot be overwritten in place. Its worker
 loads that deployment through the normal app manifest and blob loader, including
 the pinned runtime descriptor and dependencies. There is no separate workflow
 bundle, upload, executable snapshot store or `--workflow-bundle` option in the
@@ -342,6 +405,35 @@ be replaced as part of the production cutover.
 The JS replay interpreter has a shared implementation consumed by the runtime,
 SDK and bootstrap. The local host does not maintain a smaller workflow engine
 with different lifecycle or replay semantics.
+
+### Upgrading a running workflow
+
+New runs use the active app deployment. Existing generations keep their pin.
+A full restart can explicitly select the latest deployment and execute from the
+beginning with the original input. A partial restart keeps its existing deployment
+because it retains history produced by that code. Full restart may repeat external
+effects and is distinct from preserving progress across an upgrade.
+
+Mid-run upgrades are a proposed checkpoint handoff, not an implemented API.
+The app declares a safe checkpoint, a versioned business-state contract and a
+resume path in the target deployment. State transformation must be bounded and
+free of external effects. The engine does not infer how to migrate a JavaScript
+stack or replay old execution history through changed code.
+
+The customer worker quiesces the source generation, retains the target app
+deployment and validates the target's resume state. It commits the handoff in
+the customer database: recheck the source generation and authority, record the
+upgrade, persist the resume state, fence old execution and enqueue a new generation
+under the same run ID with the target deployment pin. Transformation failure or
+a stale source leaves the handoff uncommitted. Recovery follows the committed
+generation; retrying an acknowledged upgrade cannot create another generation.
+
+History remains associated with the deployment that produced it. Signals arriving
+during a handoff remain durable. Timers, child relationships and compensation
+require explicit carry-over rules; unsupported outstanding operations refuse the
+upgrade. External effect identities belong to the transferred business state
+where required to prevent repeated effects. Target deployment holds must precede
+the handoff commit, and source holds remain while replay or restart depends on them.
 
 ## Local development
 
@@ -389,6 +481,9 @@ centralized history and payload ownership are not a temporary production mode.
 - Bind journal schema, app identity, database role and payload storage through
   the worker's resolved customer context. Generate the reserved customer tables
   through the canonical migration DSL for PostgreSQL and SQLite.
+- Replace workflow-owned database adapters with the shared Rust ORM. Convert
+  supported journal operations to ORM operations and retain explicit SQL only
+  for concrete public-API gaps, without changing ORM source in this work.
 - Replace the server's data-owning task transport with registry, placement,
   wake-up and management contracts. Remove the platform workflow journal and
   its roles, remote payload uploads and workflow-specific Control journal SQL.
