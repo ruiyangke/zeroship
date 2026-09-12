@@ -28,32 +28,26 @@ impl Change {
     }
 
     async fn apply(self, db: &Client, person: Uuid, grant: &str, session: &str) {
+        let sql = match self {
+            Self::Revoked => "UPDATE zeroship.sessions SET revoked_at = NOW() WHERE id = $1",
+            Self::IdleExpired => "UPDATE zeroship.sessions SET idle_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+            // The schema requires idle expiry to stay within the absolute ceiling.
+            Self::AbsoluteExpired => "UPDATE zeroship.sessions SET absolute_expires_at = NOW() - INTERVAL '1 minute', idle_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
+            Self::GrantSuspended => "UPDATE zeroship.grants SET subject_status = 'suspended', suspended_at = NOW(), suspended_cause = 'test' WHERE id = $1",
+            Self::CredentialChanged => "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
+            Self::Disabled => "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
+            Self::Anonymized => "UPDATE zeroship.users SET anonymized_at = NOW() WHERE id = $1",
+            Self::DeletionRequested => "UPDATE zeroship.users SET deletion_requested_at = NOW() WHERE id = $1",
+            Self::DeletionScheduled => "UPDATE zeroship.users SET deletion_scheduled_for = NOW() + INTERVAL '1 day' WHERE id = $1",
+        };
         let changed = match self {
             Self::Revoked | Self::IdleExpired | Self::AbsoluteExpired => {
-                let sql = match self {
-                    Self::Revoked => "UPDATE zeroship.sessions SET revoked_at = NOW() WHERE id = $1",
-                    Self::IdleExpired => "UPDATE zeroship.sessions SET idle_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
-                    Self::AbsoluteExpired => "UPDATE zeroship.sessions SET absolute_expires_at = NOW() - INTERVAL '1 minute' WHERE id = $1",
-                    _ => unreachable!(),
-                };
                 db.execute(sql, &[&session]).await
             }
-            Self::GrantSuspended => db.execute(
-                "UPDATE zeroship.grants SET subject_status = 'suspended' WHERE id = $1",
-                &[&grant],
-            ).await,
-            _ => {
-                let sql = match self {
-                    Self::CredentialChanged => "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
-                    Self::Disabled => "UPDATE zeroship.users SET disabled_at = NOW() WHERE id = $1",
-                    Self::Anonymized => "UPDATE zeroship.users SET anonymized_at = NOW() WHERE id = $1",
-                    Self::DeletionRequested => "UPDATE zeroship.users SET deletion_requested_at = NOW() WHERE id = $1",
-                    Self::DeletionScheduled => "UPDATE zeroship.users SET deletion_scheduled_for = NOW() + INTERVAL '1 day' WHERE id = $1",
-                    _ => unreachable!(),
-                };
-                db.execute(sql, &[&person]).await
-            }
-        }.expect("apply the lifecycle change");
+            Self::GrantSuspended => db.execute(sql, &[&grant]).await,
+            _ => db.execute(sql, &[&person]).await,
+        }
+        .expect("apply the lifecycle change");
         assert_eq!(changed, 1, "{self:?} must change the fixture row");
     }
 }
