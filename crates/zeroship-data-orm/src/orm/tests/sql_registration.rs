@@ -152,6 +152,40 @@ impl SqlCompiler for CountingCompiler {
     }
 }
 
+#[derive(Clone)]
+struct AllocationCountingCompiler(Arc<AtomicUsize>);
+
+impl SqlCompiler for AllocationCountingCompiler {
+    fn support(&self) -> SqlSupport {
+        SqliteCompiler.support()
+    }
+
+    fn check(
+        &self,
+        requirements: &Requirements,
+        effective: &SqlSupport,
+    ) -> Result<(), CompileError> {
+        SqliteCompiler.check(requirements, effective)
+    }
+
+    fn compile(
+        &self,
+        statement: Statement,
+        effective: &SqlSupport,
+    ) -> Result<CompiledQuery, CompileError> {
+        SqliteCompiler.compile(statement, effective)
+    }
+
+    fn compile_identity_allocation(
+        &self,
+        request: crate::sql::statement::IdentityRequest,
+        effective: &SqlSupport,
+    ) -> Result<crate::sql::compiler::IdentityPlan, CompileError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        SqliteCompiler.compile_identity_allocation(request, effective)
+    }
+}
+
 async fn assert_empty(owner: &CollectionFixture) {
     let Output::Rows { rows, .. } = owner
         .database
@@ -217,11 +251,66 @@ async fn generated_identity_is_refused_before_the_write_frame_and_allocation() {
     let error = constrained
         .collection("records")
         .unwrap()
-        .insert(value!({"label":"blocked"}))
+        .insert(value!({"label":"blocked","secret":"private"}))
         .await
         .unwrap_err();
     assert!(error.to_string().contains("generated identity allocation"));
     assert_empty(&owner).await;
+    owner.close().await;
+}
+
+#[compio::test]
+async fn ordinary_generated_writes_do_not_require_explicit_identity_support() {
+    let mut owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let mut migration: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/identity-migration.json"
+    ))
+    .unwrap();
+    migration["ops"][0]["columns"][0]["identity"]["always"] = serde_json::json!(false);
+    owner
+        .replace_from_migration("records", &migration.to_string())
+        .await;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let compiler = AllocationCountingCompiler(calls.clone());
+    let mut support = compiler.support();
+    support.insert_generated_identity = false;
+    support.identity_allocation = false;
+    let registration = SqlRegistration::new(
+        "ordinary-upsert-without-identity-allocation",
+        crate::sql::registration::SQLITE_FAMILY,
+        compiler,
+        FixtureCodecs,
+        support,
+    )
+    .unwrap();
+    let constrained = database_with_registration(&owner, registration).await;
+
+    let Output::Rows { rows, .. } = constrained
+        .collection("records")
+        .unwrap()
+        .insert(value!({"label":"ordinary"}))
+        .await
+        .unwrap()
+    else {
+        panic!("expected inserted row")
+    };
+    assert!(!rows[0]["id"].is_null());
+
+    let Output::Rows { rows, .. } = constrained
+        .collection("records")
+        .unwrap()
+        .execute(Operation::Upsert {
+            document: value!({"label":"ordinary"}),
+            conflict_fields: value!(["label"]),
+        })
+        .await
+        .unwrap()
+    else {
+        panic!("expected upserted row")
+    };
+    assert!(!rows[0]["id"].is_null());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
     owner.close().await;
 }
 

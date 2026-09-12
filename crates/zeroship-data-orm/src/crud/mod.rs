@@ -368,12 +368,13 @@ pub async fn run_insert(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    let allocates_identity = identity::requires_allocation(&schema, &doc);
     route
         .sql_registration()
-        .check(&insert::requirements(&schema))
+        .check(&insert::requirements(allocates_identity))
         .map_err(mapping::QueryError::from)?;
     let frame;
-    let route = if identity::requires_allocation(&schema, &doc) {
+    let route = if allocates_identity {
         frame = Some(crate::transaction::AtomicWriteFrame::begin(route).await?);
         frame.as_ref().expect("opened write frame").route()
     } else {
@@ -442,9 +443,10 @@ pub async fn run_insert_many(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    let allocates_identity = identity::requires_allocation(&schema, &docs);
     route
         .sql_registration()
-        .check(&insert::requirements(&schema))
+        .check(&insert::requirements(allocates_identity))
         .map_err(mapping::QueryError::from)?;
     let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
     let route = frame.route();

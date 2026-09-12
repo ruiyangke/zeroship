@@ -3,9 +3,9 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        mapping::{self, QueryError},
         compiler::{CompiledQuery, Requirements},
         lifecycle::{AssignedValue, WriteAssignments},
+        mapping::{self, QueryError},
         statement::{
             Assignment, Comparison, Expression, Statement, StorageType, Upsert, UpsertParts,
         },
@@ -39,6 +39,7 @@ pub(crate) fn build_upsert_with_registration(
 }
 
 pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements {
+    let allocates_identity = guard_identity && super::identity::is_generated(schema);
     Requirements {
         relational_reads: false,
         aggregate_reads: false,
@@ -48,8 +49,8 @@ pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements
         explicit_conflict_target: true,
         conditional_conflict_update: guard_identity,
         returning: true,
-        insert_generated_identity: super::identity::is_generated(schema),
-        identity_allocation: guard_identity && super::identity::is_generated(schema),
+        insert_generated_identity: allocates_identity,
+        identity_allocation: allocates_identity,
         default_expression: false,
         bind_parameters: 0,
     }
