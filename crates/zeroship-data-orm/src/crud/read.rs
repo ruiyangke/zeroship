@@ -313,11 +313,7 @@ fn parse_order(
                 .inputs
                 .get(field)
                 .ok_or_else(|| invalid(format!("sort field has no physical column: {field}")))?;
-            let descending = match direction.as_i64() {
-                Some(1) => false,
-                Some(-1) => true,
-                _ => return Err(invalid("orderBy direction must be 1 or -1")),
-            };
+            let descending = parse_sort_direction(direction, "orderBy")?;
             Ok(ResolvedOrder {
                 expression: ResolvedOperand::Column(table.table.column(&input.column)?),
                 direction: if descending {
@@ -333,6 +329,14 @@ fn parse_order(
             })
         })
         .collect()
+}
+
+pub(super) fn parse_sort_direction(direction: &Value, operation: &str) -> Result<bool, QueryError> {
+    match direction.as_i64() {
+        Some(1) => Ok(false),
+        Some(-1) => Ok(true),
+        _ => Err(invalid(format!("{operation} direction must be 1 or -1"))),
+    }
 }
 
 fn alias(name: &str) -> Result<Ident, QueryError> {

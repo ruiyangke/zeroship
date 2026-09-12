@@ -192,6 +192,30 @@ async fn other_dynamic_reads_reject_malformed_options() {
     assert!(error
         .to_string()
         .contains("aggregate options must be an object"));
+
+    for sort in [
+        value!({"records":0}),
+        value!({"records":2}),
+        value!({"records":1.5}),
+        value!([["records", "desc"]]),
+    ] {
+        let error = records
+            .execute(Operation::Aggregate {
+                pipeline: value!([
+                    {"$group":{"records":{"$count":true}}},
+                    {"$sort":sort}
+                ]),
+                options: value!({}),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("aggregate: $sort direction must be 1 or -1"),
+            "unexpected error: {error}"
+        );
+    }
     owner.close().await;
 }
 

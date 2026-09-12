@@ -118,15 +118,16 @@ pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbErr
     let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
-    // Success arm only: a count is a read op.
     emit_db_metric(app_id, DB_READS, 1);
-
-    // Both backends decode count into the shared exact integer value.
-    Ok(rows
+    let count = rows
         .first()
         .and_then(|row| row.get("count"))
-        .and_then(Value::as_i64)
-        .unwrap_or(0))
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_i64(),
+            _ => None,
+        })
+        .ok_or_else(|| DbError::internal("count result did not return an integer"))?;
+    Ok(count)
 }
 
 /// Execute an insert/update/delete query, returning the affected
@@ -485,6 +486,35 @@ mod tests {
             )
             .bind(handle);
             assert!(mismatch.is_err());
+        });
+    }
+
+    #[test]
+    fn exec_count_rejects_malformed_driver_results() {
+        run(async {
+            let (backend, dir) = crate::tests::fixtures::unit_backend();
+            let route = ambient_route_for_tests("app_count_result", backend);
+            for sql in [
+                "SELECT 1 AS other",
+                "SELECT 'one' AS count",
+                "SELECT 1.5 AS count",
+            ] {
+                let error = exec_count(
+                    &route,
+                    CompiledQuery {
+                        sql: sql.to_owned(),
+                        params: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("count result"),
+                    "unexpected error: {error}"
+                );
+            }
+            drop(route);
+            drop(dir);
         });
     }
 

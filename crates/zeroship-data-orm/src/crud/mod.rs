@@ -62,15 +62,20 @@ pub async fn exec_mutation_then_read(
 
 /// Execute an aggregate with its grouping and result-column metadata.
 /// The owned metadata remains available while the read pipeline borrows it.
-pub async fn exec_aggregate_read(
+pub(crate) async fn exec_aggregate_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
     bq: crate::sql::compiler::CompiledQuery,
     group_fields: Vec<String>,
-    result_columns: Option<Vec<String>>,
+    result_projection: Option<aggregate::AggregateProjection>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
-    let rows = exec_query(&route, bq).await?;
+    let mut rows = exec_query(&route, bq).await?;
+    if let Some(projection) = &result_projection {
+        route
+            .sql_registration()
+            .decode_rows(&projection.schema, &mut rows)?;
+    }
     read_pipeline::apply(
         &route,
         &binding,
@@ -87,8 +92,10 @@ pub async fn exec_aggregate_read(
             // descriptor declares, so the declared surface would drop
             // every one of them. This is the ONLY call site in the crate
             // that names a surface; every other one takes the default.
-            row_surface: match &result_columns {
-                Some(cols) => read_pipeline::RowSurface::Projected(cols.as_slice()),
+            row_surface: match &result_projection {
+                Some(projection) => {
+                    read_pipeline::RowSurface::Projected(projection.columns.as_slice())
+                }
                 None => read_pipeline::RowSurface::Declared,
             },
             ..read_pipeline::ApplyOptions::default()
@@ -1071,13 +1078,19 @@ pub fn plan_restore_many(
 // ---------------------------------------------------------------------------
 
 /// Compile an aggregate and return its result-column layout with the query.
-pub fn plan_aggregate(
+pub(crate) fn plan_aggregate(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
     collection: &str,
     pipeline: &Value,
     opts: &Value,
-) -> Result<(crate::sql::compiler::CompiledQuery, Option<Vec<String>>), DbError> {
+) -> Result<
+    (
+        crate::sql::compiler::CompiledQuery,
+        Option<aggregate::AggregateProjection>,
+    ),
+    DbError,
+> {
     validate_dynamic_options(opts, "aggregate")?;
     let include_deleted = parse_include_deleted(opts)?;
 

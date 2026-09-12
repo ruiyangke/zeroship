@@ -23,6 +23,11 @@ struct AggregateOutput {
     source_field: Option<String>,
 }
 
+pub(crate) struct AggregateProjection {
+    pub columns: Vec<String>,
+    pub schema: Value,
+}
+
 pub(crate) fn build(
     namespace: &SchemaName,
     collection: &str,
@@ -30,7 +35,13 @@ pub(crate) fn build(
     filter_soft_deleted: bool,
     schema: &Value,
     registration: &SqlRegistration,
-) -> Result<(crate::sql::compiler::CompiledQuery, Option<Vec<String>>), QueryError> {
+) -> Result<
+    (
+        crate::sql::compiler::CompiledQuery,
+        Option<AggregateProjection>,
+    ),
+    QueryError,
+> {
     let stages = pipeline
         .as_array()
         .ok_or_else(|| invalid("aggregate: pipeline must be an array"))?;
@@ -91,7 +102,7 @@ pub(crate) fn build(
         filter_soft_deleted,
     )?;
 
-    let (projection, group_by, outputs, result_columns) = match group {
+    let (projection, group_by, outputs, result_projection) = match group {
         Some(group) => grouped_projection(group, schema, &table)?,
         None => {
             if having.is_some() {
@@ -127,7 +138,7 @@ pub(crate) fn build(
     })?;
     Ok((
         registration.compile(Statement::Select(statement))?,
-        result_columns,
+        result_projection,
     ))
 }
 
@@ -135,7 +146,7 @@ type GroupedProjection = (
     Vec<SelectedExpression>,
     Vec<ResolvedOperand>,
     BTreeMap<String, AggregateOutput>,
-    Option<Vec<String>>,
+    Option<AggregateProjection>,
 );
 
 fn grouped_projection(
@@ -150,6 +161,7 @@ fn grouped_projection(
     let mut group_by = Vec::new();
     let mut outputs = BTreeMap::new();
     let mut result_columns = Vec::new();
+    let mut result_schema = crate::value::Map::new();
     let mut names = BTreeSet::new();
     if let Some(by) = fields.get("by") {
         let names_in = match by {
@@ -244,6 +256,8 @@ fn grouped_projection(
             expression: operand.clone(),
             alias,
         });
+        let result_definition =
+            aggregate_result_definition(function, source_field.as_deref(), schema)?;
         outputs.insert(
             name.clone(),
             AggregateOutput {
@@ -252,11 +266,35 @@ fn grouped_projection(
             },
         );
         result_columns.push(name.clone());
+        result_schema.insert(name.clone(), result_definition);
     }
     if projection.is_empty() {
         return Err(invalid("aggregate: $group requires a field or accumulator"));
     }
-    Ok((projection, group_by, outputs, Some(result_columns)))
+    Ok((
+        projection,
+        group_by,
+        outputs,
+        Some(AggregateProjection {
+            columns: result_columns,
+            schema: Value::Object(result_schema),
+        }),
+    ))
+}
+
+fn aggregate_result_definition(
+    function: AggregateFunc,
+    source_field: Option<&str>,
+    schema: &Value,
+) -> Result<Value, QueryError> {
+    match function {
+        AggregateFunc::Count => Ok(crate::value!({"type":"integer"})),
+        AggregateFunc::Avg => Ok(crate::value!({"type":"number"})),
+        AggregateFunc::Sum | AggregateFunc::Min | AggregateFunc::Max => source_field
+            .and_then(|field| schema.get(field))
+            .cloned()
+            .ok_or_else(|| invalid("aggregate: source field has no result type")),
+    }
 }
 
 fn resolve_having(
@@ -397,7 +435,7 @@ fn resolve_order(
                 }
                 read::selected(table, field)?.expression
             };
-            let descending = direction.as_i64().is_some_and(|value| value < 0);
+            let descending = read::parse_sort_direction(direction, "aggregate: $sort")?;
             Ok(ResolvedOrder {
                 expression: operand,
                 direction: if descending {
