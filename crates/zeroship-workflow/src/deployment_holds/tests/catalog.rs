@@ -10,6 +10,12 @@ fn manifest() -> (String, String) {
 
 #[test]
 fn concurrent_local_hosts_share_the_normal_deployment_identity() {
+    for _ in 0..8 {
+        concurrent_local_registration();
+    }
+}
+
+fn concurrent_local_registration() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("index.sqlite");
     let app = AppId::mint();

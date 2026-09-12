@@ -2,10 +2,13 @@
 
 use super::{collections, DeploymentHolds, SQLITE_SCHEMA};
 use crate::WorkflowServiceError;
-use std::path::Path;
+use std::{
+    path::Path,
+    time::{Duration, Instant},
+};
 use zeroship_core::schema_name::SchemaName;
 use zeroship_data_orm::{
-    binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
+    binding::DbBinding, encryption::ProjectKeySource, error::DbError, orm::Database, ConnectOptions,
 };
 
 impl DeploymentHolds {
@@ -16,19 +19,31 @@ impl DeploymentHolds {
     /// Refuses incompatible catalogs without altering existing data.
     pub async fn open_local(path: &Path) -> Result<Self, WorkflowServiceError> {
         initialize(path)?;
-        let database = Database::connect(
-            DbBinding::new(
-                "platform",
-                "app-deployments",
-                SchemaName::new("main").expect("local catalog namespace"),
-            ),
-            ConnectOptions::new(
-                format!("sqlite:{}", path.display()),
-                ProjectKeySource::unavailable(),
-            ),
-            collections()?,
-        )
-        .await?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let database = loop {
+            let result = Database::connect(
+                DbBinding::new(
+                    "platform",
+                    "app-deployments",
+                    SchemaName::new("main").expect("local catalog namespace"),
+                ),
+                ConnectOptions::new(
+                    format!("sqlite:{}", path.display()),
+                    ProjectKeySource::unavailable(),
+                ),
+                collections()?,
+            )
+            .await;
+            match result {
+                Ok(database) => break database,
+                // Another host may still hold bootstrap's schema read while
+                // the ORM switches the database to WAL. Retry only contention.
+                Err(DbError::LockContention { .. }) if Instant::now() < deadline => {
+                    compio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        };
         Self::new(database)
     }
 }
