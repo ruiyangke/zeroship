@@ -27,9 +27,6 @@ pub enum StorageType {
 
 impl StorageType {
     fn accepts(self, value: &Value) -> bool {
-        if value.is_null() {
-            return true;
-        }
         match self {
             Self::Boolean => matches!(value, Value::Bool(_)),
             Self::Integer => value.as_i64().is_some() || value.as_u64().is_some(),
@@ -926,6 +923,9 @@ fn validate_insert_expression(
     expression: &Expression,
 ) -> Result<(), CompileError> {
     match expression {
+        Expression::Bind(value) if value.is_null() => {
+            Err(invalid("SQL null must use the explicit null expression"))
+        }
         Expression::Bind(value) if !storage.accepts(value) => Err(invalid(
             "bound value does not match its physical storage type",
         )),
@@ -949,6 +949,9 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
             }
             let storage = assignment.column.storage();
             match &assignment.value {
+                Expression::Bind(value) if value.is_null() => {
+                    return Err(invalid("SQL null must use the explicit null expression"));
+                }
                 Expression::Bind(value) if !storage.accepts(value) => {
                     return Err(invalid(
                         "bound value does not match its physical storage type",
@@ -1036,6 +1039,9 @@ fn validate_update_expression(
 ) -> Result<(), CompileError> {
     let storage = assigned.storage();
     match expression {
+        Expression::Bind(value) if value.is_null() => {
+            Err(invalid("SQL null must use the explicit null expression"))
+        }
         Expression::Bind(value) if !storage.accepts(value) => Err(invalid(
             "bound value does not match its physical storage type",
         )),

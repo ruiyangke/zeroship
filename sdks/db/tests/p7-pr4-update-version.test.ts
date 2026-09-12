@@ -116,6 +116,31 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
     assert.ok(row);
   });
 
+  test("non_integer_concurrency_filter_is_not_reported_as_a_conflict", async () => {
+    const native = {
+      collection() {
+        return { async update() { return null; } };
+      },
+    } as unknown as NativeDb;
+    const posts = new Collection(
+      "posts",
+      {
+        id: { type: "string", required: true, primaryKey: true },
+        title: { type: "string", required: true },
+        revision: { type: "integer", required: true, concurrency: true },
+      },
+      native,
+    );
+
+    const result = await posts.update(
+      { id: "post_x", revision: 1.5 } as never,
+      { title: "renamed" },
+    );
+
+    assert.equal(result.error, null);
+    assert.equal(result.data, null);
+  });
+
   test("OPTIMISTIC_CONCURRENCY_error_is_retryable", () => {
     const e = new OptimisticLockError({ column: "revision", expected: 7 }, "posts");
     assert.equal(e.retryable, true);

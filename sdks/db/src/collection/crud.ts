@@ -139,7 +139,7 @@ export function extractConcurrencyGuard(
   if (column === undefined) return null;
   if (filter === null || typeof filter !== "object") return null;
   const v = filter[column];
-  if (typeof v === "number" && Number.isFinite(v)) {
+  if (typeof v === "number" && Number.isSafeInteger(v)) {
     return { column, expected: v };
   }
   return null;

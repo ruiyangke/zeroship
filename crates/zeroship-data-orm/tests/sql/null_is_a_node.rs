@@ -1,7 +1,11 @@
+use zeroship_core::schema_name::SchemaName;
 use zeroship_data_orm::sql::{
+    compiler::CompileError,
+    statement::{Expression, Insert, InsertParts, StorageType, Table},
     Ident, IdentRole, Literal, LiteralError, LiteralSet, MembershipOp, Operand, Predicate,
 };
 use zeroship_data_orm::value;
+use zeroship_data_orm::Value;
 
 #[test]
 fn filter_text_uses_the_validated_literal_boundary() {
@@ -26,6 +30,32 @@ fn null_has_no_literal_representation() {
         assert_ne!(literal.type_name(), "null");
     }
     assert_eq!(Literal::from_optional(None), None);
+}
+
+#[test]
+fn sql_null_cannot_hide_inside_a_bound_value() {
+    let table = Table::new(
+        SchemaName::new("app").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        [(
+            Ident::parse_as("title", IdentRole::Column).unwrap(),
+            StorageType::Text,
+        )],
+    )
+    .unwrap();
+    let title = table.column("title").unwrap();
+    let error = Insert::new(InsertParts {
+        table,
+        columns: vec![title],
+        rows: vec![vec![Expression::Bind(Value::Null)]],
+        returning: Vec::new(),
+        insert_generated_identity: false,
+    })
+    .unwrap_err();
+    assert_eq!(
+        error,
+        CompileError::InvalidStatement("SQL null must use the explicit null expression".into())
+    );
 }
 
 #[test]
