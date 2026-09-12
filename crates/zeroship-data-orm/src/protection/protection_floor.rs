@@ -55,7 +55,7 @@ fn floor_from_live(live: &crate::sql::catalog::LiveSchema) -> ProtectionFloor {
             .filter_map(|(column, info)| {
                 let stored = StoredProtection {
                     masked: info.mask.is_some(),
-                    encrypted: info.encryption.is_some(),
+                    encrypted: info.encrypted,
                 };
                 stored.any().then(|| (column.clone(), stored))
             })
@@ -188,10 +188,7 @@ pub fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::catalog::WrappedType;
-    use crate::sql::catalog::{
-        Classification, ColumnInfo, EncryptionMeta, LiveSchema, MaskKind, MaskMeta,
-    };
+    use crate::sql::catalog::{Classification, ColumnInfo, LiveSchema, MaskKind, MaskMeta};
 
     use crate::value;
 
@@ -208,9 +205,7 @@ mod tests {
 
     fn encrypted_column() -> ColumnInfo {
         ColumnInfo {
-            encryption: Some(EncryptionMeta {
-                wraps: WrappedType::String,
-            }),
+            encrypted: true,
             ..Default::default()
         }
     }

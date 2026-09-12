@@ -111,7 +111,7 @@ impl crate::protection::Catalog for SqliteBackend {
                     .map(|s| s != "0")
                     .unwrap_or(false);
                 let default_expr = row.get(4).and_then(|c| c.clone());
-                let encryption = encryption_by_col.get(&name).cloned();
+                let encrypted = encryption_by_col.contains(&name);
                 let mask = mask_by_parent.get(&name).cloned();
                 col_map.insert(
                     name,
@@ -132,7 +132,7 @@ impl crate::protection::Catalog for SqliteBackend {
                         // New fields default; `vector_dims` /
                         // `is_geopoint` are populated
                         // from `sqlite_master.sql` introspection regexes.
-                        encryption,
+                        encrypted,
                         mask,
                         ..Default::default()
                     },

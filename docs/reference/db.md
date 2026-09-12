@@ -137,9 +137,9 @@ failures as 422, not as a literal authoring-time 400.
 
 **Type generation refuses invalid names too, so failures surface at build time.**
 Column names follow the portable identifier and reserved-prefix rules. Masked
-storage names come from the generated runtime descriptor; `_masked` has no
-special meaning. A masked field name must also leave room for its hidden raw
-storage name. Invalid declarations leave `generated/zeroship/` unchanged.
+storage names come from the generated runtime descriptor. A masked field name
+must also leave room for its hidden raw storage name. Invalid declarations
+leave `generated/zeroship/` unchanged.
 
 ## Two return contracts
 
@@ -1552,7 +1552,7 @@ Plaintext reveal is always explicit. `await row.ssn.unmask({ actor?, reason? })`
 
 `defineMaskPolicy()` is the app-scoped authorization declaration for unmasking. It validates the classifications (`public`, `pii`, `spi`, `phi`, `pci`, `internal`) and snapshots a pending role-to-classification map for bootstrap to install. Declarations may be replaced during startup; after the startup flush, further calls fail with `MASK_POLICY_IMMUTABLE`. The policy is held in memory for the app and deployment. No database backend persists it, and changes require redeployment (`sdks/db/src/policy.ts`). If an app never calls `defineMaskPolicy()`, the fallback is strict: only the `auto` actor can unmask. If the app does declare a policy, `auto` still keeps full access unless the policy explicitly lists `auto` with a narrower set (`sdks/db/src/policy.ts`).
 
-Two sentinel formats are shipped, and they are unrelated to each other. `__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). `zero-migrate:mask:kind=<kind>,classification=<class>` is the schema/introspection sentinel the migration engine attaches to the field's own (masked) column as a database COMMENT, so the diff, the protection floor and the backfill paths can recover mask metadata from the live database definition (`crates/zeroship-migrate-backend/src/mask_codec.rs` writes it, `crates/zeroship-data-orm/src/sql/mask_codec.rs` reads it). Its encryption peer is `zero-migrate:enc:<wraps>`, attached to the encrypted column itself. The schema sentinels were spelled `__zsmask:` / `zsenc:` on the reader side until 2026-09-04, which is one character from the payload sentinel above and was never what the engine wrote.
+`__zsmask__` is the read-side wire sentinel for a masked value payload (`sdks/db/src/types.ts`, `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `crates/zeroship-data-v8/src/v8_classes/masked_value.rs`). Catalog sentinels record stored protection. The mask marker carries its kind and classification; the encryption marker records only that protection is present from the ORM's perspective. Runtime type and storage behavior always come from the installed descriptor (`crates/zeroship-data-orm/src/sql/mask_codec.rs`).
 
 Column encryption is always randomised. Each write uses a fresh nonce and
 binds authentication to the app, collection, column and row identity.
@@ -1571,8 +1571,8 @@ Runtime descriptors carry the logical plaintext type and an encryption flag:
 The SDK declaration is `t.encrypted({ of: t.number() })`; `t.encrypted()`
 selects string plaintext. Rust writes, reads and unmasking share a native
 plaintext codec selected by `type`. Binary values remain native buffers.
-The physical catalog sentinel also records the plaintext type, since the
-stored SQL type describes ciphertext.
+The physical catalog marks the column as encrypted. It is not a second source
+of runtime type metadata.
 
 The host supplies a project encryption key and explicit app-to-project bindings
 through `DbServiceConfig.project_keys`. Every encrypted column in that project

@@ -543,13 +543,11 @@ impl SqliteBackend {
     }
 }
 
-/// Recover encrypted-column metadata from stored DDL comments.
+/// Recover encrypted columns from stored DDL comments.
 /// The scanner attaches each sentinel to the preceding quoted column identifier.
-/// Malformed or unattachable sentinels are logged and skipped.
-fn parse_encryption_sentinels(
-    create_table_text: &str,
-) -> std::collections::HashMap<String, crate::sql::catalog::EncryptionMeta> {
-    let mut out = std::collections::HashMap::new();
+/// Unattachable sentinels are logged and skipped.
+fn parse_encryption_sentinels(create_table_text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
     // Walk the body, finding each `/* zero-migrate:enc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
     // column name. The emitter always emits the column name as the
@@ -599,36 +597,16 @@ fn parse_encryption_sentinels(
             break;
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
-        // Reuse the canonical parser so the wire shape is centralised, and so a
-        // sentinel this crate cannot interpret produces the codec's typed error
-        // rather than a silent absence. Structured exactly like the mask
-        // sibling below, for the same reason: both failure arms are LOUD.
-        match crate::sql::mask_codec::parse_encryption_sentinel(body) {
-            Ok(meta) => {
-                // Rewind from `abs_marker` to find the column name. The
-                // column name is the most recent `"…"` token before the
-                // marker — scan backwards for the closing `"` then the
-                // opening `"`.
-                let before = &create_table_text[..abs_marker];
-                match recover_preceding_quoted_ident(before) {
-                    Some(col_name) => {
-                        out.insert(col_name, meta);
-                    }
-                    None => {
-                        tracing::warn!(
-                            sentinel = %body,
-                            "diff: encryption sentinel with no recoverable column name \
-                             in the CREATE TABLE text; ignoring",
-                        );
-                    }
-                }
+        let before = &create_table_text[..abs_marker];
+        match recover_preceding_quoted_ident(before) {
+            Some(col_name) => {
+                out.insert(col_name);
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
                     sentinel = %body,
-                    error = %e,
-                    "diff: malformed encryption sentinel on SQLite column; \
-                     treating the column as unencrypted",
+                    "diff: encryption sentinel with no recoverable column name \
+                     in the CREATE TABLE text; ignoring",
                 );
             }
         }
@@ -959,37 +937,10 @@ mod tests {
         (result, warnings[0].1.clone())
     }
 
-    /// Assert `ddl` yields no encryption metadata AND that the walker said so
-    /// out loud, carrying the codec's typed error verbatim.
-    fn assert_enc_sentinel_refused_loudly(ddl: &str, expected_error_fragment: &str) {
-        let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
-        assert!(
-            got.is_empty(),
-            "a refused sentinel must stamp no column: {got:?}"
-        );
-        let error = fields
-            .get("error")
-            .expect("the warning must carry the codec's typed error");
-        assert!(
-            error.contains("enc_sentinel_malformed"),
-            "the codec's discriminator must survive into the log line: {error:?}"
-        );
-        assert!(
-            error.contains(expected_error_fragment),
-            "expected {expected_error_fragment:?} in {error:?}"
-        );
-        assert!(
-            fields.contains_key("sentinel"),
-            "the warning must name the offending sentinel: {fields:?}"
-        );
-    }
-
     // -----------------------------------------------------------------
     // Encryption sentinel parser unit tests
     // -----------------------------------------------------------------
 
-    /// Round-trip a single encrypted column: emitter shape → parser
-    /// extracts the wrapped type correctly.
     #[test]
     fn parse_encryption_sentinel_single_column() {
         let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
@@ -997,32 +948,9 @@ mod tests {
             \"ssn\" BYTEA /* zero-migrate:enc:string */  NOT NULL,\n  \
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
-        let m = got.get("ssn").expect("ssn must be parsed");
-        assert!(matches!(m.wraps, crate::sql::catalog::WrappedType::String));
-        assert!(
-            !got.contains_key("name"),
-            "non-encrypted col must be absent"
-        );
-        assert!(!got.contains_key("id"));
-    }
-
-    /// A numeric wrapped type survives introspection.
-    #[test]
-    fn parse_encryption_sentinel_number() {
-        let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
-            \"salary\" BYTEA /* zero-migrate:enc:number */ NOT NULL\n)";
-        let got = parse_encryption_sentinels(ddl);
-        let m = got.get("salary").expect("salary must be parsed");
-        assert!(matches!(m.wraps, crate::sql::catalog::WrappedType::Number));
-    }
-
-    /// Byte-valued plaintext retains its wrapped type.
-    #[test]
-    fn parse_encryption_sentinel_bytes() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:bytes */)";
-        let got = parse_encryption_sentinels(ddl);
-        let m = got.get("a").expect("a must be parsed");
-        assert!(matches!(m.wraps, crate::sql::catalog::WrappedType::Bytes));
+        assert!(got.contains("ssn"));
+        assert!(!got.contains("name"), "non-encrypted col must be absent");
+        assert!(!got.contains("id"));
     }
 
     /// Multiple encrypted columns in one CREATE TABLE — each attaches
@@ -1036,26 +964,12 @@ mod tests {
         assert_eq!(got.len(), 2);
     }
 
-    /// Malformed sentinel — wrong number of parts → refused, and the refusal
-    /// is AUDIBLE. A column whose sentinel does not parse reads back
-    /// unencrypted, so the log line is the only difference between "the
-    /// metadata was rejected" and "there was never any metadata".
     #[test]
-    fn parse_encryption_sentinel_rejects_malformed() {
-        assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:only_one_part */)",
-            "expected zero-migrate:enc:",
-        );
-    }
-
-    /// Unknown wraps → refused loudly. This arm had no test at all before the
-    /// walker was collapsed onto the codec.
-    #[test]
-    fn parse_encryption_sentinel_rejects_unknown_wraps() {
-        assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:blob */)",
-            "expected zero-migrate:enc:",
-        );
+    fn parse_encryption_sentinel_ignores_migration_owned_detail() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:opaque-detail */)";
+        let (got, events) = capture_events(|| parse_encryption_sentinels(ddl));
+        assert!(got.contains("a"));
+        assert!(events.is_empty());
     }
 
     /// A well-formed sentinel with no recoverable column name in front of it
@@ -1075,38 +989,6 @@ mod tests {
         );
     }
 
-    /// Every wrapped type the emitter can produce round-trips through the
-    /// walker unchanged, and silently.
-    ///
-    /// The input is BUILT by `crate::sql::mask_codec::build_encryption_sentinel`
-    /// rather than hand-written, so this pins walker-against-emitter rather
-    /// than walker-against-one-literal: a change to the wire shape moves both
-    /// sides and this test keeps passing, which is the point of collapsing the
-    /// parse onto the codec.
-    #[test]
-    fn parse_encryption_sentinel_round_trips_every_built_sentinel() {
-        use crate::sql::catalog::{EncryptionMeta, WrappedType};
-
-        {
-            for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
-                let meta = EncryptionMeta { wraps };
-                let sentinel = crate::sql::mask_codec::build_encryption_sentinel(&meta);
-                let ddl = format!("CREATE TABLE t (\"ssn\" BYTEA /* {sentinel} */ NOT NULL)");
-                let (got, events) = capture_events(|| parse_encryption_sentinels(&ddl));
-                let parsed = got.get("ssn").unwrap_or_else(|| {
-                    panic!("built sentinel {sentinel:?} must round-trip: {got:?}")
-                });
-                assert_eq!(parsed.wraps, meta.wraps, "wraps drifted for {sentinel:?}");
-                assert!(
-                    events.is_empty(),
-                    "the success path must be silent for {sentinel:?}: {events:?}"
-                );
-            }
-        }
-    }
-
-    /// DDL with no sentinels → empty map (no allocations beyond the
-    /// HashMap itself).
     #[test]
     fn parse_encryption_sentinel_empty_when_no_marker() {
         let ddl = "CREATE TABLE t (\"a\" TEXT, \"b\" INTEGER)";
@@ -1157,7 +1039,7 @@ mod tests {
              \"c\" BYTEA /* zero-migrate:enc:number\n)";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(unterminated));
         assert_eq!(
-            got.keys().collect::<Vec<_>>(),
+            got.iter().collect::<Vec<_>>(),
             vec!["a"],
             "only the column ahead of the unterminated comment survives: {got:?}"
         );
@@ -1171,7 +1053,7 @@ mod tests {
              \"b\" BYTEA /* zero-migrate:enc:string */,\n  \
              \"c\" BYTEA /* zero-migrate:enc:number */\n)";
         let (got, events) = capture_events(|| parse_encryption_sentinels(control));
-        let mut names: Vec<_> = got.keys().cloned().collect();
+        let mut names: Vec<_> = got.iter().cloned().collect();
         names.sort();
         assert_eq!(
             names,

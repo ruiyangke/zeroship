@@ -3146,20 +3146,13 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             )
             .await;
 
-            // CONTROL 1: the engine's encryption sentinel, compared against the runtime
-            // codec's own build for the same declaration.
+            // The live catalog must retain an encryption marker the runtime recognizes.
             let stored = column_comment(&pool, &app, "people", "secret")
                 .await
                 .expect("the engine must attach an encryption sentinel to the encrypted column");
-            assert_eq!(
-                stored,
-                crate::sql::mask_codec::build_encryption_sentinel(
-                    &crate::sql::catalog::EncryptionMeta {
-                        wraps: crate::sql::catalog::WrappedType::String,
-                    }
-                ),
-                "the migration engine writes the protection record and the data plane \
-         reads it; a spelling only one of them knows is a fence with no input",
+            assert!(
+                crate::sql::mask_codec::is_encryption_sentinel(&stored),
+                "the migration engine must write an encryption marker the runtime recognizes",
             );
 
             // CONTROL 2: the encrypting deploy stores ciphertext, so this test is not
