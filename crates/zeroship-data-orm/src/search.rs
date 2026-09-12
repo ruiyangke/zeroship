@@ -134,4 +134,36 @@ mod tests {
         .unwrap();
         assert_eq!(request.limit, 100);
     }
+
+    #[test]
+    fn sqlite_spatial_search_selects_an_unreadable_identity_for_internal_ranking() {
+        let binding = DbBinding::cold_start("spatial_hidden_identity");
+        let schema = value!({
+            "id":{
+                "type":"integer",
+                "required":true,
+                "primaryKey":true,
+                "readable":false
+            },
+            "location":{"type":"geoPoint"}
+        });
+        let request = SpatialSearch::compile(
+            &binding,
+            "places",
+            "location",
+            GeoPoint { lat: 0.0, lng: 0.0 },
+            1.0,
+            &Value::Null,
+            None,
+            &schema,
+            &crate::sql::registration::SqlRegistration::sqlite(),
+        )
+        .unwrap();
+
+        assert!(
+            request.query.sql().contains("\"source\".\"id\" AS \"id\""),
+            "SQLite must fetch the hidden identity used to order equal distances: {}",
+            request.query.sql()
+        );
+    }
 }
