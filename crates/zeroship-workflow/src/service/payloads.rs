@@ -281,7 +281,8 @@ impl WorkflowService {
         let mut tx = self.begin().await?;
         let table = tx.table("payloads");
         let now = tx.now().await?;
-        let candidates = tx.query(&format!("SELECT app_id,id FROM {table} WHERE state IN ('uploading','staged','deleting','deleted') AND expires_at <= $1 ORDER BY expires_at,app_id,id LIMIT $2"), &[now.into(),(limit as i64).into()]).await?;
+        let (scope, app_ids) = tx.host_app_scope()?;
+        let candidates = tx.query(&format!("SELECT app_id,id FROM {table} WHERE app_id IN ({scope}) AND state IN ('uploading','staged','deleting','deleted') AND expires_at <= $2 ORDER BY expires_at,app_id,id LIMIT $3"), &[app_ids,now.into(),(limit as i64).into()]).await?;
         tx.commit().await?;
         let mut collected = 0;
         for candidate in candidates {

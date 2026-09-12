@@ -224,6 +224,27 @@ pub struct Transaction {
     pub(crate) policies: Option<std::sync::Arc<super::HostPolicies>>,
 }
 impl Transaction {
+    /// Expand the host's assigned apps from the first query parameter. A JSON
+    /// array avoids a parameter per app and keeps filtering before scan limits.
+    /// This selects candidates only; mutations still resolve current host policy.
+    pub(crate) fn host_app_scope(&self) -> Result<(&'static str, Value), WorkflowServiceError> {
+        let apps = self
+            .policies
+            .as_ref()
+            .ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow host policy was not bound".into())
+            })?
+            .app_ids()?;
+        let encoded = serde_json::to_string(&apps).map_err(|_| {
+            WorkflowServiceError::Internal("workflow app scope could not be encoded".into())
+        })?;
+        let query = match self.backend {
+            Backend::Postgres(_) => "SELECT jsonb_array_elements_text($1::text::jsonb)",
+            Backend::Sqlite(_) => "SELECT value FROM json_each($1)",
+        };
+        Ok((query, encoded.into()))
+    }
+
     pub(crate) fn dialect(&self) -> &'static str {
         match self.backend {
             Backend::Postgres(_) => "postgres",

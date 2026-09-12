@@ -100,7 +100,11 @@ journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
 payload read/write contract alongside the local task protocol.
 `runner::WorkflowWorker` drives bounded task slots, scheduling and expired
-payload collection on its host's compio thread. It keeps working without a
+payload collection on its host's compio thread. Background discovery selects
+only host-assigned apps before applying batch limits; customer journal rows
+cannot register apps with the host. Expired assignments still permit lease and
+payload cleanup, while current policy is checked again before mutation.
+The loop keeps working without a
 request isolate, retries failed attempts with a delay, and bounds task polling
 and maintenance I/O. Shutdown cancels active execution and waits for it to stop
 before releasing claims. A cancelled host future must be drained before its

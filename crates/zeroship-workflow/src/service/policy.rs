@@ -82,6 +82,18 @@ pub struct HostPolicies {
     entries: RwLock<BTreeMap<AppId, PolicySnapshot>>,
 }
 impl HostPolicies {
+    /// Candidate discovery includes expired assignments so their leases and
+    /// abandoned uploads can still be recovered. Mutation resolves policy again.
+    pub(crate) fn app_ids(&self) -> Result<Vec<AppId>, WorkflowServiceError> {
+        Ok(self
+            .entries
+            .read()
+            .map_err(|_| unavailable())?
+            .keys()
+            .cloned()
+            .collect())
+    }
+
     pub(crate) fn install(
         &self,
         app: &AppId,
