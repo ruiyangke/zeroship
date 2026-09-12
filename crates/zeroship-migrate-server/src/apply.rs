@@ -8,6 +8,7 @@ use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_core::schema_name::SchemaName;
+use zeroship_core::UserId;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -276,7 +277,7 @@ pub async fn apply_ir_documents(
     request: &ApplyMigrationsRequest,
     policy_config: &ManagedPolicyConfig,
     schema_apply_store: &SchemaApplyStore,
-    principal_id: Uuid,
+    principal_id: &UserId,
 ) -> Result<ApplyMigrationsResponse, ApplyRequestError> {
     validate_request_shape(request)?;
     let policy = resolve_apply_policy(app_id, request, policy_config)?;
@@ -496,7 +497,7 @@ async fn run_apply(
     prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
     role: &str,
-    principal_id: Uuid,
+    principal_id: &UserId,
 ) -> Result<SealedApplyOutcome, ApplyRequestError> {
     // (d) POLICY: seal the effective policy with the zeroship-migrate-policy HMAC so
     // the apply carries an authenticated, ceiling-stamped integrity token.
@@ -511,7 +512,7 @@ async fn run_apply(
         ceiling_version = sealed_policy.ceiling_version,
         "migrate-server: applying IR under sealed managed migration policy"
     );
-    let applied_by = format!("migrate-server:{principal_id}");
+    let applied_by = format!("migrate-server:{}", principal_id.as_str());
     provision_runtime_app_role(session.client(), schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
@@ -1623,6 +1624,7 @@ mod tests {
             1,
         )
         .expect("policy config");
+        let principal_id = UserId::mint();
         let err = rt
             .block_on(apply_ir_documents(
                 "postgres://unused",
@@ -1631,7 +1633,7 @@ mod tests {
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
-                Uuid::new_v4(),
+                &principal_id,
             ))
             .expect_err("empty request rejected before DB connect");
         assert!(matches!(err, ApplyRequestError::Empty));
@@ -1654,6 +1656,7 @@ mod tests {
             1,
         )
         .expect("policy config");
+        let principal_id = UserId::mint();
         let err = rt
             .block_on(apply_ir_documents(
                 "postgres://unused",
@@ -1662,7 +1665,7 @@ mod tests {
                 &request,
                 &policy_config,
                 &SchemaApplyStore::new("postgres://unused"),
-                Uuid::new_v4(),
+                &principal_id,
             ))
             .expect_err("scalar request rejected before DB connect");
         assert!(matches!(err, ApplyRequestError::InvalidDocument(_)));

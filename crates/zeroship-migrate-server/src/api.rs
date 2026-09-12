@@ -64,7 +64,7 @@ pub async fn provision_workflows(
     .await;
     match result {
         Ok(()) => {
-            tracing::info!(%app_id, principal_id = %caller.principal_id, "workflow journal schema provisioned");
+            tracing::info!(%app_id, principal_id = caller.principal_id.as_str(), "workflow journal schema provisioned");
             web::HttpResponse::Ok().json(&json!({"app_id": app_id}))
         }
         Err(error) => {
@@ -105,7 +105,7 @@ pub async fn create_database(
         tracing::error!(
             error = %error,
             database_id = %database_id,
-            principal_id = %caller.principal_id,
+            principal_id = caller.principal_id.as_str(),
             "migrate-server: database create failed"
         );
         return database_infrastructure_response();
@@ -113,7 +113,7 @@ pub async fn create_database(
 
     tracing::info!(
         database_id = %database_id,
-        principal_id = %caller.principal_id,
+        principal_id = caller.principal_id.as_str(),
         "migrate-server: database created"
     );
     web::HttpResponse::Ok().json(&json!({"database_id": database_id}))
@@ -185,14 +185,14 @@ pub async fn apply(
         &body,
         &state.policy_config,
         &state.schema_apply_store,
-        caller.principal_id,
+        &caller.principal_id,
     )
     .await
     {
         Ok(report) => {
             tracing::info!(
                 app_id = %app_id,
-                principal_id = %caller.principal_id,
+                principal_id = caller.principal_id.as_str(),
                 applied = report.applied.len(),
                 skipped = report.skipped.len(),
                 "migrate-server: applied frozen IR migrations"
