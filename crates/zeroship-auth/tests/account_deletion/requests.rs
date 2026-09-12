@@ -55,7 +55,7 @@ async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
         let scheduled = scheduled.expect("scheduled set");
         assert_eq!(
             scheduled - requested.unwrap(),
-            chrono::Duration::days(i64::from(account_reaper::GRACE_DAYS)),
+            chrono::Duration::days(account_reaper::GRACE_DAYS),
             "the schedule must honor the requested grace interval"
         );
 
