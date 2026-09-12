@@ -9,8 +9,8 @@ use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
 use crate::exec::{exec_mutation_count_with_emit, exec_mutation_with_emit, exec_query};
-use crate::sql::mapping;
 use crate::sql::lifecycle::{concurrency_column, soft_delete_column};
+use crate::sql::mapping;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -1316,30 +1316,65 @@ pub fn plan_search(
         vector.push(n as f32);
     }
 
-    let k = args
-        .get("k")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize)
-        .unwrap_or(10);
-    let metric_str = args
-        .get("metric")
-        .and_then(Value::as_str)
-        .unwrap_or("cosine");
-    let metric = match metric_str {
-        "l2" => crate::backend::VectorMetric::L2,
-        "innerProduct" | "ip" => crate::backend::VectorMetric::InnerProduct,
-        _ => crate::backend::VectorMetric::Cosine,
+    let k = match args.get("k") {
+        None => 10,
+        Some(value) => value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| {
+                DbError::config("invalid_search_args", "search: `k` must be an integer")
+            })?,
     };
-    let column = args
-        .get("column")
-        .and_then(Value::as_str)
-        .unwrap_or("embedding")
-        .to_string();
+    let metric = match args.get("metric") {
+        None => crate::backend::VectorMetric::Cosine,
+        Some(value) => match value.as_str() {
+            Some("cosine") => crate::backend::VectorMetric::Cosine,
+            Some("l2") => crate::backend::VectorMetric::L2,
+            Some("innerProduct") => crate::backend::VectorMetric::InnerProduct,
+            _ => {
+                return Err(DbError::config(
+                    "invalid_search_args",
+                    "search: `metric` must be cosine, l2, or innerProduct",
+                ));
+            }
+        },
+    };
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
+    let column = match args.get("column") {
+        None => {
+            let readable = crate::sql::descriptors::readable_fields(&schema);
+            let mut vectors = schema
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(name, definition)| {
+                    readable.contains(name.as_str())
+                        && definition.get("type").and_then(Value::as_str) == Some("vector")
+                })
+                .map(|(name, _)| name.as_str());
+            let field = vectors.next().filter(|_| vectors.next().is_none()).ok_or_else(|| {
+                DbError::config(
+                    "invalid_search_args",
+                    "search: `column` is required unless the collection has one readable vector field",
+                )
+            })?;
+            field.to_owned()
+        }
+        Some(value) => value
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                DbError::config(
+                    "invalid_search_args",
+                    "search: `column` must be a non-empty string",
+                )
+            })?,
+    };
     let filter = args
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(crate::value::Map::new()));
-    let schema = crate::descriptor::collection_schema(binding, collection)?;
     let query = search::vector(
         binding.schema(),
         collection,
@@ -1457,10 +1492,17 @@ pub fn plan_near(
         }
     };
 
-    let limit = args
-        .get("limit")
-        .and_then(Value::as_u64)
-        .map(|n| n as usize);
+    let limit = match args.get("limit") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|value| usize::try_from(value).ok())
+                .ok_or_else(|| {
+                    DbError::config("invalid_near_args", "near: `limit` must be an integer")
+                })?,
+        ),
+    };
     let filter = args
         .get("filter")
         .cloned()
