@@ -229,7 +229,7 @@ pub(crate) fn extract_concurrency_guard(
         return Ok(None);
     };
     if filter_has_nested_concurrency_predicate(filter, column) {
-        return Err(DbError::version_filter_must_be_top_level(
+        return Err(DbError::concurrency_filter_must_be_top_level(
             collection, column,
         ));
     }

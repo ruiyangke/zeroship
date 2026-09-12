@@ -569,7 +569,7 @@ impl DbError {
     }
 
     /// A descriptor-declared optimistic-concurrency check failed.
-    pub fn version_mismatch(
+    pub fn concurrency_mismatch(
         collection: &str,
         row_id: Option<&str>,
         column: &str,
@@ -577,7 +577,7 @@ impl DbError {
     ) -> Self {
         let id_part = row_id.map(|id| format!(" {id}")).unwrap_or_default();
         DbError::ValidationFailed {
-            code: "version_mismatch",
+            code: "concurrency_mismatch",
             message: format!(
                 "Optimistic concurrency check failed for {collection}{id_part}: \
                  expected `{column}` value {expected}, but the row was modified concurrently."
@@ -589,9 +589,9 @@ impl DbError {
     }
 
     /// A concurrency guard without an identity cannot report per-row conflicts.
-    pub fn multi_row_version_filter_unsupported(collection: &str, column: &str) -> Self {
+    pub fn multi_row_concurrency_filter_unsupported(collection: &str, column: &str) -> Self {
         DbError::ValidationFailed {
-            code: "multi_row_version_filter_unsupported",
+            code: "multi_row_concurrency_filter_unsupported",
             message: format!(
                 "UPDATE on `{collection}` with `{column}` in the filter requires \
                  an `id` predicate; optimistic concurrency is per-row only."
@@ -605,9 +605,9 @@ impl DbError {
     }
 
     /// Concurrency guards must be direct equality predicates.
-    pub fn version_filter_must_be_top_level(collection: &str, column: &str) -> Self {
+    pub fn concurrency_filter_must_be_top_level(collection: &str, column: &str) -> Self {
         DbError::ValidationFailed {
-            code: "version_filter_must_be_top_level",
+            code: "concurrency_filter_must_be_top_level",
             message: format!(
                 "UPDATE on `{collection}` requires optimistic-concurrency \
                  `{column}` filters to be top-level."

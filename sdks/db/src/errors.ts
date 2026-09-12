@@ -6,7 +6,7 @@
 
 const CANONICAL_CODE_OVERRIDES = Object.freeze({
   fk_violation: "FOREIGN_KEY_VIOLATION",
-  version_mismatch: "OPTIMISTIC_CONCURRENCY",
+  concurrency_mismatch: "OPTIMISTIC_CONCURRENCY",
 } satisfies Record<string, string>);
 
 const VALIDATION_ERROR_BRAND = Symbol.for("@zeroship/db/ValidationError");
@@ -86,67 +86,44 @@ export class ValidationError extends Error {
   }
 }
 
-/**
- * D4 — optimistic-concurrency CAS update failed. Raised when an
- * `updateOne`/`updateMany` call includes `{ version: N }` in the filter
- * but the stored `version` no longer matches N (another writer won the
- * race). The error's `code` is `"OPTIMISTIC_CONCURRENCY"`; `expectedVersion`
- * carries the caller's N.
- *
- * **P7 PR 4** — the platform's UPDATE auto-bump path now surfaces the
- * same condition with its native error code. The runtime-typed error carries
- * `retryable: true` semantically (the hint advises re-read + retry). The
- * SDK's `update()` / `updateMany()` catch that native code and rethrow as
- * `OptimisticLockError` so app code can branch on the error class or on
- * `OPTIMISTIC_CONCURRENCY` — see [`mapOptimisticConcurrencyError`].
- */
+export interface ConcurrencyExpectation {
+  column: string;
+  expected: number;
+}
+
+/** Raised when a descriptor-declared compare-and-swap guard no longer matches. */
 export class OptimisticLockError extends Error {
   name = "OptimisticLockError";
   code = "OPTIMISTIC_CONCURRENCY" as const;
   readonly [OPTIMISTIC_LOCK_ERROR_BRAND] = true;
-  expectedVersion: number;
-  /** **P7 PR 4** — always `true` for this error class; advisory flag
-   *  the SDK consumer can branch on (`if (e.retryable) retry()`).
-   *  Mirrors the `retryable: true` semantics the Rust side carries
-   *  in its `hint`. */
+  concurrencyColumn: string;
+  expectedValue: number;
+  /** Advisory flag for retry helpers. */
   retryable = true as const;
 
   static [Symbol.hasInstance](value: unknown): boolean {
     return hasErrorBrand(value, OPTIMISTIC_LOCK_ERROR_BRAND, "OptimisticLockError");
   }
 
-  constructor(expectedVersion: number, collection?: string) {
+  constructor(expectation: ConcurrencyExpectation, collection?: string) {
     super(
       `Optimistic concurrency failure on ${collection ?? "collection"}: ` +
-      `expected version ${expectedVersion}, row was modified by another writer`,
+      `expected \`${expectation.column}\` value ${expectation.expected}, ` +
+      "row was modified by another writer",
     );
-    this.expectedVersion = expectedVersion;
+    this.concurrencyColumn = expectation.column;
+    this.expectedValue = expectation.expected;
   }
 }
 
-/**
- * **P7 PR 4** — translate a caught error from the native UPDATE
- * dispatcher into an [`OptimisticLockError`] when it carries the
- * optimistic-concurrency code. Used by `Collection.update()` /
- * `Collection.updateMany()` so the SDK contract surfaces a single
- * typed error class regardless of whether the failure came from the
- * SDK's pre-PR-4 null-result inference or the runtime's typed reject.
- *
- * Returns the original error unchanged for any other code; the caller then
- * handles it via the standard `mapNativeError` rail. The `expectedVersion`
- * defaults to `NaN`
- * when the SDK doesn't have the original CAS value in scope (the
- * runtime's message body carries it but parsing free-text would
- * be fragile — callers that need the value have it in their own
- * filter object).
- */
+/** Translate a native compare-and-swap failure into the SDK error type. */
 export function mapOptimisticConcurrencyError(
   e: unknown,
   collection: string,
-  expectedVersion: number,
+  expectation: ConcurrencyExpectation,
 ): Error {
   if (readCanonicalErrorCode(e) === "OPTIMISTIC_CONCURRENCY") {
-    return new OptimisticLockError(expectedVersion, collection);
+    return new OptimisticLockError(expectation, collection);
   }
   return e instanceof Error ? e : new Error(String(e));
 }

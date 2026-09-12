@@ -126,7 +126,7 @@ async fn cas_identity(postgres: bool) {
                 matches!(
                     result,
                     Err(DbError::ValidationFailed {
-                        code: "multi_row_version_filter_unsupported",
+                        code: "multi_row_concurrency_filter_unsupported",
                         ..
                     })
                 ),

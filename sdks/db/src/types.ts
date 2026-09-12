@@ -1733,11 +1733,9 @@ export interface SchemaOptions {
   softDelete: boolean;
   strictness: Strictness;
   /**
-   * D4 — optimistic concurrency. When `true` the collection auto-injects
-   * an `INTEGER NOT NULL DEFAULT 1` `version` column at DDL time and
-   * `updateOne`/`updateMany` honour a `{ version: N }` filter clause for
-   * compare-and-swap updates (mismatch returns an
-   * `OPTIMISTIC_CONCURRENCY` error).
+   * Enables the migration generator that emits a descriptor-declared
+   * concurrency column. Runtime compare-and-swap behavior follows the
+   * field carrying `concurrency: true`, including when that field is renamed.
    */
   versioning: boolean;
 }

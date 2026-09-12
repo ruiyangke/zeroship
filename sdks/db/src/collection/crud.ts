@@ -3,6 +3,7 @@ import {
   ValidationError,
   OptimisticLockError,
   mapOptimisticConcurrencyError,
+  type ConcurrencyExpectation,
 } from "../errors";
 import { trackCollectionAccess } from "../live";
 import { IdLoader } from "../loader";
@@ -53,8 +54,6 @@ export interface CrudCollectionInternals<
 > {
   _name: string;
   _schema: NormalizedSchema;
-  _softDelete: boolean;
-  _versioning: boolean;
   _indexes: readonly NamedIndexSpec[];
   _knownFields: Set<string>;
   _idLoader: IdLoader<Row<S>, IdValue> | null;
@@ -131,21 +130,18 @@ export function validateArrayPushOps(
   }
 }
 
-/**
- * D4 — return the caller-supplied `version: N` value from a filter,
- * but only when versioning is enabled on this collection AND the
- * value is a plain number (not a `$gt`/`$in`/etc. operator). Returns
- * `null` otherwise so callers can short-circuit to the non-CAS path.
- */
-export function extractCasVersion(
+/** Return a direct equality guard on the descriptor's concurrency field. */
+export function extractConcurrencyGuard(
   schema: Record<string, FieldDef>,
   filter: PlainObject,
-): number | null {
+): ConcurrencyExpectation | null {
   const column = Object.keys(schema).find((key) => schema[key].concurrency === true);
   if (column === undefined) return null;
   if (filter === null || typeof filter !== "object") return null;
   const v = filter[column];
-  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "number" && Number.isFinite(v)) {
+    return { column, expected: v };
+  }
   return null;
 }
 
@@ -407,7 +403,7 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
     const fields = extractUpdateFields(updateObj);
     checkPartial(fields, self._schema);
     validateArrayPushOps(updateObj, self._schema);
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
     const mappedFilter = mapFilterOutbound(
       filter as ZeroshipDbFilter,
       self._toColumn,
@@ -417,14 +413,14 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
     try {
       result = await self._nativeCollection().update(mappedFilter, mappedUpdate);
     } catch (e) {
-      if (casVersion !== null) {
-        throw mapOptimisticConcurrencyError(e, self._name, casVersion);
+      if (concurrency !== null) {
+        throw mapOptimisticConcurrencyError(e, self._name, concurrency);
       }
       throw e;
     }
     if (result === null) {
-      if (casVersion !== null) {
-        throw new OptimisticLockError(casVersion, self._name);
+      if (concurrency !== null) {
+        throw new OptimisticLockError(concurrency, self._name);
       }
       return null;
     }
@@ -443,7 +439,7 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
     const fields = extractUpdateFields(updateObj);
     checkPartial(fields, self._schema);
     validateArrayPushOps(updateObj, self._schema);
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
     const mappedFilter = mapFilterOutbound(
       filter as ZeroshipDbFilter,
       self._toColumn,
@@ -453,13 +449,13 @@ export function updateManyCollection<S, N extends string, AllSchemas extends Rec
     try {
       n = await self._nativeCollection().updateMany(mappedFilter, mappedUpdate);
     } catch (e) {
-      if (casVersion !== null) {
-        throw mapOptimisticConcurrencyError(e, self._name, casVersion);
+      if (concurrency !== null) {
+        throw mapOptimisticConcurrencyError(e, self._name, concurrency);
       }
       throw e;
     }
-    if (n === 0 && casVersion !== null) {
-      throw new OptimisticLockError(casVersion, self._name);
+    if (n === 0 && concurrency !== null) {
+      throw new OptimisticLockError(concurrency, self._name);
     }
     return { count: n };
   });
@@ -475,12 +471,12 @@ export function deleteCollection<S, N extends string, AllSchemas extends Record<
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
 
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const result = await self._nativeCollection().delete(mapped);
     if (result === null) {
-      if (casVersion !== null) throw new OptimisticLockError(casVersion, self._name);
+      if (concurrency !== null) throw new OptimisticLockError(concurrency, self._name);
       return null;
     }
     return mapResultDoc(result as PlainObject, self._toField) as Row<S>;
@@ -499,12 +495,12 @@ export function deleteManyCollection<S, N extends string, AllSchemas extends Rec
     self._indexes,
   );
   return self._run(async () => {
-    const casVersion = extractCasVersion(self._schema, filter as PlainObject);
+    const concurrency = extractConcurrencyGuard(self._schema, filter as PlainObject);
 
     const mapped = mapFilterOutbound(filter as ZeroshipDbFilter, self._toColumn);
     const n = await self._nativeCollection().deleteMany(mapped);
-    if (n === 0 && casVersion !== null) {
-      throw new OptimisticLockError(casVersion, self._name);
+    if (n === 0 && concurrency !== null) {
+      throw new OptimisticLockError(concurrency, self._name);
     }
     return { deletedCount: n };
   });

@@ -586,46 +586,38 @@ mod tests {
         }
     }
 
-    /// `DbError::version_mismatch` stamps the canonical
-    /// `version_mismatch` code; carries a hint advising re-read +
-    /// retry.
     #[test]
-    fn version_mismatch_stamps_canonical_code_and_hint() {
-        let e = DbError::version_mismatch("posts", Some("post_x"), "version", 5).to_op_error();
+    fn concurrency_mismatch_stamps_canonical_code_and_hint() {
+        let e = DbError::concurrency_mismatch("posts", Some("post_x"), "revision", 5).to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, "version_mismatch");
+                assert_eq!(code, "concurrency_mismatch");
                 let h = hint.as_deref().expect("must carry a retry hint");
                 assert!(h.to_lowercase().contains("retry"), "hint: {h}");
             }
             other => panic!("expected CodedError, got {other:?}"),
         }
-        // Message body includes the collection + id + expected version
-        // so SDK consumers don't have to reconstruct the context.
         assert!(e.message.contains("posts"), "message: {}", e.message);
         assert!(e.message.contains("post_x"), "message: {}", e.message);
+        assert!(e.message.contains("revision"), "message: {}", e.message);
         assert!(e.message.contains("5"), "message: {}", e.message);
     }
 
-    /// `DbError::version_mismatch` without a row id omits the id
-    /// segment from the message (used for multi-row UPDATEs whose
-    /// filter doesn't carry id).
     #[test]
-    fn version_mismatch_message_handles_missing_id() {
-        let e = DbError::version_mismatch("posts", None, "version", 5).to_op_error();
+    fn concurrency_mismatch_message_handles_missing_id() {
+        let e = DbError::concurrency_mismatch("posts", None, "revision", 5).to_op_error();
         assert!(e.message.contains("posts"));
+        assert!(e.message.contains("revision"));
         assert!(e.message.contains("5"));
     }
 
-    /// `DbError::multi_row_version_filter_unsupported` stamps the
-    /// canonical code; carries a remediation hint pointing at the
-    /// per-id loop.
     #[test]
-    fn multi_row_version_filter_unsupported_stamps_canonical_code() {
-        let e = DbError::multi_row_version_filter_unsupported("posts", "version").to_op_error();
+    fn multi_row_concurrency_filter_unsupported_stamps_canonical_code() {
+        let e =
+            DbError::multi_row_concurrency_filter_unsupported("posts", "revision").to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, "multi_row_version_filter_unsupported");
+                assert_eq!(code, "multi_row_concurrency_filter_unsupported");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }
             other => panic!("expected CodedError, got {other:?}"),
@@ -633,11 +625,11 @@ mod tests {
     }
 
     #[test]
-    fn version_filter_must_be_top_level_stamps_canonical_code() {
-        let e = DbError::version_filter_must_be_top_level("posts", "version").to_op_error();
+    fn concurrency_filter_must_be_top_level_stamps_canonical_code() {
+        let e = DbError::concurrency_filter_must_be_top_level("posts", "revision").to_op_error();
         match &e.kind {
             zeroship_runtime::state::OpErrorKind::CodedError { code, hint, .. } => {
-                assert_eq!(code, "version_filter_must_be_top_level");
+                assert_eq!(code, "concurrency_filter_must_be_top_level");
                 assert!(hint.is_some(), "must carry a remediation hint");
             }
             other => panic!("expected CodedError, got {other:?}"),

@@ -148,8 +148,6 @@ export class Collection<
   private _knownFields: Set<string>;
   private _toColumn: (field: string) => string;
   private _toField: (column: string) => string;
-  private _softDelete: boolean;
-  private _versioning: boolean;
   /**
    * Named multi-column indexes declared via `schema(...).index(name, fields)`.
    * Field names are already mapped to column names so the runtime warning
@@ -190,8 +188,6 @@ export class Collection<
     native: NativeDb,
     options?: {
       naming?: NamingStrategy;
-      softDelete?: boolean;
-      versioning?: boolean;
       indexes?: readonly NamedIndexSpec[];
     },
   ) {
@@ -200,8 +196,6 @@ export class Collection<
     this._schema = schema;
     this._native = native;
     this._nativeCol = null;
-    this._softDelete = options?.softDelete ?? false;
-    this._versioning = options?.versioning ?? false;
     this._idLoader = null;
     this._txDepth = 0;
     this._resolveCollection = null;
