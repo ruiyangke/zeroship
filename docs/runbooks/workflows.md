@@ -65,11 +65,12 @@ code verifies their presence rather than creating them. Workers commit journal
 progress separately from Control's timer acknowledgements; recovery repairs
 that gap.
 
-The finalized [workflow server design](../proposals/2026-09-11-workflow-server.md)
-replaces this arrangement with a dedicated workflow server, polling workers and
-atomic journal/frontier updates. It also specifies shared local execution. The
-replacement is not implemented yet; these operational instructions describe the
-current Control-hosted implementation.
+The revised [workflow coordination design](../proposals/2026-09-11-workflow-worker.md)
+places journal/frontier transactions and payload access in the customer's worker
+and stores. The server handles registry, placement, wake-up hints and high-level
+management without a customer journal connection. Local development embeds the
+same worker engine. That cutover is in progress; these operational instructions
+describe the current Control-hosted implementation.
 
 ## Dispatch Pause
 

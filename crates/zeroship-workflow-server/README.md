@@ -1,5 +1,12 @@
 # zeroship-workflow-server
 
+The [revised target](../../docs/proposals/2026-09-11-workflow-worker.md) is a
+lightweight registry, placement and management coordinator. Customer workers
+own workflow history, task claims and payload storage. The data-owning HTTP
+host described below is the current refactor prototype; it has not replaced the
+deployed worker path and must be reshaped before cutover. Its customer-data
+routes and platform journal are not part of the target coordinator contract.
+
 The V8-free HTTP host for `zeroship-workflow::service`. App routes require a
 Control-issued capability. Task routes verify an active enrolled worker's
 signature and bind the service's task token to that instance. Operator deploy

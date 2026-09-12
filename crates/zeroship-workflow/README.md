@@ -32,8 +32,12 @@ Local and deployed hosts share journal types and outcome decoding. The host
 keeps lease credentials outside the invocation and binds returned outcomes to
 its claim before applying them.
 
-The replacement service is under construction and is not yet composed into the
-worker, Control or CLI. Its native contracts exercise app isolation, retry
+The replacement engine is under construction and is not yet composed into the
+worker, Control or CLI. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
+embeds it in the customer's worker with customer-bound persistence; a lightweight
+server coordinates metadata and does not own the journal or payloads. The
+central persistence and remote task adapters below are refactor code awaiting
+that correction. The engine's native contracts exercise app isolation, retry
 receipts, expired leases, lifecycle changes, child execution, retained restart
 history and scheduled occurrences against both database adapters. PostgreSQL
 fixtures use Testcontainers.

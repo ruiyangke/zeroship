@@ -1,6 +1,6 @@
 # Durable workflows — scheduler + fungible workers (register model)
 
-- **Status:** Superseded by the [workflow server design](2026-09-11-workflow-server.md). The register model below is historical context, not the implementation target.
+- **Status:** Superseded by the [workflow coordination design](2026-09-11-workflow-worker.md). The register model below is historical context, not the implementation target.
 - **Date:** 2026-07-09
 - **Branch:** `design/durable-workflows`
 - **Historical scope:** Consolidated the earlier scheduler and worker proposals and replaced the control-plane architecture described in `2026-07-05-durable-workflows-design.md`. This document's target has now also been superseded.
