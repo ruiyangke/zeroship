@@ -115,7 +115,8 @@ pub fn base62_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
         if digit == 255 {
             return Err(format!("invalid base62 character: {}", b as char));
         }
-        n = n.checked_mul(62)
+        n = n
+            .checked_mul(62)
             .and_then(|n| n.checked_add(digit as u128))
             .ok_or_else(|| "base62 overflow".to_string())?;
     }
@@ -185,10 +186,7 @@ impl std::error::Error for ParseError {}
 /// smuggle `..` — or another entity type's id — through it.
 ///
 /// Returns the embedded UUID on success.
-pub fn parse_with_prefix(
-    typed_id: &str,
-    expected_prefix: &str,
-) -> Result<uuid::Uuid, ParseError> {
+pub fn parse_with_prefix(typed_id: &str, expected_prefix: &str) -> Result<uuid::Uuid, ParseError> {
     let (got, uuid) = parse(typed_id).map_err(ParseError::Malformed)?;
     if got != expected_prefix {
         return Err(ParseError::WrongPrefix {
@@ -207,8 +205,7 @@ pub fn to_uuid_string(typed_id: &str) -> Result<String, String> {
 
 /// Encode a UUID string (hyphenated) to typed ID with the given prefix.
 pub fn from_uuid_string(prefix: &str, uuid_str: &str) -> Result<String, String> {
-    let uuid = uuid::Uuid::parse_str(uuid_str)
-        .map_err(|e| format!("invalid UUID: {e}"))?;
+    let uuid = uuid::Uuid::parse_str(uuid_str).map_err(|e| format!("invalid UUID: {e}"))?;
     Ok(format!("{}_{}", prefix, uuid_to_base62(&uuid)))
 }
 
@@ -388,13 +385,10 @@ pub fn app_oauth_client_id(app_id: &uuid::Uuid) -> String {
 /// clients. The exact inverse of [`app_oauth_client_id`].
 #[must_use]
 pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<uuid::Uuid> {
-    let encoded = client_id.strip_prefix(APP_OAUTH_CLIENT_PREFIX)?.strip_prefix('_')?;
+    let encoded = client_id
+        .strip_prefix(APP_OAUTH_CLIENT_PREFIX)?
+        .strip_prefix('_')?;
     base62_to_uuid(encoded).ok()
-}
-
-/// Generate a new user ID: `usr_{base62(uuidv7)}`
-pub fn new_user_id() -> String {
-    generate(USER_PREFIX)
 }
 
 /// Generate a new session ID: `ses_{base62(uuidv7)}`
@@ -630,7 +624,9 @@ pub fn sign_workflow_signal_token(
         .map_err(|e| format!("workflow signal token hmac key: {e}"))?;
     mac.update(payload_b64.as_bytes());
     let sig_b64 = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-    Ok(format!("{WORKFLOW_SIGNAL_TOKEN_PREFIX}_{payload_b64}.{sig_b64}"))
+    Ok(format!(
+        "{WORKFLOW_SIGNAL_TOKEN_PREFIX}_{payload_b64}.{sig_b64}"
+    ))
 }
 
 /// Verify and decode a `wst_…` workflow signal token.
@@ -644,7 +640,9 @@ pub fn verify_workflow_signal_token(
     let body = token
         .strip_prefix(WORKFLOW_SIGNAL_TOKEN_PREFIX)
         .and_then(|s| s.strip_prefix('_'))
-        .ok_or_else(|| format!("workflow signal token must start with {WORKFLOW_SIGNAL_TOKEN_PREFIX}_"))?;
+        .ok_or_else(|| {
+            format!("workflow signal token must start with {WORKFLOW_SIGNAL_TOKEN_PREFIX}_")
+        })?;
     let (payload_b64, sig_b64) = body
         .split_once('.')
         .ok_or_else(|| "workflow signal token missing signature separator".to_string())?;
@@ -763,7 +761,10 @@ mod tests {
         let a = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]);
         let b = base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x03]);
         assert_ne!(a, b);
-        assert_eq!(a, base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02]));
+        assert_eq!(
+            a,
+            base62_encode_bytes(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02])
+        );
         assert!(a.bytes().all(|c| BASE62.contains(&c)), "{a}");
         assert!(base62_encode_bytes(&[]).is_empty());
         // A full 32-byte HMAC tag yields >= 20 chars (enough to truncate to
@@ -774,13 +775,13 @@ mod tests {
 
     #[test]
     fn roundtrip_typed_id() {
-        let id = new_user_id();
-        assert!(id.starts_with("usr_"));
-        assert_eq!(id.len(), 26); // "usr_" + 22
-        let (prefix, uuid) = parse(&id).unwrap();
+        let id = crate::UserId::mint();
+        assert!(id.as_str().starts_with("usr_"));
+        assert_eq!(id.as_str().len(), 26); // "usr_" + 22
+        let (prefix, uuid) = parse(id.as_str()).unwrap();
         assert_eq!(prefix, "usr");
         let back = from_uuid_string("usr", &uuid.to_string()).unwrap();
-        assert_eq!(id, back);
+        assert_eq!(id.as_str(), back);
     }
 
     #[test]
@@ -865,7 +866,7 @@ mod tests {
 
     #[test]
     fn all_prefixes() {
-        let u = new_user_id();
+        let u = crate::UserId::mint();
         // The app id has no `new_app_id` free function; its one minter is the
         // typed `AppId`. Swept here anyway so the registry arm stays complete
         // and so APP_PREFIX keeps a caller that proves what it spells.
@@ -873,14 +874,18 @@ mod tests {
         let s = new_session_id();
         let w = new_wake_id();
         let p = new_plan_id();
-        assert!(u.starts_with("usr_"));
+        assert!(u.as_str().starts_with("usr_"));
         assert!(a.as_str().starts_with("app_"));
         assert!(s.starts_with("ses_"));
         assert!(w.starts_with("wak_"));
         assert!(p.starts_with("pln_"));
         // pln_ + 22 base62 chars = 26, and it round-trips through parse().
         assert_eq!(p.len(), 26);
-        assert_eq!(PLAN_PREFIX.len(), 3, "plan prefix must be 3 chars (R16-API2)");
+        assert_eq!(
+            PLAN_PREFIX.len(),
+            3,
+            "plan prefix must be 3 chars (R16-API2)"
+        );
         let (prefix, _) = parse(&p).expect("new_plan_id must roundtrip");
         assert_eq!(prefix, "pln");
     }
@@ -891,7 +896,11 @@ mod tests {
     /// 4 chars would be clearer" suggestion fails CI.
     #[test]
     fn wake_prefix_is_three_chars() {
-        assert_eq!(WAKE_PREFIX.len(), 3, "wake prefix must be 3 chars (R16-API2)");
+        assert_eq!(
+            WAKE_PREFIX.len(),
+            3,
+            "wake prefix must be 3 chars (R16-API2)"
+        );
         let w = new_wake_id();
         assert_eq!(w.len(), 26, "wak_ + 22 base62 = 26 chars");
         let (prefix, _) = parse(&w).expect("new_wake_id must roundtrip");
@@ -900,7 +909,11 @@ mod tests {
 
     #[test]
     fn invoice_prefix_is_three_chars_and_roundtrips() {
-        assert_eq!(INVOICE_PREFIX.len(), 3, "invoice prefix must be 3 chars (R16-API2)");
+        assert_eq!(
+            INVOICE_PREFIX.len(),
+            3,
+            "invoice prefix must be 3 chars (R16-API2)"
+        );
         let i = new_invoice_id();
         assert!(i.starts_with("inv_"));
         assert_eq!(i.len(), 26, "inv_ + 22 base62 = 26 chars");
@@ -920,12 +933,19 @@ mod tests {
         assert_eq!(p.len(), 26, "ipy_ + 22 base62 = 26 chars");
         let (prefix, _) = parse(&p).expect("new_invoice_payment_id must roundtrip");
         assert_eq!(prefix, "ipy");
-        assert_ne!(prefix, INVOICE_PREFIX, "payment id must be disjoint from invoice id");
+        assert_ne!(
+            prefix, INVOICE_PREFIX,
+            "payment id must be disjoint from invoice id"
+        );
     }
 
     #[test]
     fn refund_prefix_is_three_chars_and_disjoint() {
-        assert_eq!(REFUND_PREFIX.len(), 3, "refund prefix must be 3 chars (R16-API2)");
+        assert_eq!(
+            REFUND_PREFIX.len(),
+            3,
+            "refund prefix must be 3 chars (R16-API2)"
+        );
         let r = new_refund_id();
         assert!(r.starts_with("ref_"));
         assert_eq!(r.len(), 26, "ref_ + 22 base62 = 26 chars");
@@ -969,7 +989,8 @@ mod tests {
             let id = mk();
             assert!(id.starts_with(&format!("{want}_")), "got {id}");
             assert_eq!(id.len(), 26, "{want}_ + 22 base62 = 26 chars: {id}");
-            let (prefix, _) = parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
+            let (prefix, _) =
+                parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
             assert_eq!(prefix, want);
             assert_eq!(want.len(), 3, "{want} prefix must be 3 chars (R16-API2)");
         }
@@ -987,10 +1008,16 @@ mod tests {
     fn notification_source_prefixes_are_pairwise_disjoint() {
         // `DISPUTE_PREFIX` MUST still equal the `"dsp"` literal this test reserved
         // before the const existed, so the dedup key stays disjoint and stable.
-        assert_eq!(DISPUTE_PREFIX, "dsp", "DISPUTE_PREFIX must remain 'dsp' (notify dedup key)");
+        assert_eq!(
+            DISPUTE_PREFIX, "dsp",
+            "DISPUTE_PREFIX must remain 'dsp' (notify dedup key)"
+        );
         let sources = [
             ("spend_state_history", SPEND_HISTORY_PREFIX),
-            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
+            (
+                "organization_billing_status_history",
+                ORGANIZATION_BILLING_HISTORY_PREFIX,
+            ),
             ("invoices", INVOICE_PREFIX),
             ("refunds", REFUND_PREFIX),
             ("disputes", DISPUTE_PREFIX),
@@ -1013,20 +1040,53 @@ mod tests {
     #[test]
     fn workflow_prefixes_roundtrip() {
         let cases = [
-            (new_workflow_run_id as fn() -> String, WORKFLOW_RUN_PREFIX, 26usize),
-            (new_workflow_signal_id as fn() -> String, WORKFLOW_SIGNAL_PREFIX, 26),
-            (new_workflow_cron_id as fn() -> String, WORKFLOW_CRON_PREFIX, 27),
-            (new_workflow_schedule_id as fn() -> String, WORKFLOW_SCHEDULE_PREFIX, 26),
-            (new_workflow_dispatch_id as fn() -> String, WORKFLOW_DISPATCH_PREFIX, 26),
-            (new_workflow_signal_key_id as fn() -> String, WORKFLOW_SIGNAL_KEY_PREFIX, 26),
-            (new_workflow_subscription_id as fn() -> String, WORKFLOW_SUBSCRIPTION_PREFIX, 26),
-            (new_workflow_broadcast_id as fn() -> String, WORKFLOW_BROADCAST_PREFIX, 26),
+            (
+                new_workflow_run_id as fn() -> String,
+                WORKFLOW_RUN_PREFIX,
+                26usize,
+            ),
+            (
+                new_workflow_signal_id as fn() -> String,
+                WORKFLOW_SIGNAL_PREFIX,
+                26,
+            ),
+            (
+                new_workflow_cron_id as fn() -> String,
+                WORKFLOW_CRON_PREFIX,
+                27,
+            ),
+            (
+                new_workflow_schedule_id as fn() -> String,
+                WORKFLOW_SCHEDULE_PREFIX,
+                26,
+            ),
+            (
+                new_workflow_dispatch_id as fn() -> String,
+                WORKFLOW_DISPATCH_PREFIX,
+                26,
+            ),
+            (
+                new_workflow_signal_key_id as fn() -> String,
+                WORKFLOW_SIGNAL_KEY_PREFIX,
+                26,
+            ),
+            (
+                new_workflow_subscription_id as fn() -> String,
+                WORKFLOW_SUBSCRIPTION_PREFIX,
+                26,
+            ),
+            (
+                new_workflow_broadcast_id as fn() -> String,
+                WORKFLOW_BROADCAST_PREFIX,
+                26,
+            ),
         ];
         for (mk, want, len) in cases {
             let id = mk();
             assert!(id.starts_with(&format!("{want}_")), "got {id}");
             assert_eq!(id.len(), len, "{want}_ + base62 length mismatch: {id}");
-            let (prefix, _) = parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
+            let (prefix, _) =
+                parse(&id).unwrap_or_else(|e| panic!("{want} id must roundtrip: {e}"));
             assert_eq!(prefix, want);
         }
     }
@@ -1087,7 +1147,11 @@ mod tests {
 
     #[test]
     fn dispute_prefix_is_three_chars_and_disjoint() {
-        assert_eq!(DISPUTE_PREFIX.len(), 3, "dispute prefix must be 3 chars (R16-API2)");
+        assert_eq!(
+            DISPUTE_PREFIX.len(),
+            3,
+            "dispute prefix must be 3 chars (R16-API2)"
+        );
         let d = new_dispute_id();
         assert!(d.starts_with("dsp_"), "got {d}");
         assert_eq!(d.len(), 26, "dsp_ + 22 base62 = 26 chars");
@@ -1139,7 +1203,10 @@ mod tests {
             ("refunds", REFUND_PREFIX),
             ("plan_change_events", PLAN_CHANGE_EVENT_PREFIX),
             ("spend_state_history", SPEND_HISTORY_PREFIX),
-            ("organization_billing_status_history", ORGANIZATION_BILLING_HISTORY_PREFIX),
+            (
+                "organization_billing_status_history",
+                ORGANIZATION_BILLING_HISTORY_PREFIX,
+            ),
             ("billing_disputes", DISPUTE_PREFIX),
             ("payout_failures", PAYOUT_FAILURE_PREFIX),
             ("connect_checkout_failures", CHECKOUT_FAILURE_PREFIX),
@@ -1173,9 +1240,8 @@ mod tests {
 
     #[test]
     fn parse_with_prefix_rejects_wrong_prefix() {
-        let id = new_user_id(); // prefix = "usr"
-        let err =
-            parse_with_prefix(&id, "sbx").expect_err("wrong prefix must error");
+        let id = crate::UserId::mint();
+        let err = parse_with_prefix(id.as_str(), "sbx").expect_err("wrong prefix must error");
         match err {
             ParseError::WrongPrefix { expected, got } => {
                 assert_eq!(expected, "sbx");
@@ -1192,15 +1258,14 @@ mod tests {
         assert!(matches!(err, ParseError::Malformed(_)));
 
         // Invalid base62 after a real prefix.
-        let err = parse_with_prefix("sbx_!!!notbase62!!!", "sbx")
-            .expect_err("invalid base62 must error");
+        let err =
+            parse_with_prefix("sbx_!!!notbase62!!!", "sbx").expect_err("invalid base62 must error");
         assert!(matches!(err, ParseError::Malformed(_)));
     }
 
     #[test]
     fn parse_with_prefix_rejects_empty() {
-        let err =
-            parse_with_prefix("", "sbx").expect_err("empty input must error");
+        let err = parse_with_prefix("", "sbx").expect_err("empty input must error");
         assert!(matches!(err, ParseError::Malformed(_)));
     }
 }
