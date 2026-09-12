@@ -55,6 +55,7 @@ pub mod stripe_client;
 pub mod stripe_handlers;
 pub mod stripe_store;
 pub mod tax;
+mod user_id;
 pub mod void_reissue;
 pub mod worker_enrolment;
 pub mod worker_health;

@@ -57,6 +57,7 @@ use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
 use zeroship_core::net_policy::{normalize_name, Destination, EgressRule, Verdict};
 use zeroship_core::types::{AppNetPolicyLimits, FREE_TIER_NET_POLICY_LIMITS};
+use zeroship_core::UserId;
 
 use crate::audit::{self, Action as AuditAction, AuditEntry};
 use crate::authz_guard::AuthzGuard;
@@ -127,7 +128,7 @@ pub struct EgressRuleRecord {
     pub kind: &'static str,
     pub destination: String,
     pub port: u16,
-    pub created_by: String,
+    pub created_by: UserId,
     pub created_at: DateTime<Utc>,
     pub note: Option<String>,
     /// The verdict that applies once the whole SET is read, which is not always
@@ -300,11 +301,7 @@ async fn plan_net_limits(pg: &Client, app_id: Uuid) -> Result<AppNetPolicyLimits
 }
 
 /// How many rules of one verdict the app currently holds.
-async fn count_rules(
-    pg: &Client,
-    app_id: Uuid,
-    verdict: Verdict,
-) -> Result<u32, EgressRuleError> {
+async fn count_rules(pg: &Client, app_id: Uuid, verdict: Verdict) -> Result<u32, EgressRuleError> {
     let verdict_text = verdict.as_str();
     let rows = pg
         .query(
@@ -353,7 +350,7 @@ pub async fn list_rules(pg: &Client, app_id: Uuid) -> Result<EgressRuleList, Egr
             tracing::error!(error = %err, app_id = %app_id, "control: app egress rule list failed");
             EgressRuleError::Db
         })?;
-    let rules = rows_to_records(&rows);
+    let rules = rows_to_records(&rows)?;
 
     let requests = manifest_net_requests(manifest_json.as_deref(), app_id);
     let accepted_keys = rules
@@ -397,7 +394,7 @@ pub async fn upsert_rule(
     pg: &Client,
     app_id: Uuid,
     body: &EgressRuleBody,
-    created_by: &str,
+    created_by: &UserId,
 ) -> Result<SetEgressRuleResult, EgressRuleError> {
     let caps = plan_net_limits(pg, app_id).await?;
 
@@ -411,7 +408,12 @@ pub async fn upsert_rule(
     let port = i32::from(rule.port());
     let verdict_text = rule.verdict().as_str();
 
-    let note = match body.note.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    let note = match body
+        .note
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         Some(note) if note.chars().count() > MAX_NOTE_CHARS => {
             return Err(EgressRuleError::Invalid(format!(
                 "note must be at most {MAX_NOTE_CHARS} characters"
@@ -462,7 +464,7 @@ pub async fn upsert_rule(
                 &kind,
                 &destination,
                 &port,
-                &created_by,
+                &created_by.as_str(),
                 &note,
                 &cap,
             ],
@@ -499,11 +501,17 @@ pub async fn upsert_rule(
             EgressRuleError::Db
         })?;
     let written_key = (kind, destination.clone(), rule.port());
-    let record = rows_to_records(&all)
+    let record = rows_to_records(&all)?
         .into_iter()
         .find(|r| (r.kind, r.destination.clone(), r.port) == written_key)
         .unwrap_or_else(|| {
-            written_record(&rule, app_id, row.get("created_by"), row.get("created_at"), note.clone())
+            written_record(
+                &rule,
+                app_id,
+                created_by.clone(),
+                row.get("created_at"),
+                note.clone(),
+            )
         });
 
     Ok(SetEgressRuleResult {
@@ -608,17 +616,19 @@ fn count_of(rules: &[EgressRuleRecord], verdict: Verdict) -> u32 {
 /// name-versus-range overlaps are settled at connect time against a resolved
 /// address, so reporting a guess for them here would be reporting a lookup this
 /// endpoint did not do.
-fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
+fn rows_to_records(
+    rows: &[compio_postgres::Row],
+) -> Result<Vec<EgressRuleRecord>, EgressRuleError> {
     let parsed: Vec<(EgressRuleRecord, Option<Destination>)> = rows
         .iter()
         .map(|row| {
             let raw: String = row.get("verdict");
             let verdict = parse_verdict(&raw);
-            let record = row_to_record(row, verdict);
+            let record = row_to_record(row, verdict)?;
             let destination = Destination::parse(&record.destination).ok();
-            (record, destination)
+            Ok((record, destination))
         })
-        .collect();
+        .collect::<Result<_, EgressRuleError>>()?;
 
     let reject_ranges: Vec<(&Destination, u16)> = parsed
         .iter()
@@ -627,7 +637,7 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
         .filter(|(d, _)| matches!(d, Destination::Range(_)))
         .collect();
 
-    parsed
+    Ok(parsed
         .iter()
         .map(|(record, destination)| {
             let mut record = record.clone();
@@ -647,7 +657,7 @@ fn rows_to_records(rows: &[compio_postgres::Row]) -> Vec<EgressRuleRecord> {
             }
             record
         })
-        .collect()
+        .collect())
 }
 
 /// A verdict read back from the database, for EVERY reader of the table.
@@ -688,7 +698,7 @@ pub(crate) fn parse_verdict(raw: &str) -> Verdict {
 fn written_record(
     rule: &EgressRule,
     app_id: Uuid,
-    created_by: String,
+    created_by: UserId,
     created_at: DateTime<Utc>,
     note: Option<String>,
 ) -> EgressRuleRecord {
@@ -707,20 +717,31 @@ fn written_record(
     }
 }
 
-fn row_to_record(row: &compio_postgres::Row, verdict: Verdict) -> EgressRuleRecord {
+fn row_to_record(
+    row: &compio_postgres::Row,
+    verdict: Verdict,
+) -> Result<EgressRuleRecord, EgressRuleError> {
     let port_i32: i32 = row.get("port");
     let kind: String = row.get("kind");
-    EgressRuleRecord {
+    let raw_created_by = row.try_get::<_, String>("created_by").map_err(|err| {
+        tracing::error!(error = %err, "control: egress rule creator read failed");
+        EgressRuleError::Db
+    })?;
+    let created_by = UserId::parse(&raw_created_by).map_err(|err| {
+        tracing::error!(error = %err, "control: egress rule carries invalid creator id");
+        EgressRuleError::Db
+    })?;
+    Ok(EgressRuleRecord {
         app_id: row.get("app_id"),
         verdict,
         kind: if kind == "cidr" { "cidr" } else { "name" },
         destination: row.get("destination"),
         port: u16::try_from(port_i32).unwrap_or(0),
-        created_by: row.get("created_by"),
+        created_by,
         created_at: row.get("created_at"),
         note: row.get("note"),
         effective_verdict: verdict,
-    }
+    })
 }
 
 fn manifest_net_requests(manifest_json: Option<&str>, app_id: Uuid) -> Vec<EgressRequest> {
@@ -826,7 +847,7 @@ pub async fn create(
         state.control_pg.as_ref(),
         app_id,
         &body,
-        &authz.principal_id.to_string(),
+        &authz.principal_id,
     )
     .await
     {
@@ -916,7 +937,7 @@ async fn log_rule_audit(
         AuditEntry {
             app_id: Some(app_id),
             organization_id: None,
-            actor_user_id: Some(authz.principal_id),
+            actor_user_id: Some(&authz.principal_id),
             action,
             resource: Some(resource),
             source_ip: ip.as_deref(),
@@ -1008,8 +1029,7 @@ mod tests {
         assert_eq!(destination_kind(accepted.destination()), "cidr");
         // And the same range as a REJECT has no floor at all, which is the
         // asymmetry the floor is only meaningful because of.
-        EgressRule::parse(Verdict::Reject, "0.0.0.0/0", 443)
-            .expect("a reject range has no floor");
+        EgressRule::parse(Verdict::Reject, "0.0.0.0/0", 443).expect("a reject range has no floor");
     }
 
     /// A row whose verdict is not one the CHECK constraint admits is a
@@ -1039,7 +1059,7 @@ mod tests {
         let app_id = Uuid::new_v4();
         let now = Utc::now();
         let reject = EgressRule::parse(Verdict::Reject, "93.184.216.7/32", 443).unwrap();
-        let record = written_record(&reject, app_id, "usr_x".to_string(), now, None);
+        let record = written_record(&reject, app_id, UserId::mint(), now, None);
         assert_eq!(record.verdict, Verdict::Reject);
         assert_eq!(record.effective_verdict, Verdict::Reject);
         assert_eq!(record.kind, "cidr");
@@ -1047,7 +1067,7 @@ mod tests {
 
         // The control, differing in ONE thing - the verdict written.
         let accept = EgressRule::parse(Verdict::Accept, "93.184.216.7/32", 443).unwrap();
-        let record = written_record(&accept, app_id, "usr_x".to_string(), now, None);
+        let record = written_record(&accept, app_id, UserId::mint(), now, None);
         assert_eq!(record.verdict, Verdict::Accept);
         assert_eq!(record.effective_verdict, Verdict::Accept);
     }
