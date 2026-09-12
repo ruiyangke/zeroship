@@ -9,7 +9,7 @@
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::transaction::scope::TransactionScope;
 
-const SCOPE_SYMBOL_KEY: &str = "zeroship.plugin-db.txScope";
+const SCOPE_SYMBOL_KEY: &str = "zeroship.data-v8.txScope";
 
 fn scope_symbol<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Symbol>> {
     let key = v8::String::new(scope, SCOPE_SYMBOL_KEY)?;
@@ -95,9 +95,7 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
     scope.set_continuation_preserved_embedder_data(local);
 }
 
-/// Which SQL dialect this thread's statements must be written in.
-///
-/// Capture compiler, codecs, and effective support without opening a backend.
+/// Capture this thread's compiler, codecs, and support without opening a backend.
 pub(crate) fn configured_sql_registration() -> zeroship_data_orm::sql::registration::SqlRegistration
 {
     crate::context::with(|c| c.sql_registration())
@@ -165,31 +163,8 @@ pub(crate) async fn bind_route(
 
 #[cfg(test)]
 mod tests {
-    //! ## The capture arms
-    //!
-    //! ESTABLISHED: `capture_route`'s answer tracks the async-scope marker, and
-    //! it is NOT the ambient `has_tx_for` answer - `capture` says "in the
-    //! transaction" at a moment when `has_tx_for` says "no transaction parked",
-    //! so the two discriminators are provably different functions. Reverting
-    //! `CapturedRoute::capture` to the pre-fix
-    //! `tx_lanes::with(|l| l.has_tx_for(app_id))` fails three of the four.
-    //!
-    //! NOT ESTABLISHED, stated rather than implied:
-    //!   - that every `dispatch_*` actually calls `capture`. Nothing at runtime
-    //!     can check that; it is enforced by the TYPE (the exec entry points
-    //!     take `&TxRoute`, and `TxRoute` has no other production constructor)
-    //!     and end to end by `examples/db-todos/tests/database.test.ts` (`cxPlain`).
-    //!   - the OTHER direction of the #254 defect - an app with a transaction
-    //!     genuinely PARKED in the per-isolate slot while an unrelated dispatch
-    //!     runs. Reaching that state needs a real `Session` (a live
-    //!     Postgres `Client` or SQLite session handle), which these tests
-    //!     deliberately do not open. It is covered by `cxPlain` on both tiers.
-    //!   - anything about which CONNECTION the exec path then picks.
-    //!
-    //! **These five arms lived in the engine's `tx_route.rs`** and moved here
-    //! with the data-engine cut: every name they drive except `tx_lanes` is this
-    //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
-    //! per-isolate context at all.
+    //! Route capture follows the continuation scope. Database-backed tests cover
+    //! the connection selected after that captured route is bound.
 
     use zeroship_runtime::init_v8;
 

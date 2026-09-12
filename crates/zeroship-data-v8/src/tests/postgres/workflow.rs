@@ -75,7 +75,7 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
         .expect("provision app-local workflow journal");
     crate::tests::fixtures::roles::ensure_per_app_role(&pool, &app_schema)
         .await
-        .expect("redeploy plugin-db per-app role grants");
+        .expect("redeploy data ORM per-app role grants");
 
     for table in tables.all() {
         let rows = pool

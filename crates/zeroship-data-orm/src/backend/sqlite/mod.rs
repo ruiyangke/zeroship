@@ -324,12 +324,7 @@ struct OpenedBackend {
     packet_rx: flume::Receiver<CommitPacket>,
 }
 
-// ---------------------------------------------------------------------------
-// Capability impls - five carved capability blocks, per
-// `p1-sqlite-implementation-plan.md` §9. The order below mirrors
-// `backend/postgres.rs` so a reviewer can diff the two files
-// side-by-side as the SQLite side grows.
-// ---------------------------------------------------------------------------
+// Backend capabilities are grouped in the same order across implementations.
 
 impl SqliteBackend {
     /// Return an unreserved session handle for autocommit commands.

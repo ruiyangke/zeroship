@@ -128,7 +128,7 @@ mod live_reserved_sweep_tests {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
         let (client, conn) = compio_postgres::connect(&postgres.url(), NoTls)
             .await
-            .expect("connect to the plugin-db test database");
+            .expect("connect to the data ORM test database");
         compio::runtime::spawn(async move {
             let _ = conn.run().await;
         })

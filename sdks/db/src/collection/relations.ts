@@ -88,16 +88,8 @@ export async function loadRelations(
       for (const r of rows) r[field] = null;
       return;
     }
-    // Chunked, because the native builder REJECTS a membership list longer
-    // than MAX_MEMBERSHIP_LIST_LEN (`zeroship-data-orm::sql/src/compile.rs`). Sending
-    // the whole deduplicated set failed outright for any page carrying more
-    // than that many DISTINCT foreign keys - which an unpaginated find()
-    // reaches easily, so a documented feature broke on ordinary data.
-    //
-    // Deliberately sequential rather than Promise.all: the relations
-    // can run concurrently outside a transaction, and fanning out here
-    // too would multiply in-flight queries by the chunk count for a single
-    // creator call.
+    // Stay within the ORM membership budget. Run chunks sequentially so one
+    // relation load cannot multiply its own in-flight native queries.
     const targetKey = fieldDef.refColumn ?? "id";
     const byId = new Map<string, PlainObject>();
     for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {

@@ -1387,18 +1387,7 @@ mod tests {
         });
     }
 
-    /// **The protection floor holds on SQLite too, and this is not implied by
-    /// the PostgreSQL gate.**
-    ///
-    /// The two backends recover the mask sentinel by different code: PostgreSQL
-    /// reads `pg_description` in `pg_introspect`, SQLite regexes
-    /// `sqlite_master.sql` in `parse_mask_sentinels`. Either could stop
-    /// populating `ColumnInfo::mask` on its own, and the fence would then wave
-    /// the downgrade through on that backend while `plugin-db/tests/mask_flip.rs`
-    /// stayed green on the other. This is the SQLite half.
-    ///
-    /// It also binds the DEV TIER specifically: `pnpm dev` runs SQLite, so a
-    /// creator's first encounter with a dropped `mask` key happens here.
+    /// SQLite introspection must retain the protection floor recorded in the file.
     #[test]
     fn a_sqlite_write_is_refused_when_the_descriptor_drops_a_mask_the_file_still_records() {
         run(async {
