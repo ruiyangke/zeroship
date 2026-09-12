@@ -2,35 +2,9 @@ use crate::{operations::RunState, WorkflowInvocation, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_core::app_id::AppId;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "String", into = "String")]
-pub struct RequestId(String);
-impl RequestId {
-    #[must_use]
-    pub fn mint() -> Self {
-        Self(typed_id::generate(typed_id::WORKFLOW_REQUEST_PREFIX))
-    }
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-impl TryFrom<String> for RequestId {
-    type Error = WorkflowServiceError;
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        typed_id::parse_with_prefix(&value, typed_id::WORKFLOW_REQUEST_PREFIX).map_err(|_| {
-            WorkflowServiceError::InvalidRequest("invalid workflow request identity".into())
-        })?;
-        Ok(Self(value))
-    }
-}
-impl From<RequestId> for String {
-    fn from(value: RequestId) -> Self {
-        value.0
-    }
-}
+pub use zeroship_core::workflow_coordination::RequestId;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]

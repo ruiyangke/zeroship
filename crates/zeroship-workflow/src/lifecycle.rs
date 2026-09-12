@@ -36,34 +36,34 @@ impl RestartSafety {
     }
 }
 
-impl RestartOptions {
-    /// Resolve the deploy policy without changing the immutable retained prefix.
-    ///
-    /// # Errors
-    /// Rejects an invalid target or a partial restart onto another deploy.
-    pub fn deploy_policy(&self) -> Result<RestartDeploy, WorkflowServiceError> {
-        if let Some(target) = &self.from {
-            if target.name.is_empty() {
-                return Err(WorkflowServiceError::InvalidRequest(
-                    "restart target name must not be empty".into(),
-                ));
-            }
-            if target
-                .occurrence
-                .is_some_and(|value| value > i32::MAX as u32)
-            {
-                return Err(WorkflowServiceError::InvalidRequest(
-                    "restart target occurrence exceeds the journal ordinal range".into(),
-                ));
-            }
-            if self.deploy == Some(RestartDeploy::Latest) {
-                return Err(WorkflowServiceError::Conflict(
-                    "partial restart cannot change deploy pin".into(),
-                ));
-            }
-            Ok(RestartDeploy::Started)
-        } else {
-            Ok(self.deploy.unwrap_or(RestartDeploy::Latest))
+/// Resolve the deploy policy without changing the immutable retained prefix.
+///
+/// # Errors
+/// Rejects an invalid target or a partial restart onto another deploy.
+pub fn restart_deploy_policy(
+    options: &RestartOptions,
+) -> Result<RestartDeploy, WorkflowServiceError> {
+    if let Some(target) = &options.from {
+        if target.name.is_empty() {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "restart target name must not be empty".into(),
+            ));
         }
+        if target
+            .occurrence
+            .is_some_and(|value| value > i32::MAX as u32)
+        {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "restart target occurrence exceeds the journal ordinal range".into(),
+            ));
+        }
+        if options.deploy == Some(RestartDeploy::Latest) {
+            return Err(WorkflowServiceError::Conflict(
+                "partial restart cannot change deploy pin".into(),
+            ));
+        }
+        Ok(RestartDeploy::Started)
+    } else {
+        Ok(options.deploy.unwrap_or(RestartDeploy::Latest))
     }
 }
