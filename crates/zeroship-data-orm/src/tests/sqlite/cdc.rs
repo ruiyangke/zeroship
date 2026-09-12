@@ -15,7 +15,7 @@ use zeroship_data_orm::cdc::ChangeOp;
 
 use zeroship_data_orm::error::DbError;
 
-use zeroship_data_orm::cdc::broker::{Subscription, SubscriptionMessage, subscribe};
+use zeroship_data_orm::cdc::broker::{subscribe, Subscription, SubscriptionMessage};
 
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
@@ -119,6 +119,67 @@ fn insert_publishes_via_preupdate_hook() {
                 }
                 other => panic!("expected Change event, got {other:?}"),
             }
+        });
+    })
+}
+
+#[test]
+fn publisher_observes_columns_added_after_first_event() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            backend
+                .attach_app_file("cdc_schema_refresh")
+                .await
+                .expect("attach app file");
+            backend
+                .execute_fixture(
+                    "CREATE TABLE \"cdc_schema_refresh\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            let sub = subscribe_local("cdc_schema_refresh", "items");
+            backend
+                .execute_fixture(
+                    "INSERT INTO \"cdc_schema_refresh\".\"items\" (id, name) VALUES (1, 'before')",
+                    &[],
+                )
+                .await
+                .expect("insert before schema change");
+            drain_publisher().await;
+            assert_eq!(drain(&sub).len(), 1);
+
+            backend
+                .execute_fixture(
+                    "ALTER TABLE \"cdc_schema_refresh\".\"items\" ADD COLUMN note TEXT",
+                    &[],
+                )
+                .await
+                .expect("add column");
+            backend
+                .execute_fixture(
+                    "INSERT INTO \"cdc_schema_refresh\".\"items\" (id, name, note) \
+                     VALUES (2, 'after', 'visible')",
+                    &[],
+                )
+                .await
+                .expect("insert after schema change");
+            drain_publisher().await;
+
+            let messages = drain(&sub);
+            assert_eq!(messages.len(), 1);
+            let SubscriptionMessage::Change(event) = &messages[0] else {
+                panic!("expected change event");
+            };
+            assert_eq!(
+                event.new_tuple.get("note").map(String::as_str),
+                Some("visible")
+            );
         });
     })
 }
