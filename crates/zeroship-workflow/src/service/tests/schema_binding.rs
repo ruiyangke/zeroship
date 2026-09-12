@@ -1,5 +1,79 @@
 use super::*;
 
+#[compio::test]
+async fn workflow_tables_share_the_app_database_without_changing_business_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("app.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE orders (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO orders VALUES ('order', 'customer data'); CREATE VIEW visible_orders AS SELECT * FROM orders;").unwrap();
+    schema::initialize_sqlite(&path).unwrap();
+    let (service, app, _) = registered_service(Arc::new(SqliteStore::new(&path))).await;
+    let started = service
+        .for_app(app.clone())
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let before = service
+        .for_app(app.clone())
+        .status(&started.id)
+        .await
+        .unwrap()
+        .state;
+    schema::initialize_sqlite(&path).unwrap();
+    assert_eq!(
+        service
+            .for_app(app)
+            .status(&started.id)
+            .await
+            .unwrap()
+            .state,
+        before
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT body FROM visible_orders WHERE id='order'",
+                [],
+                |row| row.get::<_, String>(0)
+            )
+            .unwrap(),
+        "customer data"
+    );
+    connection
+        .execute(
+            "UPDATE __zeroship_workflow_schema_version SET fingerprint='incompatible'",
+            [],
+        )
+        .unwrap();
+    assert!(schema::initialize_sqlite(&path).is_err());
+    assert_eq!(
+        connection
+            .query_row("SELECT body FROM orders WHERE id='order'", [], |row| row
+                .get::<_, String>(
+                0
+            ))
+            .unwrap(),
+        "customer data"
+    );
+}
+
+#[test]
+fn partial_workflow_schema_is_refused_in_a_shared_database() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("app.sqlite");
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute_batch("CREATE TABLE orders (id TEXT); CREATE TABLE __zeroship_workflow_partial (value TEXT); INSERT INTO __zeroship_workflow_partial VALUES ('preserve');").unwrap();
+    assert!(schema::initialize_sqlite(&path).is_err());
+    assert_eq!(
+        connection
+            .query_row("SELECT value FROM __zeroship_workflow_partial", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+        "preserve"
+    );
+}
+
 #[test]
 fn schema_binding_preserves_literals_and_includes_compiler_generated_names() {
     let output = Command::new("node")
