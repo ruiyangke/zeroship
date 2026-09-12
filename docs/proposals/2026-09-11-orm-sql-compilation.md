@@ -388,8 +388,13 @@ statement distinguishes SQL null, database default, incoming values, current
 values, and native binds. Compilation enforces effective capabilities and a
 statement-wide bind budget. It consumes the native document and transfers byte,
 text, and encoded JSON buffers into bindings. Only the guarded strategy retains
-input for its retry. Backend registration and early strategy preflight remain
-part of the in-progress cutover.
+input for its retry. PostgreSQL and SQLite now register their compiler, storage
+codecs, effective support, and immutable identity as one bundle. Captured routes
+retain that identity and the connection identity, and refuse a replacement
+registration or connection. Production upsert checks its required features
+before opening its atomic write frame. The dialect files are backend-wide
+compiler homes; upsert is the first statement family routed through them while
+the other families remain in the cutover below.
 
 ## Implementation checklist
 
@@ -397,9 +402,9 @@ part of the in-progress cutover.
 - [x] Close incomplete runtime dialect admission; retain migration dialect support.
 - [x] Consolidate compiler output with native bindings and redacted inspection.
 - [ ] Move remaining collection binding through the shared writer.
-- [ ] Register compiler, storage codecs, effective support, and immutable identity together.
-- [ ] Capture registration and verify it against bound backends and scoped sessions.
-- [ ] Replace production upsert construction with a resolved statement and capability preflight.
+- [x] Register compiler, storage codecs, effective support, and immutable identity together.
+- [x] Capture registration and verify it against bound backends and scoped sessions.
+- [x] Replace production upsert construction with a resolved statement and capability preflight.
 - [ ] Move generated-identity allocation behind the scoped ORM backend service.
 - [ ] Verify protected upsert concurrency, nullable targets, no-change updates, and effects.
 - [ ] Cut over other writes and remove their replaced renderers.

@@ -57,6 +57,7 @@ pub mod catalog;
 pub mod compile;
 pub mod compiler;
 pub mod statement;
+pub mod registration;
 pub mod descriptors;
 pub mod lifecycle;
 pub mod mask_codec;
