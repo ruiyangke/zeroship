@@ -74,7 +74,8 @@ HTTP and workflow execution. Vite builds and publishes the local app artifact
 automatically while serving client assets and live modules through its dev
 bridge. There is no workflow-only archive argument or TOML bundle setting.
 Workflow execution reads from the retained app bundle store without making
-separate executable copies.
+separate executable copies. Background maintenance retries interrupted deployment
+hold operations after restart without requiring an HTTP request.
 
 The CLI persists its trusted workflow app identity in `.zeroship/app-id`. The
 journal uses the app database selected by `DATABASE_URL`, and payloads use the

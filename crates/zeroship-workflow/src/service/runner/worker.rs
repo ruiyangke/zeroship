@@ -5,11 +5,12 @@
     reason = "workflow slots and storage run on their owning compio thread"
 )]
 
-use super::{RunnerOutcome, RunnerSlot, TaskExecutor, WorkerTasks};
+use super::{retention::HoldRecovery, RunnerOutcome, RunnerSlot, TaskExecutor, WorkerTasks};
 use crate::{service::WorkflowService, WorkflowServiceError};
 use futures::{
     future::{Either, LocalBoxFuture, Shared},
-    Future, FutureExt,
+    stream::FuturesUnordered,
+    Future, FutureExt, StreamExt,
 };
 use serde::{Deserialize, Serialize};
 use std::{rc::Rc, task::Poll, time::Duration};
@@ -71,6 +72,7 @@ pub struct WorkflowWorker {
     service: WorkflowService,
     slots: Vec<RunnerSlot>,
     options: WorkerOptions,
+    hold_recovery: HoldRecovery,
 }
 impl std::fmt::Debug for WorkflowWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -83,20 +85,28 @@ impl WorkflowWorker {
     /// Construct the customer's worker from its bound task authority and executor.
     ///
     /// # Errors
-    /// Rejects invalid limits and missing customer payload or executable storage.
+    /// Rejects invalid limits, missing storage and missing app-scoped hold clients.
     pub fn new(
         tasks: Rc<WorkerTasks>,
         executor: Rc<dyn TaskExecutor>,
         options: WorkerOptions,
     ) -> Result<Self, WorkflowServiceError> {
         options.validate()?;
-        if tasks.service.deployments.is_none() || tasks.service.payload_storage.is_none() {
+        let Some(deployments) = tasks
+            .service
+            .deployments
+            .as_ref()
+            .filter(|_| tasks.service.payload_storage.is_some())
+        else {
             return Err(WorkflowServiceError::InvalidRequest(
                 "workflow worker requires customer payload storage and normal app deployments"
                     .into(),
             ));
-        }
+        };
         let service = tasks.service.clone();
+        for app in service.policies.app_ids()? {
+            deployments.client(&app)?;
+        }
         let timeout = Duration::from_millis(options.execution_timeout_ms);
         let mut slots = Vec::with_capacity(options.task_slots);
         for _ in 1..options.task_slots {
@@ -107,10 +117,11 @@ impl WorkflowWorker {
             service,
             slots,
             options,
+            hold_recovery: HoldRecovery::default(),
         })
     }
 
-    /// Drive scheduling, payload maintenance and bounded execution until shutdown.
+    /// Drive scheduling, payload and hold maintenance, and execution until shutdown.
     /// Returns only after active executions have stopped and their claims have
     /// been released or left to expire. An unresponsive executor keeps its slot.
     ///
@@ -118,13 +129,24 @@ impl WorkflowWorker {
     /// the host, or call `run_until` again to drain before reusing the slots.
     pub async fn run_until(&mut self, shutdown: impl Future<Output = ()>) {
         let shutdown = shutdown.boxed_local().shared();
-        let executions = futures::future::join_all(
-            self.slots
-                .iter_mut()
-                .map(|slot| run_slot(slot, self.options, shutdown.clone())),
+        // Give each loop its own wake queue entry. Polling every loop in a fixed
+        // order lets ready execution slots repeatedly win shared ORM admission
+        // while maintenance waits, especially when database polls are slow.
+        let mut loops = FuturesUnordered::new();
+        for slot in &mut self.slots {
+            loops.push(run_slot(slot, self.options, shutdown.clone()).boxed_local());
+        }
+        loops.push(maintain(&self.service, self.options, shutdown.clone()).boxed_local());
+        loops.push(
+            maintain_holds(
+                &mut self.hold_recovery,
+                &self.service,
+                self.options,
+                shutdown,
+            )
+            .boxed_local(),
         );
-        let maintenance = maintain(&self.service, self.options, shutdown);
-        futures::join!(executions, maintenance);
+        while loops.next().await.is_some() {}
     }
 
     /// Stop and join executions retained after an interrupted host future.
@@ -221,4 +243,37 @@ async fn stopped_after(shutdown: Shutdown<'_>, delay_ms: u64) -> bool {
         .await,
         Either::Left(_)
     )
+}
+
+async fn maintain_holds(
+    recovery: &mut HoldRecovery,
+    service: &WorkflowService,
+    options: WorkerOptions,
+    shutdown: Shutdown<'_>,
+) {
+    loop {
+        let tick = recovery
+            .sweep(
+                service,
+                Duration::from_millis(options.maintenance_timeout_ms),
+            )
+            .boxed_local();
+        match futures::future::select(shutdown.clone(), tick).await {
+            Either::Left(((), tick)) => {
+                drop(tick);
+                break;
+            }
+            Either::Right((result, _)) => {
+                if let Err(error) = result {
+                    tracing::warn!(
+                        code = error.code(),
+                        "workflow deployment hold discovery failed"
+                    );
+                }
+            }
+        }
+        if stopped_after(shutdown.clone(), options.maintenance_interval_ms).await {
+            break;
+        }
+    }
 }

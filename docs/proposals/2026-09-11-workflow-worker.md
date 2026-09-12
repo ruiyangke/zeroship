@@ -52,8 +52,15 @@ Engine activation now acquires or reconciles a hold through a host-bound client
 before verifying the normal app artifact. Both activation and task reads check
 the held generation across artifact I/O. Missing or corrupt artifacts park
 their deployment, and an availability epoch protects concurrent repairs.
-Background hold reconciliation and the production retention cutover remain
-pending.
+The shared worker now reconciles pending holds in background maintenance through
+host-bound clients. Recovery rotates between assigned apps, advances past failed
+or malformed intents and bounds each attempt with the existing maintenance
+timeout. Expired policy leases do not discard retention intent; recovery does
+not activate deployments or admit execution. Each worker loop has its own wake
+queue entry so continuous task polling cannot starve journal maintenance.
+Native PostgreSQL and SQLite contracts exercise restart, lost replies, corrupt
+records, foreign assignments, timeout and shutdown. The production retention
+cutover remains pending.
 
 Active, reloaded and pinned production worker isolates now load the complete
 module graph through the shared bundle loader. Pinned manifest reads verify

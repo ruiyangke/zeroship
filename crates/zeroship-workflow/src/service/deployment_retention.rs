@@ -30,6 +30,12 @@ struct Intent {
     generation: i64,
     state: String,
 }
+
+#[derive(FromRow)]
+#[orm(entity = holds)]
+struct PendingHold {
+    deploy_id: String,
+}
 impl Intent {
     fn validate(&self, scope: &HoldScope) -> Result<HoldGeneration, WorkflowServiceError> {
         if self.holder_id != scope.holder() {
@@ -228,6 +234,8 @@ impl WorkflowService {
     }
 
     /// Page pending intents for a host-authorized app before contacting its client.
+    /// The cursor is an opaque stored key, so discovery can pass a malformed
+    /// intent whose identity will be refused during reconciliation.
     pub async fn pending_deployment_holds(
         &self,
         app: &AppId,
@@ -239,8 +247,10 @@ impl WorkflowService {
                 "invalid deployment hold page size".into(),
             ));
         }
-        let mut tx = self.begin().await?;
-        lock_app(&mut tx, app).await?;
+        // Discovery is only a hint. Reconciliation locks and revalidates the
+        // selected intent, so scanning need not lock execution's app row.
+        self.policies.resolve(app)?;
+        let tx = self.begin().await?;
         let db = tx.database();
         let source = db.entity::<holds::Entity>()?.alias("h")?;
         let mut predicates = vec![
@@ -251,14 +261,13 @@ impl WorkflowService {
             ]),
         ];
         if let Some(after) = after {
-            typed_id::parse_with_prefix(after, "dep").map_err(|_| invalid_request())?;
             predicates.push(source.column(holds::deploy_id).gt(after)?);
         }
         let rows = db
             .from(&source)
             .filter(Predicate::And(predicates))
             .order_by(source.column(holds::deploy_id).asc())
-            .select(source.row::<Intent>())?
+            .select(source.row::<PendingHold>())?
             .limit(i64::from(limit))?
             .all()
             .await?;

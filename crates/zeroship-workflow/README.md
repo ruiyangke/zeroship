@@ -45,8 +45,12 @@ consumers. `service::WorkflowService` records customer-side acquisition and rele
 intents and reconciles them through `DeploymentHoldClient`. A release closes
 deployment admission under the app lock and checks retained journal dependencies
 before contacting the platform. Lost responses and host cancellation leave
-durable work to retry. Production host composition and automatic reconciliation
-remain unfinished; the existing journal-reading collector has not yet been replaced.
+durable work to retry. The worker automatically reconciles pending holds through
+its host-bound clients, including after restart or policy-lease expiry. Recovery
+rotates between assigned apps and advances past failed intents; individual calls
+are bounded by the maintenance timeout. Execution and maintenance use independent
+wake queue entries so busy polling cannot starve recovery. Production host
+composition remains unfinished; the journal-reading collector has not yet been replaced.
 `OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.
@@ -114,8 +118,8 @@ the deployment compiler and `.zship` packer, retaining static and dynamic module
 dependencies and the captured runtime descriptor. Each build discovers fresh
 declarations. The dev server publishes complete archives atomically; the CLI
 ingests them into its app bundle store. HTTP and workflow execution load that
-same deployment. Production worker composition, background hold reconciliation
-and the platform retention cutover remain unfinished.
+same deployment. Production worker composition and the platform retention
+cutover remain unfinished.
 
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,
