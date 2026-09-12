@@ -20,9 +20,7 @@ use zeroship_data_orm::search::Search;
 
 /// Encode a `Vec<f32>` as a SQLite `x'<hex>'` blob literal.
 ///
-/// The bytes are native-endian f32 (4 bytes per dim); all platforms
-/// we target are little-endian, so this matches what `vec_to_le_bytes`
-/// in `backend/sqlite/vector.rs` produces.
+/// Uses the same little-endian representation as the SQLite search backend.
 fn vec_to_hex_lit(v: &[f32]) -> String {
     let mut hex = String::with_capacity(v.len() * 8 + 4);
     hex.push_str("x'");

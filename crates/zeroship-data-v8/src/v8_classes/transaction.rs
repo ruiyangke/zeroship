@@ -687,16 +687,7 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------
-    // The settle-lowering arms, MOVED here from the engine's
-    // `transaction/mod.rs` with the data-engine cut on 2026-09-03.
-    //
-    // They rule on `build_settle_resolve_value`, which is defined in THIS file
-    // and lowers an engine `SettleOutcome` into a runtime `ResolveValue`. They
-    // could not travel with the module whose outcomes they check:
-    // `zeroship-data-orm` declares neither `v8` nor `zeroship-runtime`, by
-    // design, so `ResolveValue` is not nameable there.
-    // ---------------------------------------------------------------------
+    // Adapter tests for lowering ORM settlement into V8 results.
 
     /// The settle's own code reaches the creator, UNWRAPPED.
     ///

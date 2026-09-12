@@ -23,7 +23,7 @@ import { generatedSchema } from "./_install-helper.js";
  * `toString` / `toJSON` → masked string, `unmask` success / failure,
  * multi-column unmask, `canUnmask` probe) is exercised by the Rust
  * unit tests in `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and
- * the SQLite integration target — they require the V8 + plugin-db
+ * the SQLite integration target — they require the V8 data adapter
  * runtime, which this Node test harness does not host. The type-level
  * checks below pin the SDK's ambient `declare class MaskedValue` shape.
  */

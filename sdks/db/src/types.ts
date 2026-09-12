@@ -191,7 +191,7 @@ type StringOps = {
  * Filter value for an ordinary field — either a direct value, null, or
  * operator object.
  *
- * `$like` / `$ilike` are real backend operators: plugin-db's query builder
+ * `$like` / `$ilike` are real backend operators: the ORM query builder
  * validates them and lowers them to SQL predicates.
  */
 type PlainFilterValue<T> =
@@ -459,11 +459,10 @@ export type MaskKind =
  *                "sensitive PI").
  * - `phi`      — health records, medical IDs, diagnosis (HIPAA scope).
  * - `pci`      — card numbers, CVV, magnetic stripe (PCI-DSS scope).
- * - `internal` — platform-internal metadata, system-field overrides.
+ * - `internal` — application-internal metadata.
  *
- * The six names are also reserved as column names by
- * `crates/zeroship-data-orm/src/sql/compile.rs::validate_field_name` so creator
- * schemas cannot accidentally collide with the taxonomy.
+ * These names are reserved as columns by the ORM identifier policy so creator
+ * schemas cannot collide with the taxonomy.
  */
 export type Classification =
   | "public"

@@ -244,20 +244,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   });
 
   test("more than 100 distinct FKs → the IN list is chunked, never over the cap", async () => {
-    // The native builder REJECTS a membership list longer than
-    // MAX_MEMBERSHIP_LIST_LEN = 100 (`zeroship-data-orm::sql/src/compile.rs:604`),
-    // and the loader issues `{ id: { $in: ids } }` with the whole
-    // deduplicated set (`src/collection/relations.ts:125`) - no chunking,
-    // no length guard. So a page carrying >100 DISTINCT foreign keys is
-    // rejected outright: a documented feature failing on ordinary data.
-    //
-    // Ids are deduplicated first, so this needs >100 distinct targets, which
-    // an unpaginated find() over a modest table reaches easily.
-    //
-    // The assertion is on the CALL SHAPE rather than on an error, because
-    // the cap lives in the Rust builder that this mock does not model.
-    // Asserting "no batch exceeds the cap" tests the property the loader
-    // must hold regardless of who enforces it.
+    // The SDK must split relation lookups before they reach the ORM budget.
     const N = 150;
     const users: Record<string, AnyRec> = {};
     const todos: Record<string, AnyRec> = {};

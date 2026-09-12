@@ -259,7 +259,7 @@ pub(super) async fn require_postgis(pool: &Pool) {
 
 /// The seven platform system columns, PostgreSQL spelling.
 ///
-/// Hand-written, not rendered. plugin-db does not own DDL, so a test that needs
+/// Hand-written, not rendered. The ORM does not own DDL, so a test that needs
 /// a table spells it; a fixture rendered by the layer under test cannot detect
 /// that layer being wrong. Same argument as `tests/fixtures/data/sqlite.rs` on the
 /// SQLite side.

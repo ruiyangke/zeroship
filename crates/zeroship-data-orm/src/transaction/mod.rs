@@ -560,13 +560,7 @@ fn test_backend() -> crate::backend::BackendHandle {
 mod tests {
     use super::*;
 
-    // THE LAST V8-SHAPED NAME IN THIS FILE IS GONE. Two arms here drove the
-    // ADAPTER's `build_settle_resolve_value` through
-    // `zeroship_runtime::state::ResolveValue`, to prove the engine's outcome
-    // mapping survives lowering. They moved to `zeroship-data-v8`'s
-    // `v8_classes/transaction.rs` with the data-engine cut - the lowering is
-    // that function's, and the engine crate declares neither `v8` nor
-    // `zeroship-runtime`, so the arms could not follow the module they tested.
+    // V8 settlement lowering is tested in the adapter crate.
     use std::path::PathBuf;
     use std::rc::Rc;
 
