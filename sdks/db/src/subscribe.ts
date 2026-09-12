@@ -42,7 +42,7 @@ export type SubscriptionEvent =
       collection: string;
       /** Surrogate primary key of the affected row, or null. */
       pk: string | null;
-      /** Columns touched by the mutation (post-image, minus system fields). */
+      /** Columns touched by the mutation, excluding hidden storage fields. */
       columns: string[];
     }
   | {

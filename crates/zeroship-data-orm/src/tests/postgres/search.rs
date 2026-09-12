@@ -45,9 +45,7 @@ fn vector_search_returns_k_nearest() {
             crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
-            // The six non-`id` platform system columns are part of every real creator
-            // table and are named unconditionally by the implicit read projection the
-            // vector search builds, so the fixture carries them too.
+            // The fixture carries every field in its read descriptor.
             pool.execute(
                 &format!(
                     "CREATE TABLE \"{app}\".\"{coll}\" (\

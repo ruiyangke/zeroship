@@ -131,11 +131,7 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
                 .unwrap();
             pool.execute(
                 &format!(
-                    // The seven platform system columns are here because a write's
-                    // RETURNING is now an explicit list of them plus the declared
-                    // fields. A fixture table missing them fails with `42703 column
-                    // does not exist` - loudly, which is the point of naming columns
-                    // rather than starring them.
+                    // Match the descriptor because writes use an explicit returning list.
                     r#"CREATE TABLE "{app}"."users" (
                 id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 name TEXT NOT NULL,

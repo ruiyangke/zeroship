@@ -257,13 +257,13 @@ pub(super) async fn require_postgis(pool: &Pool) {
     );
 }
 
-/// The seven platform system columns, PostgreSQL spelling.
+/// Common schema-declared columns used by PostgreSQL fixtures.
 ///
 /// Hand-written, not rendered. The ORM does not own DDL, so a test that needs
 /// a table spells it; a fixture rendered by the layer under test cannot detect
 /// that layer being wrong. Same argument as `tests/fixtures/data/sqlite.rs` on the
 /// SQLite side.
-pub(super) const PG_SYSTEM_COLUMNS: &str = r#"
+pub(super) const PG_COMMON_FIXTURE_COLUMNS: &str = r#"
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),

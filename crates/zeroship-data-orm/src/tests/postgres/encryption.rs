@@ -292,7 +292,7 @@ fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
             pool.batch_execute(&format!(
                 r#"CREATE SCHEMA IF NOT EXISTS "{app}";
 CREATE EXTENSION IF NOT EXISTS vector;
-CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
+CREATE TABLE "{app}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
   "name" TEXT NOT NULL,
   "ssn" BYTEA,
   "phone" TEXT,

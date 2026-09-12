@@ -231,10 +231,8 @@ impl Collection {
         dispatch_delete_many(scope, self.binding.clone(), &self.name, filter_v).into()
     }
 
-    /// `collection.purge(filter)` — explicit hard-delete
-    /// of a single matching row. Always emits `DELETE FROM ...`
-    /// regardless of the system-fields marker. For compliance /
-    /// right-to-be-forgotten flows.
+    /// `collection.purge(filter)` — hard-delete one matching row regardless of
+    /// the descriptor's soft-delete role.
     #[v8_method]
     fn purge<'s>(
         &self,

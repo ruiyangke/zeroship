@@ -36,7 +36,6 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     insensitive_like_suffix: "",
     average_suffix: "::double precision",
     vector_distance: write_vector_distance,
-    spatial_near: compile_spatial_near,
     array_mutation: write_array_mutation,
 };
 
@@ -176,7 +175,28 @@ impl SqlCompiler for PostgresCompiler {
         statement: Statement,
         effective: &SqlSupport,
     ) -> Result<CompiledQuery, CompileError> {
-        super::shared::compile(SYNTAX, SUPPORT, statement, effective)
+        self.check(&Requirements::for_statement(&statement), effective)?;
+        match statement {
+            Statement::Select(statement) => {
+                super::shared::compile_select(SYNTAX, effective, statement)
+            }
+            Statement::VectorSearch(statement) => {
+                super::shared::compile_vector_search(SYNTAX, effective, statement)
+            }
+            Statement::SpatialNear(statement) => compile_spatial_near(statement, effective),
+            Statement::Insert(statement) => {
+                super::shared::compile_insert(SYNTAX, effective, statement)
+            }
+            Statement::Upsert(statement) => {
+                super::shared::compile_upsert(SYNTAX, effective, statement)
+            }
+            Statement::Update(statement) => {
+                super::shared::compile_update(SYNTAX, effective, statement)
+            }
+            Statement::Delete(statement) => {
+                super::shared::compile_delete(SYNTAX, effective, statement)
+            }
+        }
     }
 
     fn compile_identity_allocation(
