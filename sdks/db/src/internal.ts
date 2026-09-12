@@ -24,6 +24,8 @@ export type {
   NativeTransactionFn,
 } from "./native";
 export { Query } from "./query";
+export type { PaginationResult } from "./query";
+export type { TxCollection, TxQuery, TransactionOptions } from "./db-types";
 export { createLive } from "./live";
 export type { LiveOptions, LiveQuery } from "./live";
 export { subscribe } from "./subscribe";
@@ -45,6 +47,7 @@ export type {
   PlainObject,
   Result,
   Row,
+  RowId,
   RowInput,
   UpsertOptions,
   UpdateExpression,

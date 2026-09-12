@@ -42,16 +42,20 @@ import {
   type NamedIndexSpec,
   type Result,
   type Row,
+  type RowId,
+  type TxCollection,
+  type TxQuery,
+  type TransactionOptions,
+  type PaginationResult,
   type RowInput,
   type UpsertOptions,
   type UpdateExpression,
   type Filter,
-  type IsolationLevel,
   type WithSpec,
-  type WithRelations,
   type PlainObject,
   type FieldDef,
 } from "@zeroship/db/internal";
+export type { TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
 
 // ---------------------------------------------------------------------------
 // normalizeSchema + expandUnionToFlatColumns (moved from @zeroship/db/schema)
@@ -547,109 +551,6 @@ export type ValidateSchemaShape<T> = {
           : `Schema "${K & string}" must be a field map of t.* builders, a schema(...) builder, or a top-level t.union(...).`;
 };
 
-type TxPaginationResult<P> = {
-  page: P[];
-  continueCursor: string;
-  isDone: boolean;
-};
-
-/**
- * A typed collection inside a transaction — same API as Collection but
- * throws on error instead of returning Result. Generic over schema
- * shape S.
- */
-export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
-  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A>;
-  insert(row: RowInput<S>): Promise<Row<S>>;
-  insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
-  get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
-  ): Promise<Pick<Row<S>, K> | null>;
-  get<W extends WithSpec>(
-    idOrFilter: string | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> },
-  ): Promise<(Row<S> & WithRelations<S, W, AllSchemas>) | null>;
-  get(
-    idOrFilter: string | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> },
-  ): Promise<Row<S> | null>;
-  exists(filter: Filter<S>): Promise<boolean>;
-  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
-  upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
-  update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
-  updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
-  deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  purge(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
-  purgeMany(filter?: Filter<S>): Promise<{ purgedCount: number }>;
-  restore(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
-  restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
-  count(filter?: Filter<S>): Promise<number>;
-  distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
-  aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
-  bulkUnmask(
-    items: ReadonlyArray<{
-      id: string;
-      columns: readonly (string & keyof Row<S>)[];
-    }>,
-    opts: { actor: Record<string, unknown>; reason?: string },
-  ): Promise<Map<string, Record<string, unknown>>>;
-  search(
-    args: {
-      vector: number[];
-      k?: number;
-      metric?: "cosine" | "l2" | "innerProduct";
-      column?: string;
-      filter?: Filter<S>;
-    },
-  ): Promise<(Row<S> & { _distance?: number })[]>;
-  near(args: {
-    field: keyof S & string;
-    point: { lat: number; lng: number };
-    radius: number;
-    filter?: Filter<S>;
-    limit?: number;
-  }): Promise<(Row<S> & { _distance_m: number })[]>;
-};
-
-/** Query inside a transaction — same chainable API but resolves to data directly */
-export type TxQuery<
-  S = PlainObject,
-  P = Row<S>,
-  AllSchemas extends Record<string, unknown> = Record<string, unknown>,
-> = {
-  sort(s: Record<string, number> | string): TxQuery<S, P, AllSchemas>;
-  limit(n: number): TxQuery<S, P, AllSchemas>;
-  skip(n: number): TxQuery<S, P, AllSchemas>;
-  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
-  after(id: string): TxQuery<S, P, AllSchemas>;
-  with<W extends WithSpec>(spec: W): TxQuery<S, P & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  paginate(opts: {
-    cursor?: string | null;
-    numItems: number;
-  }): Promise<TxPaginationResult<P>>;
-  /** **P9 PR 1** — first matching row or `null`; throws on native error. */
-  first(): Promise<P | null>;
-  /** **P9 PR 1** — strict exactly-one; throws `NotFoundError` on zero or
-   *  `NotUniqueError` on >1 matches. */
-  unique(): Promise<P>;
-  /** **P9 PR 1** — last matching row in the current sort, or `null`;
-   *  throws `InvalidOperationError` if no sort was set. */
-  last(): Promise<P | null>;
-  then<TResult1 = P[], TResult2 = never>(
-    resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
-    reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
-  ): Promise<TResult1 | TResult2>;
-};
-
-/** Options for the transaction method. */
-export interface TransactionOptions {
-  isolationLevel?: IsolationLevel;
-}
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type UnwrapSchema<T> =
   T extends SchemaBuilder<infer S> ? S :
@@ -679,12 +580,12 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
 
 function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
   async function getImpl(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
   ): Promise<unknown> {
     const colAny = collection as unknown as {
       get(
-        idOrFilter: string | Filter<S>,
+        idOrFilter: RowId<S> | Filter<S>,
         opts?: { select?: (string & keyof Row<S>)[]; orderBy?: Record<string, 1 | -1> },
       ): Promise<Result<Row<S> | null>>;
     };
@@ -714,25 +615,25 @@ function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
     async upsert(row: RowInput<S>, options: UpsertOptions<S>) {
       return unwrap(await collection.upsert(row, options));
     },
-    async update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>) {
+    async update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>) {
       return unwrap(await collection.update(idOrFilter, patch));
     },
     async updateMany(filter: Filter<S>, patch: UpdateExpression<S>) {
       return unwrap(await collection.updateMany(filter, patch));
     },
-    async delete(idOrFilter: string | Filter<S>) {
+    async delete(idOrFilter: RowId<S> | Filter<S>) {
       return unwrap(await collection.delete(idOrFilter));
     },
     async deleteMany(filter: Filter<S>) {
       return unwrap(await collection.deleteMany(filter));
     },
-    async purge(idOrFilter: string | Filter<S>) {
+    async purge(idOrFilter: RowId<S> | Filter<S>) {
       return unwrap(await collection.purge(idOrFilter));
     },
     async purgeMany(filter: Filter<S> = {} as Filter<S>) {
       return unwrap(await collection.purgeMany(filter));
     },
-    async restore(idOrFilter: string | Filter<S>) {
+    async restore(idOrFilter: RowId<S> | Filter<S>) {
       return unwrap(await collection.restore(idOrFilter));
     },
     async restoreMany(filter: Filter<S> = {} as Filter<S>) {
@@ -778,14 +679,14 @@ function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
     limit(n: number) { query.limit(n); return wrapped; },
     skip(n: number) { query.skip(n); return wrapped; },
     select: selectImpl as TxQuery<S, Row<S>>["select"],
-    after(id: string) { query.after(id); return wrapped; },
+    after(id: RowId<S>) { query.after(id); return wrapped; },
     with: ((spec: WithSpec) => {
       (query as unknown as { with(s: WithSpec): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
     async paginate(
       opts: Parameters<Query<S, Row<S>>["paginate"]>[0],
-    ): Promise<TxPaginationResult<Row<S>>> {
+    ): Promise<PaginationResult<Row<S>>> {
       return unwrap(await query.paginate(opts));
     },
     // **P9 PR 1** — Result→throw shims for the new terminals so the
@@ -1003,7 +904,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
   const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
   for (const [name, col] of Object.entries(collections)) {
-    (txCollections as Record<string, TxCollection<unknown>>)[name] =
+    (txCollections as Record<string, unknown>)[name] =
       createTxCollection(col as Collection<unknown>);
   }
 

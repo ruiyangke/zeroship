@@ -51,6 +51,7 @@
 import type { Collection } from "./collection";
 import type { AliasedCollection, ReadFrom } from "./read";
 import type { LiveOptions, LiveQuery } from "./live";
+import type { PaginationResult } from "./query";
 import type {
   PlainObject,
   Result,
@@ -89,12 +90,6 @@ export type SchemaInput =
 // ---------------------------------------------------------------------------
 // Transaction surface — TxCollection / TxQuery / TransactionOptions
 // ---------------------------------------------------------------------------
-
-type TxPaginationResult<P> = {
-  page: P[];
-  continueCursor: string;
-  isDone: boolean;
-};
 
 /**
  * A typed collection inside a transaction — same API as Collection but
@@ -179,7 +174,7 @@ export type TxQuery<
   paginate(opts: {
     cursor?: string | null;
     numItems: number;
-  }): Promise<TxPaginationResult<P>>;
+  }): Promise<PaginationResult<P>>;
   /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
    *  the tx callback on a native error (tx unwraps Result). */
   first(): Promise<P | null>;
