@@ -35,7 +35,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         host.run(async {
             use std::collections::HashMap;
 
-            use crate::sql::compile::{build_insert_many_with_dialect, SqlDialect};
+            use crate::sql::compile::SqlDialect;
             use zeroship_data_orm::backend::sqlite::session::TypedCell;
             use zeroship_data_orm::encryption;
 
@@ -104,7 +104,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 })
                 .collect();
 
-            let built = build_insert_many_with_dialect(
+            let built = compile_insert_many(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
@@ -401,7 +401,7 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::{build_insert_with_dialect, SqlDialect};
+        use crate::sql::compile::SqlDialect;
         use crate::tests::fixtures::DatabaseFixture;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::protection::encryption_pass::{
@@ -457,7 +457,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             let ciphertext = doc["ssn"].as_bytes().expect("native ciphertext").to_vec();
 
             // Bind the ciphertext directly.
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &schema,

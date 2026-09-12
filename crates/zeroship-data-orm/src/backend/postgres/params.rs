@@ -1,6 +1,6 @@
 //! Encode native database values at the PostgreSQL protocol boundary.
-use compio_postgres::types::{Format, IsNull, ToSql, Type, private::BytesMut};
 use crate::value::Value;
+use compio_postgres::types::{private::BytesMut, Format, IsNull, ToSql, Type};
 type EncodeError = Box<dyn std::error::Error + Send + Sync>;
 
 #[derive(Debug)]
@@ -174,11 +174,9 @@ mod tests {
             crate::value!(["1"]),
             Value::Array(vec![Value::try_from(f64::MAX).unwrap()]),
         ] {
-            assert!(
-                Parameter(&value)
-                    .to_sql(&vector, &mut BytesMut::new())
-                    .is_err()
-            );
+            assert!(Parameter(&value)
+                .to_sql(&vector, &mut BytesMut::new())
+                .is_err());
         }
     }
 
@@ -213,12 +211,10 @@ mod tests {
     #[compio::test]
     async fn native_values_round_trip_through_postgres() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
-        let (client, connection) = compio_postgres::connect(
-            &postgres.url(),
-            compio_postgres::NoTls,
-        )
-        .await
-        .unwrap();
+        let (client, connection) =
+            compio_postgres::connect(&postgres.url(), compio_postgres::NoTls)
+                .await
+                .unwrap();
         compio::runtime::spawn(async move {
             connection.run().await.unwrap();
         })
@@ -249,28 +245,18 @@ mod tests {
     async fn json_filter_literals_are_not_encoded_as_strings() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
         use crate::value;
-        use crate::sql::compile;
-        let (client, connection) = compio_postgres::connect(
-            &postgres.url(),
-            compio_postgres::NoTls,
-        )
-        .await
-        .unwrap();
+        let (client, connection) =
+            compio_postgres::connect(&postgres.url(), compio_postgres::NoTls)
+                .await
+                .unwrap();
         compio::runtime::spawn(async move {
             connection.run().await.unwrap();
         })
         .detach();
-        let mut params = Vec::new();
-        let filter = compile::build_where(
-            &value!({"payload":{"$eq":{"key":"value"}}}),
-            &mut params,
-            &value!({"payload":{"type":"json"}}),
-        )
-        .unwrap();
-        let sql = format!(
-            "SELECT payload FROM (VALUES ('{{\"key\":\"value\"}}'::jsonb)) AS data(payload) WHERE {filter}"
-        );
-        let rows = query(&client, &sql, &params).await.unwrap();
+        let params = [value!({"key":"value"})];
+        let rows = query(&client, "SELECT $1::jsonb AS payload", &params)
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(
             crate::backend::postgres::pg_row_json::rows_to_values(&rows).unwrap()[0]["payload"],

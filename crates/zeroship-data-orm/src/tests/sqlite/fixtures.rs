@@ -26,6 +26,68 @@ pub(super) fn fresh_backend(host: &Host) -> (SqliteBackend, tempfile::TempDir) {
     (backend, dir)
 }
 
+pub(super) fn compile_insert(
+    namespace: &crate::sql::SchemaName,
+    collection: &str,
+    schema: &crate::value::Value,
+    document: &crate::value::Value,
+    dialect: crate::sql::compile::SqlDialect,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    assert_eq!(dialect, crate::sql::compile::SqlDialect::Sqlite);
+    crate::crud::insert::build_one(
+        namespace,
+        collection,
+        schema,
+        document.clone(),
+        &crate::sql::registration::SqlRegistration::builtin(dialect),
+    )
+}
+
+pub(super) fn compile_insert_many(
+    namespace: &crate::sql::SchemaName,
+    collection: &str,
+    schema: &crate::value::Value,
+    documents: &crate::value::Value,
+    dialect: crate::sql::compile::SqlDialect,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    assert_eq!(dialect, crate::sql::compile::SqlDialect::Sqlite);
+    crate::crud::insert::build_many(
+        namespace,
+        collection,
+        schema,
+        documents.clone(),
+        &crate::sql::registration::SqlRegistration::builtin(dialect),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compile_find(
+    namespace: &crate::sql::SchemaName,
+    collection: &str,
+    filter: &crate::value::Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&crate::value::Value>,
+    select: Option<&crate::value::Value>,
+    schema: &crate::value::Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    crate::crud::read::find(
+        namespace,
+        collection,
+        schema,
+        filter.clone(),
+        limit,
+        offset,
+        order_by,
+        select,
+        &[],
+        false,
+        &crate::sql::registration::SqlRegistration::builtin(
+            crate::sql::compile::SqlDialect::Sqlite,
+        ),
+    )
+}
+
 /// Helper — install backend + schema for an unmask test. Returns the
 /// backend (kept alive for the test duration via Rc) + the TempDir
 /// guard the caller binds to keep the on-disk directory alive.

@@ -12,15 +12,11 @@
 
 pub mod ident;
 pub mod joins;
-pub use joins::{Join, JoinKind, MAX_READ_SOURCES};
+pub use joins::{JoinKind, MAX_READ_SOURCES};
 pub mod literal;
 pub mod path;
-pub mod plan;
 pub mod predicate;
-pub mod projection;
-pub mod render;
-pub mod search;
-pub mod write;
+pub mod read;
 
 pub use compiler::BindBudget;
 pub use ident::{Ident, IdentError, IdentRole, MAX_IDENT_BYTES};
@@ -29,26 +25,12 @@ pub use literal::{
     MAX_VECTOR_DIMS,
 };
 pub use path::{FieldPath, JsonKey, PathError, MAX_JSON_KEY_BYTES, MAX_PATH_SEGMENTS};
-pub use plan::{
-    DbPlan, Direction, NullOrder, OrderKey, PlanError, RowLimit, RowOffset, Select, SelectBuilder,
-    MAX_ROW_LIMIT, MAX_ROW_OFFSET,
-};
 pub use predicate::{
     AggregateFunc, AggregateRef, CompareOp, EscapeChar, MembershipOp, Operand, PatternOp,
     Predicate, PredicateError, RangeBounds, TextPattern, MAX_PREDICATE_DEPTH,
 };
-pub use projection::{
-    Exposure, ProjectedField, Projection, ProjectionError, ProjectionKind, ProjectionSource,
-    SearchScalarKind,
-};
-pub use search::{
-    GeoPoint, RadiusMetres, Search, SearchBuilder, SearchCriterion, SearchError, VectorMetric,
-    MAX_RADIUS_METRES,
-};
-pub use write::{
-    Arithmetic, ArithmeticOp, Assignment, ColumnAssignment, ColumnValue, Delete, DeleteBuilder,
-    Insert, InsertBuilder, Returning, Update, UpdateBuilder, WriteError, WriteValue,
-    MAX_INSERT_ROWS,
+pub use read::{
+    Direction, NullOrder, OrderKey, ReadError, RowLimit, RowOffset, MAX_ROW_LIMIT, MAX_ROW_OFFSET,
 };
 
 /// Catalog facts used by runtime protection and decoding.
@@ -69,7 +51,6 @@ pub mod filter;
 
 pub mod sqlite_values;
 
-mod array_update;
 pub mod codecs;
 pub mod json;
 pub mod temporal;

@@ -68,7 +68,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 #[test]
 fn masked_insert_persists_visible_and_raw_columns_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::{build_insert_with_dialect, SqlDialect};
+        use crate::sql::compile::SqlDialect;
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -94,12 +94,13 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
             let mut doc = crate::value!({"ssn": "***-**-6789"});
             doc[raw.as_str()] = crate::value::Value::from("123-45-6789");
             let schema = crate::value!({
+                "id": { "type": "string" },
                 "ssn": {
                     "type": "string",
                     "mask": {"kind": "last4", "classification": "spi"}
                 }
             });
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &schema,
@@ -152,7 +153,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::{build_find_with_schema, build_insert_with_dialect, SqlDialect};
+        use crate::sql::compile::SqlDialect;
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -182,6 +183,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             // `apply_mask_on_write` design), the field's own column stores
             // the masked string.
             let schema = crate::value!({
+                "id": { "type": "string" },
                 "ssn": {
                     "type": "string",
                     "mask": { "kind": "last4", "classification": "spi" }
@@ -196,7 +198,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             doc.as_object_mut()
                 .expect("doc object")
                 .insert(raw_ssn.clone(), crate::value!("123-45-6789"));
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &schema,
@@ -218,7 +220,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             // name the field's own column directly AND must NOT reference the
             // raw column at all. Verify the SQL shape BEFORE running the
             // query - this is the load-bearing assertion this test pins.
-            let bq = build_find_with_schema(
+            let bq = compile_find(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
                 &crate::value!({ "id": "usr_01" }),
@@ -238,10 +240,6 @@ fn a_select_serves_the_masked_column_sqlite() {
             assert!(
                 select_clause.contains("\"ssn\""),
                 "SELECT must project the field's own column directly: {select_clause}"
-            );
-            assert!(
-                !select_clause.contains("AS \"ssn\""),
-                "there is no more AS-rewrite onto ssn - the aliasing scheme is gone: {select_clause}"
             );
             // The raw column (real value) must NEVER appear in a default
             // read's SELECT clause - it is unqueryable outside the audited
@@ -286,9 +284,8 @@ fn a_select_serves_the_masked_column_sqlite() {
 #[test]
 fn aliased_select_skips_kind_none_sqlite() {
     Host::test(|_| {
-        use crate::sql::compile::build_find_with_schema;
-
         let schema = crate::value!({
+            "id": { "type": "string" },
             "ssn": {
                 "type": "string",
                 "encrypted": true,
@@ -296,7 +293,7 @@ fn aliased_select_skips_kind_none_sqlite() {
             },
             "name": { "type": "string" }
         });
-        let bq = build_find_with_schema(
+        let bq = compile_find(
             &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
             "users",
             &crate::value!({}),
@@ -319,13 +316,8 @@ fn aliased_select_skips_kind_none_sqlite() {
             "schema-backed reads must avoid `*`: {}",
             bq.sql,
         );
-        assert!(
-            bq.sql.contains("SELECT \"ssn\", \"name\"")
-                && bq.sql.contains("\"ssn\"")
-                && bq.sql.contains("\"name\""),
-            "schema-backed reads must project the public column set: {}",
-            bq.sql,
-        );
+        assert!(bq.sql.contains("\"source\".\"ssn\" AS \"ssn\""));
+        assert!(bq.sql.contains("\"source\".\"name\" AS \"name\""));
     })
 }
 

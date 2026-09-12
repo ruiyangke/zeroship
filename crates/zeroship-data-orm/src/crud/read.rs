@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 const SOURCE_ALIAS: &str = "source";
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn find(
+pub(crate) fn find(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
@@ -66,7 +66,7 @@ pub(super) fn find(
     )
 }
 
-pub(super) fn count(
+pub(crate) fn count(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,
@@ -101,7 +101,7 @@ pub(super) fn count(
     )
 }
 
-pub(super) fn distinct(
+pub(crate) fn distinct(
     namespace: &SchemaName,
     collection: &str,
     schema: &Value,

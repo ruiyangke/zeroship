@@ -15,7 +15,7 @@ use zeroship_data_orm::protection::unmask;
 
 use zeroship_data_orm::protection::mask_policy;
 
-use zeroship_data_orm::protection::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
+use zeroship_data_orm::protection::unmask::{dispatch_bulk_unmask, BulkUnmaskArgs, BulkUnmaskItem};
 
 use zeroship_data_orm::protection::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_unmask_for_query,
@@ -216,8 +216,8 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 .expect("CREATE TABLE");
 
             // Encrypt + insert one row inline.
+            use crate::sql::compile::SqlDialect;
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-            use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
             let row_pk = "usr_auto_01";
             let plaintext = "123-45-6789";
             let mut doc = crate::value!({
@@ -246,7 +246,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 obj.insert(raw_ssn.clone(), ciphertext);
                 obj.insert("ssn".to_string(), crate::value!("***-**-6789"));
             }
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
@@ -644,8 +644,8 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
                 .expect("CREATE TABLE");
 
             // Encrypt + insert one row.
+            use crate::sql::compile::SqlDialect;
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-            use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
             let row_pk = "usr_grant_01";
             let plaintext = "alice@example.com";
             let mut doc = crate::value!({
@@ -672,12 +672,9 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             {
                 let obj = doc.as_object_mut().expect("doc object");
                 obj.insert(raw_email.clone(), ciphertext);
-                obj.insert(
-                    "email".to_string(),
-                    crate::value!("a****@example.com"),
-                );
+                obj.insert("email".to_string(), crate::value!("a****@example.com"));
             }
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
@@ -894,11 +891,8 @@ fn policy_cannot_change_after_startup() {
             "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
         })).await;
             let binding = DbBinding::cold_start(app_id);
-            mask_policy::install_mask_policy(
-                &binding,
-                crate::value!({ "support": ["public"] }),
-            )
-            .unwrap();
+            mask_policy::install_mask_policy(&binding, crate::value!({ "support": ["public"] }))
+                .unwrap();
             let args = unmask::UnmaskFieldArgs {
                 collection: collection.to_string(),
                 row_pk: "any".to_string(),
@@ -1175,19 +1169,16 @@ fn cold_bulk_unmask_attaches_before_read() {
             // Plaintext recovered for every pair.
             let u1 = result.results.get("u1").expect("u1 row");
             assert_eq!(
-                u1.get("email")
-                    .and_then(crate::value::Value::as_str),
+                u1.get("email").and_then(crate::value::Value::as_str),
                 Some("alice@example.com")
             );
             assert_eq!(
-                u1.get("ssn")
-                    .and_then(crate::value::Value::as_str),
+                u1.get("ssn").and_then(crate::value::Value::as_str),
                 Some("123-45-6789")
             );
             let u2 = result.results.get("u2").expect("u2 row");
             assert_eq!(
-                u2.get("email")
-                    .and_then(crate::value::Value::as_str),
+                u2.get("email").and_then(crate::value::Value::as_str),
                 Some("bob@example.com")
             );
 

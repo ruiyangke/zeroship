@@ -3,7 +3,7 @@ use crate::sql::{compile, descriptors::GeoPoint};
 use crate::value::Value;
 
 mod typed;
-pub(crate) use typed::{prepare_array_operand, prepare_value};
+pub(crate) use typed::prepare_value;
 pub use typed::{prepare_document, prepare_update};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -555,16 +555,16 @@ mod tests {
         assert_eq!(rows[0]["created_at"], crate::value!("ordinary text"));
         assert_eq!(rows[0]["updated_at"], crate::value!(9));
         assert_eq!(rows[0]["occurred_at"], Value::Timestamp(1_778_115_723_004));
-        let mut parameters = Vec::new();
-        let sql = compile::build_where_with_dialect(
-            &crate::value!({"created_at":"ordinary text"}),
-            &mut parameters,
-            &schema,
-            compile::SqlDialect::Postgres,
-        )
-        .unwrap();
-        assert!(!sql.contains("timestamptz"));
-        assert_eq!(parameters, vec![crate::value!("ordinary text")]);
+        let registration =
+            crate::sql::registration::SqlRegistration::builtin(compile::SqlDialect::Postgres);
+        let storage = registration.storage_type(&schema["created_at"]).unwrap();
+        assert_eq!(storage, crate::sql::statement::StorageType::Text);
+        assert_eq!(
+            registration
+                .encode(storage, crate::value!("ordinary text"))
+                .unwrap(),
+            crate::value!("ordinary text")
+        );
     }
     #[test]
     fn parse_timestamp_millis_accepts_iso_z_and_variable_fraction() {

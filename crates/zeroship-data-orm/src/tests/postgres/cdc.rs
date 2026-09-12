@@ -167,14 +167,16 @@ fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
             }));
             crate::tests::fixtures::cache_schema(app, "users", schema.clone());
             // Insert via the production helper.
-            let bq = crate::sql::compile::build_insert(
+            let bq = crate::crud::insert::build_one(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "users",
-                // The descriptor entry for the fixture table above: one declared field.
                 &schema,
-                &crate::value!({ "name": "alice" }),
+                crate::value!({ "name": "alice" }),
+                &crate::sql::registration::SqlRegistration::builtin(
+                    crate::sql::compile::SqlDialect::Postgres,
+                ),
             )
-            .expect("build_insert");
+            .expect("compile insert");
             let _ = host.exec_mutation_with_emit(
                 bq,
                 app,

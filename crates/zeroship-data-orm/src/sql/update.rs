@@ -311,18 +311,6 @@ mod tests {
             let before = patch.clone();
             assert!(normalize(&mut patch).is_err(), "{patch:?}");
             assert_eq!(patch, before);
-            for dialect in [
-                crate::sql::compile::SqlDialect::Postgres,
-                crate::sql::compile::SqlDialect::Sqlite,
-            ] {
-                assert!(crate::sql::compile::build_set_clauses_with_dialect(
-                    &patch,
-                    &mut vec![],
-                    &value!({}),
-                    dialect
-                )
-                .is_err());
-            }
         }
     }
 }

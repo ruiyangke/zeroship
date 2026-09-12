@@ -1037,13 +1037,18 @@ fn validate_predicate_for_tables(
     predicate: &ResolvedPredicate,
     allow_aggregate: bool,
 ) -> Result<(), CompileError> {
-    let mut pending = vec![predicate];
-    while let Some(predicate) = pending.pop() {
+    let mut pending = vec![(predicate, 1)];
+    let mut nodes = 0;
+    while let Some((predicate, depth)) = pending.pop() {
+        nodes += 1;
+        if depth > super::MAX_PREDICATE_DEPTH || nodes > super::joins::MAX_READ_PREDICATE_NODES {
+            return Err(invalid("predicate exceeds its complexity budget"));
+        }
         match predicate {
             ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
-                pending.extend(children);
+                pending.extend(children.iter().map(|child| (child, depth + 1)));
             }
-            ResolvedPredicate::Not(child) => pending.push(child),
+            ResolvedPredicate::Not(child) => pending.push((child, depth + 1)),
             ResolvedPredicate::Compare { lhs, rhs, .. } => {
                 validate_operand(tables, lhs, allow_aggregate)?;
                 let lhs_storage = lhs.storage()?;

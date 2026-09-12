@@ -993,7 +993,7 @@ mod tests {
     }
 
     use crate::encryption;
-    use crate::sql::compile::{build_insert_with_dialect, SqlDialect};
+    use crate::sql::{compile::SqlDialect, registration::SqlRegistration};
     use crate::tests::fixtures::cache_schema;
     use crate::tests::fixtures::DatabaseFixture;
     use zeroship_migrate::schema::query::FkEmission;
@@ -1234,12 +1234,12 @@ mod tests {
             )
             .await;
 
-            let insert_built = build_insert_with_dialect(
+            let insert_built = crate::crud::insert::build_one(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
-                &insert_doc,
-                SqlDialect::Sqlite,
+                insert_doc.clone(),
+                &SqlRegistration::builtin(SqlDialect::Sqlite),
             )
             .expect("build insert");
             let insert_params = &insert_built.params;

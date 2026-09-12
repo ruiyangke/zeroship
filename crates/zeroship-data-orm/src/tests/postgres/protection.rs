@@ -5,9 +5,9 @@
 //! verify that filtering cannot reveal a protected value without unmask authorization.
 //! PostgreSQL and its required extensions come from an owned testcontainer.
 
-use crate::tests::fixtures::Host;
 #[allow(unused_imports)]
 use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::Host;
 use crate::tests::fixtures::{self, schema};
 #[allow(unused_imports)]
 use zeroship_migrate::schema::query::FkEmission;
@@ -15,20 +15,18 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
+use crate::sql::compile::{raw_column_name, read_surface_columns, validate_field_name};
+use crate::sql::{compile::SqlDialect, registration::SqlRegistration, SchemaName};
+use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::protection::mask_policy::install_mask_policy;
 use zeroship_data_orm::protection::unmask::{
-    BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs, audit_query_hint_granted,
-    authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask, dispatch_unmask_for_query,
-    parse_args, parse_bulk_args,
+    audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
+    dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
+    UnmaskFieldArgs,
 };
-use crate::sql::compile::{
-    build_aggregate, build_distinct, build_find_with_schema, build_insert, build_where,
-    raw_column_name, read_surface_columns, validate_field_name,
-};
-use crate::value::{Value, value};
 
 /// Use the backend already installed by the fixture; this helper does not test cold startup.
 async fn unmask_backend(host: &Host) -> zeroship_data_orm::backend::BackendHandle {
@@ -198,7 +196,7 @@ async fn insert_through_the_pipeline(
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
     let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
-    let bq = build_insert(
+    let bq = compile_insert(
         &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
         schema,
@@ -237,9 +235,93 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
     Value::Object(map)
 }
 
+fn compile_insert(
+    namespace: &SchemaName,
+    collection: &str,
+    schema: &Value,
+    document: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    crate::crud::insert::build_one(
+        namespace,
+        collection,
+        schema,
+        document.clone(),
+        &SqlRegistration::builtin(SqlDialect::Postgres),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compile_find(
+    namespace: &SchemaName,
+    collection: &str,
+    filter: &Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    schema: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    crate::crud::read::find(
+        namespace,
+        collection,
+        schema,
+        filter.clone(),
+        limit,
+        offset,
+        order_by,
+        select,
+        &[],
+        false,
+        &SqlRegistration::builtin(SqlDialect::Postgres),
+    )
+}
+
+fn compile_distinct(
+    namespace: &SchemaName,
+    collection: &str,
+    field: &str,
+    filter: &Value,
+    schema: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    crate::crud::read::distinct(
+        namespace,
+        collection,
+        schema,
+        field,
+        filter.clone(),
+        false,
+        &SqlRegistration::builtin(SqlDialect::Postgres),
+    )
+}
+
+fn compile_aggregate(
+    namespace: &SchemaName,
+    collection: &str,
+    pipeline: &Value,
+    schema: &Value,
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+    crate::crud::aggregate::build(
+        namespace,
+        collection,
+        pipeline,
+        false,
+        schema,
+        &SqlRegistration::builtin(SqlDialect::Postgres),
+    )
+    .map(|(query, _)| query)
+}
+
+fn compile_filter(
+    filter: &Value,
+    _parameters: &mut Vec<Value>,
+    _schema: &Value,
+) -> Result<crate::sql::Predicate, crate::sql::compile::QueryError> {
+    crate::sql::filter::decode(filter)
+}
+
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
-    let bq = build_find_with_schema(
+    let bq = compile_find(
         &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
         filter,
@@ -423,7 +505,7 @@ fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
             // And the ordering channel is closed the same way: `orderBy` on a masked
             // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
             let ordered = {
-                let bq = build_find_with_schema(
+                let bq = compile_find(
                     &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                     "people",
                     &value!({}),
@@ -2157,13 +2239,13 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         let refusals: Vec<(&str, bool)> = vec![
             (
                 "filter key",
-                build_where(&value!({ (raw.clone()): "x" }), &mut Vec::new(), &schema).is_err(),
+                compile_filter(&value!({ (raw.clone()): "x" }), &mut Vec::new(), &schema).is_err(),
             ),
             (
                 // The aggregate matcher and `$group.by` below both validate
                 // against the same declared shape.
                 "aggregate $match",
-                build_aggregate(
+                compile_aggregate(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!([{ "$match": { (raw.clone()): "x" } }]),
@@ -2173,7 +2255,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "select",
-                build_find_with_schema(
+                compile_find(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!({}),
@@ -2187,7 +2269,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "orderBy",
-                build_find_with_schema(
+                compile_find(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!({}),
@@ -2201,7 +2283,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "$group.by",
-                build_aggregate(
+                compile_aggregate(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &value!([{ "$group": { "by": [raw.clone()] } }]),
@@ -2211,7 +2293,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             ),
             (
                 "distinct",
-                build_distinct(
+                compile_distinct(
                     &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
                     "people",
                     &raw,
@@ -2235,31 +2317,28 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 
         // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
         // it, a validator that refused everything would pass all seven above.
-        assert!(build_where(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
-        assert!(
-            build_distinct(
-                &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
-                "people",
-                "ssn",
-                &value!({}),
-                &schema
-            )
-            .is_ok()
-        );
+        assert!(compile_filter(&value!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
+        assert!(compile_distinct(
+            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
+            "people",
+            "ssn",
+            &value!({}),
+            &schema
+        )
+        .is_ok());
         assert!(validate_field_name("ssn").is_ok());
-        assert!(
-            build_find_with_schema(
-                &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
-                "people",
-                &value!({}),
-                Some(1),
-                None,
-                Some(&value!({ "ssn": 1 })),
-                Some(&value!(["ssn"])),
-                &schema,
-            )
-            .is_ok()
-        );
+        let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+        assert!(compile_find(
+            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
+            "people",
+            &value!({}),
+            Some(1),
+            None,
+            Some(&value!({ "ssn": 1 })),
+            Some(&value!(["ssn"])),
+            &runtime_schema,
+        )
+        .is_ok());
     })
 }
 
@@ -2281,7 +2360,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 #[test]
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
     Host::test(|_| {
-        use zeroship_data_orm::cdc::read_set::{Predicate, PredicateOp, normalise_filter};
+        use zeroship_data_orm::cdc::read_set::{normalise_filter, Predicate, PredicateOp};
         let schema = flip_schema();
 
         let Some(Predicate::All(conjuncts)) =
@@ -2534,10 +2613,12 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             host.prepare_insert_many_docs(&mut docs, app, "people", None)
                 .await
                 .expect("write pipeline");
-            let bq = build_insert(
+            let runtime_schema =
+                crate::tests::fixtures::schema::generated_fields(schema.clone());
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
-                &schema,
+                &runtime_schema,
                 &docs[0],
             )
             .unwrap();

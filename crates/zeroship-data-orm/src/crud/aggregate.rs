@@ -23,7 +23,7 @@ struct AggregateOutput {
     source_field: Option<String>,
 }
 
-pub(super) fn build(
+pub(crate) fn build(
     namespace: &SchemaName,
     collection: &str,
     pipeline: &Value,

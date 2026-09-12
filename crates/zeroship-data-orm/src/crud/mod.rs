@@ -19,18 +19,18 @@ use crate::protection::{mask_pass, protection_floor, unmask};
 
 pub(crate) mod assignment_pass;
 
-mod aggregate;
+pub(crate) mod aggregate;
 mod bytes_pass;
-mod delete;
+pub(crate) mod delete;
 mod identity;
 pub(crate) mod insert;
 pub(crate) mod internal;
 pub(crate) mod predicate;
-mod read;
+pub(crate) mod read;
 pub mod read_pipeline;
 pub(crate) mod resolved;
 pub(crate) mod search;
-mod update;
+pub(crate) mod update;
 mod update_validation;
 pub mod upsert;
 mod write_pipeline;

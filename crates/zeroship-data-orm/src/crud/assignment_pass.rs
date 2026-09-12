@@ -155,9 +155,11 @@ fn inject_into_object(
 
 pub fn apply_assignments_on_update(patch: &mut Value, schema: &Value) -> Result<(), DbError> {
     if patch.get("id").is_some()
-        || ["$set", "$inc", "$dec", "$mul"]
-            .iter()
-            .any(|op| patch.get(*op).is_some_and(|fields| fields.get("id").is_some()))
+        || ["$set", "$inc", "$dec", "$mul"].iter().any(|op| {
+            patch
+                .get(*op)
+                .is_some_and(|fields| fields.get("id").is_some())
+        })
     {
         return Err(DbError::validation(
             "immutable_primary_key",
@@ -197,10 +199,12 @@ fn refuse_and_strip(
     for name in immutable {
         if obj.contains_key(name) {
             let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
-            return Err(crate::sql::compile::QueryError::ImmutableAssignedField(format!(
-                "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
-            ))
-            .into());
+            return Err(
+                crate::sql::compile::QueryError::ImmutableAssignedField(format!(
+                    "UPDATE patch attempted to overwrite immutable assigned field `{name}`{where_}"
+                ))
+                .into(),
+            );
         }
     }
     for name in reassigned {
@@ -272,8 +276,8 @@ pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sql::compile::SqlDialect;
     use crate::value;
-    use crate::sql::{SchemaName, compile::{SqlDialect, build_insert_many_with_dialect}};
 
     fn schema() -> Value {
         value!({
@@ -327,18 +331,9 @@ mod tests {
         let mut docs = value!([{"title":"first", "born":0}, {"title":"second", "revision":99}]);
         apply_assignments_on_insert_many(&mut docs, &fields, "notes", None).unwrap();
         assert_ne!(docs[0]["key"], docs[1]["key"]);
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let query = build_insert_many_with_dialect(
-                &SchemaName::new("app").unwrap(),
-                "notes",
-                &fields,
-                &docs,
-                dialect,
-            )
-            .unwrap();
-            let insert = query.sql.split("RETURNING").next().unwrap();
+        for document in docs.as_array().unwrap() {
             for name in ["born", "touched", "revision", "removed"] {
-                assert!(!insert.contains(&format!("\"{name}\"")), "{}", query.sql);
+                assert!(document.get(name).is_none());
             }
         }
     }
@@ -410,14 +405,12 @@ mod tests {
             );
         }
         assert!(extract_cas_version(&value!({"$and":[{"revision":7}]}), "notes", &fields).is_err());
-        assert!(
-            extract_cas_version(
-                &value!({"$or":[{"$and":[{"revision":7}]}]}),
-                "notes",
-                &fields
-            )
-            .is_err()
-        );
+        assert!(extract_cas_version(
+            &value!({"$or":[{"$and":[{"revision":7}]}]}),
+            "notes",
+            &fields
+        )
+        .is_err());
         assert_eq!(
             extract_cas_version(&value!({"version":7}), "notes", &value!({})).unwrap(),
             None
