@@ -386,6 +386,7 @@ fn upload_retry_backoff(attempt: u32) -> std::time::Duration {
 /// callers keep a faithful diagnostic.
 fn map_s3(hash_or_key: &str, e: S3Error) -> BlobError {
     match e {
+        S3Error::TooLarge { .. } => BlobError::TooLarge,
         S3Error::NotFound => BlobError::NotFound(hash_or_key.to_string()),
         S3Error::Integrity { expected, computed } => BlobError::HashMismatch {
             expected,
@@ -611,11 +612,7 @@ impl BlobStore for S3BlobStore {
         }
     }
 
-    async fn get_manifest(
-        &self,
-        app_id: &Uuid,
-        deploy_hash: &str,
-    ) -> Result<Bytes, BlobError> {
+    async fn get_manifest(&self, app_id: &Uuid, deploy_hash: &str) -> Result<Bytes, BlobError> {
         let key = Self::manifest_key(app_id, deploy_hash);
         let (bytes, _meta) = self
             .client

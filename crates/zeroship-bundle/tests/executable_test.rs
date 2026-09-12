@@ -202,6 +202,34 @@ async fn worker_loading_rejects_corrupt_missing_and_oversized_sources() {
 }
 
 #[compio::test]
+async fn local_manifest_reads_refuse_oversized_files_before_loading_the_body() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = LocalDiskBlobStore::new(directory.path().into()).unwrap();
+    let app = Uuid::now_v7();
+    let hash = "a".repeat(64);
+    store.put_manifest(&app, &hash, b"{}").await.unwrap();
+    assert_eq!(
+        store.get_manifest(&app, &hash).await.unwrap().as_ref(),
+        b"{}"
+    );
+    let path = directory
+        .path()
+        .join("manifests")
+        .join(app.to_string())
+        .join(format!("{hash}.json"));
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_len(zeroship_bundle::MAX_MANIFEST_BYTES + 1)
+        .unwrap();
+    assert!(matches!(
+        store.get_manifest(&app, &hash).await,
+        Err(zeroship_bundle::BlobError::TooLarge)
+    ));
+}
+
+#[compio::test]
 async fn worker_loading_rejects_invalid_paths_text_and_descriptor_json() {
     let fixture = Fixture::new().await;
     let invalid = b"\xff";

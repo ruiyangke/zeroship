@@ -64,6 +64,7 @@ pub fn verify_deployment_manifest(
 
 /// An in-memory module graph loaded from an app deployment, without runtime secrets.
 /// Persistence remains the normal manifest and blob store.
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoadedWorker {
     entry: String,
     modules: BTreeMap<String, String>,
@@ -160,7 +161,11 @@ async fn read_blob(
         .await?;
     let written = source
         .get_blob_to_file(hash, &file, None, *remaining as u64)
-        .await?;
+        .await
+        .map_err(|error| match error {
+            BlobError::TooLarge => ExecutableError::TooLarge,
+            other => ExecutableError::Storage(other),
+        })?;
     let length = usize::try_from(written).map_err(|_| ExecutableError::TooLarge)?;
     *remaining = remaining
         .checked_sub(length)
