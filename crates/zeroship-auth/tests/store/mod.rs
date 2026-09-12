@@ -2,6 +2,7 @@
 
 mod email_verification;
 mod identities;
+mod password_reset;
 mod rate_limit;
 mod session_visibility;
 mod sessions;

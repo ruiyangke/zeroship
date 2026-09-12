@@ -40,7 +40,7 @@
 //! reset tokens (no cross-device flow); we write a sentinel placeholder.
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 
@@ -306,7 +306,7 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 ///
 /// Returns [`AuthError::Db`] on PG failure.
 pub async fn complete(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     raw_token: &str,
     password_hash: &str,
 ) -> Result<Option<CompletedReset>> {
