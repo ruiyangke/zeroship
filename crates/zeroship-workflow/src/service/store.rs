@@ -93,7 +93,6 @@ impl OrmStore {
         let family = backend.sql_registration().family();
         if !matches!(family, POSTGRES_FAMILY | SQLITE_FAMILY)
             || family != clock.sql_registration().family()
-            || backend.connection_identity().is_none()
             || backend.connection_identity() != clock.connection_identity()
             || std::ptr::eq(
                 std::ops::Deref::deref(&backend),
