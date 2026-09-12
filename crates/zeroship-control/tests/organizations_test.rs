@@ -19,8 +19,8 @@
 //!   least equal billing authority. Each refusal is paired with a control that
 //!   differs in ONE variable, so a green is a result rather than a coincidence.
 //! - **The last owner.** Not a CHECK - the claim is about a set. What the tests
-//!   can bind here is the predicate; the LOCK that makes it true under
-//!   concurrency is exercised by the concurrent case at the end.
+//!   bind both the predicate and concurrent departures queued behind an
+//!   observed PostgreSQL row lock in the `concurrency` module.
 //! - **Invite redemption.** The schema froze the inviter's rank at issue time
 //!   and said so. These bind the half only the control plane can enforce: an
 //!   invite from a since-demoted admin is refused.
@@ -38,12 +38,15 @@ use zeroship_mailer::RecordingMailer;
 
 use crate::common;
 
+#[path = "organizations/concurrency.rs"]
+mod concurrency;
+
 // ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
 
-/// A live database and one connection to it. Every case builds its own, so a
-/// failure in one leaves nothing behind for the next to trip on.
+/// Connections to the configured, migrated test database. Each `Org` owns its
+/// fixture rows; the database itself is shared by this integration target.
 struct Fx {
     registry: Registry,
     pg: Client,
