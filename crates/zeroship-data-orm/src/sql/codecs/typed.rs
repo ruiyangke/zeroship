@@ -349,7 +349,25 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
                     {
                         prepare_value(field, definition, operand)?;
                     }
-                    Operator::Increment | Operator::Decrement | Operator::Multiply => {}
+                    Operator::Increment | Operator::Decrement | Operator::Multiply => {
+                        let valid = match definition["type"].as_str() {
+                            Some("int" | "integer" | "bigInt") => {
+                                matches!(operand, Value::Number(value) if value.as_i64().is_some())
+                            }
+                            Some("number" | "float") => match operand {
+                                Value::Number(_) => true,
+                                Value::Decimal(value) => crate::sql::decimal::valid(value),
+                                _ => false,
+                            },
+                            _ => false,
+                        };
+                        if !valid {
+                            return Err(CodecError::validation(
+                                "invalid_arithmetic_operand",
+                                "arithmetic requires its assigned numeric column and operand",
+                            ));
+                        }
+                    }
                 }
             }
         } else {
