@@ -139,17 +139,9 @@ impl Reservation {
 
 /// Schema-name fences.
 ///
-/// `__zeroship` is refused here, and it guards two distinct things. The first is
-/// live: `__zeroship_` is the prefix of tables that exist in every app schema
-/// today - the migration journal, the unmask audit table, the workflow journal -
-/// and a creator-named collection colliding with one of them is a corruption
-/// rather than a name clash. The second is a reservation: this crate builds
-/// plans the *worker* executes, and the worker executes creator code, so per the
-/// platform invariant, state a separate service writes and the worker only reads
-/// must not be nameable from a worker-built plan. No such platform-owned schema
-/// exists at the time of writing; the fence holds the namespace open for one and
-/// protects the live tables meanwhile. Do not narrow it on the grounds that the
-/// schema is absent.
+/// Host-selected customer schemas cannot use backend or platform namespaces.
+/// These reservations apply to the schema name, not to tables within it.
+/// Table references are transparent within the bound customer schema.
 const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
     Reservation::Exact("information_schema"),
