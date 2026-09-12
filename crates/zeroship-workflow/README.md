@@ -37,7 +37,10 @@ its claim before applying them.
 The shared engine is composed into the CLI; production worker and Control
 integration remain unfinished. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
 embeds it in the customer's worker with customer-bound persistence; a lightweight
-server coordinates metadata and does not own the journal or payloads.
+server coordinates metadata and does not own the journal or payloads. Workers
+may access only creator databases; Control and other platform services may access
+only the control database. Authenticated service contracts carry cross-boundary
+requests without sharing database credentials.
 `DeploymentHolds` accepts an authorized platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers
 run inside a host-owned transaction that also fences routing and other deployment
@@ -54,8 +57,10 @@ composition remains unfinished; the journal-reading collector has not yet been r
 `OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.
-Journal operations currently use the ORM's scoped SQL execution interface while
-model conversion proceeds. Both Rust and creator code may reference workflow
+Journal model conversion is ongoing. Restart copies retained checkpoints and
+payload references through paged ORM reads and batch inserts in its transaction,
+preserving effect origins and compensation metadata. Remaining relational queries
+use the ORM's scoped SQL interface. Both Rust and creator code may reference workflow
 tables within their bound schema through the normal ORM.
 `schema::postgres_sql` binds the generated
 DDL for a provisioning host with authorized migration credentials. Runtime
