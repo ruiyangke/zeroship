@@ -15,6 +15,7 @@ serde_json = { workspace = true }
 v8 = { workspace = true }
 
 [dev-dependencies]
+zeroship-data-orm = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-storage = { workspace = true }
 sha2 = { workspace = true }

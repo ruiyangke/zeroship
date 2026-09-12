@@ -99,15 +99,15 @@ impl Backend for Faults {
 #[compio::test]
 async fn sqlite_snapshot_io_does_not_block_work_or_revoke_a_repair() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    fault_contract(Arc::new(SqliteStore::new(path))).await;
+    fault_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
 async fn postgres_snapshot_io_does_not_block_work_or_revoke_a_repair() {
     let fixture = PostgresFixture::start().await;
-    fault_contract(Arc::new(fixture.store.clone())).await;
+    fault_contract(Rc::new(fixture.store.clone())).await;
 }
 
 #[expect(
@@ -118,7 +118,7 @@ async fn postgres_snapshot_io_does_not_block_work_or_revoke_a_repair() {
     clippy::future_not_send,
     reason = "the database and storage contract runs on its compio thread"
 )]
-async fn fault_contract(store: Arc<dyn WorkflowStore>) {
+async fn fault_contract(store: Rc<OrmStore>) {
     let dir = tempfile::tempdir().unwrap();
     let faults = Arc::new(Faults {
         local: LocalFs::new(dir.path()),

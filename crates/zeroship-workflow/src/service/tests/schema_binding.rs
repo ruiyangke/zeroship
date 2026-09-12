@@ -3,11 +3,33 @@ use super::*;
 #[compio::test]
 async fn workflow_tables_share_the_app_database_without_changing_business_data() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("app.sqlite");
+    let path = directory.path().join("zs-workflow.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE orders (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO orders VALUES ('order', 'customer data'); CREATE VIEW visible_orders AS SELECT * FROM orders;").unwrap();
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _) = registered_service(Arc::new(SqliteStore::new(&path))).await;
+    let store = Rc::new(sqlite_store(&path).await);
+    let database = zeroship_data_orm::orm::Database::from_schema(
+        store.binding.clone(),
+        store.backend.clone(),
+        vec![(
+            "orders".into(),
+            zeroship_data_orm::value!({
+                "id": {"type":"string", "primaryKey":true, "writable":true, "required":true},
+                "body": {"type":"string", "required":true}
+            }),
+        )],
+    )
+    .unwrap();
+    database
+        .install_mask_policy(zeroship_data_orm::value!({}))
+        .unwrap();
+    assert!(database.collection("__zeroship_workflow_runs").is_err());
+    let orders = database.collection("orders").unwrap();
+    orders
+        .insert(zeroship_data_orm::value!({"id":"native", "body":"native ORM data"}))
+        .await
+        .unwrap();
+    let (service, app, _) = registered_service(store).await;
     let started = service
         .for_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -20,6 +42,20 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
         .unwrap()
         .state;
     schema::initialize_sqlite(&path).unwrap();
+    let zeroship_data_orm::orm::Output::Rows { rows, .. } = orders
+        .find(
+            zeroship_data_orm::value!({"id":"native"}),
+            zeroship_data_orm::value!({}),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("expected business rows");
+    };
+    assert_eq!(
+        rows[0]["body"],
+        zeroship_data_orm::value!("native ORM data")
+    );
     assert_eq!(
         service
             .for_app(app)
@@ -60,7 +96,7 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
 #[test]
 fn partial_workflow_schema_is_refused_in_a_shared_database() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("app.sqlite");
+    let path = directory.path().join("zs-workflow.sqlite");
     let connection = rusqlite::Connection::open(&path).unwrap();
     connection.execute_batch("CREATE TABLE orders (id TEXT); CREATE TABLE __zeroship_workflow_partial (value TEXT); INSERT INTO __zeroship_workflow_partial VALUES ('preserve');").unwrap();
     assert!(schema::initialize_sqlite(&path).is_err());
@@ -143,7 +179,7 @@ fn sqlite_journal_objects_and_foreign_keys_stay_in_the_reserved_namespace() {
 
 #[test]
 fn creator_queries_cannot_name_journal_tables() {
-    use zeroship_data_sql::compile::validate_collection;
+    use zeroship_data_orm::sql::compile::validate_collection;
     assert!(validate_collection("orders").is_ok());
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute_batch(schema::SQLITE_SQL).unwrap();

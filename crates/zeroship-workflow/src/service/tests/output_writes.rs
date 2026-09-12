@@ -86,7 +86,7 @@ fn prepare(task: &TaskAssignment, outcomes: Value) -> PreparedExecution {
 fn step(value: Value) -> Value {
     json!({"kind":"StepCompleted","ordinal":0,"name":"saved","output":value})
 }
-async fn stored_rows(store: &dyn WorkflowStore, task: &TaskAssignment) -> usize {
+async fn stored_rows(store: &OrmStore, task: &TaskAssignment) -> usize {
     let mut tx = store.begin().await.unwrap();
     let rows = tx
         .query(
@@ -102,17 +102,17 @@ async fn stored_rows(store: &dyn WorkflowStore, task: &TaskAssignment) -> usize 
 #[compio::test]
 async fn sqlite_output_preparation_and_retryable_uploads() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    output_contract(Arc::new(SqliteStore::new(path))).await;
+    output_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_output_preparation_and_retryable_uploads() {
     let fixture = PostgresFixture::start().await;
-    output_contract(Arc::new(fixture.store.clone())).await;
+    output_contract(Rc::new(fixture.store.clone())).await;
 }
 
-async fn output_contract(store: Arc<dyn WorkflowStore>) {
+async fn output_contract(store: Rc<OrmStore>) {
     let dir = tempfile::tempdir().unwrap();
     let (service, app, other) = registered_service(store.clone()).await;
     let service = service

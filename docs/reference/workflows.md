@@ -19,10 +19,18 @@ instructions below still apply today.
 
 ## Rust integration
 
-`zeroship-workflow` owns the journal engine, claim/apply protocol, PostgreSQL
-store, scoped HTTP client, and local SQLite persistence. It has no V8 dependency.
+`zeroship-workflow` owns the journal engine, claim/apply protocol, scoped HTTP
+client, and customer persistence through `zeroship-data-orm`. It has no V8 dependency.
 `zeroship-workflow-v8` installs `env.workflows` and supplies the V8 executor
 used by the local engine. The control plane uses the Rust engine directly.
+
+The replacement service accepts an `OrmStore` built from the host's `OrmContext`,
+`DbBinding` and `BackendHandle`. The ORM selects the configured database and owns
+transactions. Reserved journal operations use its scoped SQL interface because
+the current collection API rejects those table names for native callers too.
+`AppWorkflows::into_backend` exposes a bounded client for V8 and Rust callers on
+other runtime threads; database operations remain on the engine's owning thread.
+The existing Control PostgreSQL store remains until production cutover.
 
 A trusted Rust host can use `HttpWorkflowBackend` through `WorkflowBackend`
 to start runs, read status, signal, restart, or change lifecycle state. Construct
@@ -65,25 +73,20 @@ bridge. There is no workflow-only archive argument or TOML bundle setting.
 The engine's customer executable snapshot copies are still being replaced with
 reads from the retained app bundle store.
 
-The CLI persists its trusted app identity in `.zeroship/app-id`, the customer
-journal in `.zeroship/workflows.sqlite`, and payloads and executable snapshots
-under `.zeroship/workflow-objects`. `APP_ID` does not authorize workflow access.
-Restart preserves that identity and rediscovers durable work. Incompatible
-journals are refused without silently resetting them.
+The CLI persists its trusted workflow app identity in `.zeroship/app-id`. The
+journal uses the app database selected by `DATABASE_URL`, and payloads use the
+app's normal storage configuration. With default SQLite configuration, the ORM
+places the app tables and workflow journal in `.zeroship/zs-default.sqlite`;
+object storage defaults to `.zeroship/storage`. There is no dedicated workflow
+database or object directory. `APP_ID` does not authorize workflow access.
+Restart preserves identity and rediscovers durable work. Incompatible journals
+are refused without resetting them, and initialization preserves business tables.
 
-`--workflow-config=workflow.toml` configures the same native host:
-
-```toml
-journal = ".zeroship/workflows.sqlite"
-objects = ".zeroship/workflow-objects"
-```
-
-Paths resolve against the project working directory. The optional `worker`
-and `payloads` tables configure `WorkerOptions` and `TaskPayloadLimits`.
-The CLI has no dedicated workflow reset command. Its remaining local setup is
-being reduced to binding the shared engine to the app's existing database and
-runtime configuration, as described in the worker design. A workflow journal
-does not require a separate SQLite file.
+`--workflow-config=workflow.toml` configures native execution limits. Its optional
+`worker` and `payloads` tables configure `WorkerOptions` and `TaskPayloadLimits`.
+Database paths and object storage belong to normal app configuration; workflow
+TOML rejects separate `journal` and `objects` settings. The CLI has no dedicated
+workflow reset command.
 
 ## Testing
 

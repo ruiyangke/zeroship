@@ -4,13 +4,48 @@ use std::path::Path;
 
 use crate::WorkflowServiceError;
 
+/// Initialize the SQLite file already selected by the host's ORM binding.
+/// PostgreSQL provisioning belongs to the authorized migration host.
+pub async fn initialize_local(store: &super::store::OrmStore) -> Result<(), WorkflowServiceError> {
+    use zeroship_data_orm::{sql::compile::SqlDialect, Value};
+    if store.backend.dialect() != SqlDialect::Sqlite {
+        return Ok(());
+    }
+    let rows = store
+        .backend
+        .query(
+            store.binding.app_id(),
+            store.binding.schema(),
+            "PRAGMA database_list",
+            &[],
+        )
+        .await
+        .map_err(super::store::database_error)?;
+    let namespace = store
+        .backend
+        .namespace(store.binding.app_id(), store.binding.schema());
+    let file = rows
+        .iter()
+        .find(|row| row.get("name").and_then(Value::as_str) == Some(namespace))
+        .and_then(|row| row.get("file"))
+        .and_then(Value::as_str)
+        .filter(|file| !file.is_empty())
+        .ok_or_else(|| {
+            WorkflowServiceError::Unavailable("workflow app database is not attached".into())
+        })?;
+    initialize_sqlite(Path::new(file))
+}
+
 const POSTGRES_TEMPLATE: &str = include_str!("../../schema/postgres.sql");
 pub const SQLITE_SQL: &str = include_str!("../../schema/sqlite.sql");
 /// Instantiate canonical DDL in the customer's resolved physical schema.
 /// The provisioning host supplies its own authorized migration connection.
 #[must_use]
 pub fn postgres_sql(schema: &super::store::SchemaName) -> String {
-    POSTGRES_TEMPLATE.replace("\"__zeroship_workflow_schema\"", &schema.quoted())
+    POSTGRES_TEMPLATE.replace(
+        "\"__zeroship_workflow_schema\"",
+        &zeroship_data_orm::sql::compile::quote_ident(schema.as_str()),
+    )
 }
 
 const FINGERPRINTS: &str = include_str!("../../schema/fingerprints.json");
@@ -40,23 +75,23 @@ pub fn initialize_sqlite(path: &Path) -> Result<(), WorkflowServiceError> {
             WorkflowServiceError::Unavailable(format!("create workflow directory: {error}"))
         })?;
     }
-    let mut conn = rusqlite::Connection::open(path).map_err(super::store::sqlite_error)?;
+    let mut conn = rusqlite::Connection::open(path).map_err(sqlite_error)?;
     conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(super::store::sqlite_error)?;
+        .map_err(sqlite_error)?;
     conn.pragma_update(None, "foreign_keys", true)
-        .map_err(super::store::sqlite_error)?;
+        .map_err(sqlite_error)?;
     conn.pragma_update(None, "journal_mode", "WAL")
-        .map_err(super::store::sqlite_error)?;
+        .map_err(sqlite_error)?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(super::store::sqlite_error)?;
+        .map_err(sqlite_error)?;
     let populated: bool = tx
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name GLOB '__zeroship_workflow_*')",
             [],
             |row| row.get(0),
         )
-        .map_err(super::store::sqlite_error)?;
+        .map_err(sqlite_error)?;
     if populated {
         let actual: String = tx
             .query_row(
@@ -69,14 +104,18 @@ pub fn initialize_sqlite(path: &Path) -> Result<(), WorkflowServiceError> {
             return Err(incompatible());
         }
     } else {
-        tx.execute_batch(SQLITE_SQL)
-            .map_err(super::store::sqlite_error)?;
+        tx.execute_batch(SQLITE_SQL).map_err(sqlite_error)?;
     }
-    tx.commit().map_err(super::store::sqlite_error)
+    tx.commit().map_err(sqlite_error)
 }
 
 pub(crate) fn incompatible() -> WorkflowServiceError {
     WorkflowServiceError::Unavailable(
-        "workflow store schema is incompatible; apply workflow migrations or explicitly reset local workflow state".into(),
+        "workflow store schema is incompatible; apply workflow migrations to the app database"
+            .into(),
     )
+}
+
+fn sqlite_error(_error: rusqlite::Error) -> WorkflowServiceError {
+    WorkflowServiceError::Internal("workflow local schema operation failed".into())
 }

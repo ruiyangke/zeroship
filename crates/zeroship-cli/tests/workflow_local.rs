@@ -160,7 +160,9 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
         json!({"version":"original:lazy"})
     );
     assert!(!root.path().join("unused.sqlite").exists());
-    assert!(root.path().join(".zeroship/workflows.sqlite").exists());
+    assert!(root.path().join(".zeroship/zs-default.sqlite").exists());
+    assert!(!root.path().join(".zeroship/workflows.sqlite").exists());
+    assert!(!root.path().join(".zeroship/workflow-objects").exists());
     let started = host.request("/start").unwrap();
     let run = started["id"].as_str().unwrap();
     let status = format!("/status?id={run}");

@@ -13,8 +13,6 @@ use zeroship_workflow::{
     operations::{RunOperation, RunState, SignalOptions, StartOptions},
     service::{
         runner::{RunnerOutcome, RunnerSlot, TaskPayloadLimits, TaskPayloads, WorkerTasks},
-        schema,
-        store::SqliteStore,
         AppPolicy, AppWorkflows, CompletionReceipt, DeployRegistration, ExecutableSnapshot,
         HostPolicies, PayloadRead, PayloadSlot, PolicySnapshot, RequestId, SnapshotStore,
         StagedPayload, TaskAssignment, TaskToken, WorkerIdentity, WorkflowService,
@@ -134,10 +132,8 @@ impl Fixture {
     }
     async fn with_limits(source: &str, cpu_limit: Option<Duration>, policy: AppPolicy) -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("workflow.sqlite");
-        schema::initialize_sqlite(&path).unwrap();
         let service = WorkflowService::open(
-            Arc::new(SqliteStore::new(path)),
+            std::rc::Rc::new(orm_fixture::store(dir.path()).await),
             Arc::new(HostPolicies::default()),
         )
         .await
@@ -892,9 +888,7 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     fixture.assert_disposed().await;
     let old_run = old_run.unwrap();
     let service = WorkflowService::open(
-        Arc::new(SqliteStore::new(
-            fixture.directory.path().join("workflow.sqlite"),
-        )),
+        std::rc::Rc::new(orm_fixture::store(fixture.directory.path()).await),
         Arc::new(HostPolicies::default()),
     )
     .await
@@ -1240,3 +1234,6 @@ async fn native_runner_timeout_disposes_v8_before_reusing_its_slot() {
     );
     fixture.assert_disposed().await;
 }
+
+#[path = "support/orm.rs"]
+mod orm_fixture;

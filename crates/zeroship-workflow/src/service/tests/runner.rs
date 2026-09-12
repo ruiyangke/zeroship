@@ -21,7 +21,7 @@ use std::{
 #[derive(Clone, Copy)]
 enum ExecutionMode {
     Complete,
-    Delayed,
+    AfterRenewal,
     Pending,
 }
 struct Probe {
@@ -83,7 +83,7 @@ impl TaskExecution for Execution {
         self.probe.record("execute");
         match self.mode {
             ExecutionMode::Complete => {}
-            ExecutionMode::Delayed => compio::time::sleep(Duration::from_millis(900)).await,
+            ExecutionMode::AfterRenewal => self.probe.observed("renewed").await,
             ExecutionMode::Pending => std::future::pending().await,
         }
         WorkflowExecution::from_runtime_value(
@@ -154,7 +154,9 @@ impl TaskTransport for ObservedTasks {
                 .transition(&RequestId::mint(), &run, operation)
                 .await?;
         }
-        self.inner.heartbeat(task, token).await
+        let heartbeat = self.inner.heartbeat(task, token).await?;
+        self.probe.record("renewed");
+        Ok(heartbeat)
     }
     async fn complete(
         &self,
@@ -198,7 +200,7 @@ struct Harness {
     run: String,
 }
 impl Harness {
-    async fn new(store: Arc<dyn WorkflowStore>) -> Self {
+    async fn new(store: Rc<OrmStore>) -> Self {
         let (service, app, _) = registered_service(store).await;
         service
             .register_app(
@@ -251,22 +253,38 @@ impl Harness {
 }
 async fn sqlite() -> (tempfile::TempDir, Harness) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let harness = Harness::new(Arc::new(SqliteStore::new(path))).await;
+    let harness = Harness::new(Rc::new(sqlite_store(&path).await)).await;
     (dir, harness)
 }
 
 async fn completion_contract(harness: Harness) {
-    harness.probe.mode.set(ExecutionMode::Delayed);
+    harness
+        .tasks
+        .app
+        .service
+        .register_app(
+            harness.tasks.app.app_id(),
+            configured_policy(
+                3,
+                AppPolicy {
+                    lease_ms: 5_000,
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    harness.probe.mode.set(ExecutionMode::AfterRenewal);
     harness.tasks.lose_completion.set(true);
-    let mut slot = harness.slot(Duration::from_secs(5));
+    let mut slot = harness.slot(Duration::from_secs(15));
     let RunnerOutcome::Completed(receipt) = slot.run_once().await.unwrap() else {
         panic!("task must complete");
     };
     assert_eq!(receipt.run_id, harness.run);
     assert_eq!(harness.probe.count("execute"), 1);
-    assert!(harness.probe.count("heartbeat") > 0);
+    assert!(harness.probe.count("renewed") > 0);
     {
         let completions = harness.tasks.completions.borrow();
         assert_eq!(completions.len(), 2);
@@ -293,7 +311,7 @@ async fn sqlite_runner_renews_and_recovers_completion_without_reexecution() {
 #[compio::test]
 async fn postgres_runner_renews_and_recovers_completion_without_reexecution() {
     let fixture = PostgresFixture::start().await;
-    completion_contract(Harness::new(Arc::new(fixture.store.clone())).await).await;
+    completion_contract(Harness::new(Rc::new(fixture.store.clone())).await).await;
 }
 
 #[compio::test]

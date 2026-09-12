@@ -99,7 +99,7 @@ fn options() -> WorkerOptions {
     }
 }
 async fn host(
-    store: Arc<dyn WorkflowStore>,
+    store: Rc<OrmStore>,
     dir: &Path,
 ) -> (WorkflowService, AppWorkflows, Rc<Probe>, WorkflowWorker) {
     let (service, app, _) = registered_service(store).await;
@@ -131,17 +131,17 @@ async fn wait_for(mut condition: impl FnMut() -> bool) {
 #[compio::test]
 async fn sqlite_worker_runs_bounded_slots_and_retries_without_request_isolates() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    capacity_contract(Arc::new(SqliteStore::new(path)), dir.path()).await;
+    capacity_contract(Rc::new(sqlite_store(&path).await), dir.path()).await;
 }
 #[compio::test]
 async fn postgres_worker_runs_bounded_slots_and_retries_without_request_isolates() {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    capacity_contract(Arc::new(fixture.store.clone()), dir.path()).await;
+    capacity_contract(Rc::new(fixture.store.clone()), dir.path()).await;
 }
-async fn capacity_contract(store: Arc<dyn WorkflowStore>, dir: &Path) {
+async fn capacity_contract(store: Rc<OrmStore>, dir: &Path) {
     let (service, app, probe, mut worker) = host(store, dir).await;
     let mut runs = Vec::new();
     for _ in 0..6 {
@@ -312,10 +312,10 @@ async fn maintenance_while_busy(
 #[compio::test]
 async fn worker_shutdown_joins_executions_before_releasing_claims() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
     let (service, app, probe, mut worker) =
-        host(Arc::new(SqliteStore::new(path)), dir.path()).await;
+        host(Rc::new(sqlite_store(&path).await), dir.path()).await;
     for _ in 0..3 {
         app.start(&RequestId::mint(), "Example", StartOptions::default())
             .await
@@ -381,9 +381,9 @@ async fn worker_shutdown_joins_executions_before_releasing_claims() {
 #[compio::test]
 async fn stopped_worker_does_not_claim_new_work() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (_, app, probe, mut worker) = host(Arc::new(SqliteStore::new(path)), dir.path()).await;
+    let (_, app, probe, mut worker) = host(Rc::new(sqlite_store(&path).await), dir.path()).await;
     let run = app
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -396,9 +396,9 @@ async fn stopped_worker_does_not_claim_new_work() {
 #[compio::test]
 async fn worker_refuses_missing_storage_and_invalid_capacity_before_claiming() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _) = registered_service(Arc::new(SqliteStore::new(path))).await;
+    let (service, app, _) = registered_service(Rc::new(sqlite_store(&path).await)).await;
     let identity = WorkerIdentity::new("invalid-host".into()).unwrap();
     let executor = Rc::new(Executor(Rc::new(Probe::default())));
     assert!(WorkflowWorker::new(
