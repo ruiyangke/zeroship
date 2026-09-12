@@ -45,6 +45,8 @@ import {
 import { validateEncryptedFieldsInFilter } from "./encryption-fence";
 import { _maybeWarnUnindexedFilter } from "./index-warnings";
 
+export const TRANSACTION_READ = Symbol("@zeroship/db/transaction-read");
+
 export interface CrudCollectionInternals<
   S = PlainObject,
   N extends string = string,
@@ -55,14 +57,17 @@ export interface CrudCollectionInternals<
   _indexes: readonly NamedIndexSpec[];
   _knownFields: Set<string>;
   _idLoader: IdLoader<Row<S>, IdValue> | null;
-  _txDepth: number;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _toResultError(e: unknown): Error;
-  _loadById(id: IdValue, txDepthAtCall: number): Promise<Row<S> | null>;
+  _loadById(id: IdValue): Promise<Row<S> | null>;
   _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
-  _loadRelations(rows: PlainObject[], withSpec: WithSpec): Promise<void>;
+  _loadRelations(
+    rows: PlainObject[],
+    withSpec: WithSpec,
+    transactionScoped?: boolean,
+  ): Promise<void>;
 }
 
 /**
@@ -192,10 +197,10 @@ export function getCollection<
     unmask?: (string & keyof Row<S>)[];
     unmaskReason?: string;
     with?: WithSpec;
+    [TRANSACTION_READ]?: boolean;
   } = {},
 ): Promise<Result<Row<S> | null>> {
   trackCollectionAccess(self._name);
-  const txDepthAtCall = self._txDepth;
   const isBareId = isIdValue(idOrFilter);
   if (
     isBareId &&
@@ -205,9 +210,9 @@ export function getCollection<
     opts.actor === undefined &&
     opts.unmaskReason === undefined &&
     opts.with === undefined &&
-    txDepthAtCall === 0
+    opts[TRANSACTION_READ] !== true
   ) {
-    return self._run(() => self._loadById(idOrFilter, txDepthAtCall));
+    return self._run(() => self._loadById(idOrFilter));
   }
   return self._run(async () => {
     const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
@@ -245,7 +250,7 @@ export function getCollection<
     if (rows.length === 0) return null;
     const row = mapResultDoc(rows[0] as PlainObject, self._toField);
     if (opts.with !== undefined) {
-      await self._loadRelations([row], opts.with);
+      await self._loadRelations([row], opts.with, opts[TRANSACTION_READ] === true);
     }
     return row as Row<S>;
   });
@@ -258,7 +263,6 @@ export async function loadByIdCollection<
 >(
   self: CrudCollectionInternals<S, N, AllSchemas>,
   id: IdValue,
-  txDepthAtCall: number,
 ): Promise<Row<S> | null> {
   if (self._idLoader === null) {
     self._idLoader = new IdLoader<Row<S>, IdValue>(
@@ -276,10 +280,9 @@ export async function loadByIdCollection<
         }
         return map;
       },
-      () => self._txDepth,
     );
   }
-  return self._idLoader.load(id, txDepthAtCall);
+  return self._idLoader.load(id);
 }
 
 export async function existsCollection<
@@ -317,6 +320,7 @@ export function findCollection<
     unmask?: (string & keyof Row<S>)[];
     unmaskReason?: string;
     with?: WithSpec;
+    [TRANSACTION_READ]?: boolean;
   },
 ): Query<S, Row<S>, AllSchemas> {
   trackCollectionAccess(self._name);
@@ -334,7 +338,11 @@ export function findCollection<
     async (_col, f, fopts) => self._nativeCollection().find(f, fopts),
     self._toField,
     self._toColumn,
-    (rows, spec) => self._loadRelations(rows, spec),
+    (rows, spec) => self._loadRelations(
+      rows,
+      spec,
+      opts?.[TRANSACTION_READ] === true,
+    ),
     opts?.unmask !== undefined || opts?.actor !== undefined || opts?.unmaskReason !== undefined
       ? {
           unmask: opts.unmask?.map((f) => self._toColumn(f)),

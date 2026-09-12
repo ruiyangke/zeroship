@@ -1,6 +1,5 @@
 import type { NormalizedSchema } from "../schema";
 import type { Filter, IdValue, PlainObject, Result, WithSpec } from "../types";
-import { readTransactionDepth } from "../tx-state.js";
 import { identityKey, isIdentityForField } from "../identity.js";
 import { MAX_ID_BATCH } from "../membership-cap.js";
 
@@ -22,6 +21,7 @@ export async function loadRelations(
   self: RelationsCollectionInternals,
   rows: PlainObject[],
   withSpec: WithSpec,
+  transactionScoped = false,
 ): Promise<void> {
   if (rows.length === 0) return;
   const load = async ([field, spec]: [string, unknown]): Promise<void> => {
@@ -116,7 +116,7 @@ export async function loadRelations(
     }
   };
   const entries = Object.entries(withSpec);
-  if (readTransactionDepth(self) > 0) {
+  if (transactionScoped) {
     for (const entry of entries) await load(entry);
   } else {
     await Promise.all(entries.map(load));
