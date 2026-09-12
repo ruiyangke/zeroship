@@ -537,10 +537,9 @@ pub async fn validated_session(
         .expect("seed person")
         .get("id");
 
-    let dir = std::env::temp_dir().join(format!("zs-witness-keys-{tag}"));
-    std::fs::create_dir_all(&dir).expect("key dir");
-    let hash_path = dir.join("hash");
-    let idem_path = dir.join("idem");
+    let dir = tempfile::tempdir().expect("private witness keys");
+    let hash_path = dir.path().join("hash");
+    let idem_path = dir.path().join("idem");
     for (path, body) in [
         (
             &hash_path,
