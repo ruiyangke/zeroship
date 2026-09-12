@@ -1,7 +1,6 @@
 //! Build task isolates from retained code and a separately bound app context.
 
 use crate::{LoadedWorkflow, WorkflowBinding, WorkflowRuntimeLoader};
-use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
 use zeroship_bundle::LoadedWorker;
 use zeroship_runtime::{EnvSnapshot, ModuleEntry, NativePlugin, Runtime, RuntimeLimits};
@@ -54,9 +53,8 @@ impl AppRuntimeLoader {
     }
 }
 
-#[async_trait(?Send)]
 impl WorkflowRuntimeLoader for AppRuntimeLoader {
-    async fn load(
+    fn load(
         &self,
         assignment: &TaskAssignment,
         executable: &LoadedWorker,

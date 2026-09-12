@@ -1810,7 +1810,7 @@ mod tests {
                         runtime_descriptor: Some(RuntimeDescriptorEntry { hash: descriptor_hash.clone() }),
                         ..Manifest::default()
                     };
-                    let executable = crate::sync::load_executable(&manifest, &blobs).await.unwrap();
+                    let executable = crate::executable::load_executable(&manifest, &blobs).await.unwrap();
                     assert_eq!(executable.modules[0].specifier, "app/z-entry.js");
                     assert_eq!(serde_json::from_str::<serde_json::Value>(executable.descriptor.as_deref().unwrap()).unwrap(), serde_json::from_str::<serde_json::Value>(descriptor).unwrap());
                     if deployment == "original" {

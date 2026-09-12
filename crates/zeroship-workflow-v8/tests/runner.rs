@@ -70,9 +70,8 @@ struct Loader {
     cpu_limit: Option<Duration>,
     markers: Markers,
 }
-#[async_trait(?Send)]
 impl WorkflowRuntimeLoader for Loader {
-    async fn load(
+    fn load(
         &self,
         assignment: &TaskAssignment,
         executable: &LoadedWorker,
