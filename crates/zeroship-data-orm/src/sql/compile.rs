@@ -3090,7 +3090,9 @@ pub fn build_upsert_with_assignments(
     let mut params: Vec<Value> = Vec::new();
     let mut update_clauses = Vec::new();
 
-    for (key, value) in obj {
+    let mut fields: Vec<_> = obj.iter().collect();
+    fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    for (key, value) in fields {
         columns.push(quote_ident(key));
 
         if value.is_null() {
