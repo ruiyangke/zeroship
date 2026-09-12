@@ -33,21 +33,7 @@ mod backup_sqlite {
     };
     use zeroship_data_orm::error::DbError;
 
-    // The lock tag is IMPORTED, not redeclared. This module carried its own
-    // `const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore"` until
-    // 2026-09-02, whose doc comment said "It matches the PostgreSQL arm's
-    // shared tag" - an agreement between two string literals, held by hand and
-    // checked by nothing. `crate::backend::sqlite::backend` already exports the one both arms
-    // mean, and this module already imported five of its neighbours on the
-    // line above.
-
-    /// Parse a `file:///abs/path` URI into the underlying filesystem
-    /// path. Mirrors the PG arm's `parse_dest_path` shape so the SDK
-    /// error codes stay consistent across backends.
-    ///
-    /// SQLite supports only the `file://` scheme. Bare paths
-    /// (no scheme) are also accepted so operators can pass either
-    /// form. S3 / HTTPS surface as `backup_dest_uri_unsupported`.
+    /// Resolve a file URI or bare filesystem path for a snapshot artifact.
     fn parse_dest_path(dest_uri: &str) -> Result<PathBuf, DbError> {
         if let Some(rest) = dest_uri.strip_prefix("file://") {
             Ok(PathBuf::from(rest))
@@ -56,14 +42,9 @@ mod backup_sqlite {
                 code: "backup_dest_uri_unsupported",
                 message: format!(
                     "snapshot destination URI {dest_uri:?} uses an unsupported scheme; \
-                     P5 PR 5 (SQLite) ships `file://` only — S3/HTTPS land alongside the \
-                     production BlobStore wire-through in a later PR"
+                     snapshots require a file URI or bare filesystem path"
                 ),
-                hint: Some(
-                    "use `file:///abs/path/to/snapshot.sqlite` in P5 PR 5; \
-                     S3/R2 destinations are deferred"
-                        .to_string(),
-                ),
+                hint: Some("use `file:///abs/path/to/snapshot.sqlite`".to_string()),
             })
         } else {
             Ok(PathBuf::from(dest_uri))
@@ -396,16 +377,4 @@ mod backup_sqlite {
         Ok(())
     }
 
-    // There is no `pitr_replay` helper because there is no longer a
-    // `pitr_replay`. It was deleted on 2026-09-07 together with the trait
-    // method; neither backend could replay, and the reason is recorded once, in
-    // `zeroship_data_orm::storage::Backup`'s rustdoc, rather than in a comment
-    // per arm.
-    //
-    // Two earlier homes for that sentence are worth not repeating: an empty
-    // `fn _pitr_marker(PitrTarget) {}` under `#[allow(dead_code)]` (deleted
-    // 2026-09-04), and the refusal arm itself. A no-op function is a bad home
-    // for a sentence about why code is ABSENT, because it compiles and so reads
-    // as a mechanism; a refusal arm is a worse one, because it reads as a
-    // deliberate per-vendor divergence when the capability was absent on both.
 }

@@ -383,7 +383,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
                 args,
             )
             .await
-            .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
+            .expect_err("dispatch_unmask must refuse an actor denied by policy");
             match err {
                 zeroship_data_orm::error::DbError::Coded { code, .. } => {
                     assert_eq!(code, "unmask_not_permitted");

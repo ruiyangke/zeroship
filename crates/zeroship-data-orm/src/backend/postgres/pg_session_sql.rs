@@ -82,10 +82,6 @@ pub(crate) fn autocommit_local_session_setup_sql(schema: &SchemaName) -> Result<
 mod tests {
     use super::*;
 
-    // The three tests below moved verbatim from `auth/bootstrap.rs` with the
-    // functions they cover, on 2026-09-01. A test that stays behind when its
-    // subject moves is how a module ends up asserting things it no longer owns.
-
     fn demo_schema() -> SchemaName {
         SchemaName::new("app_demo").expect("fixture schema name")
     }
@@ -112,13 +108,8 @@ mod tests {
 
     #[test]
     fn autocommit_local_session_setup_bounds_statement_time_via_set_local() {
-        // P2-C1 + DB-1: the pooled autocommit path is pool-bounded (8) but a
-        // slow statement still pins one of those shared connections -- bound it
-        // with a statement_timeout. Crucially every value is `SET LOCAL`, run
-        // inside an explicit transaction, so role + timeouts auto-revert at
-        // COMMIT/ROLLBACK (including rollback-on-drop on cancellation) and can
-        // never leak to the next checkout. No idle-in-tx guard — the wrapping
-        // transaction commits around a single statement and never sits idle.
+        // The short transaction bounds the statement and keeps every setting
+        // scoped to this pool lease.
         let setup = autocommit_local_session_setup_sql(&demo_schema()).unwrap();
         assert!(
             setup.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
@@ -157,9 +148,7 @@ mod tests {
         }
     }
 
-    /// Every value must be `SET LOCAL`. A bare `SET` would survive COMMIT and
-    /// ride the pooled connection to the next tenant - the leak class P2-C1
-    /// removed.
+    /// Every value must be transaction scoped so it cannot survive pool reuse.
     #[test]
     fn every_setting_is_transaction_scoped() {
         for sql in [
