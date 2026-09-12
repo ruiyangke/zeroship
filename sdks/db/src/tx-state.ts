@@ -1,6 +1,7 @@
 import type { IdLoader } from "./loader";
+import type { IdValue } from "./types";
 
-type LoaderRow = { id: string };
+type LoaderRow = { id: IdValue };
 
 /**
  * Internal JS-only transaction bookkeeping carried by each Collection.
