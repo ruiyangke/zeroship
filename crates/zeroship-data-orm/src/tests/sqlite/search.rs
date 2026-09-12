@@ -716,7 +716,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                     app,
                     crate::sql::compile::SqlDialect::Sqlite,
                 )
-                .bind(handle.clone()),
+                .bind(handle.clone())
+                .unwrap(),
             )
             .await;
             assert!(
@@ -731,7 +732,8 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                     app,
                     crate::sql::compile::SqlDialect::Sqlite,
                 )
-                .bind(handle.clone()),
+                .bind(handle.clone())
+                .unwrap(),
             )
             .await;
             assert_eq!(

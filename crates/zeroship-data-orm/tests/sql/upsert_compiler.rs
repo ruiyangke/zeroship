@@ -2,6 +2,7 @@ use zeroship_data_orm::{
     sql::{
         CompareOp, Ident, IdentRole, SchemaName,
         compiler::{CompileError, PostgresCompiler, Requirements, SqlCompiler, SqliteCompiler},
+        registration::{SqlRegistration, SqlStorageCodecs},
         statement::{
             Assignment, Comparison, Expression, ReturnedColumn, Statement, StorageType, Table,
             Upsert, UpsertParts,
@@ -195,4 +196,70 @@ fn statement_compilation_moves_buffers_and_keeps_values_out_of_sql() {
         assert!(!query.sql().contains("DROP TABLE"));
         assert!(!format!("{query:?}").contains("DROP TABLE"));
     }
+}
+
+#[derive(Clone, Copy)]
+struct DownstreamCompiler;
+
+impl SqlCompiler for DownstreamCompiler {
+    fn support(&self) -> zeroship_data_orm::sql::compiler::SqlSupport {
+        PostgresCompiler.support()
+    }
+
+    fn check(
+        &self,
+        requirements: &Requirements,
+        effective: &zeroship_data_orm::sql::compiler::SqlSupport,
+    ) -> Result<(), CompileError> {
+        PostgresCompiler.check(requirements, effective)
+    }
+
+    fn compile(
+        &self,
+        statement: Statement,
+        effective: &zeroship_data_orm::sql::compiler::SqlSupport,
+    ) -> Result<zeroship_data_orm::sql::compiler::CompiledQuery, CompileError> {
+        PostgresCompiler.compile(statement, effective)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct DownstreamCodecs;
+
+impl SqlStorageCodecs for DownstreamCodecs {
+    fn storage_type(&self, _: &Value) -> Result<StorageType, CompileError> {
+        Ok(StorageType::Integer)
+    }
+
+    fn encode(&self, _: StorageType, value: Value) -> Result<Value, CompileError> {
+        Ok(value)
+    }
+
+    fn decode(&self, _: StorageType, value: Value) -> Result<Value, CompileError> {
+        Ok(value)
+    }
+}
+
+#[test]
+fn a_downstream_compiler_and_codecs_register_without_a_vendor_enum_arm() {
+    let registration = SqlRegistration::new(
+        "fixture-sql",
+        zeroship_data_orm::sql::compile::SqlDialect::Postgres,
+        DownstreamCompiler,
+        DownstreamCodecs,
+        DownstreamCompiler.support(),
+    )
+    .unwrap();
+    assert_ne!(
+        registration.identity(),
+        SqlRegistration::builtin(zeroship_data_orm::sql::compile::SqlDialect::Postgres).identity()
+    );
+    assert_eq!(
+        registration
+            .compile(Statement::Upsert(Upsert::new(parts(&table())).unwrap()))
+            .unwrap()
+            .params()
+            .len(),
+        3
+    );
 }

@@ -4,13 +4,13 @@
 //! the request's identity, actor, read set and transaction route synchronously;
 //! execution can then yield without consulting another request's context.
 
+pub use crate::value::Value;
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::cdc::ChangeOp;
 pub use zeroship_data_orm::error::DbError;
-pub use crate::value::Value;
 
-use crate::{backend::BackendHandle, sql::compiler::CompiledQuery, crud, tx_route::CapturedRoute};
+use crate::{backend::BackendHandle, crud, sql::compiler::CompiledQuery, tx_route::CapturedRoute};
 
 /// A database connection bound to an app deployment.
 #[derive(Clone, Debug)]
@@ -131,7 +131,7 @@ impl Database {
         self.context
             .scope(async {
                 self.check_scope()?;
-                let route = self.capture_route().bind(self.backend.clone());
+                let route = self.capture_route().bind(self.backend.clone())?;
                 let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
                 let active = Rc::new(Cell::new(true));
                 let _guard = ScopeGuard(active.clone());
@@ -156,7 +156,8 @@ impl Database {
             self.transaction_scope.as_ref(),
             self.binding.app_id(),
             self.binding.schema().clone(),
-            self.backend.dialect(),
+            self.backend.sql_registration().clone(),
+            self.backend.connection_identity(),
         )
     }
 }
@@ -353,9 +354,9 @@ pub mod read;
 pub use read::{ReadJoin, ReadProjection, ReadQuery, ReadSource};
 mod read_builder;
 mod read_input;
+pub use crate::value::Record;
 pub use read_builder::*;
 pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
-pub use crate::value::Record;
 
 /// Implementation support for generated metadata.
 #[doc(hidden)]
@@ -636,12 +637,7 @@ impl PreparedOperation {
             actor_id,
             plan,
         } = self;
-        if route.dialect() != backend.dialect() {
-            return Err(DbError::internal(
-                "ORM backend does not match the prepared dialect",
-            ));
-        }
-        let route = route.bind(backend);
+        let route = route.bind(backend)?;
         let result = match plan {
             Plan::Read(plan) => Box::pin(plan.execute(&binding, &route)).await?,
             Plan::Find { filter, plan } => {

@@ -1,25 +1,26 @@
 use super::*;
-use zeroship_data_orm::encryption::ProjectKeySource;
 use crate::value;
+use zeroship_data_orm::encryption::ProjectKeySource;
 
 schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
 mod bulk;
 mod calendar_date;
+mod encrypted_upsert;
 mod fixtures;
 mod generated_identity;
 mod identity;
 mod identity_contract;
 mod identity_visibility;
-mod encrypted_upsert;
 mod joins;
 mod json;
 mod lifecycle;
 mod nested_temporal;
-mod protected_updates;
 mod protected_projections;
+mod protected_updates;
 mod schema_updates;
+mod sql_registration;
 mod timestamp;
 mod typed_arrays;
 mod typed_updates;
@@ -720,7 +721,8 @@ async fn caught_statement_failure_cannot_commit_a_poisoned_transaction() {
 #[compio::test]
 async fn preparation_rejects_a_route_for_another_database() {
     let (db, _directory) = database().await;
-    let route = CapturedRoute::pool_for_tests("another_app", crate::sql::compile::SqlDialect::Sqlite);
+    let route =
+        CapturedRoute::pool_for_tests("another_app", crate::sql::compile::SqlDialect::Sqlite);
     let result = PreparedOperation::new(
         db.binding.clone(),
         "posts",
@@ -806,7 +808,10 @@ impl crate::executor::ScopedExecutor for RegisteredBackend {
 }
 #[async_trait::async_trait(?Send)]
 impl crate::protection::Catalog for RegisteredBackend {
-    async fn introspect_schema(&self, app_id: &str) -> Result<crate::sql::catalog::LiveSchema, DbError> {
+    async fn introspect_schema(
+        &self,
+        app_id: &str,
+    ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
         self.inner.introspect_schema(app_id).await
     }
 }
