@@ -615,28 +615,7 @@ mod tests {
 
     /// Minting must refuse an app id that is not a legal schema name.
     ///
-    /// `binding_for_isolate` used to stamp the app id into a `DbBinding` with no
-    /// validation at all, so a name `zeroship_data_orm::sql::compile::validate_schema`
-    /// rejected survived the mint. The refusal surfaced only LATER and only PER
-    /// OPERATION, inside the query builder, as `QueryError::InvalidCollection`
-    /// -- so an isolate could hold a live `env.db` whose every operation was
-    /// doomed, and nothing said so at the moment the binding was created.
-    ///
-    /// That deferral is what made the app-id/schema-name conflation invisible.
-    /// One string is today both the tenant identity and the physical schema
-    /// name; the mint is the one place that can refuse a value which is illegal
-    /// as a SCHEMA while perfectly legal as a TENANT id. Validating at the mint
-    /// is what forces the two meanings apart.
-    ///
-    /// **THE DEFERRED REFUSAL IS NOW UNREACHABLE, WHICH IS THE POINT.** The
-    /// builders take a [`zeroship_data_orm::sql::SchemaName`], so the control below
-    /// asserts the refusal where it now lives - at construction - rather than at
-    /// a per-operation `build_find_with_schema` that can no longer be handed an
-    /// illegal name.
-    ///
-    /// WHAT THIS DOES NOT CATCH: it pins the refusal, not the channel. If the
-    /// mint later reports the refusal by some route other than `None`, this test
-    /// needs rewriting rather than deleting.
+    /// Invalid physical schema names are refused before a binding is installed.
     #[test]
     fn mint_refuses_an_app_id_that_is_not_a_legal_schema_name() {
         // A double quote is the character that makes `quote_ident`'s escaping
@@ -650,9 +629,9 @@ mod tests {
         assert!(
             matches!(
                 refused,
-                Err(zeroship_data_orm::sql::compile::QueryError::InvalidCollection(_))
+                Err(zeroship_core::schema_name::SchemaNameError::Invalid(_))
             ),
-            "control: the fixture must be a name validate_schema rejects, got {refused:?}"
+            "control: SchemaName must reject the fixture, got {refused:?}"
         );
 
         // THE PROPERTY: the mint refuses it, rather than handing back a binding
