@@ -4,7 +4,7 @@ use super::{
         mint_signal_capability, verify_signal_capability, CapabilityToken, SignalGrant,
         SignalTarget, WORKFLOW_AUDIENCE,
     },
-    signals,
+    models, signals,
     store::Transaction,
     types::digest,
     AppWorkflows, RequestId, WorkflowService,
@@ -15,6 +15,10 @@ use std::{collections::BTreeSet, sync::Arc};
 use zeroship_core::{
     app_id::AppId,
     service_assertion::{ServiceIssuer, ServiceSigningKey, ServiceTrustBundle},
+};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions},
+    value,
 };
 
 pub struct SignalAuthority {
@@ -161,28 +165,31 @@ impl AppWorkflows {
         })?;
         match target {
             Some(SignalTarget::Run { run_id }) => {
-                let runs = tx.table("runs");
-                tx.execute(
-                    &format!("UPDATE {runs} SET signal_epoch=$3 WHERE app_id=$1 AND id=$2"),
-                    &[self.app.as_str().into(), run_id.into(), epoch.into()],
-                )
-                .await?;
+                tx.database()
+                    .collection(models::runs::Entity::COLLECTION)?
+                    .update(
+                        value!({"app_id":self.app.as_str(), "id":run_id}),
+                        value!({"signal_epoch":epoch}),
+                    )
+                    .await?;
             }
             Some(SignalTarget::Topic { topic }) => {
-                let topics = tx.table("topics");
-                tx.execute(
-                    &format!("UPDATE {topics} SET signal_epoch=$3 WHERE app_id=$1 AND topic=$2"),
-                    &[self.app.as_str().into(), topic.into(), epoch.into()],
-                )
-                .await?;
+                tx.database()
+                    .collection(models::topics::Entity::COLLECTION)?
+                    .update(
+                        value!({"app_id":self.app.as_str(), "topic":topic}),
+                        value!({"signal_epoch":epoch}),
+                    )
+                    .await?;
             }
             None => {
-                let apps = tx.table("app_state");
-                tx.execute(
-                    &format!("UPDATE {apps} SET signal_epoch=$2 WHERE app_id=$1"),
-                    &[self.app.as_str().into(), epoch.into()],
-                )
-                .await?;
+                tx.database()
+                    .collection(models::app_state::Entity::COLLECTION)?
+                    .update(
+                        value!({"app_id":self.app.as_str()}),
+                        value!({"signal_epoch":epoch}),
+                    )
+                    .await?;
             }
         }
         let result = RevokedSignals { epoch };
@@ -274,16 +281,21 @@ fn authority(service: &WorkflowService) -> Result<Arc<SignalAuthority>, Workflow
     })
 }
 async fn app_epoch(tx: &mut Transaction, app: &AppId) -> Result<i64, WorkflowServiceError> {
-    let apps = tx.table("app_state");
     let rows = tx
-        .query(
-            &format!("SELECT signal_epoch FROM {apps} WHERE app_id=$1"),
-            &[app.as_str().into()],
+        .database()
+        .entity::<models::app_state::Entity>()?
+        .find::<models::AppSignalEpoch>(
+            models::app_state::app_id.eq(app.as_str())?,
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
         )
         .await?;
-    rows.first()
+    Ok(rows
+        .first()
         .ok_or_else(|| WorkflowServiceError::NotFound("workflow app not found".into()))?
-        .integer("signal_epoch")
+        .signal_epoch)
 }
 async fn target_epoch(
     tx: &mut Transaction,
@@ -307,12 +319,24 @@ async fn target_epoch(
             let topics = tx.table("topics");
             tx.execute(&format!("INSERT INTO {topics} (app_id,topic,signal_epoch) VALUES ($1,$2,0) ON CONFLICT (app_id,topic) DO NOTHING"), &[app.as_str().into(),topic.clone().into()]).await?;
             let rows = tx
-                .query(
-                    &format!("SELECT signal_epoch FROM {topics} WHERE app_id=$1 AND topic=$2"),
-                    &[app.as_str().into(), topic.clone().into()],
+                .database()
+                .entity::<models::topics::Entity>()?
+                .find::<models::TopicSignalEpoch>(
+                    models::topics::app_id
+                        .eq(app.as_str())?
+                        .and(models::topics::topic.eq(topic.as_str())?),
+                    FindOptions {
+                        limit: Some(1),
+                        ..Default::default()
+                    },
                 )
                 .await?;
-            rows[0].integer("signal_epoch")
+            Ok(rows
+                .first()
+                .ok_or_else(|| {
+                    WorkflowServiceError::Internal("workflow signal topic is missing".into())
+                })?
+                .signal_epoch)
         }
     }
 }

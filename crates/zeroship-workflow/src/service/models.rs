@@ -12,7 +12,8 @@ pub use journal::{
     __zeroship_workflow_runs as runs, __zeroship_workflow_schedules as schedules,
     __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_signals as signals,
     __zeroship_workflow_steps as steps, __zeroship_workflow_subscriptions as subscriptions,
-    __zeroship_workflow_tasks as tasks, __zeroship_workflow_waits as waits,
+    __zeroship_workflow_tasks as tasks, __zeroship_workflow_topics as topics,
+    __zeroship_workflow_waits as waits,
 };
 
 #[derive(FromRow)]
@@ -120,6 +121,18 @@ pub struct TaskRecord {
 #[orm(entity = app_state)]
 pub struct SubscriptionSequence {
     pub subscription_sequence: i64,
+}
+
+#[derive(FromRow)]
+#[orm(entity = app_state)]
+pub struct AppSignalEpoch {
+    pub signal_epoch: i64,
+}
+
+#[derive(FromRow)]
+#[orm(entity = topics)]
+pub struct TopicSignalEpoch {
+    pub signal_epoch: i64,
 }
 
 #[derive(FromRow)]

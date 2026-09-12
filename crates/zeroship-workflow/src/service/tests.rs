@@ -23,6 +23,7 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
 
 mod background_scope;
 mod frontier_models;
+mod ingress_models;
 mod journal_models;
 mod orm;
 mod output_reads;
