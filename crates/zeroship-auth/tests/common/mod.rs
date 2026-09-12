@@ -18,6 +18,7 @@
 
 pub mod mock_control;
 pub mod mock_provider;
+pub mod database;
 
 use std::sync::Arc;
 
