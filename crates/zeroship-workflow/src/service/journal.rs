@@ -12,7 +12,7 @@ use crate::{
 use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation},
+    orm::{Entity, FindOptions, Operation, Output},
     sql::{Predicate, RowLimit},
     value,
 };
@@ -320,7 +320,10 @@ pub(crate) async fn resolve(
             output = Some(Value::Null);
         }
         if step.kind == "wait_signal" {
-            let signals = tx.table("signals");
+            let signals = tx
+                .database()
+                .entity::<models::signals::Entity>()?
+                .alias("s")?;
             let oldest = step
                 .max_signal_age_ms
                 .map(|age| now.saturating_sub(age))
@@ -328,25 +331,64 @@ pub(crate) async fn resolve(
             let latest = step
                 .wake_at
                 .map_or(now, |due| due.timestamp_millis().min(now));
-            let rows=tx.query(&format!("SELECT id,payload,created_at,origin,delivery,topic FROM {signals} WHERE app_id=$1 AND run_id=$2 AND signal_type=$3 AND consumed_generation IS NULL AND created_at >= $4 AND created_at <= $5 AND (target_generation IS NULL OR (target_generation=$6 AND target_ordinal=$7)) ORDER BY created_at,id LIMIT 1"),
-                &[app.as_str().into(),id.clone().into(),step.signal_type.clone().into(),oldest.into(),latest.into(),generation.into(),i64::from(step.ordinal).into()]).await?;
+            let signal_type = step.signal_type.as_deref().ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow signal wait has no type".into())
+            })?;
+            let rows = tx
+                .database()
+                .from(&signals)
+                .filter(Predicate::And(vec![
+                    signals.column(models::signals::app_id).eq(app.as_str())?,
+                    signals.column(models::signals::run_id).eq(id.as_str())?,
+                    signals
+                        .column(models::signals::signal_type)
+                        .eq(signal_type)?,
+                    signals
+                        .column(models::signals::consumed_generation)
+                        .eq(None::<i64>)?,
+                    signals.column(models::signals::created_at).gte(oldest)?,
+                    signals.column(models::signals::created_at).lte(latest)?,
+                    Predicate::Or(vec![
+                        signals
+                            .column(models::signals::target_generation)
+                            .eq(None::<i64>)?,
+                        Predicate::And(vec![
+                            signals
+                                .column(models::signals::target_generation)
+                                .eq(Some(generation))?,
+                            signals
+                                .column(models::signals::target_ordinal)
+                                .eq(Some(i64::from(step.ordinal)))?,
+                        ]),
+                    ]),
+                ]))
+                .order_by(signals.column(models::signals::created_at).asc())
+                .order_by(signals.column(models::signals::id).asc())
+                .select(signals.row::<models::SignalMessage>())?
+                .limit(1)?
+                .all()
+                .await?;
             if let Some(signal) = rows.first() {
-                let signal_id = signal.text("id")?;
-                let created_at =
-                    chrono::DateTime::from_timestamp_millis(signal.integer("created_at")?)
-                        .ok_or_else(|| {
-                            WorkflowServiceError::Internal(
-                                "invalid workflow signal timestamp".into(),
-                            )
-                        })?;
+                let signal_id = signal.id.clone();
+                let created_at = chrono::DateTime::from_timestamp_millis(signal.created_at)
+                    .ok_or_else(|| {
+                        WorkflowServiceError::Internal("invalid workflow signal timestamp".into())
+                    })?;
                 output = Some(json!({
-                    "id":signal_id,"type":step.signal_type,"payload":decode::<Value>(&signal.text("payload")?)?,
-                    "createdAt":created_at.to_rfc3339(),"origin":signal.text("origin")?,
-                    "delivery":signal.text("delivery")?,"topic":signal.optional_text("topic")?,
+                    "id":signal_id,"type":step.signal_type,"payload":decode::<Value>(&signal.payload)?,
+                    "createdAt":created_at.to_rfc3339(),"origin":signal.origin,
+                    "delivery":signal.delivery,"topic":signal.topic,
                 }));
                 step.consumed_signal_id = Some(signal_id.clone());
-                tx.execute(&format!("UPDATE {signals} SET consumed_generation=$3,consumed_ordinal=$4 WHERE app_id=$1 AND id=$2 AND run_id=$5 AND consumed_generation IS NULL"),
-                    &[app.as_str().into(),signal_id.into(),generation.into(),i64::from(step.ordinal).into(),id.clone().into()]).await?;
+                let consumed = tx.database().collection(models::signals::Entity::COLLECTION)?.execute(Operation::Update {
+                    filter:value!({"app_id":app.as_str(), "id":signal_id, "run_id":id.clone(), "consumed_generation":null}),
+                    patch:value!({"consumed_generation":generation, "consumed_ordinal":i64::from(step.ordinal)}), many:true,
+                }).await?;
+                if !matches!(consumed, Output::Count(1)) {
+                    return Err(WorkflowServiceError::Conflict(
+                        "workflow signal was already consumed".into(),
+                    ));
+                }
             } else if expired {
                 output = Some(Value::Null);
             }
