@@ -128,16 +128,7 @@ export function mapOptimisticConcurrencyError(
   return e instanceof Error ? e : new Error(String(e));
 }
 
-/**
- * **P9 PR 1** — `Query.unique()` raised this when zero matches resolved
- * against the strict-exactly-one terminal. Mirrors `ValidationError` /
- * `OptimisticLockError`'s shape: a `.name` set for `instanceof` flow, a
- * stable `.code` string app code can branch on, plus the collection
- * name for log/diagnostic messages.
- *
- * Use `find(filter).first()` instead if a missing row is a normal
- * outcome — `.first()` returns `null`, never throws.
- */
+/** `Query.unique()` found no matching row. */
 export class NotFoundError extends Error {
   name = "NotFoundError";
   code = "NOT_FOUND" as const;
@@ -158,23 +149,13 @@ export class NotFoundError extends Error {
   }
 }
 
-/**
- * **P9 PR 1** — `Query.unique()` raised this when more than one row
- * resolved against the strict-exactly-one terminal. Includes the actual
- * count (capped at 2 — the query is `LIMIT 2`) so `e.count === 2` is
- * the canonical signal for "ambiguous match".
- *
- * Use `find(filter).first()` if the caller is happy with any single
- * matching row; `.unique()` is for "this filter must identify EXACTLY
- * one row" assertions (a unique-constraint enforced lookup).
- */
+/** `Query.unique()` found multiple matching rows. */
 export class NotUniqueError extends Error {
   name = "NotUniqueError";
   code = "NOT_UNIQUE" as const;
   readonly [NOT_UNIQUE_ERROR_BRAND] = true;
   collection?: string;
-  /** Number of rows the query observed (capped at 2 by the `LIMIT 2`
-   *  the terminal applies). */
+  /** Number of rows observed before the ambiguity was established. */
   count: number;
 
   static [Symbol.hasInstance](value: unknown): boolean {
@@ -192,13 +173,7 @@ export class NotUniqueError extends Error {
   }
 }
 
-/**
- * **P9 PR 1** — raised when a Query terminal is called in a state that
- * doesn't make sense. Today the only producer is `Query.last()` invoked
- * without a `.sort(...)` clause: "last" is meaningless without an
- * ordering, so the terminal refuses upfront rather than silently
- * returning whatever the storage layer hands back.
- */
+/** A query terminal was called without the state it requires. */
 export class InvalidOperationError extends Error {
   name = "InvalidOperationError";
   readonly [INVALID_OPERATION_ERROR_BRAND] = true;

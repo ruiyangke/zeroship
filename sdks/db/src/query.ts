@@ -18,6 +18,7 @@ import {
   type Actor,
   type IdValue,
   type RowId,
+  type SortSpec,
   type WithRelations,
   type WithSpec,
   ok,
@@ -207,7 +208,7 @@ export class Query<
    * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
    * String: `"field"` for ASC, `"-field"` for DESC. Multiple: `"-created_at name"`.
    */
-  sort(s: Record<string, number> | string): this {
+  sort(s: SortSpec<S> | string): this {
     if (typeof s === "string") {
       const obj: Record<string, number> = {};
       for (const part of s.split(/\s+/).filter(Boolean)) {
@@ -219,7 +220,7 @@ export class Query<
       }
       this._sort = obj;
     } else {
-      this._sort = s;
+      this._sort = s as Record<string, number>;
     }
     return this;
   }
@@ -497,17 +498,7 @@ export class Query<
     return (terms.length === 1 ? terms[0] : { $or: terms }) as ZeroshipDbFilter;
   }
 
-  /**
-   * **P9 PR 1** — terminal returning the first matching row, or `null`
-   * when the query has no result. Loose semantics: a missing row is a
-   * normal outcome, not an error. Mirrors what `Collection.findOne`
-   * used to do — drop the old method's behaviour onto the Query
-   * builder.
-   *
-   * Implementation: applies `LIMIT 1` over the current query state and
-   * unwraps the single-row array. The orderBy / select / with / cursor
-   * settings carry through unchanged.
-   */
+  /** Return the first matching row, or `null`. */
   async first(): Promise<Result<P | null>> {
     const prevLimit = this._limit;
     this._limit = 1;
@@ -521,17 +512,7 @@ export class Query<
     }
   }
 
-  /**
-   * **P9 PR 1** — strict terminal: exactly one matching row required.
-   * Returns `err(NotFoundError)` on 0 matches and `err(NotUniqueError)`
-   * on >1 matches. Use this for unique-constraint enforced lookups
-   * (e.g. `find({ email }).unique()` against a `.unique()` column)
-   * where ambiguity is a contract violation, not a normal outcome.
-   *
-   * Implementation: `LIMIT 2` so we can detect "more than one" without
-   * dragging the whole table; if exactly one row materialises, resolve
-   * with it.
-   */
+  /** Return one row, failing when none or multiple rows match. */
   async unique(): Promise<Result<P>> {
     const prevLimit = this._limit;
     this._limit = 2;
@@ -551,16 +532,7 @@ export class Query<
     }
   }
 
-  /**
-   * **P9 PR 1** — terminal returning the last matching row in the
-   * current sort, or `null` when there are no matches. Implemented by
-   * reversing the configured `.sort(...)` and taking the first row;
-   * the original sort is restored before returning.
-   *
-   * Throws `InvalidOperationError("LAST_REQUIRES_SORT")` (as
-   * `err(...)`) if no sort was set on the query — "last" without an
-   * ordering would return arbitrary rows from the storage layer.
-   */
+  /** Return the last row in the configured order, or fail when no order is set. */
   async last(): Promise<Result<P | null>> {
     if (this._sort === undefined || Object.keys(this._sort).length === 0) {
       return err(

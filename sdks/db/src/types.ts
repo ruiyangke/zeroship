@@ -250,6 +250,69 @@ export type Filter<S> = FieldFilters<S> & {
   $not?: Filter<S>;
 };
 
+type SortableBuilder<F> = F extends {
+  readonly _encryption: infer E;
+  readonly _mask: infer M;
+  readonly _filterKind: infer K;
+}
+  ? true extends E
+    ? false
+    : M extends Exclude<MaskKind, "none">
+      ? true
+      : K extends "text" | "ordered"
+        ? true
+        : false
+  : false;
+
+type DistinctBuilder<F> = F extends {
+  readonly _encryption: infer E;
+  readonly _filterKind: infer K;
+}
+  ? true extends E
+    ? false
+    : K extends "json" | "search"
+      ? false
+      : true
+  : false;
+
+/** Fields with the same order on every supported database. */
+export type SortableField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: SortableBuilder<NonNullable<S[K]>> extends true ? K : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends
+          | string
+          | number
+          | bigint
+          | MaskedValue<string | number | bigint | Uint8Array>
+          ? K
+          : never;
+      }[keyof Row<S>] | "id");
+
+/** Fields with portable database equality for grouping and deduplication. */
+export type DistinctField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: DistinctBuilder<NonNullable<S[K]>> extends true ? K : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends
+          | string
+          | number
+          | bigint
+          | boolean
+          | Uint8Array
+          | MaskedValue<string | number | bigint | Uint8Array>
+          ? K
+          : never;
+      }[keyof Row<S>] | "id");
+
+export type SortSpec<S> = Partial<Record<SortableField<S>, 1 | -1>>;
+
 // ---------------------------------------------------------------------------
 // Update expression types — typed operators per field type
 // ---------------------------------------------------------------------------
@@ -449,7 +512,7 @@ export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json
  *
  * No raw user-defined JS functions for masking — they would let an
  * AI-generated `mask: v => v` defeat the purpose. Adding a new
- * mask kind is a platform PR, not creator config.
+ * mask kind requires a platform release.
  */
 export type MaskKind =
   | "full"
@@ -462,9 +525,7 @@ export type MaskKind =
   | "none";
 
 /**
- * sensitivity classification used by the unmask
- * authorization (PR 4) and audit (PR 4) machinery. Mirrors
- * `crate::diff::Classification` on the Rust side.
+ * Sensitivity classification used for unmask authorization and auditing.
  *
  * - `public`   — usernames, display names, public profile data.
  * - `pii`      — full name, email, address, phone, IP, date of birth.
@@ -492,7 +553,6 @@ export type Classification =
  *
  * - `kind`            — required. The mask transform; see {@link MaskKind}.
  * - `classification`  — optional. Defaults to `"pii"` when omitted.
- *                       Drives unmask authorization (PR 4).
  */
 export interface MaskOpts {
   kind: MaskKind;
@@ -531,12 +591,7 @@ export interface MaskedValueRepr {
   sentinel: "__zsmask__";
 }
 
-/**
- * opaque actor descriptor passed to
- * `MaskedValue.unmask({ actor? })`. PR 4 will wire the round-trip
- * through the unmask RPC; today the type stays minimal (any plain
- * object) so PR 5 (`defineMaskPolicy`) can land the concrete shape.
- */
+/** Actor descriptor passed to unmask authorization. */
 export type Actor = Record<string, unknown>;
 
 /**
@@ -1134,11 +1189,7 @@ export class TypeBuilder<
         { code: "MASK_INVALID_CLASSIFICATION" as const },
       );
     }
-    // `t.ref()` columns must not carry a mask — see Q-P5-I in the
-    // sensitive-field-masking proposal. The FK column is an integer
-    // typed id; masking it would defeat the JOIN integrity check
-    // and the sibling column would itself participate in the FK
-    // semantics (incoherent).
+    // Reference columns must remain visible to foreign-key joins.
     if (this._def.type === "ref") {
       throw Object.assign(
         new Error(
@@ -1380,8 +1431,8 @@ export const t = {
   },
   /**
    * geographic point field (WGS84, EPSG:4326). Stored as
-   * PostGIS's `geography(POINT, 4326)` column on PG; on SQLite (P4 PR 5)
-   * a `BLOB` packed `(lat, lng)` × `f64` = 16 bytes.
+   * PostGIS's `geography(POINT, 4326)` column on PostgreSQL and as a packed
+   * coordinate pair on SQLite.
    *
    * ```ts
    * const fields = {

@@ -20,6 +20,7 @@ import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
 import type {
   Actor,
   Filter,
+  DistinctField,
   Id,
   IdValue,
   RowId,
@@ -29,6 +30,7 @@ import type {
   Result,
   Row,
   RowInput,
+  SortSpec,
   UpsertOptions,
   UpdateExpression,
   WithRelations,
@@ -247,9 +249,7 @@ export class Collection<
     if (this._nativeCol) return this._nativeCol;
     this._nativeCol = requireNativeCollection(this._native, this._name, {
       code: "NATIVE_COLLECTION_UNAVAILABLE",
-      message:
-        "@zeroship/db: env.db.collection(name) not available — " +
-        "runtime is missing the Collection v8_class surface.",
+      message: "@zeroship/db: env.db.collection(name) is unavailable",
     });
     return this._nativeCol;
   }
@@ -295,22 +295,22 @@ export class Collection<
 
   async get<K extends string & keyof Row<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
+    opts: { select: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
   async get<W extends WithSpec>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
+    opts: { with: W; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
+    opts?: { orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<Row<S> | null>>;
   async get(
     idOrFilter: RowId<S> | Filter<S>,
     opts: {
       actor?: Actor;
       select?: (string & keyof Row<S>)[];
-      orderBy?: Record<string, 1 | -1>;
+      orderBy?: SortSpec<S>;
       unmask?: (string & keyof Row<S>)[];
       unmaskReason?: string;
       with?: WithSpec;
@@ -403,10 +403,10 @@ export class Collection<
     return countCollection(this._crud(), filter);
   }
 
-  async distinct(
-    field: string & keyof Row<S>,
+  async distinct<K extends DistinctField<S> & keyof Row<S>>(
+    field: K,
     filter: Filter<S> = {} as Filter<S>,
-  ): Promise<Result<(string | number | boolean | null)[]>> {
+  ): Promise<Result<Exclude<Row<S>[K], undefined>[]>> {
     return distinctCollection(this._crud(), field, filter);
   }
 

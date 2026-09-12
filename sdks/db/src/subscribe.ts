@@ -1,7 +1,4 @@
 /**
- * Reactive-query subscription primitive — P8a of the C1 reactive
- * queries phase of the @zeroship/db proposal.
- *
  * A subscription on `collection` fires for every change to that
  * collection. The runtime arms distributed WAL delivery before
  * `ready()` resolves. Read-set narrowing and React `useQuery` remain
@@ -27,7 +24,6 @@
  * iterating to completion.
  */
 import {
-  requireBoundNativeCapability,
   requireCollectionResolver,
   type NativeCollection,
   type NativeSubscriptionLike,
@@ -94,9 +90,7 @@ function getNativeDbCollection(name: string): NativeCollection {
   const db = (env as { db?: unknown } | undefined)?.db;
   return requireCollectionResolver(db, {
     code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
-    message:
-      "@zeroship/db/subscribe: env.db.collection not available — " +
-      "runtime is missing the Db v8_class surface.",
+    message: "@zeroship/db/subscribe: env.db.collection is unavailable",
   })(name);
 }
 
@@ -115,17 +109,7 @@ export function subscribe(collection: string): Subscription {
     );
   }
   const col = getNativeDbCollection(collection);
-  const openSubscription = requireBoundNativeCapability(
-    col,
-    "openSubscription",
-    {
-      code: "NATIVE_SUBSCRIPTION_UNAVAILABLE",
-      message:
-        "@zeroship/db/subscribe: env.db.<collection>.openSubscription not available — " +
-        "runtime is missing the Subscription v8_class surface.",
-    },
-  );
-  const sub = openSubscription();
+  const sub = col.openSubscription();
   let closed = false;
   let readiness: Promise<void> | undefined;
 
