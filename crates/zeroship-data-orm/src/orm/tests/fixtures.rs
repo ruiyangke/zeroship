@@ -28,6 +28,9 @@ impl CollectionFixture {
             .path()
             .join(format!("zs-{}.sqlite", original.binding.app_id()));
         let fixture = rusqlite::Connection::open(&file).unwrap();
+        for statement in zeroship_migrate_sqlite::backend::audit_unmask_ddl("main") {
+            fixture.execute_batch(&statement).unwrap();
+        }
         fixture
             .execute_batch(&table_sql(
                 "main",
@@ -87,6 +90,9 @@ impl CollectionFixture {
             ))
             .await
             .unwrap();
+        backend.pool().batch_execute(
+            &zeroship_migrate_server::provisioning::audit_unmask_table_sql(&app)
+        ).await.unwrap();
         crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
             .await
             .unwrap();
