@@ -33,6 +33,9 @@ use zeroship_workflow::{
 };
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor, WorkflowBinding};
 
+mod reset;
+mod state;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
@@ -60,6 +63,21 @@ impl Default for LocalConfig {
             payloads: TaskPayloadLimits::default(),
         }
     }
+}
+pub fn config_from_args(args: &[String]) -> Result<LocalConfig, String> {
+    let path = crate::parse_flag(args, "--workflow-config").map(PathBuf::from);
+    let mut config = LocalConfig::read(path.as_deref())?;
+    if let Some(path) = zeroship_core::declared_env_os!(
+        cli,
+        "ZEROSHIP_WORKFLOW_SQLITE_PATH",
+        crate::ZeroshipCliConsumer
+    ) {
+        config.journal = path.into();
+    }
+    if let Some(path) = crate::parse_flag(args, "--workflow-bundle") {
+        config.bundle = Some(path.into());
+    }
+    Ok(config)
 }
 impl LocalConfig {
     pub fn read(path: Option<&Path>) -> Result<Self, String> {
@@ -98,6 +116,7 @@ pub struct LocalHost {
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
+    _state: state::StateLock,
 }
 impl LocalHost {
     pub fn start(
@@ -107,8 +126,13 @@ impl LocalHost {
         peers: Vec<Arc<dyn NativePlugin>>,
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
-        let config = config.resolve(root)?;
+        let mut config = config.resolve(root)?;
         let app = project_identity(root)?;
+        let paths = state::StatePaths::new(root, &config, &app)?;
+        let state = paths.lock(false)?;
+        paths.ensure_ready()?;
+        config.journal = paths.journal;
+        config.objects = paths.objects;
         let worker_app = app.clone();
         let (ready, receive) = std::sync::mpsc::sync_channel(1);
         let (stop, stopped) = oneshot::channel();
@@ -164,6 +188,7 @@ impl LocalHost {
             stop: Some(stop),
             thread: Some(thread),
             stopping,
+            _state: state,
         })
     }
 }
@@ -213,9 +238,47 @@ fn project_identity(root: &Path) -> Result<AppId, String> {
             Err(error) => return Err(error.to_string()),
         }
     }
-    let encoded =
-        std::fs::read_to_string(path).map_err(|error| format!("read project identity: {error}"))?;
+    read_project_identity(root)
+}
+
+fn read_project_identity(root: &Path) -> Result<AppId, String> {
+    let encoded = std::fs::read_to_string(root.join(".zeroship/app-id"))
+        .map_err(|error| format!("read persisted project identity: {error}"))?;
     AppId::parse(encoded.trim()).map_err(|_| "invalid persisted project app identity".into())
+}
+
+pub fn command(args: &[String]) -> Result<(), String> {
+    const USAGE: &str =
+        "Usage: zeroship workflows reset [--workflow-config=PATH] (local workflow state only)";
+    if args.get(2).map(String::as_str) != Some("reset") {
+        return Err(USAGE.into());
+    }
+    let mut arguments = args.iter().skip(3);
+    let mut configured = false;
+    while let Some(argument) = arguments.next() {
+        if configured {
+            return Err(format!("unexpected reset argument: {argument}; {USAGE}"));
+        }
+        if argument == "--workflow-config" {
+            arguments
+                .next()
+                .filter(|value| !value.is_empty() && !value.starts_with("--"))
+                .ok_or("--workflow-config requires a path")?;
+        } else if let Some(value) = argument.strip_prefix("--workflow-config=") {
+            if value.is_empty() {
+                return Err("--workflow-config requires a path".into());
+            }
+        } else {
+            return Err(format!("unexpected reset argument: {argument}; {USAGE}"));
+        }
+        configured = true;
+    }
+    reset::reset(
+        &std::env::current_dir().map_err(|error| error.to_string())?,
+        config_from_args(args)?,
+    )?;
+    eprintln!("[zeroship] local workflow state reset; project identity and other stores preserved");
+    Ok(())
 }
 
 async fn initialize(

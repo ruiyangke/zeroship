@@ -185,6 +185,9 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
     let identity = std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap();
     assert!(zeroship_core::app_id::AppId::parse(&identity).is_ok());
     assert_ne!(identity, "untrusted-variable");
+    let refused = reset(root.path());
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("in use"));
     drop(host);
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
     let mut host = Host::start(root.path());
@@ -195,4 +198,30 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
     host.request(&format!("/signal?id={run}")).unwrap();
     let completed = host.until(&status, |value| value["state"] == "completed");
     assert_eq!(completed["output"], "original:original:lazy");
+    drop(host);
+    let cleared = reset(root.path());
+    assert!(
+        cleared.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleared.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap(),
+        identity
+    );
+    assert!(root.path().join("workflows.zship").exists());
+    let mut host = Host::start(root.path());
+    assert!(host.request(&status).is_err(), "reset retained the old run");
+    let started = host.request("/start").unwrap();
+    assert_ne!(started["id"], run);
+}
+
+fn reset(root: &Path) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .current_dir(root)
+        .args(["workflows", "reset"])
+        .env_remove("ZEROSHIP_WORKFLOW_SQLITE_PATH")
+        .env_remove("ZEROSHIP_DIE_WITH_PARENT")
+        .output()
+        .unwrap()
 }

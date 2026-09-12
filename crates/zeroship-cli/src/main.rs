@@ -67,6 +67,7 @@ fn main() {
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
         "dev" => exit_on_error("dev", dev::cmd_dev(&args)),
+        "workflows" => exit_on_error("workflows", workflow::command(&args)),
         "organization" => exit_on_error("organization", organizations::cmd_organization(&args)),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
@@ -328,22 +329,11 @@ fn cmd_serve(args: &[String]) {
         Some(Arc::clone(&dev_meter)),
     )));
 
-    let config_path = parse_flag(args, "--workflow-config").map(PathBuf::from);
-    let mut workflow_config = workflow::LocalConfig::read(config_path.as_deref())
+    let workflow_config = workflow::config_from_args(args)
         .unwrap_or_else(|error| {
             eprintln!("[zeroship] workflows: {error}");
             std::process::exit(1);
         });
-    if let Some(path) = zeroship_core::declared_env_os!(
-        cli,
-        "ZEROSHIP_WORKFLOW_SQLITE_PATH",
-        crate::ZeroshipCliConsumer
-    ) {
-        workflow_config.journal = path.into();
-    }
-    if let Some(path) = parse_flag(args, "--workflow-bundle") {
-        workflow_config.bundle = Some(path.into());
-    }
     let workflow_host = workflow::LocalHost::start(
         &std::env::current_dir().expect("project directory"),
         workflow_config,
@@ -1139,6 +1129,8 @@ fn print_usage() {
     eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
     eprintln!("                   [--workflow-config=PATH] [--workflow-bundle=PATH]");
     eprintln!("                   Run a single JS file with the V8 runtime.");
+    eprintln!("  zeroship workflows reset [--workflow-config=PATH]");
+    eprintln!("                   Reset local workflow state after stopping its workers.");
     eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   --app takes the app's ID; --app-name its routing label.");

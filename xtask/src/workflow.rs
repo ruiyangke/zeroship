@@ -47,7 +47,7 @@ pub fn run() -> Result<()> {
             "zeroship-cli",
             "--bin",
             "zeroship",
-            "workflow::tests",
+            "workflow::",
         ]),
         "local workflow identity, retained code and background worker contracts",
     )?;
