@@ -394,12 +394,6 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-pub(crate) fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
-    match dialect {
-        SqlDialect::Postgres | SqlDialect::Sqlite => quote_ident(name),
-    }
-}
-
 // ---------------------------------------------------------------------------
 /// Prefix of the physical column holding a masked field's protected value.
 /// The migration emitter owns declaration validation; the runtime keeps the

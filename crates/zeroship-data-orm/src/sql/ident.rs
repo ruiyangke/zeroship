@@ -43,6 +43,8 @@ pub enum IdentRole {
     Namespace,
     /// A table name.
     Collection,
+    /// A platform-owned table inside an application schema.
+    StoredCollection,
     /// A column name being *referenced*. Not a column being declared: this
     /// crate plans no DDL.
     Column,
@@ -75,7 +77,7 @@ impl IdentRole {
     const fn reservations(self) -> &'static [Reservation] {
         match self {
             Self::Namespace => NAMESPACE_RESERVATIONS,
-            Self::Collection => &[],
+            Self::Collection | Self::StoredCollection => &[],
             Self::Column => COLUMN_RESERVATIONS,
             Self::StoredColumn => STORED_COLUMN_RESERVATIONS,
             Self::Alias => ALIAS_RESERVATIONS,
@@ -88,6 +90,7 @@ impl IdentRole {
         match self {
             Self::Namespace => "namespace",
             Self::Collection => "collection",
+            Self::StoredCollection => "stored collection",
             Self::Column => "column",
             Self::StoredColumn => "stored column",
             Self::Alias => "alias",
@@ -348,7 +351,7 @@ impl Ident {
                 character: bad,
             });
         }
-        if role == IdentRole::Collection {
+        if matches!(role, IdentRole::Collection | IdentRole::StoredCollection) {
             for reservation in BACKEND_CATALOG_RESERVATIONS {
                 if reservation.matches(raw) {
                     return Err(IdentError::Reserved {
@@ -358,14 +361,16 @@ impl Ident {
                     });
                 }
             }
-            for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
-                let reservation = Reservation::Prefix(prefix);
-                if reservation.matches(raw) {
-                    return Err(IdentError::Reserved {
-                        role,
-                        name: raw.to_string(),
-                        reservation: reservation.describe(),
-                    });
+            if role == IdentRole::Collection {
+                for prefix in PLATFORM_RESERVED_COLLECTION_PREFIXES {
+                    let reservation = Reservation::Prefix(prefix);
+                    if reservation.matches(raw) {
+                        return Err(IdentError::Reserved {
+                            role,
+                            name: raw.to_string(),
+                            reservation: reservation.describe(),
+                        });
+                    }
                 }
             }
         }
@@ -447,6 +452,7 @@ mod tests {
         let cases = [
             (IdentRole::Namespace, "__zeroship_reserved", false),
             (IdentRole::Collection, "pg_class", false),
+            (IdentRole::StoredCollection, "__zeroship_audit_unmask", true),
             (IdentRole::Column, "pg_attribute", false),
             // Accepted, and that IS the deliberate behaviour: this role exists
             // so the platform can name its own stored columns. The refusal half
@@ -473,6 +479,7 @@ mod tests {
             match role {
                 IdentRole::Namespace
                 | IdentRole::Collection
+                | IdentRole::StoredCollection
                 | IdentRole::Column
                 | IdentRole::StoredColumn
                 | IdentRole::Alias
@@ -480,6 +487,13 @@ mod tests {
                 | IdentRole::Index => {}
             }
         }
-        println!("ruled on {} roles", cases.len());
+    }
+
+    #[test]
+    fn a_platform_table_is_nameable_only_through_the_stored_collection_role() {
+        assert!(Ident::parse_as("__zeroship_audit_unmask", IdentRole::StoredCollection).is_ok());
+        assert!(Ident::parse_as("__zeroship_audit_unmask", IdentRole::Collection).is_err());
+        assert!(Ident::parse_as("pg_class", IdentRole::StoredCollection).is_err());
+        assert!(Ident::parse_as("sqlite_schema", IdentRole::StoredCollection).is_err());
     }
 }

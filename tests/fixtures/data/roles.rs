@@ -20,7 +20,7 @@ pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// Reserved table whose grants permit the runtime to append unmask audit rows.
 /// The dedicated grant recipe excludes mutation and deletion of existing evidence.
 pub(crate) const WORKER_WRITABLE_RESERVED_TABLE: &str =
-    zeroship_data_orm::sql::internal::AUDIT_UNMASK_TABLE;
+    zeroship_data_orm::backend_handle::AUDIT_UNMASK_TABLE;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
 /// so operators see *what* the bootstrap layer was doing when the SQL

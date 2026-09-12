@@ -66,8 +66,6 @@ pub use zeroship_core::schema_name::SchemaName;
 /// SDK filter decoding into typed predicates.
 pub mod filter;
 
-pub mod internal;
-
 pub mod sqlite_values;
 
 

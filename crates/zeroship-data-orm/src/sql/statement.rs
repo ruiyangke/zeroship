@@ -71,7 +71,24 @@ impl Table {
         table: Ident,
         columns: impl IntoIterator<Item = (Ident, StorageType)>,
     ) -> Result<Self, CompileError> {
-        Ident::parse_as(table.as_str(), IdentRole::Collection)?;
+        Self::build(namespace, table, columns, IdentRole::Collection)
+    }
+
+    pub(crate) fn platform(
+        namespace: SchemaName,
+        table: Ident,
+        columns: impl IntoIterator<Item = (Ident, StorageType)>,
+    ) -> Result<Self, CompileError> {
+        Self::build(namespace, table, columns, IdentRole::StoredCollection)
+    }
+
+    fn build(
+        namespace: SchemaName,
+        table: Ident,
+        columns: impl IntoIterator<Item = (Ident, StorageType)>,
+        role: IdentRole,
+    ) -> Result<Self, CompileError> {
+        Ident::parse_as(table.as_str(), role)?;
         let mut indices = BTreeMap::new();
         let mut resolved = Vec::new();
         for (name, storage) in columns {
