@@ -9,11 +9,13 @@ The SDK types live in `sdks/workflows/`. The native `env.workflows` binding
 starts and controls runs from app code, and the control client exposes the
 token and topic broadcast helpers used by systems outside the app.
 
-This reference describes the current implementation. The finalized
-[workflow server design](../proposals/2026-09-11-workflow-server.md) replaces
-Control/Gateway workflow dispatch with a dedicated server and polling workers,
-and embeds the shared engine in local development. That refactor is in progress;
-the local limitations and provisioning instructions below still apply today.
+This reference describes the current implementation. The revised
+[workflow coordination design](../proposals/2026-09-11-workflow-worker.md) keeps
+history and payloads in customer storage, processed by the customer's worker.
+A lightweight server handles registry, placement and high-level management;
+the worker owns durable execution and journal writes. The shared local engine
+and production cutover are in progress; the limitations and provisioning
+instructions below still apply today.
 
 ## Rust integration
 
