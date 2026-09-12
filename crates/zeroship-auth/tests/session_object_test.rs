@@ -1,4 +1,4 @@
-//! `zeroship.sessions` + `zeroship.grants` against live PostgreSQL: the
+//! `zeroship.sessions` + `zeroship.grants` against live `PostgreSQL`: the
 //! validating reads that MINT-READS-ROW rests on.
 //!
 //! Every arm here drives the STATEMENTS, not a wrapper around them, because the
@@ -8,12 +8,12 @@
 //! paired with a control differing in exactly one variable, so a refusal that
 //! is really a broken fixture cannot read as a fence.
 //!
-//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
-//! that cannot reach one is REFUSED, not skipped.
+//! Each case owns its `PostgreSQL` server and uses the auth role.
 
 use std::io::Write as _;
 
-use compio_postgres::{connect, Client, NoTls};
+use crate::common::database::Database;
+use compio_postgres::Client;
 use uuid::Uuid;
 use zeroship_auth::session_store::{
     self, Audience, NewSession, RotatedSession, SecretSlot, SessionKind, SessionSecretKeys,
@@ -24,23 +24,10 @@ const IDLE_DAYS: i64 = 7;
 const ABSOLUTE_DAYS: i64 = 30;
 const IDEM_WINDOW_SECS: i64 = 30;
 
-#[allow(clippy::future_not_send)]
-async fn pg() -> Client {
-    let dsn = crate::common::test_database_url();
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
-    compio::runtime::spawn(async move {
-        if let Err(err) = connection.run().await {
-            eprintln!("session_object_test pg connection error: {err}");
-        }
-    })
-    .detach();
-    client
-}
-
 /// A keyring in a private directory, owner-only, as the loader demands.
-fn keys(tag: &str) -> SessionSecretKeys {
-    let dir = std::env::temp_dir().join(format!("zs-session-keys-{tag}"));
-    std::fs::create_dir_all(&dir).expect("key dir");
+fn keys() -> SessionSecretKeys {
+    let directory = tempfile::tempdir().expect("private session key directory");
+    let dir = directory.path();
     let hash_path = dir.join("hash");
     let idem_path = dir.join("idem");
     write_owner_only(
@@ -48,7 +35,9 @@ fn keys(tag: &str) -> SessionSecretKeys {
         b"1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n",
     );
     write_owner_only(&idem_path, b"session-object-test-idempotency-master-secret");
-    SessionSecretKeys::from_files(&hash_path, &idem_path).expect("load session keys")
+    let keys = SessionSecretKeys::from_files(&hash_path, &idem_path).expect("load session keys");
+    directory.close().expect("remove loaded session key files");
+    keys
 }
 
 fn write_owner_only(path: &std::path::Path, body: &[u8]) {
@@ -63,9 +52,7 @@ fn write_owner_only(path: &std::path::Path, body: &[u8]) {
     }
 }
 
-/// A person, a registered client and an app-audience grant, all unique to this
-/// test. The suite database is shared and never dropped, so nothing here may
-/// use a fixed name.
+/// A person, a registered client and an app-audience grant in the case database.
 async fn seed(db: &Client, tag: &str) -> (Uuid, String, String) {
     let email = format!("session-object-{tag}@zeroship.test");
     let user = users::create(db, &email, "Session Object", None)
@@ -138,38 +125,41 @@ fn tag() -> String {
 /// being read as a broken fixture.
 #[compio::test]
 async fn a_revoked_session_cannot_mint() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string(), "offline_access".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string(), "offline_access".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let created = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
-    )
-    .await
-    .expect("create session")
-    .expect("session created");
-    let secret = created.secret.clone().expect("session carries a secret");
-
-    session_store::revoke(&db, &created.row.id, "test")
+        let created = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+        )
         .await
-        .expect("revoke");
+        .expect("create session")
+        .expect("session created");
+        let secret = created.secret.clone().expect("session carries a secret");
 
-    let presented = session_store::peek(&db, &keys, &secret)
-        .await
-        .expect("peek")
-        .expect("the revoked row is still findable by its hash");
-    assert_eq!(presented.slot(), SecretSlot::Current);
-
-    let rotation =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        session_store::revoke(&db, &created.row.id, "test")
             .await
-            .expect("rotate");
-    assert!(rotation.is_none(), "a revoked session minted a credential");
+            .expect("revoke");
+
+        let presented = session_store::peek(&db, &keys, &secret)
+            .await
+            .expect("peek")
+            .expect("the revoked row is still findable by its hash");
+        assert_eq!(presented.slot(), SecretSlot::Current);
+
+        let rotation =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate");
+        assert!(rotation.is_none(), "a revoked session minted a credential");
+    })
+    .await;
 }
 
 /// The control for the arm above, differing in ONE variable: the session is not
@@ -177,43 +167,46 @@ async fn a_revoked_session_cannot_mint() {
 /// the revocation fence working.
 #[compio::test]
 async fn a_live_session_mints_where_a_revoked_one_does_not() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string(), "offline_access".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string(), "offline_access".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let created = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
-    )
-    .await
-    .expect("create session")
-    .expect("session created");
-    let secret = created.secret.clone().expect("session carries a secret");
-
-    let presented = session_store::peek(&db, &keys, &secret)
+        let created = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+        )
         .await
-        .expect("peek")
-        .expect("live secret resolves");
-    let rotation =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        .expect("create session")
+        .expect("session created");
+        let secret = created.secret.clone().expect("session carries a secret");
+
+        let presented = session_store::peek(&db, &keys, &secret)
             .await
-            .expect("rotate");
-    match rotation {
-        Some(RotatedSession {
-            row,
-            secret: next,
-            proof,
-        }) => {
-            assert_ne!(next, secret, "rotation returned the same secret");
-            assert_eq!(proof.session_id(), row.id);
-            assert_eq!(proof.person_id(), person_id);
+            .expect("peek")
+            .expect("live secret resolves");
+        let rotation =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate");
+        match rotation {
+            Some(RotatedSession {
+                row,
+                secret: next,
+                proof,
+            }) => {
+                assert_ne!(next, secret, "rotation returned the same secret");
+                assert_eq!(proof.session_id(), row.id);
+                assert_eq!(proof.person_id(), person_id);
+            }
+            None => panic!("a live session refused to mint"),
         }
-        None => panic!("a live session refused to mint"),
-    }
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,56 +217,59 @@ async fn a_live_session_mints_where_a_revoked_one_does_not() {
 /// before its ceiling is moved.
 #[compio::test]
 async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let created = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
-    )
-    .await
-    .expect("create session")
-    .expect("session created");
-    let secret = created.secret.clone().expect("secret");
-
-    // Control first, on the SAME row: it mints.
-    let presented = session_store::peek(&db, &keys, &secret)
+        let created = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+        )
         .await
-        .expect("peek")
-        .expect("resolves");
-    let Some(RotatedSession { secret: next, .. }) =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        .expect("create session")
+        .expect("session created");
+        let secret = created.secret.clone().expect("secret");
+
+        // Control first, on the SAME row: it mints.
+        let presented = session_store::peek(&db, &keys, &secret)
             .await
-            .expect("rotate")
-    else {
-        panic!("the control rotation refused");
-    };
+            .expect("peek")
+            .expect("resolves");
+        let Some(RotatedSession { secret: next, .. }) =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate")
+        else {
+            panic!("the control rotation refused");
+        };
 
-    // One variable moves: the ceiling goes into the past.
-    db.execute(
-        "UPDATE zeroship.sessions \
-         SET absolute_expires_at = NOW() - INTERVAL '1 hour', \
-             idle_expires_at = NOW() - INTERVAL '1 hour' \
-         WHERE id = $1",
-        &[&created.row.id],
-    )
-    .await
-    .expect("expire");
-
-    let presented = session_store::peek(&db, &keys, &next)
+        // One variable moves: the ceiling goes into the past.
+        db.execute(
+            "UPDATE zeroship.sessions \
+             SET absolute_expires_at = NOW() - INTERVAL '1 hour', \
+                 idle_expires_at = NOW() - INTERVAL '1 hour' \
+             WHERE id = $1",
+            &[&created.row.id],
+        )
         .await
-        .expect("peek")
-        .expect("resolves");
-    let rotation =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        .expect("expire");
+
+        let presented = session_store::peek(&db, &keys, &next)
             .await
-            .expect("rotate");
-    assert!(rotation.is_none(), "an expired session minted a credential");
+            .expect("peek")
+            .expect("resolves");
+        let rotation =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate");
+        assert!(rotation.is_none(), "an expired session minted a credential");
+    })
+    .await;
 }
 
 /// A suspended grant refuses creation, and an active one creates. The
@@ -281,79 +277,85 @@ async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
 /// grant, so there is no second enforcement path to keep in agreement.
 #[compio::test]
 async fn a_suspended_grant_cannot_create_a_session() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
-    let subject = format!("pws_{tag}");
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
+        let subject = format!("pws_{tag}");
 
-    // Control: the grant is active and a session is created.
-    assert!(
-        session_store::create(
-            &db,
-            &keys,
-            &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+        // Control: the grant is active and a session is created.
+        assert!(
+            session_store::create(
+                &db,
+                &keys,
+                &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+            )
+            .await
+            .expect("create session")
+            .is_some(),
+            "an active grant refused to create a session"
+        );
+
+        db.execute(
+            "UPDATE zeroship.grants \
+             SET subject_status = 'suspended', suspended_at = NOW(), suspended_cause = 'test' \
+             WHERE id = $1",
+            &[&grant_id],
         )
         .await
-        .expect("create session")
-        .is_some(),
-        "an active grant refused to create a session"
-    );
+        .expect("suspend");
 
-    db.execute(
-        "UPDATE zeroship.grants \
-         SET subject_status = 'suspended', suspended_at = NOW(), suspended_cause = 'test' \
-         WHERE id = $1",
-        &[&grant_id],
-    )
-    .await
-    .expect("suspend");
-
-    assert!(
-        session_store::create(
-            &db,
-            &keys,
-            &new_session(person_id, &grant_id, &subject, &scopes, &amr),
-        )
-        .await
-        .expect("create session")
-        .is_none(),
-        "a suspended grant created a session"
-    );
+        assert!(
+            session_store::create(
+                &db,
+                &keys,
+                &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+            )
+            .await
+            .expect("create session")
+            .is_none(),
+            "a suspended grant created a session"
+        );
+    })
+    .await;
 }
 
 /// A credential epoch that moved between the authenticating event and issuance
 /// refuses. The control pins the epoch the person actually carries.
 #[compio::test]
 async fn a_stale_credential_epoch_cannot_create_a_session() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
-    let subject = format!("pws_{tag}");
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
+        let subject = format!("pws_{tag}");
 
-    let mut params = new_session(person_id, &grant_id, &subject, &scopes, &amr);
-    params.expected_credential_epoch = Some(0);
-    assert!(
-        session_store::create(&db, &keys, &params)
-            .await
-            .expect("create session")
-            .is_some(),
-        "the person's own credential epoch refused"
-    );
+        let mut params = new_session(person_id, &grant_id, &subject, &scopes, &amr);
+        params.expected_credential_epoch = Some(0);
+        assert!(
+            session_store::create(&db, &keys, &params)
+                .await
+                .expect("create session")
+                .is_some(),
+            "the person's own credential epoch refused"
+        );
 
-    params.expected_credential_epoch = Some(1);
-    assert!(
-        session_store::create(&db, &keys, &params)
-            .await
-            .expect("create session")
-            .is_none(),
-        "a stale credential epoch created a session"
-    );
+        params.expected_credential_epoch = Some(1);
+        assert!(
+            session_store::create(&db, &keys, &params)
+                .await
+                .expect("create session")
+                .is_none(),
+            "a stale credential epoch created a session"
+        );
+    })
+    .await;
 }
 
 /// A person whose credential epoch advances after issuance cannot rotate. This
@@ -361,42 +363,45 @@ async fn a_stale_credential_epoch_cannot_create_a_session() {
 /// rather than an enumeration something has to remember to run.
 #[compio::test]
 async fn advancing_the_credential_epoch_stops_the_next_mint() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let created = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
-    )
-    .await
-    .expect("create session")
-    .expect("session created");
-    let secret = created.secret.clone().expect("secret");
-
-    db.execute(
-        "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
-        &[&person_id],
-    )
-    .await
-    .expect("advance credential epoch");
-
-    let presented = session_store::peek(&db, &keys, &secret)
+        let created = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+        )
         .await
-        .expect("peek")
-        .expect("resolves");
-    let rotation =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        .expect("create session")
+        .expect("session created");
+        let secret = created.secret.clone().expect("secret");
+
+        db.execute(
+            "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
+            &[&person_id],
+        )
+        .await
+        .expect("advance credential epoch");
+
+        let presented = session_store::peek(&db, &keys, &secret)
             .await
-            .expect("rotate");
-    assert!(
-        rotation.is_none(),
-        "a session minted after its person's credential epoch moved"
-    );
+            .expect("peek")
+            .expect("resolves");
+        let rotation =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate");
+        assert!(
+            rotation.is_none(),
+            "a session minted after its person's credential epoch moved"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -408,70 +413,73 @@ async fn advancing_the_credential_epoch_stops_the_next_mint() {
 /// the same superseded secret is refused.
 #[compio::test]
 async fn a_superseded_secret_replays_once_and_then_is_refused() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string(), "offline_access".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string(), "offline_access".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let created = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
-    )
-    .await
-    .expect("create session")
-    .expect("session created");
-    let first = created.secret.clone().expect("secret");
-
-    let presented = session_store::peek(&db, &keys, &first)
+        let created = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+        )
         .await
-        .expect("peek")
-        .expect("resolves");
-    let Some(RotatedSession { secret: second, .. }) =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        .expect("create session")
+        .expect("session created");
+        let first = created.secret.clone().expect("secret");
+
+        let presented = session_store::peek(&db, &keys, &first)
             .await
-            .expect("rotate")
-    else {
-        panic!("rotation refused");
-    };
-    assert_ne!(first, second);
+            .expect("peek")
+            .expect("resolves");
+        let Some(RotatedSession { secret: second, .. }) =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate")
+        else {
+            panic!("rotation refused");
+        };
+        assert_ne!(first, second);
 
-    // The superseded secret resolves to the same row, in the other slot.
-    let superseded = session_store::peek(&db, &keys, &first)
-        .await
-        .expect("peek")
-        .expect("superseded secret resolves");
-    assert_eq!(superseded.slot(), SecretSlot::Superseded);
-    assert_eq!(superseded.session_id, created.row.id);
+        // The superseded secret resolves to the same row, in the other slot.
+        let superseded = session_store::peek(&db, &keys, &first)
+            .await
+            .expect("peek")
+            .expect("superseded secret resolves");
+        assert_eq!(superseded.slot(), SecretSlot::Superseded);
+        assert_eq!(superseded.session_id, created.row.id);
 
-    let locked = session_store::lock_and_read(&db, &created.row.id)
-        .await
-        .expect("lock")
-        .expect("row");
-    let replayed = session_store::replay(&db, &keys, &superseded, &locked)
-        .await
-        .expect("replay")
-        .expect("the lost response replays once");
-    assert_eq!(
-        replayed.0.refresh_token, second,
-        "the replay handed back a different successor than the rotation did"
-    );
-
-    // Single-use: the second presentation of the same superseded secret is not
-    // served, which is what the caller turns into the reuse kill.
-    let locked = session_store::lock_and_read(&db, &created.row.id)
-        .await
-        .expect("lock")
-        .expect("row");
-    assert!(
-        session_store::replay(&db, &keys, &superseded, &locked)
+        let locked = session_store::lock_and_read(&db, &created.row.id)
+            .await
+            .expect("lock")
+            .expect("row");
+        let replayed = session_store::replay(&db, &keys, &superseded, &locked)
             .await
             .expect("replay")
-            .is_none(),
-        "the idempotent record was served twice"
-    );
+            .expect("the lost response replays once");
+        assert_eq!(
+            replayed.0.refresh_token, second,
+            "the replay handed back a different successor than the rotation did"
+        );
+
+        // Single-use: the second presentation of the same superseded secret is not
+        // served, which is what the caller turns into the reuse kill.
+        let locked = session_store::lock_and_read(&db, &created.row.id)
+            .await
+            .expect("lock")
+            .expect("row");
+        assert!(
+            session_store::replay(&db, &keys, &superseded, &locked)
+                .await
+                .expect("replay")
+                .is_none(),
+            "the idempotent record was served twice"
+        );
+    })
+    .await;
 }
 
 /// The current secret must not be servable as a replay. Presenting the live
@@ -479,50 +487,53 @@ async fn a_superseded_secret_replays_once_and_then_is_refused() {
 /// cached response instead of advancing the row.
 #[compio::test]
 async fn the_live_secret_is_not_replayable() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let created = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
-    )
-    .await
-    .expect("create session")
-    .expect("session created");
-    let first = created.secret.clone().expect("secret");
-    let presented = session_store::peek(&db, &keys, &first)
+        let created = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+        )
         .await
-        .expect("peek")
-        .expect("resolves");
-    let Some(RotatedSession { secret: second, .. }) =
-        session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+        .expect("create session")
+        .expect("session created");
+        let first = created.secret.clone().expect("secret");
+        let presented = session_store::peek(&db, &keys, &first)
             .await
-            .expect("rotate")
-    else {
-        panic!("rotation refused");
-    };
+            .expect("peek")
+            .expect("resolves");
+        let Some(RotatedSession { secret: second, .. }) =
+            session_store::rotate(&db, &keys, &presented, &scopes, IDLE_DAYS, IDEM_WINDOW_SECS)
+                .await
+                .expect("rotate")
+        else {
+            panic!("rotation refused");
+        };
 
-    let live = session_store::peek(&db, &keys, &second)
-        .await
-        .expect("peek")
-        .expect("resolves");
-    assert_eq!(live.slot(), SecretSlot::Current);
-    let locked = session_store::lock_and_read(&db, &created.row.id)
-        .await
-        .expect("lock")
-        .expect("row");
-    assert!(
-        session_store::replay(&db, &keys, &live, &locked)
+        let live = session_store::peek(&db, &keys, &second)
             .await
-            .expect("replay")
-            .is_none(),
-        "the live secret was served as a replay"
-    );
+            .expect("peek")
+            .expect("resolves");
+        assert_eq!(live.slot(), SecretSlot::Current);
+        let locked = session_store::lock_and_read(&db, &created.row.id)
+            .await
+            .expect("lock")
+            .expect("row");
+        assert!(
+            session_store::replay(&db, &keys, &live, &locked)
+                .await
+                .expect("replay")
+                .is_none(),
+            "the live secret was served as a replay"
+        );
+    })
+    .await;
 }
 
 /// A session created without a secret can never be presented again. Its only
@@ -531,85 +542,91 @@ async fn the_live_secret_is_not_replayable() {
 /// than an exception to it.
 #[compio::test]
 async fn a_session_with_no_secret_can_never_be_presented() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
 
-    let subject = format!("pws_{tag}");
-    let mut params = new_session(person_id, &grant_id, &subject, &scopes, &amr);
-    params.with_secret = false;
-    let created = session_store::create(&db, &keys, &params)
-        .await
-        .expect("create session")
-        .expect("session created");
-    assert!(
-        created.secret.is_none(),
-        "a secretless session handed one back"
-    );
-    assert_eq!(created.proof.session_id(), created.row.id);
+        let subject = format!("pws_{tag}");
+        let mut params = new_session(person_id, &grant_id, &subject, &scopes, &amr);
+        params.with_secret = false;
+        let created = session_store::create(&db, &keys, &params)
+            .await
+            .expect("create session")
+            .expect("session created");
+        assert!(
+            created.secret.is_none(),
+            "a secretless session handed one back"
+        );
+        assert_eq!(created.proof.session_id(), created.row.id);
 
-    let row = session_store::lock_and_read(&db, &created.row.id)
-        .await
-        .expect("lock")
-        .expect("row");
-    assert!(
-        row.secret_key_version.is_none(),
-        "a secretless session stored a key version"
-    );
+        let row = session_store::lock_and_read(&db, &created.row.id)
+            .await
+            .expect("lock")
+            .expect("row");
+        assert!(
+            row.secret_key_version.is_none(),
+            "a secretless session stored a key version"
+        );
+    })
+    .await;
 }
 
 /// Revoking a person ends every live session they hold, in one statement, and
 /// leaves an already-revoked one alone.
 #[compio::test]
 async fn revoking_a_person_ends_every_live_session() {
-    let db = pg().await;
-    let tag = tag();
-    let keys = keys(&tag);
-    let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
-    let scopes = vec!["openid".to_string()];
-    let amr = vec!["pwd".to_string()];
-    let subject = format!("pws_{tag}");
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let keys = keys();
+        let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
+        let scopes = vec!["openid".to_string()];
+        let amr = vec!["pwd".to_string()];
+        let subject = format!("pws_{tag}");
 
-    let first = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &subject, &scopes, &amr),
-    )
-    .await
-    .expect("create")
-    .expect("created");
-    let second = session_store::create(
-        &db,
-        &keys,
-        &new_session(person_id, &grant_id, &subject, &scopes, &amr),
-    )
-    .await
-    .expect("create")
-    .expect("created");
-
-    let revoked = session_store::revoke_person_sessions(&db, person_id, "test")
+        let first = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+        )
         .await
-        .expect("revoke person");
-    assert_eq!(revoked, 2, "the person's live sessions were not all ended");
+        .expect("create")
+        .expect("created");
+        let second = session_store::create(
+            &db,
+            &keys,
+            &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+        )
+        .await
+        .expect("create")
+        .expect("created");
 
-    for id in [&first.row.id, &second.row.id] {
-        let row = session_store::lock_and_read(&db, id)
+        let revoked = session_store::revoke_person_sessions(&db, person_id, "test")
             .await
-            .expect("lock")
-            .expect("row");
-        assert!(row.revoked_at.is_some(), "session {id} survived the revoke");
-    }
+            .expect("revoke person");
+        assert_eq!(revoked, 2, "the person's live sessions were not all ended");
 
-    // A second pass ends nothing, because nothing is live.
-    assert_eq!(
-        session_store::revoke_person_sessions(&db, person_id, "test")
-            .await
-            .expect("revoke person"),
-        0
-    );
+        for id in [&first.row.id, &second.row.id] {
+            let row = session_store::lock_and_read(&db, id)
+                .await
+                .expect("lock")
+                .expect("row");
+            assert!(row.revoked_at.is_some(), "session {id} survived the revoke");
+        }
+
+        // A second pass ends nothing, because nothing is live.
+        assert_eq!(
+            session_store::revoke_person_sessions(&db, person_id, "test")
+                .await
+                .expect("revoke person"),
+            0
+        );
+    })
+    .await;
 }
 
 /// The grant is one row per (person, audience) and its subject is written once.
@@ -617,60 +634,63 @@ async fn revoking_a_person_ends_every_live_session() {
 /// what stops a re-derivation silently re-identifying a returning person.
 #[compio::test]
 async fn a_second_consent_advances_scopes_and_never_rewrites_the_subject() {
-    let db = pg().await;
-    let tag = tag();
-    let (person_id, client_id, grant_id) = seed(&db, &tag).await;
-    let audience = Audience::App {
-        client_id: client_id.clone(),
-    };
+    Database::run(async |database| {
+        let db = database.connect_as_auth().await;
+        let tag = tag();
+        let (person_id, client_id, grant_id) = seed(&db, &tag).await;
+        let audience = Audience::App {
+            client_id: client_id.clone(),
+        };
 
-    let widened = vec![
-        "openid".to_string(),
-        "offline_access".to_string(),
-        "email".to_string(),
-    ];
-    let again = session_store::upsert_grant(
-        &db,
-        person_id,
-        &audience,
-        "pws_a_different_subject_entirely",
-        &widened,
-        Some("relay@zeroship.test"),
-    )
-    .await
-    .expect("second consent");
-    assert_eq!(
-        again, grant_id,
-        "a second consent minted a second grant row"
-    );
-
-    let rows = db
-        .query(
-            "SELECT subject, scopes, relay_email FROM zeroship.grants WHERE id = $1",
-            &[&grant_id],
+        let widened = vec![
+            "openid".to_string(),
+            "offline_access".to_string(),
+            "email".to_string(),
+        ];
+        let again = session_store::upsert_grant(
+            &db,
+            person_id,
+            &audience,
+            "pws_a_different_subject_entirely",
+            &widened,
+            Some("relay@zeroship.test"),
         )
         .await
-        .expect("read grant");
-    let row = rows.first().expect("grant row");
-    let subject: String = row.get("subject");
-    let scopes: Vec<String> = row.get("scopes");
-    let relay: Option<String> = row.try_get("relay_email").ok().flatten();
-    assert_eq!(subject, format!("pws_{tag}"), "the subject was rewritten");
-    assert_eq!(scopes, widened, "the consent did not advance");
-    assert_eq!(relay.as_deref(), Some("relay@zeroship.test"));
+        .expect("second consent");
+        assert_eq!(
+            again, grant_id,
+            "a second consent minted a second grant row"
+        );
 
-    // The platform audience is a DIFFERENT row for the same person, which is
-    // what makes a suspension of deploy authority a separate act from a
-    // suspension inside one app.
-    let platform = session_store::upsert_grant(
-        &db,
-        person_id,
-        &Audience::Platform,
-        &person_id.to_string(),
-        &["openid".to_string()],
-        None,
-    )
-    .await
-    .expect("platform grant");
-    assert_ne!(platform, grant_id);
+        let rows = db
+            .query(
+                "SELECT subject, scopes, relay_email FROM zeroship.grants WHERE id = $1",
+                &[&grant_id],
+            )
+            .await
+            .expect("read grant");
+        let row = rows.first().expect("grant row");
+        let subject: String = row.get("subject");
+        let scopes: Vec<String> = row.get("scopes");
+        let relay: Option<String> = row.try_get("relay_email").ok().flatten();
+        assert_eq!(subject, format!("pws_{tag}"), "the subject was rewritten");
+        assert_eq!(scopes, widened, "the consent did not advance");
+        assert_eq!(relay.as_deref(), Some("relay@zeroship.test"));
+
+        // The platform audience is a DIFFERENT row for the same person, which is
+        // what makes a suspension of deploy authority a separate act from a
+        // suspension inside one app.
+        let platform = session_store::upsert_grant(
+            &db,
+            person_id,
+            &Audience::Platform,
+            &person_id.to_string(),
+            &["openid".to_string()],
+            None,
+        )
+        .await
+        .expect("platform grant");
+        assert_ne!(platform, grant_id);
+    })
+    .await;
 }
