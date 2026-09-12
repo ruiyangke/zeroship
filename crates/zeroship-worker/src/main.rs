@@ -18,6 +18,7 @@ use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
 use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources, WorkerSettingsConsumer};
+use zeroship_worker::executable;
 use zeroship_core::config::{
     audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
     BuildProfile, CheckConfigReport, CheckValue, CredentialPosture,

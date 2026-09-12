@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use uuid::Uuid;
-use zeroship_bundle::{BlobStore, Manifest};
 use zeroship_core::types::{AppVersionInfo, VersionMap};
 use zeroship_runtime::{EnvSnapshot, RuntimeLimits};
 
@@ -11,45 +10,7 @@ use crate::{cache, WorkerConfig};
 
 const CONTROL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Runtime input from the app's complete, verified module graph.
-pub struct AppExecutable {
-    pub modules: Vec<zeroship_runtime::ModuleEntry>,
-    pub descriptor: Option<String>,
-}
-
-#[expect(clippy::future_not_send, reason = "module loading stays on the worker's compio thread")]
-pub async fn load_executable(
-    manifest: &Manifest,
-    blob_store: &Arc<dyn BlobStore>,
-) -> Result<AppExecutable, String> {
-    let executable = zeroship_bundle::LoadedWorker::load(
-        manifest,
-        blob_store.as_ref(),
-        usize::try_from(zeroship_bundle::MAX_DECOMPRESSED_BYTES)
-            .map_err(|_| "app executable budget is not representable")?,
-    )
-    .await
-    .map_err(|error| format!("app executable load failed: {error}"))?;
-    let modules = std::iter::once(executable.entry())
-        .chain(
-            executable
-                .modules()
-                .keys()
-                .map(String::as_str)
-                .filter(|name| *name != executable.entry()),
-        )
-        .map(|name| zeroship_runtime::ModuleEntry {
-            specifier: name.into(),
-            source: executable.modules()[name].clone(),
-        })
-        .collect();
-    Ok(AppExecutable {
-        modules,
-        descriptor: executable
-            .runtime_descriptor()
-            .map(serde_json::Value::to_string),
-    })
-}
+use crate::executable::load_executable;
 
 /// Process-wide snapshot of `/internal/versions`, refreshed by a single
 /// background poller regardless of how many ntex worker threads are running.

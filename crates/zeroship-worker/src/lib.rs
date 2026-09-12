@@ -1,5 +1,6 @@
 pub mod cache;
 pub mod config;
+pub mod executable;
 // `cache`/`metrics` are compiled into BOTH targets: main.rs also declares a
 // private `mod cache;`/`mod metrics;` so `handler.rs`/`sync.rs` (private
 // modules of the BINARY, not this lib) can reach `cache`'s `pub(crate)` test
@@ -24,3 +25,4 @@ pub mod metrics;
 // synchronous and open nothing, so running them in both targets costs the
 // same as `cache`'s do and buys a fence that neither command can miss.
 pub mod policy;
+pub mod workflow_runtime;

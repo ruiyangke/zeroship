@@ -19,9 +19,14 @@ use zeroship_workflow::{
 ///
 /// The module graph and runtime descriptor must come from the supplied executable;
 /// runtime variables and native handles come from the host's trusted app binding.
-#[async_trait(?Send)]
+/// Loading constructs the isolate synchronously from inputs already read by the
+/// executor. It must not evaluate creator code or start its runtime pump.
 pub trait WorkflowRuntimeLoader {
-    async fn load(
+    /// Build an exclusive runtime using the assignment's authorized app context.
+    ///
+    /// # Errors
+    /// Refuse missing or mismatched app context and invalid runtime inputs.
+    fn load(
         &self,
         assignment: &TaskAssignment,
         executable: &LoadedWorker,
@@ -45,7 +50,7 @@ impl std::fmt::Debug for LoadedWorkflow {
 impl LoadedWorkflow {
     #[must_use]
     pub fn new(runtime: Runtime, env: EnvSnapshot) -> Self {
-        // Restore the enclosing host isolate before the loader can yield.
+        // Restore the enclosing host isolate before returning to the executor.
         runtime.exit_isolate();
         Self { runtime, env }
     }
@@ -134,7 +139,7 @@ impl TaskExecution for V8Execution {
         let (factory, assignment) = &self.loader;
         let executable = self.payloads.executable().await?;
         self.budget.check()?;
-        self.loaded = Some(factory.load(assignment, &executable).await?);
+        self.loaded = Some(factory.load(assignment, &executable)?);
         let loaded = self.loaded.as_ref().expect("loaded workflow runtime");
         let interrupt = loaded.runtime.interrupt_handle();
         self.budget.on_interrupt(move || interrupt.cancel())?;

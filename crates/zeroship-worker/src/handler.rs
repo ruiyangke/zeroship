@@ -1460,7 +1460,7 @@ async fn load_on_demand(
         .manifest
         .as_ref()
         .ok_or_else(|| format!("app {app_id} has no manifest yet"))?;
-    let executable = crate::sync::load_executable(manifest, &config.blob_store).await?;
+    let executable = crate::executable::load_executable(manifest, &config.blob_store).await?;
 
     // Fetch env BEFORE committing the V8 isolate. If env fetch fails
     // we never partially-load.
@@ -1525,7 +1525,7 @@ async fn load_pinned_workflow_on_demand(
         .map_err(|e| format!("manifest fetch failed: {e}"))?;
     let manifest = zeroship_bundle::verify_deployment_manifest(&manifest_bytes, deploy_hash)
         .map_err(|error| format!("pinned app manifest validation failed: {error}"))?;
-    let executable = crate::sync::load_executable(&manifest, &config.blob_store).await?;
+    let executable = crate::executable::load_executable(&manifest, &config.blob_store).await?;
 
     if crate::sync::get_env(envs, app_id).is_none()
         || app_version
@@ -2627,7 +2627,7 @@ pub(crate) mod tests {
     // WHAT WAS MISSING, EXACTLY. Not the policy - the manifest already reached
     // this crate. `zeroship_core::types` carries `manifest: Option<Manifest>`
     // in the version feed and `sync.rs` reads it on every reload
-    // (`sync::load_executable`). What was missing was
+    // (`executable::load_executable`). What was missing was
     // the hand-off: `cache::load_app` took limits, a net policy, a deploy hash,
     // a runtime descriptor and an env snapshot, and NOT the resource policy -
     // so by the time `dispatch` ran there was nothing to consult. It now takes
