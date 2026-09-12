@@ -199,13 +199,7 @@ fn preupdate_callback(
     case: &PreUpdateCase,
     buffer: &Arc<Mutex<CdcTxBuffer>>,
 ) {
-    // Filter system / bookkeeping relations (per plan §6: MV shadow,
-    // audit, migrations, `__zs_*`, `sqlite_*`). The SDK boundary
-    // separately refuses subscribers opening on `__zeroship_mv_*`
-    // names. This early-return is FIRST after the
-    // action discriminant on purpose: filtered relations must never
-    // build a `PendingEvent`, never touch the buffer mutex, never
-    // increment any per-tx counters.
+    // Bookkeeping relations do not enter the change stream.
     if is_filtered_relation(table) {
         return;
     }
@@ -432,15 +426,7 @@ fn value_to_string(v: ValueRef<'_>) -> Option<String> {
     }
 }
 
-/// Drop CDC for system / bookkeeping relations. Per plan §6 the
-/// filter is:
-///
-/// - `__zeroship_mv_*`  — materialised-view shadow tables (§13.5)
-/// - `__zeroship_audit_*` — audit trail (§10.7)
-/// - `__zeroship_migrations` — migration audit table
-/// - `__zs_*` - SQLite bookkeeping (e.g. `__zs_migrations`)
-/// - `sqlite_*` — engine-internal (`sqlite_master`, `sqlite_sequence`,
-///   `sqlite_autoindex_*`)
+/// Exclude platform and SQLite bookkeeping relations from CDC.
 fn is_filtered_relation(table: &str) -> bool {
     table.starts_with("__zeroship_mv_")
         || table.starts_with("__zeroship_audit_")
@@ -484,24 +470,7 @@ async fn publisher_loop(
     let mut schema_versions: HashMap<String, String> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
-        // Backfill pause + schema-pending decoder fence (plan §5 + §7). The
-        // decision itself was taken in the commit hook and rides the packet;
-        // this loop only ACTS on it. Re-sampling `sink.disposition` here is the
-        // bug this shape replaced — see the module rustdoc.
-        //
-        // Suppression is keyed by `app_id` and the dispatcher derives the
-        // per-event `app_id` from the preupdate hook's `db_name` parameter (the
-        // ATTACH alias by convention equals the app id; see `cdc::install` +
-        // `preupdate_callback` for the contract). A single packet carries one
-        // app_id in practice — the writer is single-threaded and the buffer
-        // flushes per-commit — but the stamp is per-event so a future multi-app
-        // commit still carries the right answer for each.
-        //
-        // The counting is debug-only (NOT warn): both the backfill window and
-        // the schema-pending window are normal lifecycle events
-        // (`migrations.run` is the dominant caller of the former;
-        // `bundle_invalidated` of the latter), and a stream of warns during a
-        // deploy would spam operators.
+        // Delivery state is stamped at commit so later scheduling cannot change it.
         let mut suppressed_count: usize = 0;
         let mut schema_pending_count: usize = 0;
         let mut delivered: Vec<PendingEvent> = Vec::with_capacity(packet.events.len());
@@ -617,10 +586,6 @@ async fn publisher_loop(
                 old_tuple,
             };
 
-            // Suppression / schema-pending filtering already ran over the
-            // packet's events above, on the stamp the commit hook wrote
-            // (plan §9). The engine-provided sink owns the thread-affine
-            // broker call.
             sink.publish(&event);
         }
     }

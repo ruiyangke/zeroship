@@ -475,10 +475,6 @@ fn near_returns_within_radius() {
                 .await
                 .expect("ensure_app_schema");
 
-            // Inline DDL — the `sqlite_geopoint_column_ddl` helper emits
-            // the same CHECK shape; we hand-write it here to keep the
-            // test self-contained against the orchestrator's PG-flavoured
-            // emitter.
             backend
                 .execute_fixture(
                     &format!(
