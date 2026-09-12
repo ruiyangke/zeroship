@@ -298,16 +298,6 @@ jobs:
         run: tests/deploy_instructions_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
-      # These organization source scanners remain pending retirement. Behavioral
-      # authorization coverage lives in the authz and control crate tests.
-      - name: An app reaches its owner only through its project
-        run: tests/organization_ownership_path_gate.sh --self-test
-      - name: One ownership path, and no cached authority
-        run: tests/organization_ownership_path_gate.sh
-      - name: Route and lock extractors discriminate
-        run: tests/organization_route_authorization_gate.sh --self-test
-      - name: Every mutating organization route is guarded and locks first
-        run: tests/organization_route_authorization_gate.sh
       # THESE THREE LANDED WITHOUT A STEP and tests/ci_wiring_gate.sh has been
       # red on them since. All three are text scans that need no build and no
       # database, so the reason they were unwired was that nobody wired them,
