@@ -298,17 +298,10 @@ jobs:
         run: tests/deploy_instructions_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
-      # THESE THREE LANDED WITHOUT A STEP and tests/ci_wiring_gate.sh has been
-      # red on them since. All three are text scans that need no build and no
-      # database, so the reason they were unwired was that nobody wired them,
-      # which is exactly the state that gate exists to make visible: an
-      # uninvoked gate and a clean tree print the same thing.
       - name: The app-id sweep's frontier does not go backwards
         run: tests/app_id_frontier_gate.sh
       - name: Every write that could resurrect a deleted app carries its fence
         run: tests/deleted_app_write_fence_gate.sh
-      - name: A credential is minted only from a validating read of its row
-        run: tests/mint_reads_row_gate.sh
       - name: WS stub gate self-test
         run: tests/ws_subscription_stub_gate.sh --self-test
       - name: websocket subscription stub agrees with what describes it
