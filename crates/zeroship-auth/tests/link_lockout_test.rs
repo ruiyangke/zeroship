@@ -25,10 +25,10 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::identity::linker::{PendingLink, PENDING_LINK_TTL_SECS};
 use zeroship_auth::identity::password;
 use zeroship_auth::store::users;
+use zeroship_core::config::{Secret, SourceKind};
 
 const CORRECT_PASSWORD: &str = "correct link password phrase";
 
@@ -83,7 +83,7 @@ async fn locked_account_cannot_link_with_correct_password() {
     pg_client
         .execute(
             "UPDATE zeroship.users SET locked_until = NOW() + INTERVAL '1 hour' WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("lock user");
@@ -91,7 +91,7 @@ async fn locked_account_cannot_link_with_correct_password() {
     let pg = Arc::new(pg_client);
     let cfg = Arc::new(test_cfg(&db_url));
     let pending = PendingLink {
-        user_id: user.id,
+        user_id: user.id.clone(),
         provider: "github".into(),
         subject: format!("github-{}", Uuid::new_v4().simple()),
         email: email.clone(),
@@ -161,7 +161,7 @@ async fn locked_account_cannot_link_with_correct_password() {
     let linked = pg
         .query(
             "SELECT 1 FROM zeroship.federated_identities WHERE user_id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .expect("query identities");
@@ -173,17 +173,20 @@ async fn locked_account_cannot_link_with_correct_password() {
     // Cleanup.
     pg.execute(
         "DELETE FROM zeroship.federated_identities WHERE user_id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .ok();
     pg.execute(
         "DELETE FROM zeroship.audit_events WHERE actor_user_id = $1",
-        &[&user.id],
+        &[&user.id.as_str()],
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }

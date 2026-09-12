@@ -344,10 +344,9 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
         .await;
 
         let (proof, person_id) = common::validated_session(&db, "retention-race").await;
-        let user_id = person_id.to_string();
         let scopes = vec!["openid".to_string()];
         let mint = AccessTokenMint {
-            user_id: &user_id,
+            user_id: &person_id,
             sector: "https://app.zeroship.test",
             audience: "app:00000000-0000-0000-0000-000000000001",
             client_id: "oac_retention_race",
@@ -404,13 +403,12 @@ async fn every_production_token_kind_advances_the_key_watermark() {
         clear_watermark(&db, &kid).await;
 
         let (proof, person_id) = common::validated_session(&db, "retention-kinds").await;
-        let user_id = person_id.to_string();
         let scopes = vec!["openid".to_string()];
         let access_token = issuer
             .issue_access_token(
                 &db,
                 &AccessTokenMint {
-                    user_id: &user_id,
+                    user_id: &person_id,
                     sector: "https://app.zeroship.test",
                     audience: "app:00000000-0000-0000-0000-000000000001",
                     client_id: "oac_retention_kinds",
@@ -428,7 +426,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             .issue_principal_access_token(
                 &db,
                 &PrincipalAccessTokenMint {
-                    principal_id: &user_id,
+                    principal_id: &person_id,
                     audience: "control.zeroship.test",
                     client_id: "zeroship-cli",
                     scopes: &scopes,
@@ -445,7 +443,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             .issue_id_token(
                 &db,
                 &IdTokenMint {
-                    user_id: &user_id,
+                    user_id: &person_id,
                     sector: "https://app.zeroship.test",
                     client_id: "oac_retention_kinds",
                     sid: "sid-retention-kinds",
@@ -471,7 +469,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             .issue_principal_id_token(
                 &db,
                 &PrincipalIdTokenMint {
-                    principal_id: &user_id,
+                    principal_id: &person_id,
                     client_id: "oac_retention_kinds",
                     sid: "sid-retention-kinds",
                     nonce: "nonce-retention-kinds",
@@ -497,7 +495,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 &db,
                 &LogoutTokenMint {
                     client_id: "oac_retention_kinds",
-                    sub: Some(&user_id),
+                    sub: Some(person_id.as_str()),
                     sid: None,
                     ttl_secs: Some(60),
                 },
@@ -511,7 +509,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             .issue_principal_access_token(
                 &db,
                 &PrincipalAccessTokenMint {
-                    principal_id: &user_id,
+                    principal_id: &person_id,
                     audience: "control.zeroship.test",
                     client_id: "zeroship-cli",
                     scopes: &scopes,
@@ -527,7 +525,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 &db,
                 &LogoutTokenMint {
                     client_id: "oac_retention_kinds",
-                    sub: Some(&user_id),
+                    sub: Some(person_id.as_str()),
                     sid: None,
                     ttl_secs: Some(60),
                 },
@@ -550,7 +548,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
             .issue_access_token(
                 &db,
                 &AccessTokenMint {
-                    user_id: &user_id,
+                    user_id: &person_id,
                     sector: "https://app.zeroship.test",
                     audience: "app:00000000-0000-0000-0000-000000000001",
                     client_id: "oac_retention_kinds",

@@ -7,10 +7,10 @@ use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_auth::config::AuthConfig;
-use zeroship_core::config::{Secret, SourceKind};
 use zeroship_auth::identity::linker::{PendingLink, PENDING_LINK_TTL_SECS};
 use zeroship_auth::identity::password;
 use zeroship_auth::store::users;
+use zeroship_core::config::{Secret, SourceKind};
 
 fn test_cfg(db_url: &str) -> AuthConfig {
     // A secret has no value flag - that is the point of the conversion - so the
@@ -62,7 +62,7 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
     let pg = Arc::new(pg_client);
     let cfg = Arc::new(test_cfg(&db_url));
     let pending = PendingLink {
-        user_id: user.id,
+        user_id: user.id.clone(),
         provider: "github".into(),
         subject: format!("github-{}", Uuid::new_v4().simple()),
         email: email.clone(),
@@ -116,7 +116,10 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
             String::from_utf8(test::read_body(post_resp).await.to_vec()).expect("utf8 body");
 
         if attempt < 5 {
-            assert_eq!(status, 401, "attempt {attempt} should still verify the password");
+            assert_eq!(
+                status, 401,
+                "attempt {attempt} should still verify the password"
+            );
             assert!(
                 response_body.contains("invalid password"),
                 "attempt {attempt} should render invalid password"
@@ -131,14 +134,23 @@ async fn link_wrong_password_is_limited_by_fifth_attempt() {
         csrf = next_csrf;
     }
 
-    let like = format!("link_attempt:{}:%", user.id);
-    pg.execute("DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE $1", &[&like])
-        .await
-        .ok();
-    pg.execute("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", &[&user.id])
-        .await
-        .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id])
-        .await
-        .ok();
+    let like = format!("link_attempt:{}:%", user.id.as_str());
+    pg.execute(
+        "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
+        &[&like],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.audit_events WHERE actor_user_id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }

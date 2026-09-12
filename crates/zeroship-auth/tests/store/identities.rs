@@ -14,15 +14,15 @@ async fn identities_link_find_list_unlink_roundtrip() {
         // Seed: an OAuth-only user (password_hash NULL). Email is CITEXT so the
         // bind must be cast — compio-postgres binds &str as TEXT.
         let email = format!("identities-{}@example.test", Uuid::new_v4().simple());
-        let row = client
-            .query_one(
-                "INSERT INTO zeroship.users (email, name, password_hash) \
-                 VALUES ($1::citext, $2, NULL) RETURNING id",
-                &[&email, &"OAuth Only"],
+        let user_id = zeroship_core::UserId::mint();
+        client
+            .execute(
+                "INSERT INTO zeroship.users (id, email, name, password_hash) \
+                 VALUES ($1, $2::citext, $3, NULL)",
+                &[&user_id.as_str(), &email, &"OAuth Only"],
             )
             .await
             .expect("seed user");
-        let user_id: Uuid = row.get("id");
 
         let provider = "google";
         let subject = format!("sub-{}", Uuid::new_v4().simple());
@@ -36,7 +36,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
         });
         let linked = identities::link(
             &client,
-            user_id,
+            &user_id,
             provider,
             &subject,
             Some(&email),
@@ -64,14 +64,14 @@ async fn identities_link_find_list_unlink_roundtrip() {
         assert!(missing.is_none(), "unknown subject must return None");
 
         // (4) list_for_user returns the one identity.
-        let listed = identities::list_for_user(&client, user_id)
+        let listed = identities::list_for_user(&client, &user_id)
             .await
             .expect("list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, linked.id);
 
         // (5) unlink returns true; subsequent find returns None.
-        let removed = identities::unlink(&client, user_id, provider)
+        let removed = identities::unlink(&client, &user_id, provider)
             .await
             .expect("unlink");
         assert!(removed, "unlink should report a row was deleted");
@@ -81,7 +81,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
         assert!(after.is_none(), "identity must be gone after unlink");
 
         // (6) Idempotent unlink — second call returns false.
-        let removed_again = identities::unlink(&client, user_id, provider)
+        let removed_again = identities::unlink(&client, &user_id, provider)
             .await
             .expect("unlink again");
         assert!(!removed_again, "second unlink must report no rows deleted");
@@ -95,21 +95,21 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
         let client = database.connect_as_auth().await;
 
         let email = format!("identities-{}@example.test", Uuid::new_v4().simple());
-        let row = client
-            .query_one(
-                "INSERT INTO zeroship.users (email, name, password_hash) \
-                 VALUES ($1::citext, $2, NULL) RETURNING id",
-                &[&email, &"OAuth Only"],
+        let user_id = zeroship_core::UserId::mint();
+        client
+            .execute(
+                "INSERT INTO zeroship.users (id, email, name, password_hash) \
+                 VALUES ($1, $2::citext, $3, NULL)",
+                &[&user_id.as_str(), &email, &"OAuth Only"],
             )
             .await
             .expect("seed user");
-        let user_id: Uuid = row.get("id");
 
         let google_subject = format!("google-{}", Uuid::new_v4().simple());
         let github_subject = format!("github-{}", Uuid::new_v4().simple());
         identities::link(
             &client,
-            user_id,
+            &user_id,
             "google",
             &google_subject,
             Some(&email),
@@ -119,7 +119,7 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
         .expect("link google");
         identities::link(
             &client,
-            user_id,
+            &user_id,
             "github",
             &github_subject,
             Some(&email),
@@ -145,16 +145,18 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
         transaction
             .query_one(
                 "SELECT id FROM zeroship.users WHERE id = $1 FOR UPDATE",
-                &[&user_id],
+                &[&user_id.as_str()],
             )
             .await
             .expect("hold the user while unlink operations start");
+        let google_user_id = user_id.clone();
         let unlink_google = compio::runtime::spawn(async move {
-            identities::unlink_preserving_credential(&client_a, user_id, "google").await
+            identities::unlink_preserving_credential(&client_a, &google_user_id, "google").await
         });
         let google_waiting = database.wait_until_blocked(&[google_pid]).await;
+        let github_user_id = user_id.clone();
         let unlink_github = compio::runtime::spawn(async move {
-            identities::unlink_preserving_credential(&client_b, user_id, "github").await
+            identities::unlink_preserving_credential(&client_b, &github_user_id, "github").await
         });
         let both_waiting = database.wait_until_blocked(&[google_pid, github_pid]).await;
         transaction.commit().await.expect("release waiting unlinks");
@@ -170,7 +172,7 @@ async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
         assert_eq!(google_result, GuardedUnlink::Unlinked);
         assert_eq!(github_result, GuardedUnlink::WouldOrphan);
 
-        let remaining = identities::list_for_user(&client, user_id)
+        let remaining = identities::list_for_user(&client, &user_id)
             .await
             .expect("list remaining identities");
         assert_eq!(

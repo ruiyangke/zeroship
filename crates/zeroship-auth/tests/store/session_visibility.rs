@@ -48,7 +48,7 @@ async fn seed_app(database: &Database) -> Uuid {
 /// Seed one live gateway session for `user_id`@`app_id`, returning its id.
 async fn seed_gateway_session(
     database: &Database,
-    user_id: Uuid,
+    user_id: &zeroship_core::UserId,
     app_id: Uuid,
     email: &str,
 ) -> Uuid {
@@ -60,18 +60,18 @@ async fn seed_gateway_session(
              VALUES ($1, $2, $3::citext, $4, true, \
                      NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours') \
              RETURNING id",
-            &[&user_id, &app_id, &email, &"Test"],
+            &[&user_id.as_str(), &app_id, &email, &"Test"],
         )
         .await
         .expect("seed gateway session");
     rows.first().expect("gateway session id").get("id")
 }
 
-async fn seed_idp_session(client: &Client, user_id: Uuid) -> sessions::Session {
+async fn seed_idp_session(client: &Client, user_id: &zeroship_core::UserId) -> sessions::Session {
     sessions::create(
         client,
         &sessions::CreateSession {
-            user_id,
+            user_id: user_id.clone(),
             auth_method: "password",
             amr: vec!["pwd".into()],
             acr: None,
@@ -96,7 +96,7 @@ async fn list_returns_idp_and_gateway_sessions() {
             .await
             .expect("seed user");
 
-        let idp = seed_idp_session(&client, user.id).await;
+        let idp = seed_idp_session(&client, &user.id).await;
         let seed = database.connect().await;
         seed.execute(
             "UPDATE zeroship.idp_sessions SET auth_time = NOW() - INTERVAL '1 day' WHERE id = $1",
@@ -106,9 +106,9 @@ async fn list_returns_idp_and_gateway_sessions() {
         .expect("put the IDP session before the gateway session");
 
         let app_id = seed_app(database).await;
-        let gw_id = seed_gateway_session(database, user.id, app_id, &email).await;
+        let gw_id = seed_gateway_session(database, &user.id, app_id, &email).await;
 
-        let list = sessions::list_by_user(&client, user.id)
+        let list = sessions::list_by_user(&client, &user.id)
             .await
             .expect("list_by_user");
 
@@ -150,10 +150,10 @@ async fn list_excludes_revoked_and_expired() {
             .expect("seed user");
 
         // A live idp session (should appear).
-        let live = seed_idp_session(&client, user.id).await;
+        let live = seed_idp_session(&client, &user.id).await;
 
         // A revoked idp session (should be hidden).
-        let revoked = seed_idp_session(&client, user.id).await;
+        let revoked = seed_idp_session(&client, &user.id).await;
         client
             .execute(
                 "UPDATE zeroship.idp_sessions SET revoked_at = NOW() WHERE id = $1",
@@ -169,15 +169,15 @@ async fn list_excludes_revoked_and_expired() {
                     (user_id, auth_method, amr, idle_expires_at, abs_expires_at) \
                  VALUES ($1, 'password', ARRAY['pwd'], \
                          NOW() - INTERVAL '1 minute', NOW() + INTERVAL '12 hours')",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .expect("seed expired idp session");
 
         // An expired gateway session.
         let app_id = seed_app(database).await;
-        let live_gateway = seed_gateway_session(database, user.id, app_id, &email).await;
-        let revoked_gateway = seed_gateway_session(database, user.id, app_id, &email).await;
+        let live_gateway = seed_gateway_session(database, &user.id, app_id, &email).await;
+        let revoked_gateway = seed_gateway_session(database, &user.id, app_id, &email).await;
         let seed = database.connect().await;
         seed.execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE id = $1",
@@ -189,12 +189,12 @@ async fn list_excludes_revoked_and_expired() {
                     (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
                  VALUES ($1, $2, $3::citext, $4, true, \
                          NOW() - INTERVAL '1 minute', NOW() + INTERVAL '12 hours')",
-                &[&user.id, &app_id, &email, &"Test"],
+                &[&user.id.as_str(), &app_id, &email, &"Test"],
             )
             .await
             .expect("seed expired gateway session");
 
-        let list = sessions::list_by_user(&client, user.id)
+        let list = sessions::list_by_user(&client, &user.id)
             .await
             .expect("list_by_user");
 
@@ -223,12 +223,12 @@ async fn list_excludes_other_users_sessions() {
             .expect("seed user b");
 
         // user_b has both an idp and a gateway session.
-        seed_idp_session(&client, user_b.id).await;
+        seed_idp_session(&client, &user_b.id).await;
         let app_id = seed_app(database).await;
-        seed_gateway_session(database, user_b.id, app_id, &email_b).await;
+        seed_gateway_session(database, &user_b.id, app_id, &email_b).await;
 
-        let a_idp = seed_idp_session(&client, user_a.id).await;
-        let list_a = sessions::list_by_user(&client, user_a.id)
+        let a_idp = seed_idp_session(&client, &user_a.id).await;
+        let list_a = sessions::list_by_user(&client, &user_a.id)
             .await
             .expect("list_by_user a");
         assert_eq!(
@@ -237,7 +237,7 @@ async fn list_excludes_other_users_sessions() {
             "user_a sees their own session and no session belonging to user_b"
         );
         assert_eq!(
-            sessions::list_by_user(&client, user_b.id)
+            sessions::list_by_user(&client, &user_b.id)
                 .await
                 .unwrap()
                 .len(),
@@ -259,17 +259,17 @@ async fn revoke_one_idp_session_succeeds() {
         let user = users::create(&client, &email, "Test", None)
             .await
             .expect("seed user");
-        let s = seed_idp_session(&client, user.id).await;
-        let other = seed_idp_session(&client, user.id).await;
+        let s = seed_idp_session(&client, &user.id).await;
+        let other = seed_idp_session(&client, &user.id).await;
 
-        let revoked = sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+        let revoked = sessions::revoke_one_for_user(&client, &user.id, s.id, SessionKind::Idp)
             .await
             .expect("revoke_one_for_user")
             .expect("revoking the user's own idp session reports what it ended");
         assert_eq!(revoked.kind, SessionKind::Idp);
         assert!(revoked.app_id.is_none(), "an idp session has no app_id");
 
-        let list = sessions::list_by_user(&client, user.id)
+        let list = sessions::list_by_user(&client, &user.id)
             .await
             .expect("list_by_user");
         assert_eq!(
@@ -294,10 +294,10 @@ async fn revoke_one_gateway_session_succeeds() {
             .await
             .expect("seed user");
         let app_id = seed_app(database).await;
-        let gw_id = seed_gateway_session(database, user.id, app_id, &email).await;
-        let other = seed_gateway_session(database, user.id, app_id, &email).await;
+        let gw_id = seed_gateway_session(database, &user.id, app_id, &email).await;
+        let other = seed_gateway_session(database, &user.id, app_id, &email).await;
 
-        let revoked = sessions::revoke_one_for_user(&client, user.id, gw_id, SessionKind::App)
+        let revoked = sessions::revoke_one_for_user(&client, &user.id, gw_id, SessionKind::App)
             .await
             .expect("revoke_one_for_user gateway")
             .expect("revoking the user's own gateway session reports what it ended");
@@ -308,7 +308,7 @@ async fn revoke_one_gateway_session_succeeds() {
             "the app arm must report which app to send the back-channel logout to"
         );
 
-        let list = sessions::list_by_user(&client, user.id)
+        let list = sessions::list_by_user(&client, &user.id)
             .await
             .expect("list_by_user");
         assert_eq!(
@@ -335,18 +335,18 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
             .expect("seed user b");
 
         // user_b's idp session.
-        let b_idp = seed_idp_session(&client, user_b.id).await;
+        let b_idp = seed_idp_session(&client, &user_b.id).await;
 
         // user_b's gateway session.
         let app_id = seed_app(database).await;
-        let b_gw = seed_gateway_session(database, user_b.id, app_id, &email_b).await;
+        let b_gw = seed_gateway_session(database, &user_b.id, app_id, &email_b).await;
 
         // user_a attempts to revoke BOTH of user_b's sessions by id.
         let idp_attempt =
-            sessions::revoke_one_for_user(&client, user_a.id, b_idp.id, SessionKind::Idp)
+            sessions::revoke_one_for_user(&client, &user_a.id, b_idp.id, SessionKind::Idp)
                 .await
                 .expect("idor idp attempt");
-        let gw_attempt = sessions::revoke_one_for_user(&client, user_a.id, b_gw, SessionKind::App)
+        let gw_attempt = sessions::revoke_one_for_user(&client, &user_a.id, b_gw, SessionKind::App)
             .await
             .expect("idor gateway attempt");
 
@@ -360,7 +360,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
         );
 
         // user_b's sessions are still live.
-        let b_list = sessions::list_by_user(&client, user_b.id)
+        let b_list = sessions::list_by_user(&client, &user_b.id)
             .await
             .expect("list_by_user b");
         assert_eq!(
@@ -370,20 +370,20 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
         );
 
         assert!(
-            sessions::revoke_one_for_user(&client, user_b.id, b_idp.id, SessionKind::Idp)
+            sessions::revoke_one_for_user(&client, &user_b.id, b_idp.id, SessionKind::Idp)
                 .await
                 .unwrap()
                 .is_some(),
             "the rightful owner can revoke the same IDP session"
         );
         assert!(
-            sessions::revoke_one_for_user(&client, user_b.id, b_gw, SessionKind::App)
+            sessions::revoke_one_for_user(&client, &user_b.id, b_gw, SessionKind::App)
                 .await
                 .unwrap()
                 .is_some(),
             "the rightful owner can revoke the same gateway session"
         );
-        assert!(sessions::list_by_user(&client, user_b.id)
+        assert!(sessions::list_by_user(&client, &user_b.id)
             .await
             .unwrap()
             .is_empty());
@@ -400,18 +400,18 @@ async fn revoke_already_revoked_or_missing_is_noop() {
         let user = users::create(&client, &email, "Test", None)
             .await
             .expect("seed user");
-        let s = seed_idp_session(&client, user.id).await;
+        let s = seed_idp_session(&client, &user.id).await;
 
         // First revoke succeeds.
         assert!(
-            sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+            sessions::revoke_one_for_user(&client, &user.id, s.id, SessionKind::Idp)
                 .await
                 .expect("first revoke")
                 .is_some()
         );
         // Second revoke of the same (already-revoked) id is a no-op.
         assert!(
-            sessions::revoke_one_for_user(&client, user.id, s.id, SessionKind::Idp)
+            sessions::revoke_one_for_user(&client, &user.id, s.id, SessionKind::Idp)
                 .await
                 .expect("second revoke")
                 .is_none(),
@@ -419,14 +419,14 @@ async fn revoke_already_revoked_or_missing_is_noop() {
         );
         // A totally unknown id is a no-op.
         assert!(
-            sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::Idp)
+            sessions::revoke_one_for_user(&client, &user.id, Uuid::new_v4(), SessionKind::Idp)
                 .await
                 .expect("missing revoke")
                 .is_none(),
             "revoking a nonexistent id reports nothing ended"
         );
         assert!(
-            sessions::revoke_one_for_user(&client, user.id, Uuid::new_v4(), SessionKind::App)
+            sessions::revoke_one_for_user(&client, &user.id, Uuid::new_v4(), SessionKind::App)
                 .await
                 .expect("missing gateway revoke")
                 .is_none(),
