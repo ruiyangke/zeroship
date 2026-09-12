@@ -21,6 +21,8 @@ test("invalid identities fail before collections are published", () => {
     { id: { type: "string" as const, primaryKey: true } },
     { id: { ...id, required: false } },
     { id, tenant: id },
+    { id: { ...id, assign: { by: "actor", on: "write" } } },
+    { id: { ...id, assign: { by: "actor", on: "delete" } } },
   ];
   for (const fields of invalidFields) {
     const native = {} as ConstructorParameters<typeof Collection>[2];

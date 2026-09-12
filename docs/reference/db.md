@@ -264,14 +264,18 @@ only fields declared by `S`.
 Every ORM collection must declare a required `id` field as its sole primary key.
 The descriptor must include it explicitly; collection setup never injects it.
 Generation remains optional and uses the field's assignment metadata. Composite
-business keys use unique constraints. Projections and aggregate results may
-omit `id`.
+business keys use unique constraints. Once inserted, `id` cannot change through
+updates, upsert conflicts, or lifecycle generators. ID generators run on insertion.
+Projections and aggregate results may omit `id`; protected reads retain it internally
+for decryption and unmasking.
 
 An assignment names a generator (`typedId`, `actor`, `now`, `increment(N)` or
 `identity`) and an event (`insert`, `write` or `delete`). The ORM supplies typed
 IDs and request actors. Database defaults initialize timestamps, counters and
 identity columns; write expressions update timestamps and counters. Anonymous
 writes assign a null actor. Assigned fields are excluded from typed write inputs.
+Encrypted inserts reserve a database-generated identity before encryption, within
+the write's transaction.
 
 Names such as `created_at`, `version` and `deleted_at` have no intrinsic behavior.
 Without assignment metadata, they are ordinary columns. See [Column assignments](#column-assignments).
@@ -393,8 +397,8 @@ backed by different tables are mutually incompatible at compile time:
 ```ts
 const userId: Id<"users"> = ...;
 const todoId: Id<"todos"> = ...;
-db.todos.get(userId);  // ✗ compile error
-db.todos.get(todoId);  // ✓
+const wrong: Id<"todos"> = userId; // compile error
+const correct: Id<"todos"> = todoId;
 ```
 
 Each collection exposes its own `Id` and `RowInput` type:
@@ -406,7 +410,10 @@ type UserInsert = typeof db.users.RowInput; // = RowInput<usersSchema>
 function addUser(input: UserInsert): Promise<UserId | undefined> { ... }
 ```
 
-The accessors are type-only — at runtime they return `null`.
+The accessors are type-only; do not read them at runtime. `typeof collection.Id`
+and `InferId<typeof collection>` follow the schema's underlying ID type. Numeric
+IDs work with `get`, mutation shorthand, relation loading, and `bulkUnmask`.
+The map returned by `bulkUnmask` uses the caller's ID values as keys.
 
 For a manual schema, declare the foreign-key target column explicitly:
 `t.ref("users", { column: "account_key" })`. Migration-generated builders carry
