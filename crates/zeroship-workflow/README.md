@@ -99,6 +99,14 @@ Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
 objects through the live task lease. `WorkerTasks` implements the
 payload read/write contract alongside the local task protocol.
+`runner::WorkflowWorker` drives bounded task slots, scheduling and expired
+payload collection on its host's compio thread. It keeps working without a
+request isolate, retries failed attempts with a delay, and bounds task polling
+and maintenance I/O. Shutdown cancels active execution and waits for it to stop
+before releasing claims. A cancelled host future must be drained before its
+slots are discarded or reused. `WorkerOptions` supplies the host limits, and
+construction requires customer payload and executable storage. Worker and CLI
+entrypoints are not yet connected to this loop.
 `runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
 and prepares task-scoped uploads for large or explicitly referenced results.
 It retains upload request identities across retries, checks returned descriptors

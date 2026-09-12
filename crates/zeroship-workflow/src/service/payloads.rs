@@ -17,6 +17,8 @@ use zeroship_storage::{
     Namespace, Storage, StorageError, StorageStore,
 };
 
+pub(crate) const MAX_COLLECTION_BATCH: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub enum PayloadSlot {
@@ -270,7 +272,7 @@ impl WorkflowService {
     /// Collect only unreferenced expired uploads. Failed deletion remains
     /// retryable; a transaction failure never authorizes a reference promotion.
     pub async fn collect_payloads(&self, limit: usize) -> Result<usize, WorkflowServiceError> {
-        if limit == 0 || limit > 1024 {
+        if limit == 0 || limit > MAX_COLLECTION_BATCH {
             return Err(WorkflowServiceError::InvalidRequest(
                 "invalid payload collection batch".into(),
             ));

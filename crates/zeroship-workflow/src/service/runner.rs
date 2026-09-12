@@ -2,6 +2,8 @@
 
 mod budget;
 pub use budget::{ExecutionBudget, ExecutionGuard};
+mod worker;
+pub use worker::{WorkerOptions, WorkflowWorker};
 mod payloads;
 pub use payloads::{TaskPayloadReader, TaskPayloads};
 mod outputs;
@@ -189,7 +191,10 @@ impl RunnerSlot {
     pub async fn run_once(&mut self) -> Result<RunnerOutcome, WorkflowServiceError> {
         self.drain_interrupted().await;
         let started = Instant::now();
-        let Some(assignment) = self.transport.poll().await? else {
+        let Some(assignment) = compio::time::timeout(self.execution_timeout, self.transport.poll())
+            .await
+            .map_err(|_| WorkflowServiceError::Timeout)??
+        else {
             return Ok(RunnerOutcome::Idle);
         };
         let lease = Cell::new(LeaseWindow::new(assignment.lease_ms, started)?);
