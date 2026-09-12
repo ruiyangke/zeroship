@@ -1,5 +1,10 @@
 //! Durable customer-side receipts for authenticated coordinator commands.
 
+#![expect(
+    clippy::future_not_send,
+    reason = "Management transactions stay on their owning compio thread"
+)]
+
 use super::{
     app::{decode, encode, lock_app},
     control::{self, Preparation},
@@ -61,7 +66,7 @@ impl AppWorkflows {
         }
         let authority = self.service.policies.management_authority(&self.app)?;
         let deadline = authority.deadline;
-        let attempt = self.apply_management_authorized(tx, command, &digest, &authority);
+        let attempt = Box::pin(self.apply_management_authorized(tx, command, &digest, &authority));
         if let Some(deadline) = deadline {
             // Cancellation covers lifecycle mutation and settlement. If a
             // commit's acknowledgement is lost, the next host reads its receipt.

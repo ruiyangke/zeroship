@@ -2,7 +2,10 @@ use super::super::{
     app::{active_deploy, emit, live_runs},
     journal,
 };
-use super::*;
+use super::{
+    lock_run, models, parse_state, replay, value, AppId, AppPolicy, Entity, Preparation, Rejection,
+    RestartOptions, RestartedRun, RunState, Transaction, WorkflowServiceError,
+};
 use crate::{engine::StepCheckpoint, lifecycle::RestartSafety, operations::RestartDeploy};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -216,6 +219,13 @@ impl RestartPlan {
             previous,
         } = self;
         let prefix = from.unwrap_or(0);
+        let restarted_from_ordinal = from
+            .map(|ordinal| {
+                u32::try_from(ordinal).map_err(|_| {
+                    WorkflowServiceError::Internal("invalid workflow restart ordinal".into())
+                })
+            })
+            .transpose()?;
         let tasks = tx
             .database()
             .collection(models::tasks::Entity::COLLECTION)?;
@@ -277,7 +287,7 @@ impl RestartPlan {
         let result = RestartedRun {
             run_id: run_id.into(),
             state: RunState::Queued,
-            restarted_from_ordinal: from.map(|value| value as u32),
+            restarted_from_ordinal,
             pinned_to: deploy,
         };
         emit(
@@ -304,6 +314,9 @@ async fn has_active_descendants(
     let db = tx.database();
     let run = db.entity::<models::runs::Entity>()?.alias("r")?;
     let page_limit = RowLimit::default().get();
+    let page_size = usize::try_from(page_limit).map_err(|_| {
+        WorkflowServiceError::Internal("invalid workflow descendant page size".into())
+    })?;
     let mut pending = vec![root.to_owned()];
     let mut inspected = BTreeSet::from([root.to_owned()]);
     while let Some(parent) = pending.pop() {
@@ -347,7 +360,7 @@ async fn has_active_descendants(
                 after = Some(descendant.id.clone());
                 pending.push(descendant.id);
             }
-            if count < page_limit as usize {
+            if count < page_size {
                 break;
             }
         }

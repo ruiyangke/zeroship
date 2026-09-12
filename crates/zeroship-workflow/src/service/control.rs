@@ -1,3 +1,8 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "Lifecycle transactions stay on their owning compio thread"
+)]
+
 use super::{
     app::{deadline, lock_app, lock_run, parse_state, request_result, store_request, validate_run},
     models,
@@ -24,7 +29,7 @@ pub(super) enum Rejection {
     Denied,
 }
 impl Rejection {
-    pub(super) fn outcome(&self) -> ManagementOutcome {
+    pub(super) const fn outcome(&self) -> ManagementOutcome {
         match self {
             Self::NotFound => ManagementOutcome::NotFound {},
             Self::Conflict(_) | Self::Invalid(_) => ManagementOutcome::Conflict {},
@@ -56,6 +61,11 @@ impl<T> Preparation<T> {
 }
 
 impl AppWorkflows {
+    /// Change lifecycle intent, retaining the response for app request retries.
+    ///
+    /// # Errors
+    /// Rejects unknown runs, invalid transitions and reused request identities;
+    /// reports admission and journal failures.
     pub async fn transition(
         &self,
         request: &RequestId,
@@ -90,6 +100,11 @@ impl AppWorkflows {
         Ok(result)
     }
 
+    /// Restart from a replay boundary while preserving retained step effects.
+    ///
+    /// # Errors
+    /// Rejects unsafe restart boundaries, live execution and reused request
+    /// identities; reports admission, deployment and journal failures.
     pub async fn restart(
         &self,
         request: &RequestId,

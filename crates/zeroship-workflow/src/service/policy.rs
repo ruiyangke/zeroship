@@ -84,14 +84,14 @@ pub struct HostPolicies {
 
 /// Authority captured for a management attempt. Refreshing the host snapshot
 /// does not extend an operation already waiting on customer storage.
-pub(crate) struct ManagementAuthority {
+pub(super) struct ManagementAuthority {
     revision: Revision,
-    pub(crate) deadline: Option<Instant>,
-    pub(crate) policy: AppPolicy,
+    pub(super) deadline: Option<Instant>,
+    pub(super) policy: AppPolicy,
 }
 
 impl ManagementAuthority {
-    pub(crate) fn check(
+    pub(super) fn check(
         &self,
         policies: &HostPolicies,
         app: &AppId,
@@ -108,7 +108,7 @@ impl ManagementAuthority {
 }
 
 impl HostPolicies {
-    pub(crate) fn management_authority(
+    pub(super) fn management_authority(
         &self,
         app: &AppId,
     ) -> Result<ManagementAuthority, WorkflowServiceError> {
@@ -119,11 +119,13 @@ impl HostPolicies {
             Validity::Until(deadline) if deadline > Instant::now() => Some(deadline),
             Validity::Until(_) => return Err(unavailable()),
         };
-        Ok(ManagementAuthority {
+        let authority = ManagementAuthority {
             revision: snapshot.revision,
             deadline,
             policy: snapshot.policy.clone(),
-        })
+        };
+        drop(entries);
+        Ok(authority)
     }
 
     /// Candidate discovery includes expired assignments so their leases and
