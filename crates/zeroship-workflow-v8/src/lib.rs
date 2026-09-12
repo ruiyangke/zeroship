@@ -7,7 +7,10 @@
 
 mod dev;
 mod error;
+mod executor;
 pub mod v8_class;
+
+pub use executor::{LoadedWorkflow, V8TaskExecutor, WorkflowRuntimeLoader};
 
 use std::path::Path;
 use std::sync::Arc;
