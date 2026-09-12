@@ -8,10 +8,10 @@ and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
 - `execution.rs`: typed replay inputs, executor outcomes and runtime decoding.
 - `calendar.rs`: shared cron parsing, timezone handling and calendar occurrences.
 - `claim.rs`, `apply.rs`, `advance.rs`: claims, fencing, and durable advancement.
-- `store/`: journal storage and its PostgreSQL implementation.
+- `store/`: existing Control journal implementation, awaiting production cutover.
 - `backend.rs`, `client.rs`: app-scoped control-plane operations for Rust hosts.
 - `service/`: replacement shared service, app handles, transactional lifecycle and
-  worker task protocol over PostgreSQL or SQLite.
+  worker task protocol through the shared Rust ORM.
 - `schema/`: customer journal recorded through the canonical migration DSL
   and generated through its PostgreSQL and SQLite compilers.
 
@@ -35,14 +35,29 @@ The shared engine is composed into the CLI; production worker and Control
 integration remain unfinished. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
 embeds it in the customer's worker with customer-bound persistence; a lightweight
 server coordinates metadata and does not own the journal or payloads.
-`PostgresStore::new` requires an explicit validated `SchemaName`; app identity
-does not select a physical schema. `schema::postgres_sql` binds the generated
+`OrmStore::new` accepts the host's `OrmContext`, `DbBinding` and `BackendHandle`.
+The ORM owns database selection, native values and transaction settlement;
+the workflow service has no separate PostgreSQL or SQLite runtime adapter.
+Reserved-table validation currently prevents native collection operations on the
+journal, so these operations use the ORM's scoped SQL execution interface.
+`schema::postgres_sql` binds the generated
 DDL for a provisioning host with authorized migration credentials. Runtime
 operations only verify the journal fingerprint and use ordinary DML.
 PostgreSQL and SQLite use reserved `__zeroship_workflow_*` tables. The generator
 compiles the canonical logical definition, then binds owned table, constraint
 and index identifiers for the provisioning artifact. Creator migration and
 query validators continue refusing reserved collections.
+
+`HostStorage` carries the app's resolved connection factory, keys, binding and
+object store to its workflow thread. Local setup initializes the journal in the
+SQLite file already attached by the ORM, preserving business tables. Canonical
+DDL application remains a provisioning operation. PostgreSQL runtime connections
+have ordinary app-role DML permissions and cannot provision the journal.
+
+`AppWorkflows::into_backend` creates a bounded client for other runtime threads,
+including V8. The database stays on its owning compio thread. Queue overload
+rejects admission; dropping a waiting call cancels its operation and lets the ORM
+settle any open transaction. Callers only receive success after confirmed commit.
 
 `WorkflowService::open` requires `HostPolicies`. The trusted worker supplies
 validated `PolicySnapshot` values through `register_app`, then binds app code
@@ -91,7 +106,7 @@ reads, production worker composition and metadata bundle retention remain unfini
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,
 lifecycle changes, child execution, retained restart
-history and scheduled occurrences against both database adapters. PostgreSQL
+history and scheduled occurrences through both ORM backends. PostgreSQL
 fixtures use Testcontainers.
 The replacement capability codecs use the platform's service signing keys.
 Public signal delivery checks app and target revocation epochs transactionally;

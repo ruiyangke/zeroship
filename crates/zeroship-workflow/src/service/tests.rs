@@ -1,13 +1,15 @@
 use super::{
     schema,
-    store::{PostgresStore, SqliteStore, Transaction, WorkflowStore},
+    store::{OrmStore, Transaction},
 };
-use super::{AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, RequestId, WorkflowService};
+use super::{
+    AppPolicy, DeployRegistration, HostPolicies, PolicySnapshot, RequestId, WorkflowService,
+};
 use crate::operations::{ConflictPolicy, SignalOptions, StartOptions};
 use crate::WorkflowServiceError;
 use compio_postgres::NoTls;
 use serde_json::json;
-use std::{path::Path, process::Command, sync::Arc};
+use std::{path::Path, process::Command, rc::Rc, sync::Arc};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
@@ -19,39 +21,65 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
     PolicySnapshot::configuration(revision.try_into().unwrap(), policy).unwrap()
 }
 
-mod payloads;
+mod background_scope;
+mod orm;
 mod output_reads;
 mod output_writes;
+mod payloads;
 mod policy;
-mod background_scope;
 mod runner;
+#[path = "../../../../tests/fixtures/s3.rs"]
+mod s3_fixture;
 mod schema_binding;
 mod snapshots;
 mod worker;
-#[path = "../../../../tests/fixtures/s3.rs"]
-mod s3_fixture;
 use snapshots::{fixture_snapshot_store, test_snapshot};
+
+async fn sqlite_store(path: &Path) -> OrmStore {
+    let store = orm_store(
+        &format!(
+            "sqlite:{}",
+            path.parent().unwrap().join("orm.sqlite").display()
+        ),
+        super::store::SchemaName::new("workflow").unwrap(),
+    )
+    .await;
+    schema::initialize_local(&store).await.unwrap();
+    store
+}
+
+async fn orm_store(url: &str, schema: super::store::SchemaName) -> OrmStore {
+    OrmStore::connect(
+        zeroship_data_orm::binding::DbBinding::new("workflow", "test-deployment", schema),
+        zeroship_data_orm::ConnectOptions::new(
+            url,
+            zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
+        ),
+    )
+    .await
+    .unwrap()
+}
 
 #[compio::test]
 async fn sqlite_app_operations_are_scoped_and_retryable() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    app_contract(Arc::new(SqliteStore::new(path))).await;
+    app_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
 async fn postgres_app_operations_are_scoped_and_retryable() {
     let fixture = PostgresFixture::start().await;
-    app_contract(Arc::new(fixture.store.clone())).await;
+    app_contract(Rc::new(fixture.store.clone())).await;
 }
 
-async fn registered_service(store: Arc<dyn WorkflowStore>) -> (WorkflowService, AppId, AppId) {
+async fn registered_service(store: Rc<OrmStore>) -> (WorkflowService, AppId, AppId) {
     registered_with_snapshots(store, fixture_snapshot_store()).await
 }
 
 async fn registered_with_snapshots(
-    store: Arc<dyn WorkflowStore>,
+    store: Rc<OrmStore>,
     snapshots: super::SnapshotStore,
 ) -> (WorkflowService, AppId, AppId) {
     let service = WorkflowService::open(store, Arc::new(HostPolicies::default()))
@@ -86,7 +114,7 @@ async fn registered_with_snapshots(
     (service, a, b)
 }
 
-async fn app_contract(store: Arc<dyn WorkflowStore>) {
+async fn app_contract(store: Rc<OrmStore>) {
     let (service, a, b) = registered_service(store).await;
     let a = service.for_app(a);
     let b = service.for_app(b);
@@ -160,7 +188,7 @@ async fn app_contract(store: Arc<dyn WorkflowStore>) {
 
 struct PostgresFixture {
     _container: Container<GenericImage>,
-    store: PostgresStore,
+    store: OrmStore,
     admin_url: String,
 }
 impl PostgresFixture {
@@ -180,7 +208,8 @@ impl PostgresFixture {
         admin
             .batch_execute(
                 "CREATE ROLE customer_migrator NOLOGIN; \
-             CREATE ROLE customer_worker LOGIN; CREATE ROLE zeroship_worker LOGIN; \
+             CREATE ROLE customer_worker LOGIN; CREATE ROLE app_customer_role NOLOGIN; \
+             GRANT app_customer_role TO customer_worker; CREATE ROLE zeroship_worker LOGIN; \
              CREATE ROLE zeroship_gateway LOGIN; CREATE ROLE zeroship_app LOGIN; \
              CREATE ROLE zeroship_control LOGIN; CREATE ROLE zeroship_workflow LOGIN; \
              CREATE SCHEMA customer AUTHORIZATION customer_migrator; \
@@ -194,15 +223,16 @@ impl PostgresFixture {
             .await
             .unwrap();
         admin.batch_execute(
-            "RESET ROLE; GRANT USAGE ON SCHEMA customer TO customer_worker; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA customer TO customer_worker;"
+            "RESET ROLE; GRANT USAGE ON SCHEMA customer TO app_customer_role; \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA customer TO app_customer_role;"
         ).await.unwrap();
         Self {
             _container: container,
-            store: PostgresStore::new(
-                format!("postgres://customer_worker@{host}:{port}/postgres"),
+            store: orm_store(
+                &format!("postgres://customer_worker@{host}:{port}/postgres"),
                 schema,
-            ),
+            )
+            .await,
             admin_url,
         }
     }
@@ -235,9 +265,9 @@ fn generated_schema_matches_the_shared_migration_definition() {
 #[compio::test]
 async fn sqlite_schema_constraints_and_transaction_rollback() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let store = SqliteStore::new(path);
+    let store = sqlite_store(&path).await;
     storage_contract(&store).await;
 }
 
@@ -247,11 +277,16 @@ async fn postgres_schema_constraints_and_transaction_rollback() {
     storage_contract(&fixture.store).await;
 }
 
-async fn storage_contract(store: &dyn WorkflowStore) {
+async fn storage_contract(store: &OrmStore) {
     store.verify().await.unwrap();
     let mut tx = store.begin().await.unwrap();
     let apps = tx.table("app_state");
-    tx.execute(&format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ('app_rollback',0)"), &[]).await.unwrap();
+    tx.execute(
+        &format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ('app_rollback',0)"),
+        &[],
+    )
+    .await
+    .unwrap();
     drop(tx);
     let mut tx = store.begin().await.unwrap();
     assert!(tx
@@ -263,7 +298,12 @@ async fn storage_contract(store: &dyn WorkflowStore) {
         .unwrap()
         .is_empty());
     for app in ["app_a", "app_b"] {
-        tx.execute(&format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ($1,0)"), &[app.into()]).await.unwrap();
+        tx.execute(
+            &format!("INSERT INTO {apps} (app_id, signal_epoch) VALUES ($1,0)"),
+            &[app.into()],
+        )
+        .await
+        .unwrap();
         let deploys = tx.table("deploys");
         tx.execute(&format!("INSERT INTO {deploys} (app_id,id,hash,manifest,created_at,active,state,snapshot_hash,snapshot_size,snapshot_epoch) VALUES ($1,$2,$2,'{{}}',0,1,'available','fixture',1,0)"), &[app.into(), format!("deploy_{app}").into()]).await.unwrap();
     }
@@ -317,7 +357,11 @@ async fn customer_runtime_has_dml_without_ddl_and_platform_roles_have_no_access(
     fixture.store.verify().await.unwrap();
     let admin = connect(&fixture.admin_url).await;
     for role in [
-        "zeroship_worker", "zeroship_gateway", "zeroship_app", "zeroship_control", "zeroship_workflow",
+        "zeroship_worker",
+        "zeroship_gateway",
+        "zeroship_app",
+        "zeroship_control",
+        "zeroship_workflow",
     ] {
         let url = fixture
             .admin_url
@@ -368,17 +412,19 @@ async fn customer_runtime_has_dml_without_ddl_and_platform_roles_have_no_access(
 #[test]
 fn local_initialization_never_resets_an_incompatible_journal() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     let conn = rusqlite::Connection::open(&path).unwrap();
     conn.execute_batch(
-        "CREATE TABLE existing_journal (id text); INSERT INTO existing_journal VALUES ('retained')",
+        "CREATE TABLE __zeroship_workflow_runs (id text); INSERT INTO __zeroship_workflow_runs VALUES ('retained')",
     )
     .unwrap();
     assert!(schema::initialize_sqlite(&path).is_err());
     assert_eq!(
-        conn.query_row("SELECT id FROM existing_journal", [], |row| row
-            .get::<_, String>(0))
-            .unwrap(),
+        conn.query_row("SELECT id FROM __zeroship_workflow_runs", [], |row| row
+            .get::<_, String>(
+            0
+        ))
+        .unwrap(),
         "retained"
     );
 }
@@ -386,22 +432,22 @@ fn local_initialization_never_resets_an_incompatible_journal() {
 #[compio::test]
 async fn sqlite_task_leases_and_receipts_preserve_the_frontier() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    task_contract(Arc::new(SqliteStore::new(path))).await;
+    task_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
 async fn postgres_task_leases_and_receipts_preserve_the_frontier() {
     let fixture = PostgresFixture::start().await;
-    task_contract(Arc::new(fixture.store.clone())).await;
+    task_contract(Rc::new(fixture.store.clone())).await;
 }
 
 fn execution(value: serde_json::Value) -> crate::WorkflowExecution {
     crate::WorkflowExecution::from_runtime_value(json!({"outcomes":value})).unwrap()
 }
 
-async fn task_contract(store: Arc<dyn WorkflowStore>) {
+async fn task_contract(store: Rc<OrmStore>) {
     use super::{TaskToken, WorkerIdentity};
     use crate::operations::RunState;
     let (service, app, _) = registered_service(store.clone()).await;
@@ -564,16 +610,16 @@ async fn task_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn sqlite_lifecycle_children_and_restart_share_service_transitions() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    behavior_contract(Arc::new(SqliteStore::new(path))).await;
+    behavior_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_lifecycle_children_and_restart_share_service_transitions() {
     let fixture = PostgresFixture::start().await;
-    behavior_contract(Arc::new(fixture.store.clone())).await;
+    behavior_contract(Rc::new(fixture.store.clone())).await;
 }
-async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
+async fn behavior_contract(store: Rc<OrmStore>) {
     use super::{ControlIntent, WorkerIdentity};
     use crate::operations::{RestartOptions, RestartTarget, RunOperation, RunState};
     let (service, app, _) = registered_service(store.clone()).await;
@@ -753,7 +799,10 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
         workflows: ["Example".into(), "Child".into()].into(),
         schedules: Vec::new(),
     };
-    service.activate_deploy(&app, &new_deploy, &test_snapshot()).await.unwrap();
+    service
+        .activate_deploy(&app, &new_deploy, &test_snapshot())
+        .await
+        .unwrap();
     let invalid = execution(json!([
         {"kind":"Child","ordinal":0,"name":"child","childWorkflowName":"Child","input":{"task":true}},
         {"kind":"StepCompleted","ordinal":9,"name":"invalid"}
@@ -837,16 +886,16 @@ async fn behavior_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn sqlite_concurrent_admission_cycles_and_compensation_retries() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    review_contract(Arc::new(SqliteStore::new(path))).await;
+    review_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_concurrent_admission_cycles_and_compensation_retries() {
     let fixture = PostgresFixture::start().await;
-    review_contract(Arc::new(fixture.store.clone())).await;
+    review_contract(Rc::new(fixture.store.clone())).await;
 }
-async fn review_contract(store: Arc<dyn WorkflowStore>) {
+async fn review_contract(store: Rc<OrmStore>) {
     use super::WorkerIdentity;
     use crate::operations::{RunOperation, RunState};
     let (service, app, other_app) = registered_service(store.clone()).await;
@@ -856,7 +905,10 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
         compensation_retry_ms: 60_000,
         ..Default::default()
     };
-    service.register_app(&app, configured_policy(2, policy)).await.unwrap();
+    service
+        .register_app(&app, configured_policy(2, policy))
+        .await
+        .unwrap();
     let request = RequestId::mint();
     let mut starts = Vec::new();
     for _ in 0..4 {
@@ -1010,7 +1062,9 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    let recovered = WorkflowService::open(store.clone(), service.policies.clone()).await.unwrap();
+    let recovered = WorkflowService::open(store.clone(), service.policies.clone())
+        .await
+        .unwrap();
     let task = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(
         task.invocation.journal[1].compensation_state.as_deref(),
@@ -1047,10 +1101,13 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
     service
         .register_app(
             &app,
-            configured_policy(3, AppPolicy {
-                max_running: 0,
-                ..Default::default()
-            }),
+            configured_policy(
+                3,
+                AppPolicy {
+                    max_running: 0,
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .unwrap();
@@ -1081,7 +1138,7 @@ async fn review_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn postgres_completion_that_outlives_its_lease_rolls_back() {
     let fixture = PostgresFixture::start().await;
-    let store: Arc<dyn WorkflowStore> = Arc::new(fixture.store.clone());
+    let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let run = scope
@@ -1091,10 +1148,13 @@ async fn postgres_completion_that_outlives_its_lease_rolls_back() {
     service
         .register_app(
             &app,
-            configured_policy(2, AppPolicy {
-                lease_ms: 300,
-                ..Default::default()
-            }),
+            configured_policy(
+                2,
+                AppPolicy {
+                    lease_ms: 300,
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .unwrap();
@@ -1134,16 +1194,16 @@ async fn postgres_completion_that_outlives_its_lease_rolls_back() {
 #[compio::test]
 async fn sqlite_signal_completion_races_do_not_lose_wakeups() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    signal_race_contract(Arc::new(SqliteStore::new(path))).await;
+    signal_race_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_signal_completion_races_do_not_lose_wakeups() {
     let fixture = PostgresFixture::start().await;
-    signal_race_contract(Arc::new(fixture.store.clone())).await;
+    signal_race_contract(Rc::new(fixture.store.clone())).await;
 }
-async fn signal_race_contract(store: Arc<dyn WorkflowStore>) {
+async fn signal_race_contract(store: Rc<OrmStore>) {
     let (service, app, _) = registered_service(store).await;
     let scope = service.for_app(app);
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
@@ -1230,16 +1290,16 @@ async fn signal_race_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn sqlite_schedules_commit_occurrences_with_runs() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    schedule_contract(Arc::new(SqliteStore::new(path))).await;
+    schedule_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_schedules_commit_occurrences_with_runs() {
     let fixture = PostgresFixture::start().await;
-    schedule_contract(Arc::new(fixture.store.clone())).await;
+    schedule_contract(Rc::new(fixture.store.clone())).await;
 }
-async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
+async fn schedule_contract(store: Rc<OrmStore>) {
     use super::{
         IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
     };
@@ -1260,7 +1320,10 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
             catch_up: ScheduleCatchUp::Backfill { max: 3 },
         }],
     };
-    service.activate_deploy(&app, &deploy, &test_snapshot()).await.unwrap();
+    service
+        .activate_deploy(&app, &deploy, &test_snapshot())
+        .await
+        .unwrap();
     assert_eq!(service.tick_schedules().await.unwrap(), 0);
     let mut tx = store.begin().await.unwrap();
     let now = tx.now().await.unwrap();
@@ -1274,7 +1337,10 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
     .unwrap();
     tx.commit().await.unwrap();
     // Activation notification retries must not move a persisted due frontier.
-    service.activate_deploy(&app, &deploy, &test_snapshot()).await.unwrap();
+    service
+        .activate_deploy(&app, &deploy, &test_snapshot())
+        .await
+        .unwrap();
     let mut ticks = Vec::new();
     for _ in 0..3 {
         let service = service.clone();
@@ -1325,7 +1391,10 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
     skip.id = typed_id::generate("dep");
     skip.hash = "d".repeat(64);
     skip.schedules[0].overlap = ScheduleOverlap::SkipIfRunning;
-    service.activate_deploy(&app, &skip, &test_snapshot()).await.unwrap();
+    service
+        .activate_deploy(&app, &skip, &test_snapshot())
+        .await
+        .unwrap();
     let mut tx = store.begin().await.unwrap();
     let later = tx.now().await.unwrap();
     let first = at + 180_000 + 10;
@@ -1389,7 +1458,10 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
     disabled.id = typed_id::generate("dep");
     disabled.hash = "e".repeat(64);
     disabled.schedules.clear();
-    service.activate_deploy(&app, &disabled, &test_snapshot()).await.unwrap();
+    service
+        .activate_deploy(&app, &disabled, &test_snapshot())
+        .await
+        .unwrap();
     let mut tx = store.begin().await.unwrap();
     assert!(tx
         .query(
@@ -1414,14 +1486,14 @@ async fn schedule_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn sqlite_topic_fanout_preserves_recipient_scope_after_restart() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    broadcast_contract(Arc::new(SqliteStore::new(path))).await;
+    broadcast_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_topic_fanout_preserves_recipient_scope_after_restart() {
     let fixture = PostgresFixture::start().await;
-    broadcast_contract(Arc::new(fixture.store.clone())).await;
+    broadcast_contract(Rc::new(fixture.store.clone())).await;
 }
 async fn wait_on_topic(
     service: &WorkflowService,
@@ -1437,7 +1509,7 @@ async fn wait_on_topic(
     service.complete(worker,&task.id,&task.token,execution(json!([{"kind":"Wait","ordinal":0,"name":"event","signalType":"news","topic":"updates"}]))).await.unwrap();
     run.id
 }
-async fn broadcast_contract(store: Arc<dyn WorkflowStore>) {
+async fn broadcast_contract(store: Rc<OrmStore>) {
     let (service, app, other) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let other_scope = service.for_app(other);
@@ -1475,7 +1547,9 @@ async fn broadcast_contract(store: Arc<dyn WorkflowStore>) {
     ));
     let late = wait_on_topic(&service, &scope, &worker).await;
     assert_eq!(service.tick_broadcasts().await.unwrap(), 128);
-    let recovered = WorkflowService::open(store.clone(), service.policies.clone()).await.unwrap();
+    let recovered = WorkflowService::open(store.clone(), service.policies.clone())
+        .await
+        .unwrap();
     assert_eq!(recovered.tick_broadcasts().await.unwrap(), 1);
     assert_eq!(recovered.tick_broadcasts().await.unwrap(), 0);
     let mut actual = std::collections::BTreeSet::new();
@@ -1559,16 +1633,16 @@ async fn broadcast_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn sqlite_signal_ingress_enforces_scopes_epochs_and_receipts() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    ingress_contract(Arc::new(SqliteStore::new(path))).await;
+    ingress_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 #[compio::test]
 async fn postgres_signal_ingress_enforces_scopes_epochs_and_receipts() {
     let fixture = PostgresFixture::start().await;
-    ingress_contract(Arc::new(fixture.store.clone())).await;
+    ingress_contract(Rc::new(fixture.store.clone())).await;
 }
-async fn ingress_contract(store: Arc<dyn WorkflowStore>) {
+async fn ingress_contract(store: Rc<OrmStore>) {
     use super::{
         capability::{mint_signal_capability, SignalGrant, SignalTarget},
         IngressReceipt, SignalAuthority, SignalTokenRequest,

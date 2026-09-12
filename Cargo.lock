@@ -8641,6 +8641,7 @@ dependencies = [
  "compio-s3",
  "cyper",
  "ed25519-dalek",
+ "flume 0.11.1",
  "futures",
  "percent-encoding",
  "rusqlite",
@@ -8654,7 +8655,7 @@ dependencies = [
  "uuid",
  "zeroship-bundle",
  "zeroship-core",
- "zeroship-data-sql",
+ "zeroship-data-orm",
  "zeroship-storage",
 ]
 
@@ -8711,6 +8712,7 @@ dependencies = [
  "uuid",
  "v8",
  "zeroship-core",
+ "zeroship-data-orm",
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-storage",

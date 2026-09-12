@@ -30,23 +30,23 @@ fn scheduled_deployment(count: usize) -> DeployRegistration {
 #[compio::test]
 async fn sqlite_schedules_wait_for_snapshot_repair_without_blocking_other_apps() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    scheduled_snapshot_contract(Arc::new(SqliteStore::new(path)), dir.path()).await;
+    scheduled_snapshot_contract(Rc::new(sqlite_store(&path).await), dir.path()).await;
 }
 
 #[compio::test]
 async fn postgres_schedules_wait_for_snapshot_repair_without_blocking_other_apps() {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    scheduled_snapshot_contract(Arc::new(fixture.store.clone()), dir.path()).await;
+    scheduled_snapshot_contract(Rc::new(fixture.store.clone()), dir.path()).await;
 }
 
 #[expect(
     clippy::too_many_lines,
     reason = "the contract follows executable loss through schedule deferral and repair"
 )]
-async fn scheduled_snapshot_contract(store: Arc<dyn WorkflowStore>, path: &Path) {
+async fn scheduled_snapshot_contract(store: Rc<OrmStore>, path: &Path) {
     let storage = StorageStore::from_backend(Arc::new(LocalFs::new(path.join("objects"))));
     let snapshots = SnapshotStore::new(&storage, 1024 * 1024).unwrap();
     let (service, app, other) = registered_with_snapshots(store, snapshots).await;
@@ -171,7 +171,7 @@ async fn scheduled_snapshot_contract(store: Arc<dyn WorkflowStore>, path: &Path)
 async fn postgres_schedule_rechecks_snapshot_after_waiting_for_app_lock() {
     use std::time::Duration;
     let fixture = PostgresFixture::start().await;
-    let (service, app, _) = registered_service(Arc::new(fixture.store.clone())).await;
+    let (service, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
     service
         .activate_deploy(&app, &scheduled_deployment(1), &test_snapshot())
         .await

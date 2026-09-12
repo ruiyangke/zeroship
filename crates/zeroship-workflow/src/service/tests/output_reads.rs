@@ -29,18 +29,18 @@ async fn buffered_payload_reads_consume_integrity_verification_at_eof() {
 #[compio::test]
 async fn sqlite_named_outputs_follow_the_current_generation_without_object_storage() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    output_contract(Arc::new(SqliteStore::new(path))).await;
+    output_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
 async fn postgres_named_outputs_follow_the_current_generation_without_object_storage() {
     let fixture = PostgresFixture::start().await;
-    output_contract(Arc::new(fixture.store.clone())).await;
+    output_contract(Rc::new(fixture.store.clone())).await;
 }
 
-async fn output_contract(store: Arc<dyn WorkflowStore>) {
+async fn output_contract(store: Rc<OrmStore>) {
     let (service, app, other) = registered_service(store).await;
     let app = service.for_app(app);
     let other = service.for_app(other);

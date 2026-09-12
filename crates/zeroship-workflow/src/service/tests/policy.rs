@@ -46,7 +46,7 @@ fn host_policy_revisions_reject_conflicting_limits_and_accept_authorized_refresh
 #[compio::test]
 async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() {
     let fixture = PostgresFixture::start().await;
-    let (service, app, _) = registered_service(Arc::new(fixture.store.clone())).await;
+    let (service, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
     let blocker = connect(&fixture.admin_url).await;
     blocker.batch_execute("BEGIN").await.unwrap();
     blocker
@@ -97,15 +97,15 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
 #[compio::test]
 async fn sqlite_host_policy_expiry_preserves_history_and_stops_new_execution() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("journal.sqlite");
+    let path = directory.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    host_policy_contract(Arc::new(SqliteStore::new(path))).await;
+    host_policy_contract(Rc::new(sqlite_store(&path).await)).await;
 }
 
 #[compio::test]
 async fn postgres_host_policy_needs_no_platform_database() {
     let fixture = PostgresFixture::start().await;
-    host_policy_contract(Arc::new(fixture.store.clone())).await;
+    host_policy_contract(Rc::new(fixture.store.clone())).await;
     let admin = connect(&fixture.admin_url).await;
     assert!(admin
         .query(
@@ -122,7 +122,7 @@ async fn postgres_host_policy_needs_no_platform_database() {
     clippy::future_not_send,
     reason = "The fixture drives a thread-local compio journal"
 )]
-async fn host_policy_contract(store: Arc<dyn WorkflowStore>) {
+async fn host_policy_contract(store: Rc<OrmStore>) {
     let (service, app, other) = registered_service(store.clone()).await;
     let scope = service.for_app(app.clone());
     let request = RequestId::mint();
@@ -228,9 +228,9 @@ async fn host_policy_contract(store: Arc<dyn WorkflowStore>) {
 #[compio::test]
 async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("journal.sqlite");
+    let path = directory.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let (service, app, _) = registered_service(Arc::new(SqliteStore::new(path))).await;
+    let (service, app, _) = registered_service(Rc::new(sqlite_store(&path).await)).await;
     let lifetime = Duration::from_millis(250);
     let until = Instant::now() + lifetime;
     let snapshot =
@@ -262,31 +262,37 @@ async fn metadata_lease_bounds_grants_and_duplicate_delivery_keeps_its_deadline(
 #[compio::test]
 async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
     let fixture = PostgresFixture::start().await;
-    let (first, app, _) = registered_service(Arc::new(fixture.store.clone())).await;
+    let (first, app, _) = registered_service(Rc::new(fixture.store.clone())).await;
     let admin = connect(&fixture.admin_url).await;
     let other = super::super::store::SchemaName::new("customer-other").unwrap();
-    admin.batch_execute("CREATE SCHEMA \"customer-other\" AUTHORIZATION customer_migrator; CREATE ROLE other_customer_worker LOGIN; SET ROLE customer_migrator;").await.unwrap();
+    admin.batch_execute("CREATE SCHEMA \"customer-other\" AUTHORIZATION customer_migrator; CREATE ROLE other_customer_worker LOGIN; CREATE ROLE \"app_customer-other_role\" NOLOGIN; GRANT \"app_customer-other_role\" TO other_customer_worker; SET ROLE customer_migrator;").await.unwrap();
     admin
         .batch_execute(&schema::postgres_sql(&other))
         .await
         .unwrap();
-    admin.batch_execute("RESET ROLE; GRANT USAGE ON SCHEMA \"customer-other\" TO other_customer_worker; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA \"customer-other\" TO other_customer_worker;").await.unwrap();
-    let wrong = Arc::new(PostgresStore::new(
-        fixture.admin_url.replace("postgres@", "customer_worker@"),
-        other.clone(),
-    ));
+    admin.batch_execute("RESET ROLE; GRANT USAGE ON SCHEMA \"customer-other\" TO \"app_customer-other_role\"; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA \"customer-other\" TO \"app_customer-other_role\";").await.unwrap();
+    let wrong = Rc::new(
+        orm_store(
+            &fixture.admin_url.replace("postgres@", "customer_worker@"),
+            other.clone(),
+        )
+        .await,
+    );
     assert!(
         WorkflowService::open(wrong, Arc::new(HostPolicies::default()))
             .await
             .is_err()
     );
     let second = WorkflowService::open(
-        Arc::new(PostgresStore::new(
-            fixture
-                .admin_url
-                .replace("postgres@", "other_customer_worker@"),
-            other,
-        )),
+        Rc::new(
+            orm_store(
+                &fixture
+                    .admin_url
+                    .replace("postgres@", "other_customer_worker@"),
+                other,
+            )
+            .await,
+        ),
         Arc::new(HostPolicies::default()),
     )
     .await

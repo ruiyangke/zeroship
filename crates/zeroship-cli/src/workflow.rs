@@ -17,12 +17,11 @@ use std::{
 };
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
-use zeroship_storage::{LocalFs, StorageStore};
 use zeroship_workflow::{
     service::{
         runner::{TaskPayloadLimits, WorkerOptions, WorkflowWorker},
         schema,
-        store::SqliteStore,
+        store::HostStorage,
         AppBackend, AppPolicy, ExecutableSnapshot, HostPolicies, PolicySnapshot, SnapshotStore,
         WorkerIdentity, WorkflowService,
     },
@@ -33,8 +32,6 @@ use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor, WorkflowBinding};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
-    pub journal: PathBuf,
-    pub objects: PathBuf,
     pub max_archive_bytes: usize,
     pub max_source_bytes: usize,
     pub max_snapshot_bytes: usize,
@@ -44,8 +41,6 @@ pub struct LocalConfig {
 impl Default for LocalConfig {
     fn default() -> Self {
         Self {
-            journal: ".zeroship/workflows.sqlite".into(),
-            objects: ".zeroship/workflow-objects".into(),
             max_archive_bytes: zeroship_bundle::MAX_COMPRESSED_BYTES,
             max_source_bytes: 32 * 1024 * 1024,
             max_snapshot_bytes: 64 * 1024 * 1024,
@@ -70,7 +65,7 @@ impl LocalConfig {
         )
     }
 
-    fn resolve(mut self, root: &Path) -> Result<Self, String> {
+    fn validate(self) -> Result<Self, String> {
         if self.max_archive_bytes == 0
             || self.max_archive_bytes > zeroship_bundle::MAX_COMPRESSED_BYTES
             || self.max_source_bytes == 0
@@ -81,8 +76,6 @@ impl LocalConfig {
         self.payloads
             .validate()
             .map_err(|error| error.to_string())?;
-        self.journal = root.join(self.journal);
-        self.objects = root.join(self.objects);
         Ok(self)
     }
 }
@@ -100,11 +93,12 @@ impl LocalHost {
         root: &Path,
         config: LocalConfig,
         deployment: Option<PathBuf>,
+        storage: HostStorage,
         env_vars: HashMap<String, String>,
         peers: Vec<Arc<dyn NativePlugin>>,
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
-        let config = config.resolve(root)?;
+        let config = config.validate()?;
         let app = project_identity(root)?;
         let deployment = deployment
             .map(|path| crate::deployment::AppDeployment::new(root, &path))
@@ -130,6 +124,7 @@ impl LocalHost {
                         &config,
                         deployment.as_ref(),
                         &worker_app,
+                        storage,
                         env_vars,
                         peers,
                         limits,
@@ -230,6 +225,7 @@ async fn initialize(
     config: &LocalConfig,
     deployment: Option<&crate::deployment::AppDeployment>,
     app: &AppId,
+    storage: HostStorage,
     env_vars: HashMap<String, String>,
     peers: Vec<Arc<dyn NativePlugin>>,
     limits: RuntimeLimits,
@@ -241,15 +237,13 @@ async fn initialize(
     ),
     WorkflowServiceError,
 > {
-    schema::initialize_sqlite(&config.journal)?;
-    let storage = StorageStore::from_backend(Arc::new(LocalFs::new(&config.objects)));
-    let service = WorkflowService::open(
-        Arc::new(SqliteStore::new(&config.journal)),
-        Arc::new(HostPolicies::default()),
-    )
-    .await?
-    .with_payload_storage(storage.clone())?
-    .with_snapshots(SnapshotStore::new(&storage, config.max_snapshot_bytes)?);
+    let store = storage.open().await?;
+    schema::initialize_local(&store).await?;
+    let storage = storage.objects;
+    let service = WorkflowService::open(Rc::new(store), Arc::new(HostPolicies::default()))
+        .await?
+        .with_payload_storage(storage.clone())?
+        .with_snapshots(SnapshotStore::new(&storage, config.max_snapshot_bytes)?);
     service
         .register_app(
             app,

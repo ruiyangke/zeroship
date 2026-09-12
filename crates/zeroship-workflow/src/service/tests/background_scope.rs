@@ -17,16 +17,16 @@ use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
 #[compio::test]
 async fn sqlite_background_work_uses_only_host_assigned_apps() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    background_contract(Arc::new(SqliteStore::new(path)), dir.path()).await;
+    background_contract(Rc::new(sqlite_store(&path).await), dir.path()).await;
 }
 
 #[compio::test]
 async fn postgres_background_work_uses_only_host_assigned_apps() {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    background_contract(Arc::new(fixture.store.clone()), dir.path()).await;
+    background_contract(Rc::new(fixture.store.clone()), dir.path()).await;
 }
 
 async fn seed_app(service: &WorkflowService, app: &AppId, worker: &WorkerIdentity) -> String {
@@ -125,7 +125,7 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
     clippy::too_many_lines,
     reason = "the restart contract checks selection, isolation and expiry recovery together"
 )]
-async fn background_contract(store: Arc<dyn WorkflowStore>, path: &Path) {
+async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     let (service, assigned, foreign) = registered_service(store.clone()).await;
     let storage = StorageStore::from_backend(Arc::new(LocalFs::new(path.join("objects"))));
     let service = service.with_payload_storage(storage.clone()).unwrap();

@@ -1,5 +1,5 @@
 use super::{
-    store::{Row, Transaction, WorkflowStore},
+    store::{OrmStore, Row, Transaction},
     types::{digest, AppPolicy, DeployRegistration, RequestId},
 };
 use crate::{
@@ -11,12 +11,13 @@ use crate::{
 };
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::json;
+use std::rc::Rc;
 use std::sync::Arc;
 use zeroship_core::{app_id::AppId, typed_id};
 
 #[derive(Clone)]
 pub struct WorkflowService {
-    pub(crate) store: Arc<dyn WorkflowStore>,
+    pub(crate) store: Rc<OrmStore>,
     pub(crate) policies: Arc<super::HostPolicies>,
     pub(crate) snapshots: Option<super::SnapshotStore>,
     pub(crate) signal_authority: Option<Arc<super::SignalAuthority>>,
@@ -42,7 +43,7 @@ impl WorkflowService {
     /// # Errors
     /// Refuses unavailable or incompatible journal storage.
     pub async fn open(
-        store: Arc<dyn WorkflowStore>,
+        store: Rc<OrmStore>,
         policies: Arc<super::HostPolicies>,
     ) -> Result<Self, WorkflowServiceError> {
         store.verify().await?;

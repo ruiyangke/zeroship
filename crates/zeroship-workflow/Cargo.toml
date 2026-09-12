@@ -9,9 +9,10 @@ bytes = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures = { workspace = true }
+flume = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
-zeroship-data-sql = { workspace = true }
+zeroship-data-orm = { workspace = true }
 zeroship-storage = { workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }

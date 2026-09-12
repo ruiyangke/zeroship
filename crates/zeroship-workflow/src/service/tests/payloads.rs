@@ -1,12 +1,12 @@
 use super::*;
+use crate::service::runner::TaskPayloadReader;
 use crate::{
     engine::WorkflowOutputRef,
     operations::RunState,
     service::{PayloadRead, PayloadSlot, WorkerIdentity},
 };
-use crate::service::runner::TaskPayloadReader;
-use std::rc::Rc;
 use bytes::Bytes;
+use std::rc::Rc;
 use zeroship_storage::{
     backend::{BoxChunkSource, OnceChunk},
     LocalFs, StorageStore,
@@ -36,10 +36,10 @@ fn local(dir: &Path) -> StorageStore {
 #[compio::test]
 async fn sqlite_payload_ownership_and_retention() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
     payload_contract(
-        Arc::new(SqliteStore::new(path)),
+        Rc::new(sqlite_store(&path).await),
         local(&dir.path().join("payloads")),
     )
     .await;
@@ -49,23 +49,23 @@ async fn sqlite_payload_ownership_and_retention() {
 async fn postgres_payload_ownership_and_retention() {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    payload_contract(Arc::new(fixture.store.clone()), local(dir.path())).await;
+    payload_contract(Rc::new(fixture.store.clone()), local(dir.path())).await;
 }
 
 #[compio::test]
 async fn s3_payload_ownership_and_retention() {
     let fixture = s3_fixture::Minio::start();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
     let storage = StorageStore::from_backend(Arc::new(zeroship_storage::S3::new(
         fixture.config("workflows"),
         fixture.credentials(),
     )));
-    payload_contract(Arc::new(SqliteStore::new(path)), storage).await;
+    payload_contract(Rc::new(sqlite_store(&path).await), storage).await;
 }
 
-async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) {
+async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
     let (service, a, b) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(storage.clone()).unwrap();
     let scope = service.for_app(a.clone());
@@ -339,10 +339,19 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
     assert_eq!(reader.app_id(), &a);
     assert_eq!(reader.run_id(), run.id);
     assert_eq!(reader.read_step_output("result", 0).await.unwrap(), data);
-    assert!(matches!(reader.read_step_output("missing", 0).await, Err(WorkflowServiceError::NotFound(_))));
-    assert!(matches!(reader.read_step_output("result", 1).await, Err(WorkflowServiceError::NotFound(_))));
+    assert!(matches!(
+        reader.read_step_output("missing", 0).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    assert!(matches!(
+        reader.read_step_output("result", 1).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
     let limited = TaskPayloadReader::new(transport, &next, 1).unwrap();
-    assert!(matches!(limited.read_step_output("result", 0).await, Err(WorkflowServiceError::PayloadTooLarge)));
+    assert!(matches!(
+        limited.read_step_output("result", 0).await,
+        Err(WorkflowServiceError::PayloadTooLarge)
+    ));
     assert_eq!(
         scope
             .read_step_output(&run.id, "result", 0)
@@ -468,7 +477,7 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
     );
 }
 
-async fn expire_uploads(store: &Arc<dyn WorkflowStore>) {
+async fn expire_uploads(store: &Rc<OrmStore>) {
     let mut tx = store.begin().await.unwrap();
     let table = tx.table("payloads");
     tx.execute(&format!("UPDATE {table} SET expires_at=0"), &[])
@@ -510,8 +519,16 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
         .unwrap();
     let successor = service.poll(worker).await.unwrap().unwrap();
     assert_eq!(successor.invocation.trigger.input_ref, Some(output.clone()));
-    let reader = TaskPayloadReader::new(Rc::new(service.tasks(worker.clone())), &successor, data.len()).unwrap();
-    assert_eq!(reader.input().await.unwrap(), Some(json!({"continued":true})));
+    let reader = TaskPayloadReader::new(
+        Rc::new(service.tasks(worker.clone())),
+        &successor,
+        data.len(),
+    )
+    .unwrap();
+    assert_eq!(
+        reader.input().await.unwrap(),
+        Some(json!({"continued":true}))
+    );
     assert_eq!(
         drain(
             service
@@ -618,9 +635,9 @@ impl zeroship_storage::Backend for FailingDelete {
 #[compio::test]
 async fn deletion_failure_recovers_without_reopening_payload_authority() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("workflow.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
-    let store: Arc<dyn WorkflowStore> = Arc::new(SqliteStore::new(path));
+    let store: Rc<OrmStore> = Rc::new(sqlite_store(&path).await);
     let (service, app, _) = registered_service(store.clone()).await;
     let backend = Arc::new(FailingDelete {
         inner: LocalFs::new(dir.path().join("objects")),
@@ -699,7 +716,7 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
 async fn postgres_collection_rechecks_references_after_waiting_for_completion() {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let store: Arc<dyn WorkflowStore> = Arc::new(fixture.store.clone());
+    let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(local(dir.path())).unwrap();
     let scope = service.for_app(app.clone());

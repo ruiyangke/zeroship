@@ -30,17 +30,16 @@ fn project_identity_survives_restart_and_concurrent_initialization() {
 fn local_configuration_rejects_unknown_and_invalid_limits() {
     assert!(toml::from_str::<LocalConfig>("unknown = true").is_err());
     assert!(toml::from_str::<LocalConfig>("bundle = 'built.zship'").is_err());
-    let valid: LocalConfig =
-        toml::from_str("journal = 'custom.sqlite'\n[worker]\ntask_slots = 2").unwrap();
-    let root = tempfile::tempdir().unwrap();
-    let valid = valid.resolve(root.path()).unwrap();
-    assert_eq!(valid.journal, root.path().join("custom.sqlite"));
+    let valid: LocalConfig = toml::from_str("[worker]\ntask_slots = 2").unwrap();
+    assert!(toml::from_str::<LocalConfig>("journal = 'custom.sqlite'").is_err());
+    assert!(toml::from_str::<LocalConfig>("objects = 'custom-objects'").is_err());
+    let valid = valid.validate().unwrap();
     assert_eq!(valid.worker.task_slots, 2);
     let invalid = LocalConfig {
         max_source_bytes: 0,
         ..LocalConfig::default()
     };
-    assert!(invalid.resolve(root.path()).is_err());
+    assert!(invalid.validate().is_err());
 }
 
 fn publish(path: &Path, version: &str) {
@@ -61,10 +60,9 @@ fn publish(path: &Path, version: &str) {
     );
 }
 
-async fn client(root: &Path, config: &LocalConfig, app: &AppId) -> (WorkflowService, AppWorkflows) {
-    let config = config.clone().resolve(root).unwrap();
+async fn client(root: &Path, app: &AppId) -> (WorkflowService, AppWorkflows) {
     let service = WorkflowService::open(
-        Arc::new(SqliteStore::new(config.journal)),
+        Rc::new(test_storage(root).open().await.unwrap()),
         Arc::new(HostPolicies::default()),
     )
     .await
@@ -110,13 +108,14 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
         root.path(),
         config.clone(),
         Some(bundle.clone()),
+        test_storage(root.path()),
         env,
         vec![],
         RuntimeLimits::default(),
     )
     .unwrap();
     let app = host.app.clone();
-    let (_service, api) = client(root.path(), &config, &app).await;
+    let (_service, api) = client(root.path(), &app).await;
     let old = api
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -131,6 +130,7 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
         root.path(),
         config,
         Some(bundle),
+        test_storage(root.path()),
         HashMap::new(),
         vec![],
         RuntimeLimits::default(),
@@ -161,4 +161,23 @@ async fn local_worker_retains_code_across_app_rebuild_and_restart_without_http()
         );
     }
     drop(host);
+}
+
+fn test_storage(root: &Path) -> HostStorage {
+    HostStorage {
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(&format!(
+            "sqlite:{}",
+            root.join(".zeroship/dev.sqlite").display()
+        ))
+        .unwrap(),
+        keys: zeroship_data_orm::encryption::ProjectKeySource::unavailable(),
+        binding: zeroship_data_orm::binding::DbBinding::new(
+            "default",
+            "test-deployment",
+            zeroship_core::schema_name::SchemaName::new("default").unwrap(),
+        ),
+        objects: zeroship_storage::StorageStore::from_backend(Arc::new(
+            zeroship_storage::LocalFs::new(root.join(".zeroship/storage")),
+        )),
+    }
 }

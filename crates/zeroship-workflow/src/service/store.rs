@@ -1,112 +1,63 @@
-//! Transaction adapters. Workflow decisions belong to the shared service.
+//! Customer-bound journal execution through the shared Rust ORM.
 
 use crate::{service::schema, WorkflowServiceError};
-use async_trait::async_trait;
-use bytes::BytesMut;
-use compio_postgres::{
-    types::{IsNull, ToSql, Type},
-    Client, NoTls,
+pub use zeroship_core::schema_name::SchemaName;
+pub(crate) use zeroship_data_orm::Value;
+use zeroship_data_orm::{
+    backend::BackendHandle, binding::DbBinding, error::DbError, exec, sql::compile::SqlDialect,
+    transaction::AtomicWriteFrame, tx_route::CapturedRoute, ConnectOptions, OrmContext,
 };
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
-pub use zeroship_data_sql::SchemaName;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Value {
-    Null,
-    Text(String),
-    Integer(i64),
+/// Resolved app services that a host may pass to its workflow thread.
+#[derive(Clone, Debug)]
+pub struct HostStorage {
+    pub connection: zeroship_data_orm::connection::ConnectionFactory,
+    pub keys: zeroship_data_orm::encryption::ProjectKeySource,
+    pub binding: DbBinding,
+    pub objects: zeroship_storage::StorageStore,
 }
-
-impl From<&str> for Value {
-    fn from(value: &str) -> Self {
-        Self::Text(value.into())
-    }
-}
-impl From<String> for Value {
-    fn from(value: String) -> Self {
-        Self::Text(value)
-    }
-}
-impl From<i64> for Value {
-    fn from(value: i64) -> Self {
-        Self::Integer(value)
-    }
-}
-impl From<Option<i64>> for Value {
-    fn from(value: Option<i64>) -> Self {
-        value.map_or(Self::Null, Self::Integer)
-    }
-}
-impl From<Option<String>> for Value {
-    fn from(value: Option<String>) -> Self {
-        value.map_or(Self::Null, Self::Text)
-    }
-}
-
-impl ToSql for Value {
-    fn to_sql(
-        &self,
-        ty: &Type,
-        out: &mut BytesMut,
-    ) -> Result<IsNull, Box<dyn std::error::Error + Send + Sync>> {
-        match self {
-            Self::Null => Ok(IsNull::Yes),
-            Self::Text(value) => value.to_sql_checked(ty, out),
-            Self::Integer(value) => value.to_sql_checked(ty, out),
-        }
-    }
-    fn accepts(_: &Type) -> bool {
-        true
-    }
-    fn to_sql_checked(
-        &self,
-        ty: &Type,
-        out: &mut BytesMut,
-    ) -> Result<IsNull, Box<dyn std::error::Error + Send + Sync>> {
-        self.to_sql(ty, out)
-    }
-}
-
-impl rusqlite::ToSql for Value {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        Ok(match self {
-            Self::Null => rusqlite::types::ToSqlOutput::Owned(rusqlite::types::Value::Null),
-            Self::Text(value) => value.as_str().into(),
-            Self::Integer(value) => (*value).into(),
-        })
+impl HostStorage {
+    pub async fn open(&self) -> Result<OrmStore, WorkflowServiceError> {
+        let backend = self
+            .connection
+            .connect(self.keys.clone())
+            .await
+            .map_err(database_error)?;
+        OrmStore::new(OrmContext::new(), self.binding.clone(), backend)
     }
 }
 
 #[derive(Debug)]
-pub(crate) struct Row(BTreeMap<String, Value>);
+pub(crate) struct Row(Value);
 impl Row {
     pub(crate) fn text(&self, key: &str) -> Result<String, WorkflowServiceError> {
-        match self.0.get(key) {
-            Some(Value::Text(value)) => Ok(value.clone()),
-            _ => Err(invalid_row(key)),
-        }
+        self.0
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| invalid_row(key))
     }
     pub(crate) fn integer(&self, key: &str) -> Result<i64, WorkflowServiceError> {
-        match self.0.get(key) {
-            Some(Value::Integer(value)) => Ok(*value),
-            _ => Err(invalid_row(key)),
-        }
+        self.0
+            .get(key)
+            .and_then(Value::as_i64)
+            .ok_or_else(|| invalid_row(key))
     }
     pub(crate) fn optional_text(&self, key: &str) -> Result<Option<String>, WorkflowServiceError> {
         match self.0.get(key) {
-            Some(Value::Text(value)) => Ok(Some(value.clone())),
             Some(Value::Null) => Ok(None),
-            _ => Err(invalid_row(key)),
+            Some(value) => value
+                .as_str()
+                .map(|value| Some(value.to_owned()))
+                .ok_or_else(|| invalid_row(key)),
+            None => Err(invalid_row(key)),
         }
     }
     pub(crate) fn optional_integer(&self, key: &str) -> Result<Option<i64>, WorkflowServiceError> {
         match self.0.get(key) {
-            Some(Value::Integer(value)) => Ok(Some(*value)),
             Some(Value::Null) => Ok(None),
-            _ => Err(invalid_row(key)),
+            Some(value) => value.as_i64().map(Some).ok_or_else(|| invalid_row(key)),
+            None => Err(invalid_row(key)),
         }
     }
 }
@@ -114,11 +65,81 @@ fn invalid_row(key: &str) -> WorkflowServiceError {
     WorkflowServiceError::Internal(format!("invalid workflow database field {key}"))
 }
 
-/// Persistence opens transactions; it does not provision its own schema.
-#[async_trait(?Send)]
-pub trait WorkflowStore: Send + Sync {
-    async fn begin(&self) -> Result<Transaction, WorkflowServiceError>;
-    async fn verify(&self) -> Result<(), WorkflowServiceError> {
+/// An already resolved customer database. Clones share the ORM's local owner.
+/// Connections and transactions stay on the host's compio thread.
+#[derive(Clone, Debug)]
+pub struct OrmStore {
+    pub(crate) context: OrmContext,
+    pub(crate) binding: DbBinding,
+    pub(crate) backend: BackendHandle,
+    namespace: String,
+}
+impl OrmStore {
+    /// Reuse host-owned ORM resources without opening another backend.
+    pub fn new(
+        context: OrmContext,
+        binding: DbBinding,
+        backend: BackendHandle,
+    ) -> Result<Self, WorkflowServiceError> {
+        let namespace = SchemaName::new(backend.namespace(binding.app_id(), binding.schema()))
+            .map_err(|_| {
+                WorkflowServiceError::InvalidRequest("invalid workflow database binding".into())
+            })?;
+        let namespace = zeroship_data_orm::sql::compile::quote_ident(namespace.as_str());
+        Ok(Self {
+            context,
+            binding,
+            backend,
+            namespace,
+        })
+    }
+
+    /// Open normal ORM configuration. Provisioning remains a host operation.
+    pub async fn connect(
+        binding: DbBinding,
+        options: ConnectOptions,
+    ) -> Result<Self, WorkflowServiceError> {
+        let backend = options.connect().await.map_err(database_error)?;
+        Self::new(OrmContext::new(), binding, backend)
+    }
+
+    pub async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
+        let route = CapturedRoute::capture(
+            None,
+            self.binding.app_id(),
+            self.binding.schema().clone(),
+            self.backend.dialect(),
+        )
+        .bind(self.backend.clone());
+        let frame = self
+            .context
+            .scope(AtomicWriteFrame::begin(route))
+            .await
+            .map_err(database_error)?;
+        let mut tx = Transaction {
+            frame: Some(frame),
+            context: self.context.clone(),
+            namespace: self.namespace.clone(),
+            dialect: self.backend.dialect(),
+            policies: None,
+        };
+        if tx.dialect == SqlDialect::Sqlite {
+            // The ORM opens a deferred transaction. Acquire its writer lock
+            // before reading journal state so concurrent hosts cannot promote
+            // stale read snapshots into claims. PostgreSQL locks app rows.
+            tx.execute(
+                &format!(
+                    "UPDATE {} SET fingerprint=fingerprint WHERE id='workflow'",
+                    tx.table("schema_version")
+                ),
+                &[],
+            )
+            .await?;
+        }
+        Ok(tx)
+    }
+
+    pub async fn verify(&self) -> Result<(), WorkflowServiceError> {
         let mut tx = self.begin().await?;
         let query = format!(
             "SELECT fingerprint FROM {} WHERE id = 'workflow'",
@@ -135,98 +156,23 @@ pub trait WorkflowStore: Send + Sync {
     }
 }
 
-#[derive(Clone)]
-pub struct PostgresStore {
-    url: String,
-    schema: SchemaName,
-}
-impl std::fmt::Debug for PostgresStore {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PostgresStore").finish_non_exhaustive()
-    }
-}
-impl PostgresStore {
-    #[must_use]
-    pub const fn new(url: String, schema: SchemaName) -> Self {
-        Self { url, schema }
-    }
-}
-#[async_trait(?Send)]
-impl WorkflowStore for PostgresStore {
-    async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
-        let (client, connection) = compio_postgres::connect(&self.url, NoTls)
-            .await
-            .map_err(postgres_error)?;
-        compio::runtime::spawn(async move {
-            if let Err(error) = connection.run().await {
-                tracing::debug!(error = %error, "workflow connection ended");
-            }
-        })
-        .detach();
-        client
-            .batch_execute("BEGIN")
-            .await
-            .map_err(postgres_error)?;
-        Ok(Transaction {
-            backend: Backend::Postgres(client),
-            namespace: self.schema.quoted(),
-            finished: false,
-            policies: None,
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct SqliteStore {
-    path: PathBuf,
-}
-impl SqliteStore {
-    #[must_use]
-    pub fn new(path: impl AsRef<Path>) -> Self {
-        Self {
-            path: path.as_ref().to_owned(),
-        }
-    }
-}
-#[async_trait(?Send)]
-impl WorkflowStore for SqliteStore {
-    async fn begin(&self) -> Result<Transaction, WorkflowServiceError> {
-        let conn = rusqlite::Connection::open_with_flags(
-            &self.path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-        )
-        .map_err(sqlite_error)?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(sqlite_error)?;
-        conn.pragma_update(None, "foreign_keys", true)
-            .map_err(sqlite_error)?;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(sqlite_error)?;
-        Ok(Transaction {
-            backend: Backend::Sqlite(conn),
-            namespace: "\"main\"".into(),
-            finished: false,
-            policies: None,
-        })
-    }
-}
-
-#[derive(Debug)]
-enum Backend {
-    Postgres(Client),
-    Sqlite(rusqlite::Connection),
-}
-#[derive(Debug)]
+/// A journal transaction owned and settled by the ORM transaction protocol.
 pub struct Transaction {
-    backend: Backend,
+    frame: Option<AtomicWriteFrame>,
+    context: OrmContext,
     namespace: String,
-    finished: bool,
+    dialect: SqlDialect,
     pub(crate) policies: Option<std::sync::Arc<super::HostPolicies>>,
 }
+impl std::fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Transaction")
+            .field("dialect", &self.dialect)
+            .finish_non_exhaustive()
+    }
+}
 impl Transaction {
-    /// Expand the host's assigned apps from the first query parameter. A JSON
-    /// array avoids a parameter per app and keeps filtering before scan limits.
-    /// This selects candidates only; mutations still resolve current host policy.
+    /// Filter assigned apps before limiting background candidate scans.
     pub(crate) fn host_app_scope(&self) -> Result<(&'static str, Value), WorkflowServiceError> {
         let apps = self
             .policies
@@ -238,17 +184,16 @@ impl Transaction {
         let encoded = serde_json::to_string(&apps).map_err(|_| {
             WorkflowServiceError::Internal("workflow app scope could not be encoded".into())
         })?;
-        let query = match self.backend {
-            Backend::Postgres(_) => "SELECT jsonb_array_elements_text($1::text::jsonb)",
-            Backend::Sqlite(_) => "SELECT value FROM json_each($1)",
+        let query = match self.dialect {
+            SqlDialect::Postgres => "SELECT jsonb_array_elements_text($1::text::jsonb)",
+            SqlDialect::Sqlite => "SELECT value FROM json_each($1)",
         };
         Ok((query, encoded.into()))
     }
-
     pub(crate) fn dialect(&self) -> &'static str {
-        match self.backend {
-            Backend::Postgres(_) => "postgres",
-            Backend::Sqlite(_) => "sqlite",
+        match self.dialect {
+            SqlDialect::Postgres => "postgres",
+            SqlDialect::Sqlite => "sqlite",
         }
     }
     pub(crate) fn table(&self, name: &str) -> String {
@@ -256,17 +201,17 @@ impl Transaction {
         format!("{}.\"__zeroship_workflow_{name}\"", self.namespace)
     }
     pub(crate) fn lock_clause(&self) -> &'static str {
-        match self.backend {
-            Backend::Postgres(_) => " FOR UPDATE",
-            Backend::Sqlite(_) => "",
+        match self.dialect {
+            SqlDialect::Postgres => " FOR UPDATE",
+            SqlDialect::Sqlite => "",
         }
     }
     pub(crate) async fn now(&mut self) -> Result<i64, WorkflowServiceError> {
-        let sql = match self.backend {
-            Backend::Postgres(_) => {
+        let sql = match self.dialect {
+            SqlDialect::Postgres => {
                 "SELECT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT) AS now"
             }
-            Backend::Sqlite(_) => {
+            SqlDialect::Sqlite => {
                 "SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS now"
             }
         };
@@ -281,120 +226,66 @@ impl Transaction {
         sql: &str,
         params: &[Value],
     ) -> Result<u64, WorkflowServiceError> {
-        match &mut self.backend {
-            Backend::Postgres(client) => {
-                let refs: Vec<&(dyn ToSql + Sync)> =
-                    params.iter().map(|value| value as _).collect();
-                client.execute(sql, &refs).await.map_err(postgres_error)
-            }
-            Backend::Sqlite(conn) => conn
-                .execute(
-                    &sqlite_placeholders(sql),
-                    rusqlite::params_from_iter(params),
-                )
-                .map(|n| n as u64)
-                .map_err(sqlite_error),
-        }
+        let sql = self.sql(sql);
+        self.context
+            .scope(exec::run_statement(
+                self.frame.as_ref().expect("open transaction").route(),
+                &sql,
+                params,
+            ))
+            .await
+            .map_err(database_error)
     }
     pub(crate) async fn query(
         &mut self,
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Row>, WorkflowServiceError> {
-        match &mut self.backend {
-            Backend::Postgres(client) => {
-                let refs: Vec<&(dyn ToSql + Sync)> =
-                    params.iter().map(|value| value as _).collect();
-                let rows = client.query(sql, &refs).await.map_err(postgres_error)?;
-                rows.into_iter()
-                    .map(|row| {
-                        let mut values = BTreeMap::new();
-                        for (index, column) in row.columns().iter().enumerate() {
-                            let value = match *column.type_() {
-                                Type::INT8 => Value::from(
-                                    row.try_get::<_, Option<i64>>(index)
-                                        .map_err(postgres_error)?,
-                                ),
-                                Type::TEXT | Type::VARCHAR => Value::from(
-                                    row.try_get::<_, Option<String>>(index)
-                                        .map_err(postgres_error)?,
-                                ),
-                                _ => return Err(invalid_row(column.name())),
-                            };
-                            values.insert(column.name().into(), value);
-                        }
-                        Ok(Row(values))
-                    })
-                    .collect()
-            }
-            Backend::Sqlite(conn) => {
-                let mut stmt = conn
-                    .prepare(&sqlite_placeholders(sql))
-                    .map_err(sqlite_error)?;
-                let columns: Vec<String> = stmt
-                    .column_names()
-                    .iter()
-                    .map(|name| (*name).into())
-                    .collect();
-                let rows = stmt
-                    .query_map(rusqlite::params_from_iter(params), |row| {
-                        let mut values = BTreeMap::new();
-                        for (index, name) in columns.iter().enumerate() {
-                            use rusqlite::types::ValueRef;
-                            let value = match row.get_ref(index)? {
-                                ValueRef::Null => Value::Null,
-                                ValueRef::Integer(value) => Value::Integer(value),
-                                ValueRef::Text(value) => Value::Text(
-                                    std::str::from_utf8(value)
-                                        .map_err(|_| rusqlite::Error::InvalidQuery)?
-                                        .into(),
-                                ),
-                                _ => return Err(rusqlite::Error::InvalidQuery),
-                            };
-                            values.insert(name.clone(), value);
-                        }
-                        Ok(Row(values))
-                    })
-                    .map_err(sqlite_error)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-                    .map_err(sqlite_error)
-            }
+        let sql = self.sql(sql);
+        self.context
+            .scope(exec::run_sql(
+                self.frame.as_ref().expect("open transaction").route(),
+                &sql,
+                params,
+            ))
+            .await
+            .map(|rows| rows.into_iter().map(Row).collect())
+            .map_err(database_error)
+    }
+    fn sql<'a>(&self, sql: &'a str) -> std::borrow::Cow<'a, str> {
+        match self.dialect {
+            SqlDialect::Postgres => sql.into(),
+            SqlDialect::Sqlite => sqlite_placeholders(sql).into(),
         }
     }
     pub async fn commit(mut self) -> Result<(), WorkflowServiceError> {
-        match &mut self.backend {
-            Backend::Postgres(client) => client
-                .batch_execute("COMMIT")
-                .await
-                .map_err(postgres_error)?,
-            Backend::Sqlite(conn) => conn.execute_batch("COMMIT").map_err(sqlite_error)?,
-        }
-        self.finished = true;
-        Ok(())
+        let frame = self.frame.take().expect("open transaction");
+        self.context
+            .scope(frame.finish(Ok(())))
+            .await
+            .map_err(database_error)
     }
 }
-// Closing a transaction-owned connection rolls back uncommitted work. No
-// connection is returned to a pool with an unresolved transaction.
 impl Drop for Transaction {
     fn drop(&mut self) {
-        if !self.finished {
-            if let Backend::Sqlite(conn) = &self.backend {
-                let _ = conn.execute_batch("ROLLBACK");
-            }
-        }
+        self.context.with(|| drop(self.frame.take()));
     }
 }
 
-pub(crate) fn sqlite_error(error: rusqlite::Error) -> WorkflowServiceError {
-    WorkflowServiceError::Internal(format!("workflow SQLite operation failed: {error}"))
-}
-fn postgres_error(error: compio_postgres::Error) -> WorkflowServiceError {
-    WorkflowServiceError::Internal(format!("workflow PostgreSQL operation failed: {error}"))
+pub(crate) fn database_error(error: DbError) -> WorkflowServiceError {
+    match error {
+        DbError::PermissionDenied { .. } => WorkflowServiceError::PermissionDenied,
+        DbError::Transient { .. }
+        | DbError::Serialization { .. }
+        | DbError::LockContention { .. } => {
+            WorkflowServiceError::Unavailable("workflow database temporarily unavailable".into())
+        }
+        _ => WorkflowServiceError::Internal("workflow database operation failed".into()),
+    }
 }
 
-// SQLite treats `$n` as a name and assigns slots in appearance order. Use its
-// indexed `?n` spelling so shared statements preserve PostgreSQL parameter
-// positions, including repeated references and UPDATE clauses before WHERE.
+// SQLite indexes ?n by position; $n is named and assigned in appearance order.
+// Kept only for journal operations awaiting collection-API support.
 fn sqlite_placeholders(sql: &str) -> String {
     let mut output = String::with_capacity(sql.len());
     let mut chars = sql.chars().peekable();

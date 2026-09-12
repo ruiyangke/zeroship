@@ -12,9 +12,8 @@ use zeroship_runtime::{
 use zeroship_workflow::{
     operations::{RunState, StartOptions},
     service::{
-        schema, store::SqliteStore, AppPolicy, AppWorkflows, DeployRegistration,
-        ExecutableSnapshot, HostPolicies, PolicySnapshot, RequestId, SnapshotStore, WorkerIdentity,
-        WorkflowService,
+        AppPolicy, AppWorkflows, DeployRegistration, ExecutableSnapshot, HostPolicies,
+        PolicySnapshot, RequestId, SnapshotStore, WorkerIdentity, WorkflowService,
     },
     WorkflowExecution,
 };
@@ -29,10 +28,8 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("workflow.sqlite");
-        schema::initialize_sqlite(&path).unwrap();
         let service = WorkflowService::open(
-            Arc::new(SqliteStore::new(path)),
+            std::rc::Rc::new(orm_fixture::store(directory.path()).await),
             Arc::new(HostPolicies::default()),
         )
         .await
@@ -240,3 +237,6 @@ async fn mismatched_or_missing_host_identity_rejects_before_creator_evaluation()
         runtime.shutdown().await;
     }
 }
+
+#[path = "support/orm.rs"]
+mod orm_fixture;

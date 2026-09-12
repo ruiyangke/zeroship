@@ -101,10 +101,10 @@ fn deployment(hash: char) -> DeployRegistration {
 #[compio::test]
 async fn sqlite_snapshots_survive_redeploy_restart_corruption_and_repair() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
     snapshot_contract(
-        Arc::new(SqliteStore::new(path)),
+        Rc::new(sqlite_store(&path).await),
         StorageStore::from_backend(Arc::new(LocalFs::new(dir.path().join("objects")))),
     )
     .await;
@@ -115,7 +115,7 @@ async fn postgres_snapshots_survive_redeploy_restart_corruption_and_repair() {
     let fixture = PostgresFixture::start().await;
     let dir = tempfile::tempdir().unwrap();
     snapshot_contract(
-        Arc::new(fixture.store.clone()),
+        Rc::new(fixture.store.clone()),
         StorageStore::from_backend(Arc::new(LocalFs::new(dir.path()))),
     )
     .await;
@@ -125,10 +125,10 @@ async fn postgres_snapshots_survive_redeploy_restart_corruption_and_repair() {
 async fn customer_snapshots_use_s3_without_platform_bundle_access() {
     let fixture = s3_fixture::Minio::start();
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("journal.sqlite");
+    let path = dir.path().join("zs-workflow.sqlite");
     schema::initialize_sqlite(&path).unwrap();
     snapshot_contract(
-        Arc::new(SqliteStore::new(path)),
+        Rc::new(sqlite_store(&path).await),
         StorageStore::from_backend(Arc::new(zeroship_storage::S3::new(
             fixture.config("snapshots"),
             fixture.credentials(),
@@ -145,7 +145,7 @@ async fn customer_snapshots_use_s3_without_platform_bundle_access() {
     clippy::future_not_send,
     reason = "the database and storage contract runs on its compio thread"
 )]
-async fn snapshot_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) {
+async fn snapshot_contract(store: Rc<OrmStore>, storage: StorageStore) {
     use crate::service::{runner::TaskTransport, WorkerIdentity};
     let snapshots = SnapshotStore::new(&storage, 1024 * 1024).unwrap();
     let (service, app, other) = registered_with_snapshots(store.clone(), snapshots.clone()).await;

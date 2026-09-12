@@ -195,14 +195,9 @@ fn cmd_serve(args: &[String]) {
             .into_iter()
             .collect();
     // The single-app dev host owns its namespace just as the worker does.
-    // Keep it aligned with Vite's DEV_APP_ID when no identity was supplied.
-    env_vars
-        .entry("APP_ID".into())
-        .or_insert_with(|| "default".into());
+    // Keep the host-selected local binding aligned with Vite's DEV_APP_ID.
+    env_vars.insert("APP_ID".into(), "default".into());
 
-    // Opt-in db plugin: when DATABASE_URL is set, register the db plugin
-    // so JS `zeroship.db.*` works in the dev path (e.g. `vite-plugin` spawns
-    // `zeroship serve` with DATABASE_URL forwarded from `.env`).
     let mut plugins: Vec<Arc<dyn NativePlugin>> = Vec::new();
 
     // Dev metering infrastructure: a process-wide meter the db/kv/storage
@@ -225,49 +220,31 @@ fn cmd_serve(args: &[String]) {
          no flush, no snapshot API; usage is only observable on a deployed app)"
     );
 
-    if let Some(url) =
+    let database_url =
         zeroship_core::declared_env!(external, "DATABASE_URL", crate::ZeroshipCliConsumer)
-    {
-        if !url.is_empty() {
-            // The dev vector's composition point. One `DbService`, built before
-            // the runtime exists, owning the validated configuration and the
-            // plugin prototype the runtime clones — the same shape the worker
-            // uses, so `zeroship serve` and a deployed app resolve `env.db`
-            // through identical machinery.
-            //
-            // A URL naming no supported backend fails HERE, with the same
-            // exit(2) the invalid-`ZEROSHIP_STORAGE_URL` arm below already
-            // uses, rather than surfacing inside the creator's first query.
-            let service = match zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
-                .and_then(|connection| {
-                    zeroship_data_v8::service::DbService::new(
-                        zeroship_data_v8::service::DbServiceConfig {
-                            project_keys: project_keys::load(
-                                std::path::Path::new(".zeroship/private"),
-                                &env_vars["APP_ID"],
-                            )
-                            .map_err(|error| {
-                                zeroship_data_orm::error::DbError::config(
-                                    "local_project_key",
-                                    error,
-                                )
-                            })?,
-                            connection,
-                            cdc_relay: None,
-                            meter: Some(Arc::clone(&dev_meter)),
-                        },
-                    )
-                }) {
-                Ok(service) => service,
-                Err(e) => {
-                    eprintln!("[zeroship] invalid DATABASE_URL: {e}");
-                    std::process::exit(2);
-                }
-            };
-            plugins.push(service.plugin());
-            eprintln!("[zeroship] db plugin registered (DATABASE_URL set)");
-        }
-    }
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| "sqlite:.zeroship/dev.sqlite".into());
+    let database = zeroship_data_orm::connection::ConnectionFactory::for_url(&database_url)
+        .and_then(|connection| {
+            zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
+                project_keys: project_keys::load(
+                    std::path::Path::new(".zeroship/private"),
+                    "default",
+                )
+                .map_err(|error| {
+                    zeroship_data_orm::error::DbError::config("local_project_key", error)
+                })?,
+                connection,
+                cdc_relay: None,
+                meter: Some(Arc::clone(&dev_meter)),
+            })
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("[zeroship] invalid database configuration: {error}");
+            std::process::exit(2);
+        });
+    plugins.push(database.plugin());
+    eprintln!("[zeroship] db plugin registered");
 
     // Storage plugin: always on in dev. `$ZEROSHIP_STORAGE_URL` selects the
     // backend through the SAME parser the worker uses (`--storage-url`): a
@@ -286,19 +263,20 @@ fn cmd_serve(args: &[String]) {
         }
     };
     let storage_kind = storage_cfg.kind();
-    match zeroship_storage::StorageStore::open(&storage_cfg) {
+    let storage = match zeroship_storage::StorageStore::open(&storage_cfg) {
         Ok(backend) => {
             plugins.push(Arc::new(zeroship_storage_v8::StorageBinding::new(
-                backend,
+                backend.clone(),
                 Some(Arc::clone(&dev_meter)),
             )));
             eprintln!("[zeroship] storage plugin registered (backend={storage_kind})");
+            backend
         }
         Err(e) => {
             eprintln!("[zeroship] storage backend init failed: {e}");
             std::process::exit(2);
         }
-    }
+    };
 
     // Auth plugin: always on. Stateless — the callbacks read the
     // per-request user from `RuntimeState` (set from the verified
@@ -356,6 +334,19 @@ fn cmd_serve(args: &[String]) {
         &std::env::current_dir().expect("project directory"),
         workflow_config,
         is_archive.then(|| input_path.clone()),
+        zeroship_workflow::service::store::HostStorage {
+            connection: database.connection().clone(),
+            keys: zeroship_data_orm::encryption::ProjectKeySource::supplied(
+                database.project_keys().clone(),
+            ),
+            binding: zeroship_data_orm::binding::DbBinding::new(
+                "default",
+                zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
+                zeroship_core::schema_name::SchemaName::new("default")
+                    .expect("local database binding"),
+            ),
+            objects: storage,
+        },
         env_vars.clone(),
         plugins.clone(),
         zeroship_runtime::RuntimeLimits {

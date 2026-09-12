@@ -1,4 +1,4 @@
-//! App-scoped service operations behind the native binding's Rust interface.
+//! App-scoped calls to the customer engine on its owning compio thread.
 
 use super::{AppWorkflows, RequestId};
 use crate::{
@@ -10,13 +10,26 @@ use crate::{
     WorkflowServiceError,
 };
 use async_trait::async_trait;
+use futures::{channel::oneshot, future::LocalBoxFuture, FutureExt, StreamExt};
 use zeroship_core::app_id::AppId;
 
-/// A binding-ready service client whose app identity is fixed by its host.
-#[derive(Clone, Debug)]
+const MAX_QUEUED_REQUESTS: usize = 64;
+const MAX_ACTIVE_REQUESTS: usize = 16;
+type Request = Box<dyn FnOnce(AppWorkflows) -> LocalBoxFuture<'static, ()> + Send>;
+
+/// A thread-safe client. The customer database remains on the engine's thread.
+#[derive(Clone)]
 pub struct AppBackend {
-    api: AppWorkflows,
+    app: AppId,
+    requests: flume::Sender<Request>,
     max_output_bytes: usize,
+}
+impl std::fmt::Debug for AppBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppBackend")
+            .field("app", &self.app)
+            .finish_non_exhaustive()
+    }
 }
 impl AppBackend {
     fn new(api: AppWorkflows, max_output_bytes: usize) -> Result<Self, WorkflowServiceError> {
@@ -25,22 +38,71 @@ impl AppBackend {
                 "workflow output read limit must be positive".into(),
             ));
         }
-        Ok(Self {
-            api,
+        let (requests, receiver) = flume::bounded::<Request>(MAX_QUEUED_REQUESTS);
+        let backend = Self {
+            app: api.app_id().clone(),
+            requests,
             max_output_bytes,
+        };
+        compio::runtime::spawn(async move {
+            receiver
+                .into_stream()
+                .for_each_concurrent(MAX_ACTIVE_REQUESTS, |request| request(api.clone()))
+                .await;
         })
+        .detach();
+        Ok(backend)
     }
 
     #[must_use]
     pub fn app_id(&self) -> &AppId {
-        self.api.app_id()
+        &self.app
+    }
+
+    async fn call<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(AppWorkflows) -> LocalBoxFuture<'static, Result<T, WorkflowServiceError>>
+            + Send
+            + 'static,
+    ) -> Result<T, WorkflowServiceError> {
+        let (mut reply, receive) = oneshot::channel();
+        let request: Request = Box::new(move |api| {
+            async move {
+                if reply.is_canceled() {
+                    return;
+                }
+                let result = {
+                    let cancelled = reply.cancellation();
+                    let operation = operation(api);
+                    futures::pin_mut!(cancelled, operation);
+                    match futures::future::select(cancelled, operation).await {
+                        futures::future::Either::Right((result, _)) => result,
+                        futures::future::Either::Left(_) => return,
+                    }
+                };
+                let _ = reply.send(result);
+            }
+            .boxed_local()
+        });
+        self.requests
+            .try_send(request)
+            .map_err(|error| match error {
+                flume::TrySendError::Full(_) => {
+                    WorkflowServiceError::ResourceExhausted("workflow request queue is full".into())
+                }
+                flume::TrySendError::Disconnected(_) => unavailable(),
+            })?;
+        receive.await.map_err(|_| unavailable())?
     }
 }
+fn unavailable() -> WorkflowServiceError {
+    WorkflowServiceError::Unavailable("workflow engine is unavailable".into())
+}
 impl AppWorkflows {
-    /// Bind the native operation interface with an explicit output memory limit.
+    /// Bind the native interface to this engine thread with a bounded request queue.
     ///
     /// # Errors
-    /// Rejects an empty read limit.
+    /// Rejects an empty output read limit.
     pub fn into_backend(self, max_output_bytes: usize) -> Result<AppBackend, WorkflowServiceError> {
         AppBackend::new(self, max_output_bytes)
     }
@@ -52,48 +114,62 @@ impl WorkflowBackend for AppBackend {
         workflow_name: String,
         options: StartOptions,
     ) -> Result<StartedRun, WorkflowServiceError> {
-        let request = RequestId::mint();
-        self.api.start(&request, &workflow_name, options).await
+        self.call(move |api| {
+            async move { api.start(&RequestId::mint(), &workflow_name, options).await }
+                .boxed_local()
+        })
+        .await
     }
-
     async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowServiceError> {
-        self.api.status(&run_id).await
+        self.call(move |api| async move { api.status(&run_id).await }.boxed_local())
+            .await
     }
-
     async fn signal(
         &self,
         run_id: String,
         options: SignalOptions,
     ) -> Result<DeliveredSignal, WorkflowServiceError> {
-        let request = RequestId::mint();
-        self.api.signal(&request, &run_id, options).await
+        self.call(move |api| {
+            async move { api.signal(&RequestId::mint(), &run_id, options).await }.boxed_local()
+        })
+        .await
     }
-
     async fn transition(
         &self,
         run_id: String,
         op: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
-        let request = RequestId::mint();
-        self.api.transition(&request, &run_id, op).await
+        self.call(move |api| {
+            async move { api.transition(&RequestId::mint(), &run_id, op).await }.boxed_local()
+        })
+        .await
     }
-
     async fn restart(
         &self,
         run_id: String,
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        let request = RequestId::mint();
-        self.api.restart(&request, &run_id, options).await
+        self.call(move |api| {
+            async move { api.restart(&RequestId::mint(), &run_id, options).await }.boxed_local()
+        })
+        .await
     }
-
     async fn read_step_output(
         &self,
         run_id: String,
         name: String,
         occurrence: u32,
     ) -> Result<Vec<u8>, WorkflowServiceError> {
-        let read = self.api.read_step_output(&run_id, &name, occurrence).await?;
-        read.into_bytes(self.max_output_bytes).await
+        let limit = self.max_output_bytes;
+        self.call(move |api| {
+            async move {
+                api.read_step_output(&run_id, &name, occurrence)
+                    .await?
+                    .into_bytes(limit)
+                    .await
+            }
+            .boxed_local()
+        })
+        .await
     }
 }

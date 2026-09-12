@@ -28,6 +28,14 @@ workflow-specific artifact argument. The engine's customer executable snapshot
 copies are superseded by the app-deployment contract below and must be removed
 together with their callers.
 
+The replacement service now uses a shared `OrmStore`; its workflow-owned
+PostgreSQL and SQLite adapters have been removed. The CLI supplies its normal
+database binding and object storage. Transaction ownership stays on the engine's
+compio thread, with a bounded app-scoped client for V8 and other Rust threads.
+Reserved journal operations still use the ORM's explicit SQL interface because
+the existing collection API rejects those names. Collection conversion and the
+existing Control store's removal remain pending.
+
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
 [scheduler registration design](2026-07-08-durable-workflows-scheduler-worker-design.md)
@@ -77,8 +85,8 @@ Persistence is being migrated onto the existing Rust ORM. Platform services and
 the customer worker are native ORM consumers; V8 is an adapter to that same
 library. Workflow code must not maintain PostgreSQL and SQLite implementations
 of connection management, parameter binding, row decoding or transaction cleanup.
-The ORM migration described below is an implementation target, not completed
-production behavior.
+The replacement service uses this backend composition. Collection conversion
+and production cutover described below remain implementation targets.
 
 | Component | Responsibility |
 | --- | --- |
@@ -232,6 +240,16 @@ or add a parallel query builder in workflow to evade validation. Use the existin
 host-scoped ORM execution/session interface for operations that cannot yet use
 collection APIs, and keep the remaining SQL explicit and reviewable. This is
 backend reuse, not a claim that collection migration is complete.
+
+Rust models follow the ORM's existing migration-derived model contract. Emit a
+runtime descriptor for the physical reserved table names from the same canonical
+migration definition, then use `orm::schema!` to generate entity and column
+metadata. `FromRow` defines typed read projections, `Insertable` defines creation
+inputs, and `Changeset` defines explicit partial updates. Do not maintain another
+handwritten schema in Rust or JSON. The workflow generator currently emits DDL
+and fingerprints; descriptor generation and model adoption remain pending the
+native reserved-collection contract. Composite app/run/generation keys and
+conditional updates must remain expressible before converting those operations.
 
 Do not modify `zeroship-data-orm` as part of this workflow work. Missing ORM
 capabilities are recorded as dependencies rather than implemented as workflow
@@ -441,9 +459,9 @@ the handoff commit, and source holds remain while replay or restart depends on t
 in the app's resolved database, alongside business tables under the reserved
 workflow table prefix. SQLite development uses the app's existing SQLite file;
 the host supplies the database binding instead of a workflow-specific database
-path or environment variable. The branch's separate local journal is being
-replaced with this shared-database binding. The workflow-specific CLI reset,
-filesystem deletion protocol and reset locks have been removed.
+path or environment variable. The CLI now supplies this shared-database binding
+and the app's normal object store. The workflow-specific CLI reset, filesystem
+deletion protocol and reset locks have been removed.
 
 The CLI remains a single-app host. It resolves the normal app code, database and
 storage configuration, then initializes the shared workflow engine and runtime
