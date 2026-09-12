@@ -268,6 +268,20 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
     assert!(service.collect_payloads(64).await.unwrap() > 0);
     assert_eq!(service.collect_payloads(64).await.unwrap(), 0);
     let objects = storage.namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
+    assert_eq!(
+        scope
+            .read_step_output(&run.id, "result", 0)
+            .await
+            .unwrap()
+            .into_bytes(data.len())
+            .await
+            .unwrap(),
+        data
+    );
+    assert!(matches!(
+        foreign.read_step_output(&run.id, "result", 0).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
     assert!(objects
         .get(a.as_str(), &uncommitted.id)
         .await
@@ -321,6 +335,16 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
         .unwrap();
     let next = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(next.generation, 1);
+    assert_eq!(
+        scope
+            .read_step_output(&run.id, "result", 0)
+            .await
+            .unwrap()
+            .into_bytes(data.len())
+            .await
+            .unwrap(),
+        data
+    );
     assert_eq!(
         next.invocation.journal[0].output_ref.as_ref(),
         Some(&output)

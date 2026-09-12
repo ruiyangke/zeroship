@@ -24,6 +24,13 @@ pub struct ReadAppPayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ReadStepOutput {
+    pub name: String,
+    pub occurrence: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PollTask {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

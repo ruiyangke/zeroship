@@ -181,6 +181,7 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
     let other_endpoint = WorkflowEndpoint::new(&replica.url("")).unwrap();
     for path in [
         format!("/v1/apps/{}/workflows/Example/runs", a.as_str()),
+        format!("/v1/apps/{}/workflow-runs/pending/step-output", a.as_str()),
         zeroship_core::service_identity::endpoints::WORKFLOW_TASK_POLL
             .path_template()
             .to_owned(),
@@ -444,10 +445,52 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
         received.extend_from_slice(&chunk.unwrap());
     }
     assert_eq!(received, data);
-    let done: WorkflowExecution =
-        serde_json::from_value(json!({"outcomes":[{"kind":"RunCompleted","outputRef":reference}]}))
-            .unwrap();
+    let done: WorkflowExecution = serde_json::from_value(json!({"outcomes":[
+        {"kind":"StepCompleted","ordinal":0,"name":"payload","outputRef":reference},
+        {"kind":"RunCompleted","outputRef":reference}
+    ]}))
+    .unwrap();
     tasks.complete(&task.id, &task.token, done).await.unwrap();
+    {
+        use zeroship_workflow::backend::WorkflowBackend;
+        let backend = app.clone().into_backend(data.len()).unwrap();
+        assert_eq!(backend.app_id(), &a);
+        assert_eq!(
+            backend
+                .read_step_output(run.id.clone(), "payload".into(), 0)
+                .await
+                .unwrap(),
+            data
+        );
+        let limited = app.clone().into_backend(1).unwrap();
+        assert!(matches!(
+            limited
+                .read_step_output(run.id.clone(), "payload".into(), 0)
+                .await,
+            Err(WorkflowServiceError::PayloadTooLarge)
+        ));
+    }
+    assert!(matches!(
+        foreign.read_step_output(&run.id, "payload", 0).await,
+        Err(WorkflowServiceError::NotFound(_))
+    ));
+    let no_read_token = mint_app_capability(
+        &control_key,
+        AppGrant {
+            app_id: a.clone(),
+            operations: [AppOperation::Status].into(),
+        },
+        now,
+        120,
+    )
+    .unwrap();
+    assert!(matches!(
+        endpoint
+            .for_app(a.clone(), no_read_token)
+            .read_step_output(&run.id, "payload", 0)
+            .await,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
     let mut download = app
         .read_payload(
             &run.id,

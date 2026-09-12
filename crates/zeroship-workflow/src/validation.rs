@@ -5,6 +5,13 @@ use crate::{operations::StartOptions, WorkflowServiceError};
 pub const WORKFLOW_NAME_MAX_BYTES: usize = 128;
 pub const WORKFLOW_KEY_MAX_BYTES: usize = 1024;
 pub const SIGNAL_TYPE_MAX_BYTES: usize = 256;
+pub const STEP_NAME_MAX_BYTES: usize = 256;
+
+/// # Errors
+/// Rejects empty or oversized checkpoint names.
+pub fn step_name(name: &str) -> Result<(), WorkflowServiceError> {
+    bounded_nonempty(name, STEP_NAME_MAX_BYTES, "workflow step name")
+}
 
 /// # Errors
 /// Rejects empty, oversized or reserved workflow names.

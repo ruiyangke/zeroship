@@ -3,7 +3,8 @@ use crate::{
     engine::WorkflowOutputRef,
     service::{
         wire::{
-            ReadAppPayload, ReadTaskPayload, PAYLOAD_HEADER, REQUEST_ID_HEADER, TASK_TOKEN_HEADER,
+            ReadAppPayload, ReadStepOutput, ReadTaskPayload, PAYLOAD_HEADER, REQUEST_ID_HEADER,
+            TASK_TOKEN_HEADER,
         },
         PayloadRead, PayloadSlot, StagedPayload,
     },
@@ -172,6 +173,28 @@ impl RemoteTasks {
 }
 
 impl RemoteAppWorkflows {
+    /// Read a named completed step from the run's current generation.
+    ///
+    /// # Errors
+    /// Reports invalid names, denied access, unavailable steps and transport failures.
+    pub async fn read_step_output(
+        &self,
+        run_id: &str,
+        name: &str,
+        occurrence: u32,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
+        crate::validation::step_name(name)?;
+        let path = self.path(&format!("workflow-runs/{}/step-output", segment(run_id)));
+        self.download(
+            &path,
+            &ReadStepOutput {
+                name: name.into(),
+                occurrence,
+            },
+        )
+        .await
+    }
+
     pub async fn read_payload(
         &self,
         run_id: &str,
@@ -180,10 +203,18 @@ impl RemoteAppWorkflows {
     ) -> Result<PayloadRead, WorkflowServiceError> {
         let path = self.path(&format!("workflow-runs/{}/payloads/read", segment(run_id)));
         let body = ReadAppPayload { generation, slot };
+        self.download(&path, &body).await
+    }
+
+    async fn download<T: Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+    ) -> Result<PayloadRead, WorkflowServiceError> {
         let token = self.credentials.token(&self.app).await?;
         let result = self
             .endpoint
-            .download(&path, &authorization(&token), &body, None)
+            .download(path, &authorization(&token), body, None)
             .await;
         if matches!(result, Err(WorkflowServiceError::Unauthenticated))
             && self.credentials.reject(&token)?
@@ -191,7 +222,7 @@ impl RemoteAppWorkflows {
             let refreshed = self.credentials.token(&self.app).await?;
             return self
                 .endpoint
-                .download(&path, &authorization(&refreshed), body, None)
+                .download(path, &authorization(&refreshed), body, None)
                 .await;
         }
         result
