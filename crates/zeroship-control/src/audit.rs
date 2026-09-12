@@ -8,6 +8,7 @@
 //!
 use serde_json::{json, Value};
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::registry::{Registry, RegistryError};
 
@@ -233,7 +234,7 @@ pub struct AuditEntry<'a> {
     /// nullable - an audit row must stay readable after the organization it
     /// names is gone.
     pub organization_id: Option<&'a str>,
-    pub actor_user_id: Option<Uuid>,
+    pub actor_user_id: Option<&'a UserId>,
     pub action: Action,
     pub resource: Option<&'a str>,
     pub source_ip: Option<&'a str>,
@@ -269,6 +270,7 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
 /// Best-effort audit insert with structured detail JSON for operations where
 /// `resource` alone is not enough to reconstruct the mutation.
 pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
+    let actor_user_id = entry.actor_user_id.map(UserId::as_str);
     let stdout_payload = json!({
         "app_id": entry.app_id,
         "organization_id": entry.organization_id,
@@ -299,7 +301,7 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
             &[
                 &entry.app_id,
                 &entry.organization_id,
-                &entry.actor_user_id,
+                &actor_user_id,
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
@@ -343,6 +345,7 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
     entry: AuditEntry<'_>,
     detail: &Value,
 ) {
+    let actor_user_id = entry.actor_user_id.map(UserId::as_str);
     let stdout_payload = json!({
         "app_id": entry.app_id,
         "organization_id": entry.organization_id,
@@ -364,7 +367,7 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
             &[
                 &entry.app_id,
                 &entry.organization_id,
-                &entry.actor_user_id,
+                &actor_user_id,
                 &entry.action.as_str(),
                 &entry.resource,
                 &entry.source_ip,
@@ -396,23 +399,28 @@ pub async fn recent_for_app(
             &[&app_id, &limit],
         )
         .await?;
-    Ok(rows
-        .iter()
-        .map(|r| AuditRow {
-            id: r.get("id"),
-            actor_user_id: r.get("actor_user_id"),
-            action: r.get("action"),
-            resource: r.get("resource"),
-            source_ip: r.get("source_ip"),
-            at: r.get("at_text"),
+    rows.iter()
+        .map(|row| {
+            Ok(AuditRow {
+                id: row.get("id"),
+                actor_user_id: crate::user_id::optional_from_row(
+                    row,
+                    "actor_user_id",
+                    "read app audit",
+                )?,
+                action: row.get("action"),
+                resource: row.get("resource"),
+                source_ip: row.get("source_ip"),
+                at: row.get("at_text"),
+            })
         })
-        .collect())
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditRow {
     pub id: Uuid,
-    pub actor_user_id: Option<Uuid>,
+    pub actor_user_id: Option<UserId>,
     pub action: String,
     pub resource: Option<String>,
     pub source_ip: Option<String>,

@@ -8,12 +8,13 @@ use serde_json::json;
 use uuid::Uuid;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource};
 use zeroship_authn::{AuthnRejection, VerifiedPrincipal};
+use zeroship_core::UserId;
 
 use crate::{http_util, AppState};
 
 #[derive(Debug)]
 pub struct AuthzGuard {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub token_policy: Option<authz::Policy>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
@@ -67,7 +68,7 @@ impl AuthzGuard {
         };
 
         let ctx = AuthzContext {
-            principal_id: self.principal_id,
+            principal_id: self.principal_id.clone(),
             token_policy: self.token_policy.clone(),
             action,
             resource,
@@ -110,7 +111,7 @@ impl AuthzGuard {
             }
         };
         let ctx = AuthzContext {
-            principal_id: self.principal_id,
+            principal_id: self.principal_id.clone(),
             token_policy: self.token_policy.clone(),
             action,
             resource: Resource::Any,
@@ -159,7 +160,7 @@ async fn guard_from_bearer(
     if verified.seed_platform_cli_grants {
         match zeroship_authn::platform_cli::materialize_default_grants(
             state.control_pg.as_ref(),
-            verified.principal_id,
+            &verified.principal_id,
         )
         .await
         {
@@ -186,7 +187,7 @@ async fn guard_from_bearer(
             // of the capability, hence `error` and not `warn`.
             tracing::error!(
                 error = %err,
-                principal_id = %verified.principal_id,
+                principal_id = verified.principal_id.as_str(),
                 "control: materializing default platform CLI grants failed; \
                  operator narrowing will not take effect for this principal"
             );

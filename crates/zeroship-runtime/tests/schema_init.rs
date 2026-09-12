@@ -52,10 +52,11 @@ impl NativePlugin for DescriptorProbePlugin {
 
     fn register(&self, _r: &mut NativeRegistrar) {}
 
-    fn bind_runtime_descriptor(
+    fn bind_runtime_descriptor<'s>(
         &self,
-        scope: &mut v8::PinScope,
+        scope: &mut v8::PinScope<'s, '_>,
         _app_id: &str,
+        namespace: v8::Local<'s, v8::Object>,
         descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         let observed = descriptor
@@ -69,6 +70,15 @@ impl NativePlugin for DescriptorProbePlugin {
         let value = v8::String::new(scope, &observed)
             .ok_or_else(|| "failed to allocate probe value".to_string())?;
         global.set(scope, key.into(), value.into());
+        let bound_key = v8::String::new(scope, "descriptorBound")
+            .ok_or_else(|| "failed to allocate namespace probe key".to_string())?;
+        let bound = v8::Boolean::new(scope, true);
+        namespace.define_own_property(
+            scope,
+            bound_key.into(),
+            bound.into(),
+            v8::PropertyAttribute::READ_ONLY,
+        );
         Ok(())
     }
 }
@@ -89,6 +99,9 @@ fn descriptor_hook_observed(runtime_descriptor: Option<String>) -> String {
         specifier: "index.js".into(),
         source: r#"
 const observedAtModuleEvaluation = globalThis.__zsDescriptorHookObserved ?? "missing";
+if (globalThis.__zs_env?.()?.descriptor_probe?.descriptorBound !== true) {
+    throw new Error("descriptor hook did not receive the published plugin namespace");
+}
 export default {
     fetch() { return new Response(observedAtModuleEvaluation); },
 };

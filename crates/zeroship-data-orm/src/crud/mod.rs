@@ -72,9 +72,7 @@ pub(crate) async fn exec_aggregate_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let mut rows = exec_query(&route, bq).await?;
     if let Some(projection) = &result_projection {
-        route
-            .sql_registration()
-            .decode_rows(&projection.schema, &mut rows)?;
+        crate::orm::read::decode_scalars(route.sql_registration(), &projection.schema, &mut rows)?;
     }
     read_pipeline::apply(
         &route,
@@ -83,10 +81,9 @@ pub(crate) async fn exec_aggregate_read(
         rows,
         read_pipeline::ApplyOptions {
             unmask_columns: &[],
-            schema_field_scope: if group_fields.is_empty() {
-                read_pipeline::SchemaFieldScope::All
-            } else {
-                read_pipeline::SchemaFieldScope::Only(group_fields.as_slice())
+            schema_field_scope: match &result_projection {
+                Some(_) => read_pipeline::SchemaFieldScope::Only(group_fields.as_slice()),
+                None => read_pipeline::SchemaFieldScope::All,
             },
             // A `$group` result's keys are accumulator aliases, which no
             // descriptor declares, so the declared surface would drop
@@ -906,29 +903,26 @@ pub(crate) fn plan_delete_one_input(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
-        if soft_delete_column(&schema)?.is_none() {
-            return delete::build_hard(
-                binding.schema(),
-                collection,
-                &schema,
-                filter,
-                true,
-                route.sql_registration(),
-            )
-            .map_err(DbError::from);
-        }
-        delete::build_lifecycle(
+        let builder = delete::Builder::new(
             binding.schema(),
             collection,
             &schema,
-            filter,
-            soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
-            false,
-            &autobump,
-            true,
             route.sql_registration(),
-        )
-        .map_err(DbError::from)
+        );
+        if soft_delete_column(&schema)?.is_none() {
+            return builder
+                .hard(filter, delete::Cardinality::One)
+                .map_err(DbError::from);
+        }
+        builder
+            .lifecycle(
+                filter,
+                soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
+                false,
+                &autobump,
+                delete::Cardinality::One,
+            )
+            .map_err(DbError::from)
     })
 }
 
@@ -943,29 +937,26 @@ pub fn plan_delete_many(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let autobump =
             AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
-        if soft_delete_column(&schema)?.is_none() {
-            return delete::build_hard(
-                binding.schema(),
-                collection,
-                &schema,
-                filter.into(),
-                false,
-                route.sql_registration(),
-            )
-            .map_err(DbError::from);
-        }
-        delete::build_lifecycle(
+        let builder = delete::Builder::new(
             binding.schema(),
             collection,
             &schema,
-            filter.into(),
-            soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
-            false,
-            &autobump,
-            false,
             route.sql_registration(),
-        )
-        .map_err(DbError::from)
+        );
+        if soft_delete_column(&schema)?.is_none() {
+            return builder
+                .hard(filter.into(), delete::Cardinality::Many)
+                .map_err(DbError::from);
+        }
+        builder
+            .lifecycle(
+                filter.into(),
+                soft_delete_column(&schema)?.expect("soft-delete column was resolved"),
+                false,
+                &autobump,
+                delete::Cardinality::Many,
+            )
+            .map_err(DbError::from)
     })
 }
 
@@ -977,14 +968,13 @@ pub fn plan_purge_one(
     filter: Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        delete::build_hard(
+        delete::Builder::new(
             binding.schema(),
             collection,
             &schema,
-            filter.into(),
-            true,
             route.sql_registration(),
         )
+        .hard(filter.into(), delete::Cardinality::One)
         .map_err(DbError::from)
     })
 }
@@ -997,14 +987,13 @@ pub fn plan_purge_many(
     filter: Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        delete::build_hard(
+        delete::Builder::new(
             binding.schema(),
             collection,
             &schema,
-            filter.into(),
-            false,
             route.sql_registration(),
         )
+        .hard(filter.into(), delete::Cardinality::Many)
         .map_err(DbError::from)
     })
 }
@@ -1026,16 +1015,18 @@ pub fn plan_restore_one(
                 "collection has no soft-delete column",
             )
         })?;
-        delete::build_lifecycle(
+        delete::Builder::new(
             binding.schema(),
             collection,
             &schema,
+            route.sql_registration(),
+        )
+        .lifecycle(
             filter.into(),
             marker,
             true,
             &autobump,
-            true,
-            route.sql_registration(),
+            delete::Cardinality::One,
         )
         .map_err(DbError::from)
     })
@@ -1058,16 +1049,18 @@ pub fn plan_restore_many(
                 "collection has no soft-delete column",
             )
         })?;
-        delete::build_lifecycle(
+        delete::Builder::new(
             binding.schema(),
             collection,
             &schema,
+            route.sql_registration(),
+        )
+        .lifecycle(
             filter.into(),
             marker,
             true,
             &autobump,
-            false,
-            route.sql_registration(),
+            delete::Cardinality::Many,
         )
         .map_err(DbError::from)
     })
@@ -1247,16 +1240,14 @@ pub async fn run_upsert(
                 } else {
                     None
                 };
-            let bq = upsert::build_upsert_with_registration(
+            let bq = upsert::Builder::new(
                 binding.schema(),
                 &coll,
                 &schema,
-                std::mem::take(&mut doc),
-                &conflict_fields,
                 &assignments,
-                expected_id,
                 route.sql_registration(),
             )
+            .build(std::mem::take(&mut doc), &conflict_fields, expected_id)
             .map_err(DbError::from)?;
             let rows = exec_mutation_with_emit(
                 bq,

@@ -20,7 +20,7 @@ impl crate::protection::Catalog for SqliteBackend {
         let mut user_tables: Vec<String> = Vec::with_capacity(table_rows.len());
         for row in &table_rows {
             let name = row.first().and_then(|c| c.clone()).unwrap_or_default();
-            if name.starts_with("sqlite_") || name.starts_with("__zs_") {
+            if name.starts_with("sqlite_") {
                 continue;
             }
             user_tables.push(name);

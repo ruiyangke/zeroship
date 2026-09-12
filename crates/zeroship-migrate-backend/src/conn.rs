@@ -56,9 +56,8 @@ pub enum ConnectError {}
 /// only the inputs.
 #[derive(Debug, Clone)]
 pub struct ConfinementConfig {
-    /// The per-project **meta schema** that holds the append-only migration
-    /// journal. Separate from the project schema so a creator migration can't
-    /// touch its own history.
+    /// The namespace that holds the migration journal when the backend uses a
+    /// schema for journal placement. It may be the project schema.
     ///
     /// Read by the PostgreSQL journal and by MySQL's; both spell it
     /// `<meta>.<journal table>`, but the table names DIFFER. PostgreSQL fences

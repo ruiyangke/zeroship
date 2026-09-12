@@ -132,7 +132,7 @@ pub(super) async fn provision_app_with_role(pool: &std::rc::Rc<Pool>, app: &str)
         .await
         .unwrap();
     // Stand in for the migration service by creating the audit table before
-    // provisioning the app role and its narrow audit grants.
+    // provisioning the app role and its schema-wide data grants.
     //
     // `batch_execute`, not `execute`: this is multi-statement DDL and the
     // extended protocol refuses it with "cannot insert multiple commands into a

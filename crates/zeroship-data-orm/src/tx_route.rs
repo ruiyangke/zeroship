@@ -29,7 +29,14 @@ pub struct CapturedRoute {
     scope: Option<TransactionScope>,
     /// Compiler, codecs, and effective support captured before backend acquisition.
     registration: SqlRegistration,
-    connection: Option<crate::connection::ConnectionIdentity>,
+    connection: CapturedConnection,
+}
+
+#[derive(Debug)]
+enum CapturedConnection {
+    Bound(crate::connection::ConnectionIdentity),
+    #[cfg(test)]
+    Unbound,
 }
 
 /// A captured dispatch bound to its backend. It carries app identity, callback
@@ -43,7 +50,7 @@ pub struct TxRoute {
     scope: Option<TransactionScope>,
     backend: BackendHandle,
     registration: SqlRegistration,
-    connection: Option<crate::connection::ConnectionIdentity>,
+    connection: crate::connection::ConnectionIdentity,
 }
 
 impl CapturedRoute {
@@ -54,7 +61,7 @@ impl CapturedRoute {
         app_id: &str,
         schema: SchemaName,
         registration: SqlRegistration,
-        connection: Option<crate::connection::ConnectionIdentity>,
+        connection: crate::connection::ConnectionIdentity,
     ) -> Self {
         // SEC-1 compares TENANT against TENANT. The schema rides along; it is
         // never the admission key, because two apps sharing one database would
@@ -69,7 +76,7 @@ impl CapturedRoute {
             in_tx,
             scope,
             registration,
-            connection,
+            connection: CapturedConnection::Bound(connection),
         }
     }
 
@@ -92,10 +99,6 @@ impl CapturedRoute {
         &self.registration
     }
 
-    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
-        self.connection
-    }
-
     /// Bind the frozen decision to the backend its SQL will run on.
     ///
     /// Binding consumes the captured route so it cannot be attached twice.
@@ -106,12 +109,19 @@ impl CapturedRoute {
                 "captured SQL registration does not match the resolved backend",
             ));
         }
-        if self.connection.is_some() && self.connection != backend.connection_identity() {
-            return Err(crate::error::DbError::config(
-                "backend_connection_mismatch",
-                "captured connection does not match the resolved backend",
-            ));
-        }
+        let connection = match self.connection {
+            CapturedConnection::Bound(connection) => {
+                if connection != backend.connection_identity() {
+                    return Err(crate::error::DbError::config(
+                        "backend_connection_mismatch",
+                        "captured connection does not match the resolved backend",
+                    ));
+                }
+                connection
+            }
+            #[cfg(test)]
+            CapturedConnection::Unbound => backend.connection_identity(),
+        };
         Ok(TxRoute {
             app_id: self.app_id,
             schema: self.schema,
@@ -119,7 +129,7 @@ impl CapturedRoute {
             scope: self.scope,
             backend,
             registration: self.registration,
-            connection: self.connection,
+            connection,
         })
     }
 
@@ -133,7 +143,7 @@ impl CapturedRoute {
             in_tx: false,
             scope: None,
             registration,
-            connection: None,
+            connection: CapturedConnection::Unbound,
         }
     }
 
@@ -147,7 +157,7 @@ impl CapturedRoute {
             in_tx: true,
             scope: TransactionScope::current(app_id).ok(),
             registration,
-            connection: None,
+            connection: CapturedConnection::Unbound,
         }
     }
 }
@@ -184,7 +194,7 @@ impl TxRoute {
         &self.registration
     }
 
-    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
+    pub fn connection_identity(&self) -> crate::connection::ConnectionIdentity {
         self.connection
     }
 

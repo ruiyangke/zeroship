@@ -128,12 +128,10 @@ module is the sole app-level `Env.db` augmentation.
 ### Collection names
 
 Collection names created by migrations become physical table names. Keep them
-ASCII alphanumeric plus underscores, at most 63 bytes, and avoid the reserved
-prefixes `pg_`, `sqlite_`, `__zero_migrate`, and `__zeroship`. The data-plane and
-schema-query validators refuse these names, and declarative migration loading
-calls the engine validator before lowering emits SQL. The offline `loadVerify`
-surface reports this as `ok: false`; managed HTTP apply surfaces validation
-failures as 422, not as a literal authoring-time 400.
+ASCII alphanumeric plus underscores and within the backend identifier limit.
+Creator-authored migrations reserve backend catalog prefixes and `__zeroship`
+to avoid DDL collisions. The runtime ORM may address a prefixed table already
+declared by its trusted descriptor; the prefix does not change runtime access.
 
 **Type generation refuses invalid names too, so failures surface at build time.**
 Column names follow the portable identifier and reserved-prefix rules. Masked
@@ -1533,9 +1531,11 @@ await db.transaction(async (tx) => {
 That is the contract, not an artefact. A denied attempt must not be
 erasable by rolling back the transaction it was made in, and a granted
 one records that plaintext left the database - which a rollback does
-not undo. Treat `__zeroship_audit_unmask` as append-only evidence with
-no transactional relationship to the rows it names; it stores their ids
-as text and holds no foreign key into them.
+not undo. The table has no transactional relationship to the rows it
+names; it stores their ids as text and holds no foreign key into them.
+Like every table in the creator schema, it is addressable through a
+declared ORM collection and has ordinary data privileges. Its name does
+not make it hidden or append-only.
 
 ## Encrypted and Masked Fields (Shipped Reference)
 

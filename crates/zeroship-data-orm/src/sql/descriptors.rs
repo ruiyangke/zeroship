@@ -149,57 +149,101 @@ pub(crate) fn supports_sorting(field: &crate::value::Value) -> bool {
     effective_mask(field).is_some()
         || (!is_exact_decimal(field)
             && matches!(
-            field.get("type").and_then(crate::value::Value::as_str),
-            Some(
-                "string"
-                    | "text"
-                    | "id"
-                    | "ref"
-                    | "enum"
-                    | "integer"
-                    | "int"
-                    | "bigint"
-                    | "bigInt"
-                    | "number"
-                    | "float"
-                    | "double"
-                    | "date"
-                    | "timestamp"
-                    | "timestamptz"
-                    | "calendarDate"
-                    | "time"
-            )
-        ))
+                field.get("type").and_then(crate::value::Value::as_str),
+                Some(
+                    "string"
+                        | "text"
+                        | "id"
+                        | "ref"
+                        | "enum"
+                        | "integer"
+                        | "int"
+                        | "bigint"
+                        | "bigInt"
+                        | "number"
+                        | "float"
+                        | "double"
+                        | "date"
+                        | "timestamp"
+                        | "timestamptz"
+                        | "calendarDate"
+                        | "time"
+                )
+            ))
 }
 
 pub(crate) fn supports_grouping(field: &crate::value::Value) -> bool {
     effective_mask(field).is_some()
         || (!is_exact_decimal(field)
             && matches!(
-            field.get("type").and_then(crate::value::Value::as_str),
-            Some(
-                "string"
-                    | "text"
-                    | "id"
-                    | "ref"
-                    | "enum"
-                    | "boolean"
-                    | "bool"
-                    | "integer"
-                    | "int"
-                    | "bigint"
-                    | "bigInt"
-                    | "number"
-                    | "float"
-                    | "double"
-                    | "bytes"
-                    | "date"
-                    | "timestamp"
-                    | "timestamptz"
-                    | "calendarDate"
-                    | "time"
-            )
-        ))
+                field.get("type").and_then(crate::value::Value::as_str),
+                Some(
+                    "string"
+                        | "text"
+                        | "id"
+                        | "ref"
+                        | "enum"
+                        | "boolean"
+                        | "bool"
+                        | "integer"
+                        | "int"
+                        | "bigint"
+                        | "bigInt"
+                        | "number"
+                        | "float"
+                        | "double"
+                        | "bytes"
+                        | "date"
+                        | "timestamp"
+                        | "timestamptz"
+                        | "calendarDate"
+                        | "time"
+                )
+            ))
+}
+
+pub(crate) fn supports_aggregate(
+    field: &crate::value::Value,
+    function: crate::sql::AggregateFunc,
+) -> bool {
+    use crate::sql::AggregateFunc;
+
+    let kind = field.get("type").and_then(crate::value::Value::as_str);
+    match function {
+        AggregateFunc::Count => true,
+        AggregateFunc::Sum | AggregateFunc::Avg => {
+            !is_exact_decimal(field)
+                && matches!(
+                    kind,
+                    Some("integer" | "int" | "bigint" | "bigInt" | "number" | "float" | "double")
+                )
+        }
+        AggregateFunc::Min | AggregateFunc::Max => {
+            !is_exact_decimal(field)
+                && matches!(
+                    kind,
+                    Some(
+                        "string"
+                            | "text"
+                            | "id"
+                            | "ref"
+                            | "enum"
+                            | "integer"
+                            | "int"
+                            | "bigint"
+                            | "bigInt"
+                            | "number"
+                            | "float"
+                            | "double"
+                            | "date"
+                            | "timestamp"
+                            | "timestamptz"
+                            | "calendarDate"
+                            | "time"
+                    )
+                )
+        }
+    }
 }
 
 /// Distance metric selected by a vector field descriptor.

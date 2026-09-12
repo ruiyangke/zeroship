@@ -3,8 +3,8 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        mapping::QueryError,
         compiler::CompiledQuery,
+        mapping::QueryError,
         predicate::CompareOp,
         registration::SqlRegistration,
         statement::{
@@ -88,7 +88,7 @@ pub(crate) fn unmask_audit(
     if params.len() != AUDIT_COLUMNS.len() {
         return Err(invalid("unmask audit row has the wrong shape"));
     }
-    let table_name = Ident::parse_as(AUDIT_UNMASK_TABLE, IdentRole::StoredCollection)
+    let table_name = Ident::parse_as(AUDIT_UNMASK_TABLE, IdentRole::Collection)
         .map_err(crate::sql::compiler::CompileError::from)?;
     let physical = AUDIT_COLUMNS
         .iter()
@@ -98,7 +98,7 @@ pub(crate) fn unmask_audit(
                 .map_err(crate::sql::compiler::CompileError::from)
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let table = Table::platform(namespace.clone(), table_name, physical)?;
+    let table = Table::new(namespace.clone(), table_name, physical)?;
     let columns = AUDIT_COLUMNS
         .iter()
         .map(|name| table.column(name))

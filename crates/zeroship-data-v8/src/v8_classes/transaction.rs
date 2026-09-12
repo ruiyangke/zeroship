@@ -9,23 +9,75 @@
 
 #![allow(unsafe_code)]
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
+use zeroship_runtime_macros::v8_class;
+#[allow(unused_imports)]
+use zeroship_runtime_macros::{v8_constructor, v8_method};
 
 use crate::op_error::ToOpError;
 use crate::transaction::{
     SettleOutcome, TxAdmission, exec_begin_or_savepoint, exec_settle, reducer,
 };
 use crate::v8_bridge::runtime_state;
-use crate::v8_classes::collection::mint_collection;
+use crate::v8_classes::db::cached_collection;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::{DbError, IsolationLevel};
+use zeroship_data_orm::transaction::scope::TransactionScope;
 
-/// Mint the collections-only `tx` view for a `Db.transaction(fn)`
-/// callback.
+pub struct TransactionView {
+    binding: DbBinding,
+    collection_cache: RefCell<HashMap<String, v8::Global<v8::Object>>>,
+    transaction_scope: Option<TransactionScope>,
+}
+
+impl std::fmt::Debug for TransactionView {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TransactionView")
+            .field("binding", &self.binding)
+            .field(
+                "collection_cache_len",
+                &self.collection_cache.borrow().len(),
+            )
+            .field("transaction_scope", &self.transaction_scope)
+            .finish()
+    }
+}
+
+#[v8_class]
+impl TransactionView {
+    #[v8_constructor]
+    fn new() -> Result<TransactionView, OpError> {
+        Err(OpError::type_error("Illegal constructor"))
+    }
+
+    /// Resolve any declared table by name, including one whose name collides
+    /// with a direct property on the transaction view.
+    #[v8_method]
+    fn collection<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        name: String,
+    ) -> Result<v8::Local<'s, v8::Object>, OpError> {
+        if let Some(transaction_scope) = &self.transaction_scope {
+            transaction_scope.check().map_err(ToOpError::to_op_error)?;
+        }
+        cached_collection(
+            scope,
+            &self.binding,
+            &self.collection_cache,
+            name,
+            self.transaction_scope.as_ref(),
+        )
+    }
+}
+
+/// Mint the transaction-scoped view for a `Db.transaction(fn)` callback.
 ///
-/// Builds a fresh `v8::Object` and sets one
+/// Builds a fresh native wrapper and sets one
 /// [`Collection`](super::collection::Collection) property per collection
 /// the per-thread schema cache knows about for this binding (the same set
 /// native runtime boot publishes). Each minted `Collection` is an
@@ -34,35 +86,85 @@ use zeroship_data_orm::error::{DbError, IsolationLevel};
 /// connection via the `tx_conn` slot the orchestrator set before calling
 /// the creator callback.
 ///
-/// No `commit` / `rollback` / `collection` / `transaction` / `live`
-/// method is set on the view: the only members are collections. Manual
-/// abort = throw inside the callback; commit is implicit on resolve.
+/// The view exposes `collection(name)` for names that collide with direct
+/// properties. It has no commit or rollback methods. Throwing aborts the
+/// callback; resolving commits it.
 ///
 /// When the descriptor store holds no entry for this binding, as with a raw-JS
-/// schema-less deploy, the view is an empty object. A transaction with no
-/// declared collections has nothing to address through `tx.<name>`; the
-/// commit/rollback envelope still applies.
+/// schema-less deploy, the view has no direct collection properties. The
+/// `collection(name)` lookup remains available; operations still require an
+/// installed descriptor entry.
 pub(crate) fn mint_tx_view<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: &DbBinding,
+    transaction_scope: Option<TransactionScope>,
 ) -> Result<v8::Local<'s, v8::Object>, OpError> {
-    let view = v8::Object::new(scope);
+    let class_template = TransactionView::install(scope);
+    let instance_template = class_template.instance_template(scope);
+    let view = instance_template
+        .new_instance(scope)
+        .ok_or_else(|| OpError::type_error("tx-view: allocation failed"))?;
+    let class = class_template
+        .get_function(scope)
+        .ok_or_else(|| OpError::type_error("tx-view: class allocation failed"))?;
+    let prototype_key = v8::String::new(scope, "prototype").unwrap();
+    let prototype = class
+        .get(scope, prototype_key.into())
+        .ok_or_else(|| OpError::type_error("tx-view: prototype allocation failed"))?;
+    view.set_prototype(scope, prototype);
+    let collection_cache = RefCell::new(HashMap::new());
 
-    // One tx-bound Collection per cached-schema collection. The list
-    // mirrors `Db::collection(name)`'s minting; the binding to the open
-    // tx is implicit (the `tx_conn` slot is set), so no per-object tx id
-    // is threaded.
+    // One tx-bound Collection per cached-schema collection. Each collection
+    // retains this view's frame identity so an escaped handle cannot fall back
+    // to the pool after its transaction settles.
     let collections: Vec<String> = crate::descriptor::declared_collections(binding)
         .into_iter()
         .map(|(name, _schema)| name)
         .collect();
 
     for name in collections {
-        let col = mint_collection(scope, name.clone(), binding.clone())?;
+        let col = cached_collection(
+            scope,
+            binding,
+            &collection_cache,
+            name.clone(),
+            transaction_scope.as_ref(),
+        )?;
         let key = v8::String::new(scope, &name)
             .ok_or_else(|| OpError::type_error("tx-view: collection name allocation failed"))?;
-        view.set(scope, key.into(), col.into());
+        match view.has(scope, key.into()) {
+            Some(true) => continue,
+            Some(false) => {}
+            None => return Err(OpError::type_error("tx-view: property inspection failed")),
+        }
+        if view.define_own_property(
+            scope,
+            key.into(),
+            col.into(),
+            v8::PropertyAttribute::READ_ONLY,
+        ) != Some(true)
+        {
+            return Err(OpError::type_error("tx-view: property installation failed"));
+        }
     }
+
+    let state = Box::new(TransactionView {
+        binding: binding.clone(),
+        collection_cache,
+        transaction_scope,
+    });
+    let raw = Box::into_raw(state);
+    let raw_addr = raw as usize;
+    let external = v8::External::new(scope, raw as *mut std::ffi::c_void);
+    view.set_internal_field(0, external.into());
+    let weak = v8::Weak::with_guaranteed_finalizer(
+        scope,
+        view,
+        Box::new(move || unsafe {
+            drop(Box::from_raw(raw_addr as *mut TransactionView));
+        }),
+    );
+    std::mem::forget(weak);
 
     Ok(view)
 }
@@ -174,8 +276,8 @@ pub fn transaction_dispatch<'s>(
     // now structural rather than incidental: a co-resident app's callback
     // plants ITS app_id, so the comparison below fails and this app opens
     // its own top-level BEGIN.
-    let parent_scope = crate::tx_scope::current_tx_scope(scope)
-        .filter(|parent| parent.app_id() == app_id);
+    let parent_scope =
+        crate::tx_scope::current_tx_scope(scope).filter(|parent| parent.app_id() == app_id);
     let nested = parent_scope.is_some();
     if let Some(parent) = &parent_scope {
         if let Err(error) = parent.check() {
@@ -232,8 +334,14 @@ pub fn transaction_dispatch<'s>(
         // to admission timing, not a refactor.
         let began = match crate::tx_scope::ensure_backend().await {
             Ok(backend) => {
-                match parent_scope.as_ref().map_or(Ok(()), |parent| parent.check()) {
-                    Ok(()) => exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend).await,
+                match parent_scope
+                    .as_ref()
+                    .map_or(Ok(()), |parent| parent.check())
+                {
+                    Ok(()) => {
+                        exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend)
+                            .await
+                    }
                     Err(error) => Err(error),
                 }
             }
@@ -314,8 +422,21 @@ fn run_begin_continuation(
     binding: DbBinding,
 ) {
     let app_id = binding.app_id();
-    // 1. Mint the tx-view (collections-as-props; no commit/rollback).
-    let tx_view = match crate::v8_classes::transaction::mint_tx_view(scope, &binding) {
+    let callback_scope =
+        match zeroship_data_orm::transaction::scope::TransactionScope::current(app_id) {
+            Ok(callback_scope) => callback_scope,
+            Err(error) => {
+                settle_failed_before_body(scope, state, finalizer, error.to_op_error());
+                return;
+            }
+        };
+
+    // 1. Mint the tx-view (collections plus lookup; no commit/rollback).
+    let tx_view = match crate::v8_classes::transaction::mint_tx_view(
+        scope,
+        &binding,
+        Some(callback_scope.clone()),
+    ) {
         Ok(v) => v,
         Err(e) => {
             // Minting failed before the callback ran — roll the tx back
@@ -339,13 +460,6 @@ fn run_begin_continuation(
     //    isolate think it was inside this transaction.
     let user_fn = v8::Local::new(scope, &user_fn_global);
     let undefined = v8::undefined(scope).into();
-    let callback_scope = match zeroship_data_orm::transaction::scope::TransactionScope::current(app_id) {
-        Ok(callback_scope) => callback_scope,
-        Err(error) => {
-            settle_failed_before_body(scope, state, finalizer, error.to_op_error());
-            return;
-        }
-    };
     let prev_scope = crate::tx_scope::enter(scope, &callback_scope);
     let call_result = {
         v8::tc_scope!(let tc, scope);
@@ -607,8 +721,8 @@ pub(crate) fn build_settle_resolve_value(
 mod tests {
     //! Shape guards for the `Db.transaction(fn)` callback argument.
     //!
-    //! The transaction view exposes collections without transaction lifecycle
-    //! or subscription methods.
+    //! The transaction view exposes collections and name lookup without manual
+    //! transaction lifecycle methods.
     #![allow(unsafe_code)]
 
     use zeroship_runtime::init_v8;
@@ -618,13 +732,12 @@ mod tests {
         let v = obj.get(scope, key.into()).unwrap();
         assert!(
             v.is_undefined(),
-            "tx-view must NOT expose `{name}` — it is collections-only \
-             (no JS-reachable transaction primitive); got a defined value"
+            "tx-view must not expose lifecycle method `{name}`; got a defined value"
         );
     }
 
     #[test]
-    fn tx_view_has_no_commit_or_rollback_methods() {
+    fn tx_view_has_collection_lookup_without_commit_or_rollback_methods() {
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -632,14 +745,11 @@ mod tests {
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
         let binding = crate::tests::fixtures::binding("test_app");
-        let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
+        let view = super::mint_tx_view(scope, &binding, None).expect("mint_tx_view");
 
-        // The transaction view exposes collections without lifecycle or
-        // subscription methods.
         for forbidden in [
             "commit",
             "rollback",
-            "collection",
             "transaction",
             "live",
             "beginTransaction",
@@ -647,12 +757,27 @@ mod tests {
             assert_absent(scope, view, forbidden);
         }
 
-        // It is a plain object (its [[Prototype]] is Object.prototype,
-        // not some Transaction.prototype carrying methods). Confirm the
-        // prototype chain has no `commit`.
+        let collection_key = v8::String::new(scope, "collection").unwrap();
+        let collection_fn: v8::Local<v8::Function> = view
+            .get(scope, collection_key.into())
+            .expect("transaction collection lookup")
+            .try_into()
+            .expect("tx.collection must be a function");
+        let colliding_name = v8::String::new(scope, "collection").unwrap();
+        let collection: v8::Local<v8::Object> = collection_fn
+            .call(scope, view.into(), &[colliding_name.into()])
+            .expect("lookup collection named collection")
+            .try_into()
+            .expect("collection lookup result");
+        let find_key = v8::String::new(scope, "find").unwrap();
+        assert!(
+            collection
+                .get(scope, find_key.into())
+                .is_some_and(|value| value.is_function()),
+            "tx.collection must return a native Collection"
+        );
+
         let key = v8::String::new(scope, "commit").unwrap();
-        // `get` walks the prototype chain; a plain object's chain ends at
-        // Object.prototype which has no `commit`.
         let v = view.get(scope, key.into()).unwrap();
         assert!(
             v.is_undefined(),
@@ -662,8 +787,8 @@ mod tests {
 
     #[test]
     fn tx_view_is_empty_without_runtime_descriptor() {
-        // A schema-less app has no collections in the thread context, so the view has
-        // no own enumerable properties. This is the raw-JS-deploy path.
+        // A schema-less app has no direct collection properties. The lookup
+        // method lives on the prototype and is not an own enumerable property.
         init_v8();
         let mut isolate = v8::Isolate::new(v8::CreateParams::default());
         v8::scope!(let handle_scope, &mut isolate);
@@ -671,7 +796,7 @@ mod tests {
         let scope = &mut v8::ContextScope::new(handle_scope, context);
 
         let binding = crate::tests::fixtures::binding("test_app");
-        let view = super::mint_tx_view(scope, &binding).expect("mint_tx_view");
+        let view = super::mint_tx_view(scope, &binding, None).expect("mint_tx_view");
         let names = view
             .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
             .unwrap();

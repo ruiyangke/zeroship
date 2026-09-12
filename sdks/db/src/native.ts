@@ -29,6 +29,8 @@ export interface NativeDb extends Omit<ZeroshipDb, "collection" | "transaction">
   transaction: NativeTransactionFn;
 }
 
+const nativeTransactions = new WeakMap<object, NativeTransactionFn>();
+
 function throwRequiredSurfaceError(error: RequiredSurfaceError): never {
   throw Object.assign(new Error(error.message), { code: error.code });
 }
@@ -54,20 +56,12 @@ export function requireNativeCollection(
 
 export function captureNativeTransaction(
   native: object,
-  storageKey: string,
 ): NativeTransactionFn | undefined {
-  const holder = native as { [key: string]: unknown; transaction?: unknown };
-  if (holder[storageKey] === undefined && typeof holder.transaction === "function") {
-    const captured = (holder.transaction as NativeTransactionFn).bind(native);
-    Object.defineProperty(native, storageKey, {
-      value: captured,
-      configurable: true,
-      enumerable: false,
-      writable: true,
-    });
-  }
-  const transaction = holder[storageKey];
-  return typeof transaction === "function"
-    ? (transaction as NativeTransactionFn)
-    : undefined;
+  const captured = nativeTransactions.get(native);
+  if (captured !== undefined) return captured;
+  const transaction = (native as { transaction?: unknown }).transaction;
+  if (typeof transaction !== "function") return undefined;
+  const bound = (transaction as NativeTransactionFn).bind(native);
+  nativeTransactions.set(native, bound);
+  return bound;
 }

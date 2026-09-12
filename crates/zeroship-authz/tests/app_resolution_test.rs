@@ -29,6 +29,7 @@ use zeroship_authz::{
     authority, enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext,
     AuthzDecision, AuthzError, Resource,
 };
+use zeroship_core::UserId;
 
 /// The whole chain, in one request: `Resource::App` carries a uuid in string
 /// form, the resolve parses it, joins `apps -> projects -> organization_members
@@ -40,7 +41,7 @@ fn an_app_resolves_its_authority_through_its_project() {
         fixture.seat_on_project(&pg, "developer").await;
         let policies = load_platform_policies().unwrap();
 
-        let resolved = authority::resolve(&pg, fixture.user_id, &fixture.app())
+        let resolved = authority::resolve(&pg, &fixture.user_id, &fixture.app())
             .await
             .expect("resolve must not error on the uuid/text seam");
         assert_eq!(
@@ -75,7 +76,7 @@ fn an_unknown_app_denies_without_erroring() {
         let missing = Resource::App {
             id: Uuid::new_v4().to_string(),
         };
-        let resolved = authority::resolve(&pg, fixture.user_id, &missing)
+        let resolved = authority::resolve(&pg, &fixture.user_id, &missing)
             .await
             .expect("an unknown app is not a database failure");
         assert_eq!(resolved.effective_rank, 0);
@@ -115,7 +116,7 @@ fn a_malformed_app_id_is_refused_rather_than_denied() {
         let malformed = Resource::App {
             id: "not-a-uuid".to_owned(),
         };
-        let resolved = authority::resolve(&pg, fixture.user_id, &malformed).await;
+        let resolved = authority::resolve(&pg, &fixture.user_id, &malformed).await;
         assert!(
             matches!(resolved, Err(AuthzError::Validation(_))),
             "an unreadable app id must be refused, not resolved to rank zero: {resolved:?}"
@@ -149,7 +150,8 @@ fn an_unknown_principal_is_a_validation_error_not_rank_zero() {
                 id: "org_0000000000000000000001".to_owned(),
             },
         ] {
-            let err = authority::resolve(&pg, Uuid::new_v4(), &resource)
+            let unknown = UserId::mint();
+            let err = authority::resolve(&pg, &unknown, &resource)
                 .await
                 .expect_err("an unknown principal must not resolve");
             assert!(
@@ -171,7 +173,7 @@ fn the_probe_reads_the_text_id_columns_and_returns_valid_resources() {
         let fixture = Fixture::new(&pg, "probe-ids", "developer").await;
         fixture.seat_on_project(&pg, "viewer").await;
 
-        let organizations = authority::organization_resources(&pg, fixture.user_id)
+        let organizations = authority::organization_resources(&pg, &fixture.user_id)
             .await
             .expect("organization memberships must read as text");
         assert_eq!(
@@ -181,7 +183,7 @@ fn the_probe_reads_the_text_id_columns_and_returns_valid_resources() {
             }]
         );
 
-        let projects = authority::project_probe_resources(&pg, fixture.user_id)
+        let projects = authority::project_probe_resources(&pg, &fixture.user_id)
             .await
             .expect("project memberships must read as text");
         assert_eq!(
@@ -246,7 +248,7 @@ where
 }
 
 struct Fixture {
-    user_id: Uuid,
+    user_id: UserId,
     organization_id: String,
     project_id: String,
     app_uuid: Uuid,
@@ -254,14 +256,18 @@ struct Fixture {
 
 impl Fixture {
     async fn new(pg: &Client, label: &str, organization_role: &str) -> Self {
-        let user_id = Uuid::new_v4();
+        let user_id = UserId::mint();
         let organization_id = typed_id("org");
         let project_id = typed_id("prj");
         let app_uuid = Uuid::new_v4();
 
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
-            &[&user_id, &format!("{label}-{user_id}@example.com"), &label],
+            &[
+                &user_id.as_str(),
+                &format!("{label}-{}@example.com", user_id.as_str()),
+                &label,
+            ],
         )
         .await
         .expect("insert user");
@@ -305,7 +311,7 @@ impl Fixture {
         pg.execute(
             "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
              VALUES ($1, $2, $3)",
-            &[&organization_id, &user_id, &organization_role],
+            &[&organization_id, &user_id.as_str(), &organization_role],
         )
         .await
         .expect("insert organization membership");
@@ -325,7 +331,7 @@ impl Fixture {
             &[
                 &self.project_id,
                 &self.organization_id,
-                &self.user_id,
+                &self.user_id.as_str(),
                 &role,
             ],
         )
@@ -339,9 +345,9 @@ impl Fixture {
         }
     }
 
-    const fn ctx(&self, action: Action, resource: Resource) -> AuthzContext<'_> {
+    fn ctx(&self, action: Action, resource: Resource) -> AuthzContext<'_> {
         AuthzContext {
-            principal_id: self.user_id,
+            principal_id: self.user_id.clone(),
             token_policy: None,
             action,
             resource,
@@ -357,7 +363,7 @@ impl Fixture {
             "DELETE FROM zeroship.project_members WHERE user_id = $1",
             "DELETE FROM zeroship.organization_members WHERE user_id = $1",
         ] {
-            let _ = pg.execute(sql, &[&self.user_id]).await;
+            let _ = pg.execute(sql, &[&self.user_id.as_str()]).await;
         }
         let _ = pg
             .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&self.app_uuid])
@@ -375,7 +381,10 @@ impl Fixture {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }

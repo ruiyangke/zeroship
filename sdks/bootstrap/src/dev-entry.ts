@@ -216,7 +216,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         typeof (value as { collections?: unknown }).collections === "object" &&
         !Array.isArray((value as { collections?: unknown }).collections)
       ) {
-        const out: Record<string, unknown> = {};
+        const out = Object.create(null) as Record<string, unknown>;
         for (const [name, collection] of Object.entries(
           (value as { collections: Record<string, unknown> }).collections,
         )) {

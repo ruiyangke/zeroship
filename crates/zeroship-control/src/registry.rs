@@ -12,6 +12,7 @@ use zeroship_core::types::{
     RouteMap, VersionMap,
     FREE_TIER_NET_POLICY_LIMITS, FREE_TIER_RUNTIME_LIMITS,
 };
+use zeroship_core::UserId;
 
 // ---------------------------------------------------------------------------
 // Error
@@ -265,7 +266,7 @@ impl Registry {
         &self,
         name: &str,
         plan_id: &str,
-        owner_id: &Uuid,
+        owner_id: &UserId,
         project_id: Option<&str>,
     ) -> Result<AppRecord, RegistryError> {
         validate_app_name(name)?;
@@ -278,11 +279,11 @@ impl Registry {
             Some(project_id) => project_id,
             None => {
                 personal_project =
-                    crate::organizations::ensure_personal_project(self, *owner_id)
+                    crate::organizations::ensure_personal_project(self, owner_id)
                         .await
                         .map_err(|err| {
                             RegistryError::Database(format!(
-                                "provision personal project for {owner_id}: {err:?}"
+                                "provision personal project for {}: {err:?}", owner_id.as_str()
                             ))
                         })?;
                 personal_project.as_str()
@@ -328,7 +329,7 @@ impl Registry {
                     ),
                     developer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
                 ),
-                &[&name, &plan_id, &project_id, owner_id],
+                &[&name, &plan_id, &project_id, &owner_id.as_str()],
             )
             .await?;
         let record = rows.first().map(row_to_record).ok_or_else(|| {
@@ -391,7 +392,7 @@ impl Registry {
     /// membership could not express.
     pub async fn list_apps_for_owner(
         &self,
-        owner_id: &Uuid,
+        owner_id: &UserId,
     ) -> Result<Vec<AppRecord>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
@@ -418,7 +419,7 @@ impl Registry {
                     ),
                     viewer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_VIEWER),
                 ),
-                &[owner_id],
+                &[&owner_id.as_str()],
             )
             .await?;
         Ok(rows.iter().map(row_to_record).collect())
@@ -1045,10 +1046,10 @@ impl Registry {
                 &[],
             )
             .await?;
-        let mut by_user = HashMap::<Uuid, GatewayPrincipalLifecycle>::new();
+        let mut by_user = HashMap::<UserId, GatewayPrincipalLifecycle>::new();
         for row in &rows {
-            let user_id: Uuid = row.get("id");
-            let lifecycle = by_user.entry(user_id).or_insert_with(|| {
+            let user_id = crate::user_id::from_row(row, "id", "gateway lifecycle user")?;
+            let lifecycle = by_user.entry(user_id.clone()).or_insert_with(|| {
                 GatewayPrincipalLifecycle {
                     user_id,
                     disabled: row.get("disabled"),
@@ -1063,7 +1064,7 @@ impl Registry {
             }
         }
         let mut principal_lifecycle: Vec<_> = by_user.into_values().collect();
-        principal_lifecycle.sort_by_key(|lifecycle| lifecycle.user_id);
+        principal_lifecycle.sort_by(|left, right| left.user_id.cmp(&right.user_id));
         let family_revocations = conn
             .query(
                 "SELECT client_id, sub, \

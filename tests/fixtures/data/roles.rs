@@ -1,83 +1,40 @@
 //! Test-host helpers for provisioning per-app PostgreSQL roles.
 //!
-//! Roles receive app-scoped grants without replication privileges. Reserved tables
-//! have separate grant rules; the unmask audit table permits append-only access.
-//! Production schema provisioning belongs to the migration service.
+//! The helper keeps schema isolation and DDL authority separate from table
+//! names. Production role provisioning belongs to the migration service.
 #![allow(dead_code)]
+
 use compio_postgres::Pool;
-
 use zeroship_core::database_role::per_app_role_name;
+use zeroship_data_orm::{backend::pg_error, error::DbError};
 
-/// Template membership used when provisioning per-app test roles; it carries no grants.
 pub(crate) const APP_ROLE_TEMPLATE: &str = "__zeroship_app_role_template";
 
-use zeroship_data_orm::backend::pg_error;
-
-use zeroship_data_orm::error::DbError;
-
-pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
-
-/// Reserved table whose grants permit the runtime to append unmask audit rows.
-/// The dedicated grant recipe excludes mutation and deletion of existing evidence.
-pub(crate) const WORKER_WRITABLE_RESERVED_TABLE: &str =
-    zeroship_data_orm::backend_handle::AUDIT_UNMASK_TABLE;
-
-/// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
-/// so operators see *what* the bootstrap layer was doing when the SQL
-/// failed. The SQLSTATE classification still drives the `.code`
-/// (`unique_violation`, `serialization_failure`, `transient`, …) — this
-/// helper only prepends `"auth/bootstrap: <ctx>: "` to the message body.
-///
-/// Variant-walking is shared with the other per-module helpers via
-/// [`zeroship_data_orm::backend::pg_error::coded_sql`]; this is the
-/// `auth/bootstrap`-scoped
-/// thin wrapper.
-pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
-    pg_error::coded_sql(&format!("auth/bootstrap: {context}"), e)
+/// Add database context while preserving the driver's SQLSTATE classification.
+pub(crate) fn coded_sql(context: &str, error: compio_postgres::Error) -> DbError {
+    pg_error::coded_sql(&format!("auth/bootstrap: {context}"), error)
 }
 
-/// Tiny helper for the existence + create pattern.
-///
-/// Postgres doesn't have `CREATE ROLE IF NOT EXISTS` (since the
-/// attributes might differ from the existing role); we probe
-/// `pg_roles` first, then issue the CREATE only when missing. The
-/// `attrs` string is appended verbatim to the CREATE ROLE statement —
-/// callers pass identifier-clean literals, no user input flows here.
 pub(crate) async fn create_role_if_missing(
     pool: &Pool,
     name: &str,
     attrs: &str,
 ) -> Result<bool, DbError> {
-    let exists: bool = !pool
+    let exists = !pool
         .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[name])
         .await
-        .map_err(|e| coded_sql(&format!("probe pg_roles {name}"), e))?
+        .map_err(|error| coded_sql(&format!("probe pg_roles {name}"), error))?
         .is_empty();
     if exists {
         return Ok(false);
     }
     pool.execute(&format!(r#"CREATE ROLE "{name}" {attrs}"#), &[])
         .await
-        .map_err(|e| coded_sql(&format!("CREATE ROLE {name}"), e))?;
+        .map_err(|error| coded_sql(&format!("CREATE ROLE {name}"), error))?;
     Ok(true)
 }
 
-pub(crate) fn sql_string_literal(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "''"))
-}
-
-/// `SET LOCAL ROLE "app_<id>_role"` — used INSIDE a transaction so the
-/// role automatically reverts at COMMIT/ROLLBACK (no explicit `RESET`
-/// needed, and no risk of a pooled connection leaking the role to the
-/// next checkout). This is the preferred client-SQL injection point.
-///
-/// The role name flows through the shared, length-checked composer and is
-/// double-quoted, so this is injection-safe even though it interpolates.
-///
-/// # Errors
-///
-/// Returns a typed database error if the complete role name exceeds
-/// PostgreSQL's identifier limit.
+/// Build the transaction-scoped role switch used on checked-out connections.
 pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
     let role = per_app_role_name(app_id)?;
     Ok(format!(
@@ -86,60 +43,27 @@ pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
     ))
 }
 
-/// Result of `ensure_per_app_role`, distinguishing a newly created role from
-/// an existing role for idempotency telemetry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerAppRoleOutcome {
-    /// True iff this call issued the `CREATE ROLE`.
+    /// Whether this call created the role.
     pub created_role: bool,
 }
 
-/// Idempotently provision the per-app PG role and scope its grants to
-/// the per-app schema ONLY (§17.5).
+/// Provision a runtime role with ordinary DML across its creator schema.
 ///
-/// Call AFTER the app schema exists (the deploy creates it)
-/// `"<app_id>"` (the grants reference it). Steps:
-///
-/// 1. `CREATE ROLE "app_<id>_role" NOLOGIN NOREPLICATION …
-///    IN ROLE "__zeroship_app_role_template"` — the explicit
-///    `NOREPLICATION` is the §17.5 non-negotiable; `IN ROLE` anchors
-///    every per-app role under one template so a cluster-wide audit
-///    reads one membership edge per app.
-/// 2. `GRANT USAGE ON SCHEMA "<app_id>"` - the runtime may enter the
-///    schema but may not author objects in it.
-/// 3. Grant sequence access for existing and future creator objects. Table DML
-///    is deliberately absent: the binding's column grants are its authority,
-///    and a table-level grant would subsume them.
-/// 4. Revoke every reserved `__zeroship_*` table, then give the unmask audit
-///    table exactly INSERT and its serial sequence exactly USAGE.
-///
-/// Explicitly does NOT grant `REPLICATION`, nor any privilege on another
-/// app's schema. There is no privileged schema for it to reach: the
-/// template carries schema membership only, not EXECUTE on any
-/// definer-rights routine.
-///
-/// Runs under the caller's pool, which in production is the platform
-/// (bootstrap) role — a superuser or CREATEROLE principal.
+/// The role may use the schema and its sequences, but it cannot create schema
+/// objects. Default privileges give later tables the same DML surface.
 pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRoleOutcome, DbError> {
     let role = per_app_role_name(app_id)?;
     let schema = zeroship_data_orm::sql::mapping::quote_ident(app_id);
-    let qrole = format!("\"{role}\"");
+    let quoted_role = zeroship_data_orm::sql::mapping::quote_ident(&role);
 
-    // 0. Ensure the app-role template anchor exists. The per-app role's
-    //    `IN ROLE "<template>"` membership (step 1) requires it, and
-    //    this is now the ONLY thing that creates it. The template is a
-    //    NOLOGIN/NOREPLICATION permission anchor — creating it is
-    //    idempotent and carries no login surface.
     create_role_if_missing(
         pool,
         APP_ROLE_TEMPLATE,
         "NOLOGIN NOREPLICATION NOCREATEDB NOCREATEROLE NOINHERIT",
     )
     .await?;
-
-    // 1. CREATE ROLE — NOREPLICATION is the §17.5 invariant, asserted
-    //    explicitly (not relying on the server default). `IN ROLE`
-    //    grants membership in the template.
     let created = create_role_if_missing(
         pool,
         &role,
@@ -149,236 +73,42 @@ pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRole
     )
     .await?;
 
-    // 2. Schema-level USAGE only. Runtime code never authors schema objects.
-    pool.execute(&format!("GRANT USAGE ON SCHEMA {schema} TO {qrole}"), &[])
-        .await
-        .map_err(|e| coded_sql(&format!("GRANT USAGE ON SCHEMA {app_id}"), e))?;
-
-    // 3. Sequences only. The binding layer owns column-level table grants.
-    pool.execute(
-        &format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {qrole}"),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("GRANT sequence usage ON SCHEMA {app_id}"), e))?;
-    revoke_reserved_system_table_privileges(pool, app_id, &role).await?;
-    set_worker_unmask_audit_append_privileges(pool, app_id, &role).await?;
-
-    // 4. Future sequences. Future tables still require explicit column grants.
-    pool.execute(
-        &format!(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
-             GRANT USAGE, SELECT ON SEQUENCES TO {qrole}"
+    for statement in [
+        format!("GRANT USAGE ON SCHEMA {schema} TO {quoted_role}"),
+        format!(
+            "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema} TO {quoted_role}"
         ),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("ALTER DEFAULT PRIVILEGES sequences {app_id}"), e))?;
+        format!("GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema} TO {quoted_role}"),
+        format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {quoted_role}"
+        ),
+        format!(
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA {schema} \
+             GRANT USAGE, SELECT ON SEQUENCES TO {quoted_role}"
+        ),
+    ] {
+        pool.execute(&statement, &[])
+            .await
+            .map_err(|error| coded_sql(&format!("provision app role {app_id}"), error))?;
+    }
 
     Ok(PerAppRoleOutcome {
         created_role: created,
     })
 }
 
-/// The `DO` block [`revoke_reserved_system_table_privileges`] runs.
-///
-/// Split out from the execution so the predicate can be pinned by a unit test
-/// without a live cluster. The behaviour it encodes is a privilege boundary,
-/// and the only other way to check it is a live-PG suite that does not run in
-/// the default gate.
-pub(crate) fn revoke_reserved_system_table_privileges_sql(app_id: &str, role: &str) -> String {
-    let schema_literal = sql_string_literal(app_id);
-    let role_literal = sql_string_literal(role);
-    let prefix_literal = sql_string_literal(RESERVED_SYSTEM_TABLE_PREFIX);
-    // The audit table is excluded by NAME rather than by narrowing the prefix:
-    // the prefix must keep matching everything else, and a second reserved
-    // table that the worker may write should have to be added here deliberately.
-    let writable_literal = sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE);
-    format!(
-        "DO $$ \
-         DECLARE \
-           rel record; \
-         BEGIN \
-           FOR rel IN \
-             SELECT n.nspname, c.relname \
-               FROM pg_class c \
-               JOIN pg_namespace n ON n.oid = c.relnamespace \
-              WHERE n.nspname = {schema_literal} \
-                AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
-                AND left(c.relname, {prefix_len}) = {prefix_literal} \
-                AND c.relname <> {writable_literal} \
-           LOOP \
-             EXECUTE format( \
-               'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
-               rel.nspname, rel.relname, {role_literal} \
-             ); \
-           END LOOP; \
-         END \
-         $$",
-        prefix_len = RESERVED_SYSTEM_TABLE_PREFIX.len(),
-    )
-}
-
-/// Remove every additive privilege from the exact unmask audit objects.
-///
-/// This runs as its own statement before the narrow grants. If a malformed
-/// audit table makes the grant step fail, this deny remains committed instead
-/// of rolling back with that failure. ACL-bearing objects of the wrong kind at
-/// the reserved name also lose their blanket privileges and get nothing back.
-pub(crate) fn revoke_worker_unmask_audit_privileges_sql(app_id: &str, role: &str) -> String {
-    let schema_literal = sql_string_literal(app_id);
-    let role_literal = sql_string_literal(role);
-    let audit_literal = sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE);
-    format!(
-        "DO $$ \
-         DECLARE \
-           audit_rel record; \
-           sequence_rel record; \
-         BEGIN \
-           SELECT n.nspname, c.relname, c.relkind \
-             INTO audit_rel \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-            WHERE n.nspname = {schema_literal} \
-              AND c.relname = {audit_literal} \
-              AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S'); \
-           IF FOUND THEN \
-             IF audit_rel.relkind = 'S' THEN \
-               EXECUTE format( \
-                 'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
-                 audit_rel.nspname, audit_rel.relname, {role_literal} \
-               ); \
-             ELSE \
-               EXECUTE format( \
-                 'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
-                 audit_rel.nspname, audit_rel.relname, {role_literal} \
-               ); \
-               IF audit_rel.relkind IN ('r', 'p') THEN \
-                 SELECT n.nspname, c.relname \
-                   INTO sequence_rel \
-                   FROM pg_class c \
-                   JOIN pg_namespace n ON n.oid = c.relnamespace \
-                  WHERE c.oid = pg_get_serial_sequence( \
-                          format('%I.%I', audit_rel.nspname, audit_rel.relname), \
-                          'id' \
-                        )::regclass \
-                    AND c.relkind = 'S'; \
-                 IF FOUND THEN \
-                   EXECUTE format( \
-                     'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
-                     sequence_rel.nspname, sequence_rel.relname, {role_literal} \
-                   ); \
-                 END IF; \
-               END IF; \
-             END IF; \
-           END IF; \
-         END \
-         $$"
-    )
-}
-
-/// Grant the unmask audit table its exact append-only recipe.
-///
-/// PostgreSQL grants are additive, so this runs only after
-/// [`revoke_worker_unmask_audit_privileges_sql`] has cleared every table and
-/// sequence privilege. The lookup is a no-op when the audit table has not been
-/// provisioned yet, preserving [`ensure_per_app_role`]'s schema-only
-/// precondition. A real audit table without its contractually required
-/// `BIGSERIAL` sequence is rejected after the deny has committed.
-pub(crate) fn grant_worker_unmask_audit_append_privileges_sql(app_id: &str, role: &str) -> String {
-    let schema_literal = sql_string_literal(app_id);
-    let role_literal = sql_string_literal(role);
-    let audit_literal = sql_string_literal(WORKER_WRITABLE_RESERVED_TABLE);
-    format!(
-        "DO $$ \
-         DECLARE \
-           audit_rel record; \
-           sequence_rel record; \
-         BEGIN \
-           SELECT n.nspname, c.relname \
-             INTO audit_rel \
-             FROM pg_class c \
-             JOIN pg_namespace n ON n.oid = c.relnamespace \
-            WHERE n.nspname = {schema_literal} \
-              AND c.relname = {audit_literal} \
-              AND c.relkind IN ('r', 'p'); \
-           IF FOUND THEN \
-             SELECT n.nspname, c.relname \
-               INTO sequence_rel \
-               FROM pg_class c \
-               JOIN pg_namespace n ON n.oid = c.relnamespace \
-              WHERE c.oid = pg_get_serial_sequence( \
-                      format('%I.%I', audit_rel.nspname, audit_rel.relname), \
-                      'id' \
-                    )::regclass \
-                AND c.relkind = 'S'; \
-             IF NOT FOUND THEN \
-               RAISE EXCEPTION 'serial sequence missing for %.%.id', \
-                 audit_rel.nspname, audit_rel.relname; \
-             END IF; \
-             EXECUTE format( \
-               'GRANT USAGE ON SEQUENCE %I.%I TO %I', \
-               sequence_rel.nspname, sequence_rel.relname, {role_literal} \
-             ); \
-             EXECUTE format( \
-               'GRANT INSERT ON TABLE %I.%I TO %I', \
-               audit_rel.nspname, audit_rel.relname, {role_literal} \
-             ); \
-           END IF; \
-         END \
-         $$"
-    )
-}
-
-pub(crate) async fn set_worker_unmask_audit_append_privileges(
-    pool: &Pool,
-    app_id: &str,
-    role: &str,
-) -> Result<(), DbError> {
-    pool.execute(
-        &revoke_worker_unmask_audit_privileges_sql(app_id, role),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("revoke unmask audit privileges {app_id}"), e))?;
-    pool.execute(
-        &grant_worker_unmask_audit_append_privileges_sql(app_id, role),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("set unmask audit append privileges {app_id}"), e))?;
-    Ok(())
-}
-
-pub(crate) async fn revoke_reserved_system_table_privileges(
-    pool: &Pool,
-    app_id: &str,
-    role: &str,
-) -> Result<(), DbError> {
-    pool.execute(
-        &revoke_reserved_system_table_privileges_sql(app_id, role),
-        &[],
-    )
-    .await
-    .map_err(|e| coded_sql(&format!("REVOKE reserved table privileges {app_id}"), e))?;
-    Ok(())
-}
-
-/// Drop the per-app role. Called by the §17.7 drop-namespace sequence
-/// AFTER `DROP SCHEMA "<app_id>" CASCADE`, so no objects depend on the
-/// role at drop time. Idempotent: `DROP ROLE IF EXISTS` is a no-op when
-/// the role is already gone (or was never created).
-///
-/// Postgres refuses to drop a role that still owns objects or holds
-/// grants; the CASCADE schema-drop in step 6 removes the role's objects,
-/// and the grants vanish with the schema. If a stray dependency remains
-/// (e.g. a grant in another schema that should never have existed), the
-/// DROP errors loudly rather than silently — surfacing the §17.5
-/// violation instead of masking it.
+/// Drop a runtime role after its creator schema has been removed.
 pub async fn drop_per_app_role(pool: &Pool, app_id: &str) -> Result<(), DbError> {
     let role = per_app_role_name(app_id)?;
-    pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
-        .await
-        .map_err(|e| coded_sql(&format!("DROP ROLE {role}"), e))?;
+    pool.execute(
+        &format!(
+            "DROP ROLE IF EXISTS {}",
+            zeroship_data_orm::sql::mapping::quote_ident(&role)
+        ),
+        &[],
+    )
+    .await
+    .map_err(|error| coded_sql(&format!("DROP ROLE {role}"), error))?;
     Ok(())
 }

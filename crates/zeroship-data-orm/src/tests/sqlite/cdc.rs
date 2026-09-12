@@ -124,6 +124,49 @@ fn insert_publishes_via_preupdate_hook() {
 }
 
 #[test]
+fn attached_creator_databases_with_the_same_table_name_are_isolated() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            for app in ["cdc_app_a", "cdc_app_b"] {
+                backend
+                    .attach_app_file(app)
+                    .await
+                    .expect("attach creator database");
+                backend
+                    .execute_fixture(
+                        &format!(
+                            "CREATE TABLE \"{app}\".\"items\" (id INTEGER PRIMARY KEY, name TEXT)"
+                        ),
+                        &[],
+                    )
+                    .await
+                    .expect("create creator table");
+            }
+
+            let app_a = subscribe_local("cdc_app_a", "items");
+            let app_b = subscribe_local("cdc_app_b", "items");
+            backend
+                .execute_fixture(
+                    "INSERT INTO \"cdc_app_a\".\"items\" (name) VALUES ('only-a')",
+                    &[],
+                )
+                .await
+                .expect("insert into first creator database");
+            drain_publisher().await;
+
+            let messages = drain(&app_a);
+            assert_eq!(
+                messages.len(),
+                1,
+                "first creator event missing: {messages:?}"
+            );
+            assert!(drain(&app_b).is_empty(), "event crossed creator databases");
+        });
+    })
+}
+
+#[test]
 fn publisher_observes_columns_added_after_first_event() {
     Host::test(|host| {
         host.run(async {
@@ -567,18 +610,14 @@ fn subscription_fanout_under_load() {
 }
 
 #[test]
-fn mv_refresh_does_not_emit_change_events() {
+fn prefixed_shadow_table_emits_change_events() {
     Host::test(|host| {
-        // Shadow-table writes are filtered before broker publication.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
                 .attach_app_file("app_mv")
                 .await
                 .expect("ensure_app_schema");
-            // Create a shadow table that mimics what an MV refresh would
-            // emit. The CREATE itself only touches sqlite_master (already
-            // filtered); the INSERT below is the gate.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_mv\".\"__zeroship_mv_demo\" (\
@@ -590,15 +629,8 @@ fn mv_refresh_does_not_emit_change_events() {
                 .await
                 .expect("CREATE TABLE __zeroship_mv_demo");
 
-            // Subscribe to the shadow table directly so we'd observe any
-            // event that leaked past the filter. (The SDK boundary refuses
-            // such a subscription via `Db::open_subscription`; the broker
-            // primitive does NOT, and we exercise the broker level here.)
             let sub = subscribe_local("app_mv", "__zeroship_mv_demo");
 
-            // INSERT into the shadow — this is the write the filter must
-            // drop. The preupdate hook fires, `is_filtered_relation`
-            // returns `true`, no event is buffered, no packet ships.
             backend
                 .execute_fixture(
                     "INSERT INTO \"app_mv\".\"__zeroship_mv_demo\" (id, v) VALUES (1, 'a')",
@@ -610,29 +642,25 @@ fn mv_refresh_does_not_emit_change_events() {
             drain_publisher().await;
 
             let msgs = drain(&sub);
-            assert!(
-                msgs.is_empty(),
-                "writes to __zeroship_mv_* must not reach the broker; got {msgs:?}"
-            );
+            assert_eq!(msgs.len(), 1, "expected the prefixed-table event: {msgs:?}");
+            let SubscriptionMessage::Change(event) = &msgs[0] else {
+                panic!("expected a change event: {msgs:?}")
+            };
+            assert_eq!(event.collection, "__zeroship_mv_demo");
+            assert_eq!(event.op, ChangeOp::Insert);
         });
     })
 }
 
 #[test]
-fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
+fn mixed_transaction_emits_events_for_ordinary_and_prefixed_tables() {
     Host::test(|host| {
-        // Variant of the previous gate: when a transaction touches BOTH a
-        // shadow table AND a regular collection, the shadow writes are
-        // filtered and the regular writes pass through. The regular
-        // subscriber observes exactly the regular events; the shadow
-        // subscriber observes zero events.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
                 .attach_app_file("app_mv_mixed")
                 .await
                 .expect("ensure_app_schema");
-            // Regular collection.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_mv_mixed\".\"items\" (\
@@ -643,7 +671,6 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
                 )
                 .await
                 .expect("CREATE TABLE items");
-            // Shadow table.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_mv_mixed\".\"__zeroship_mv_items\" (\
@@ -658,8 +685,6 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
             let regular_sub = subscribe_local("app_mv_mixed", "items");
             let shadow_sub = subscribe_local("app_mv_mixed", "__zeroship_mv_items");
 
-            // Single transaction touching both tables. The shadow write
-            // is filtered at the hook; the regular write reaches the broker.
             backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
             backend
                 .execute_fixture(
@@ -703,23 +728,23 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
                 }
                 other => panic!("expected Change event on regular collection, got {other:?}"),
             }
-            assert!(
-                shadow_msgs.is_empty(),
-                "shadow collection must observe zero events; got {shadow_msgs:?}"
+            assert_eq!(
+                shadow_msgs.len(),
+                1,
+                "prefixed collection should observe its INSERT: {shadow_msgs:?}"
             );
+            let SubscriptionMessage::Change(event) = &shadow_msgs[0] else {
+                panic!("expected a change event: {shadow_msgs:?}")
+            };
+            assert_eq!(event.collection, "__zeroship_mv_items");
+            assert_eq!(event.op, ChangeOp::Insert);
         });
     })
 }
 
 #[test]
-fn audit_table_writes_do_not_emit_events() {
+fn audit_table_writes_emit_events() {
     Host::test(|host| {
-        // The `is_filtered_relation` predicate covers `__zeroship_audit_*`
-        // alongside `__zeroship_mv_*`. The unit test in
-        // `cdc.rs::tests::is_filtered_relation_excludes_system_tables`
-        // already pins the predicate; this gate exercises the filter
-        // end-to-end so a regression that drops the audit-prefix arm of the
-        // predicate would fail here at the integration boundary.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -751,10 +776,12 @@ fn audit_table_writes_do_not_emit_events() {
             drain_publisher().await;
 
             let msgs = drain(&sub);
-            assert!(
-                msgs.is_empty(),
-                "writes to __zeroship_audit_* must not reach the broker; got {msgs:?}"
-            );
+            assert_eq!(msgs.len(), 1, "expected the audit-table event: {msgs:?}");
+            let SubscriptionMessage::Change(event) = &msgs[0] else {
+                panic!("expected a change event: {msgs:?}")
+            };
+            assert_eq!(event.collection, "__zeroship_audit_users");
+            assert_eq!(event.op, ChangeOp::Insert);
         });
     })
 }

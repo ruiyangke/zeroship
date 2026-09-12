@@ -455,6 +455,49 @@ fn registered_compilers_choose_the_spatial_execution_statement() {
 }
 
 #[test]
+fn sqlite_spatial_search_keeps_projection_aliases_separate_from_ranking_identity() {
+    let compile = |column: &str, alias: &str| {
+        let table = search_table();
+        SqliteCompiler
+            .compile(
+                Statement::SpatialNear(
+                    SpatialNearStatement::new(SpatialNearParts {
+                        projection: vec![
+                            ReturnedColumn {
+                                column: table.column(column).unwrap(),
+                                alias: Some(Ident::parse_as(alias, IdentRole::Alias).unwrap()),
+                            },
+                            ReturnedColumn {
+                                column: table.column("location").unwrap(),
+                                alias: None,
+                            },
+                        ],
+                        identity: table.column("id").unwrap(),
+                        spatial: table.column("location").unwrap(),
+                        point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
+                        radius_m: 1000.0,
+                        predicate: ResolvedPredicate::Const(true),
+                        limit: 5,
+                        table,
+                    })
+                    .unwrap(),
+                ),
+                &SqliteCompiler.support(),
+            )
+            .unwrap()
+    };
+
+    assert_eq!(
+        compile("label", "id").sql(),
+        "SELECT \"source\".\"label\" AS \"id\", \"source\".\"location\" AS \"location\", \"source\".\"id\" AS \"__zs_spatial_identity\" FROM \"app-search\".\"places\" AS \"source\""
+    );
+    assert_eq!(
+        compile("id", "key").sql(),
+        "SELECT \"source\".\"id\" AS \"key\", \"source\".\"location\" AS \"location\", \"source\".\"id\" AS \"__zs_spatial_identity\" FROM \"app-search\".\"places\" AS \"source\""
+    );
+}
+
+#[test]
 fn spatial_bind_preflight_follows_the_registered_compiler() {
     let statement = || {
         let table = search_table();
