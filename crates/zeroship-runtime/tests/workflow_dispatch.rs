@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 mod workflow_shutdown;
+mod workflow_failure;
 
 use serde_json::Value;
 use zeroship_runtime::{
