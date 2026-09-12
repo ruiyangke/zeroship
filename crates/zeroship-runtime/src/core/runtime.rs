@@ -1928,27 +1928,13 @@ impl RuntimeInner {
 
         self.initialized = true;
 
-        // Create POSIX CPU timer if cpu_limit is configured (Linux only).
-        //
-        // Each Runtime must register with a UNIQUE app_id so the watchdog
-        // terminates the right isolate. An earlier revision hardcoded
-        // `app_id = 0` which meant every Runtime on the same thread
-        // overwrote the previous one's handle in the watchdog map — if
-        // App A's timer fired, the watchdog killed whichever app
-        // registered LAST (likely B), not A.
-        //
-        // We use the isolate's raw pointer as a unique key. It's stable
-        // for the lifetime of the Runtime and unique per thread.
+        // The timer owns a unique registration token. Dropping it unregisters
+        // the isolate, so a queued expiration cannot target its replacement.
         #[cfg(target_os = "linux")]
         if self.cpu_limit.is_some() {
-            let system = crate::cpu_timer::CpuTimerSystem::get_or_init();
-            let isolate_id = std::ptr::addr_of!(self.isolate) as u64;
             let v8_handle = self.isolate.thread_safe_handle();
-            // The watchdog sets BOTH notes: the generic one the dispatch path
-            // polls, and the cpu-specific one that names the cause.
             self.cpu_note.store(false, std::sync::atomic::Ordering::Relaxed);
-            system.register(isolate_id, v8_handle, Arc::clone(&self.cpu_note));
-            match crate::cpu_timer::CpuTimer::new(isolate_id) {
+            match crate::cpu_timer::CpuTimer::new(v8_handle, Arc::clone(&self.cpu_note)) {
                 Ok(timer) => self.cpu_timer = Some(timer),
                 Err(e) => tracing::error!(error = %e, "cpu-timer initialisation failed"),
             }
