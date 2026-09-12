@@ -20,11 +20,10 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use compio_postgres::{Client, NoTls};
-use sha2::{Digest, Sha256};
-use uuid::Uuid;
 use zeroship_bundle::{build_blob_store, StoreUrl};
 use zeroship_control::plan_catalog::{free_plan_id, seed_plans};
 use zeroship_control::registry::{Registry, RegistryError};
+use zeroship_core::UserId;
 
 zeroship_core::declare_env_consumer!(
     /// This one-shot has no `#[zeroship_config]` declaration, so it declares its
@@ -56,8 +55,8 @@ struct Cli {
     zship: PathBuf,
 
     /// Owner user id for the app. Defaults to a deterministic dev-only owner.
-    #[arg(long)]
-    owner: Option<Uuid>,
+    #[arg(long, value_parser = parse_user_id)]
+    owner: Option<UserId>,
 
     /// Create the app and ingest the artifact, but do NOT make the deploy live.
     ///
@@ -117,9 +116,13 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
     let store_url = StoreUrl::parse(&cli.blob_store)
         .map_err(|e| err(format!("invalid --blob-store '{}': {e}", cli.blob_store)))?;
     let s3_runtime = match store_url.is_remote() {
-        true => Some(zeroship_core::resolve_s3_runtime!(DevProvisionConsumer).map_err(|e| {
-            err(format!("failed to resolve S3 credentials for blob store: {e}"))
-        })?),
+        true => Some(
+            zeroship_core::resolve_s3_runtime!(DevProvisionConsumer).map_err(|e| {
+                err(format!(
+                    "failed to resolve S3 credentials for blob store: {e}"
+                ))
+            })?,
+        ),
         false => None,
     };
     let blob_store = build_blob_store(&store_url, s3_runtime.as_ref()).map_err(|e| {
@@ -216,19 +219,19 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
     Ok(app)
 }
 
-async fn ensure_owner_exists(db_url: &str, owner_id: &Uuid) -> Result<(), DevProvisionError> {
+async fn ensure_owner_exists(db_url: &str, owner_id: &UserId) -> Result<(), DevProvisionError> {
     let conn = open_conn(db_url)
         .await
         .map_err(|e| err(format!("connect for dev owner seed: {e}")))?;
-    let email = format!("dev-provision-{owner_id}@zeroship.localhost");
+    let email = format!("dev-provision-{}@zeroship.localhost", owner_id.as_str());
     conn.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
          VALUES ($1, $2, NOW(), 'Dev Provision Owner') \
          ON CONFLICT (id) DO NOTHING",
-        &[owner_id, &email],
+        &[&owner_id.as_str(), &email],
     )
     .await
-    .map_err(|e| err(format!("seed dev owner {owner_id}: {e}")))?;
+    .map_err(|e| err(format!("seed dev owner {}: {e}", owner_id.as_str())))?;
     Ok(())
 }
 
@@ -243,13 +246,10 @@ async fn open_conn(url: &str) -> Result<Client, compio_postgres::Error> {
     Ok(client)
 }
 
-fn default_owner_id() -> Uuid {
-    let mut hasher = Sha256::new();
-    hasher.update(b"zeroship:dev-provision-owner:v1");
-    let digest = hasher.finalize();
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-    bytes[6] = (bytes[6] & 0x0F) | 0x80;
-    bytes[8] = (bytes[8] & 0x3F) | 0x80;
-    Uuid::from_bytes(bytes)
+fn parse_user_id(raw: &str) -> Result<UserId, String> {
+    UserId::parse(raw).map_err(|error| error.to_string())
+}
+
+fn default_owner_id() -> UserId {
+    UserId::parse("usr_0000000000000000000001").expect("fixed dev owner id is canonical")
 }

@@ -203,7 +203,7 @@ pub async fn onboard(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 organization_id: Some(organization_id),
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::CreateAccount,
                 resource: Some(&acct),
                 source_ip: ip.as_deref(),
@@ -435,7 +435,7 @@ pub async fn callback(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 organization_id: Some(organization_id),
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::LinkAccount,
                 resource: Some(&stored),
                 source_ip: ip.as_deref(),
@@ -661,7 +661,7 @@ pub async fn unlink(
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
                 organization_id: Some(organization_id),
-                actor_user_id: Some(authz.principal_id),
+                actor_user_id: Some(&authz.principal_id),
                 action: Action::UnlinkAccount,
                 resource: None,
                 source_ip: ip.as_deref(),

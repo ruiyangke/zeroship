@@ -8,6 +8,7 @@ use ntex::web::types::{Path, State};
 use serde::Serialize;
 use serde_json::json;
 use zeroship_authz::{Action, Resource};
+use zeroship_core::UserId;
 
 use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
@@ -27,10 +28,7 @@ pub struct OauthGrantSummary {
 }
 
 /// GET /me/oauth-grants - list active grants for the authenticated user.
-pub async fn list_grants(
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
+pub async fn list_grants(authz: AuthzGuard, state: State<Arc<AppState>>) -> web::HttpResponse {
     if let Err(resp) = authz
         .require(Action::AccountRead, Resource::Any, &state)
         .await
@@ -47,7 +45,7 @@ pub async fn list_grants(
              JOIN zeroship.oauth_clients c ON c.client_id = g.client_id \
              WHERE g.user_id = $1 \
              ORDER BY g.granted_at DESC",
-            &[&authz.principal_id],
+            &[&authz.principal_id.as_str()],
         )
         .await
     {
@@ -114,13 +112,7 @@ pub async fn revoke_grant(
     // `transaction()` needs and isolates snapshot/locks/abort-state. After
     // commit, inbound to that alias bounces (5b `revoked_at IS NULL` gate +
     // `resolve_active_alias`'s structural `EXISTS(oauth_grants)` read gate).
-    let deleted = match revoke_grant_cascade(
-        &state,
-        &authz.principal_id,
-        &client_id,
-    )
-    .await
-    {
+    let deleted = match revoke_grant_cascade(&state, &authz.principal_id, &client_id).await {
         Ok(deleted) => deleted,
         Err(err) => {
             tracing::error!(
@@ -168,7 +160,7 @@ pub async fn revoke_grant(
 /// — same single `zeroship` DB.)
 async fn revoke_grant_cascade(
     state: &AppState,
-    user_id: &uuid::Uuid,
+    user_id: &UserId,
     client_id: &str,
 ) -> Result<u64, crate::registry::RegistryError> {
     let mut conn = state.registry.conn().await?;
@@ -183,7 +175,7 @@ async fn revoke_grant_cascade(
     let deleted = tx
         .execute(
             "DELETE FROM zeroship.oauth_grants WHERE user_id = $1 AND client_id = $2",
-            &[user_id, &client_id],
+            &[&user_id.as_str(), &client_id],
         )
         .await?;
     // SAME txn — revoke the relay alias for THIS (app, user). Keyed DIRECTLY on
@@ -195,7 +187,7 @@ async fn revoke_grant_cascade(
           WHERE app_client_id = $2 \
             AND global_user_id = $1 \
             AND revoked_at IS NULL",
-        &[user_id, &client_id],
+        &[&user_id.as_str(), &client_id],
     )
     .await?;
     // SAME txn — write the per-app token-family marker so the live ACCESS token
@@ -213,11 +205,7 @@ async fn revoke_grant_cascade(
         .await?
         .map(|row| row.get("sector_identifier"));
     if let Some(sector) = sector {
-        let pws = zeroship_core::auth::derive_pairwise(
-            &state.pairwise_salt,
-            &user_id.to_string(),
-            &sector,
-        );
+        let pws = zeroship_core::auth::derive_pairwise(&state.pairwise_salt, user_id, &sector);
         tx.execute(
             "INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
              VALUES ($1, $2, NOW()) \

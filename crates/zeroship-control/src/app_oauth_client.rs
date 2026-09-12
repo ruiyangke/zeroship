@@ -535,7 +535,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
     } = input;
     let scopes: Vec<&str> = scope_allowlist.split_whitespace().collect();
     let redirect_uris: Vec<&str> = redirect_uris.iter().map(String::as_str).collect();
-    let created_by: Option<Uuid> = None;
+    let created_by: Option<&str> = None;
     let client_secret_hash = generate_client_secret_hash();
     let bcl_uri = backchannel_logout_uri(
         sector
