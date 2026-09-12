@@ -283,6 +283,14 @@ impl SqlCompiler for DownstreamCompiler {
     ) -> Result<zeroship_data_orm::sql::compiler::CompiledQuery, CompileError> {
         PostgresCompiler.compile(statement, effective)
     }
+
+    fn compile_identity_allocation(
+        &self,
+        request: zeroship_data_orm::sql::statement::IdentityRequest,
+        effective: &zeroship_data_orm::sql::compiler::SqlSupport,
+    ) -> Result<zeroship_data_orm::sql::compiler::IdentityPlan, CompileError> {
+        PostgresCompiler.compile_identity_allocation(request, effective)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -324,4 +332,26 @@ fn a_downstream_compiler_and_codecs_register_without_a_vendor_enum_arm() {
             .len(),
         3
     );
+}
+
+#[test]
+fn identity_allocation_sql_belongs_to_the_registered_compiler() {
+    use zeroship_data_orm::sql::{compiler::IdentityReadPlan, statement::IdentityRequest};
+
+    let table = table();
+    let request = || IdentityRequest::new(table.clone(), table.column("id").unwrap(), 2).unwrap();
+    let postgres = SqlRegistration::builtin(zeroship_data_orm::sql::compile::SqlDialect::Postgres)
+        .compile_identity_allocation(request())
+        .unwrap();
+    assert!(postgres.reservation.is_none());
+    assert!(matches!(postgres.allocation, IdentityReadPlan::Rows(_)));
+
+    let sqlite = SqlRegistration::builtin(zeroship_data_orm::sql::compile::SqlDialect::Sqlite)
+        .compile_identity_allocation(request())
+        .unwrap();
+    assert!(sqlite.reservation.is_some());
+    assert!(matches!(
+        sqlite.allocation,
+        IdentityReadPlan::MaximumAndCounter { .. }
+    ));
 }

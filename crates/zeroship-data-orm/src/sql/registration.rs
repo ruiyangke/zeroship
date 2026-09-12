@@ -148,6 +148,18 @@ impl SqlRegistration {
         self.compiler.compile(statement, &self.effective)
     }
 
+    pub fn compile_identity_allocation(
+        &self,
+        request: crate::sql::statement::IdentityRequest,
+    ) -> Result<crate::sql::compiler::IdentityPlan, CompileError> {
+        self.check(&Requirements {
+            identity_allocation: true,
+            ..Requirements::default()
+        })?;
+        self.compiler
+            .compile_identity_allocation(request, &self.effective)
+    }
+
     pub fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
         self.codecs.storage_type(definition)
     }

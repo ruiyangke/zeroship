@@ -11,6 +11,7 @@ pub struct SqlSupport {
     pub conditional_conflict_update: bool,
     pub returning: bool,
     pub insert_generated_identity: bool,
+    pub identity_allocation: bool,
     pub default_expression: bool,
     pub max_bind_parameters: usize,
 }
@@ -21,6 +22,7 @@ pub struct Requirements {
     pub conditional_conflict_update: bool,
     pub returning: bool,
     pub insert_generated_identity: bool,
+    pub identity_allocation: bool,
     pub default_expression: bool,
     pub bind_parameters: usize,
 }
@@ -34,6 +36,7 @@ impl Requirements {
                 Self {
                     returning: !parts.returning.is_empty(),
                     insert_generated_identity: parts.insert_generated_identity,
+                    identity_allocation: false,
                     default_expression: values
                         .clone()
                         .any(|value| matches!(value, Expression::Default)),
@@ -51,6 +54,7 @@ impl Requirements {
                     conditional_conflict_update: parts.condition.is_some(),
                     returning: !parts.returning.is_empty(),
                     insert_generated_identity: parts.insert_generated_identity,
+                    identity_allocation: false,
                     default_expression: values.clone().any(|v| matches!(v, Expression::Default)),
                     bind_parameters: values
                         .filter(|v| matches!(v, Expression::Bind(_) | Expression::Increment { .. }))
@@ -74,6 +78,27 @@ pub trait SqlCompiler: Send + Sync {
         statement: Statement,
         effective: &SqlSupport,
     ) -> Result<CompiledQuery, CompileError>;
+    fn compile_identity_allocation(
+        &self,
+        request: crate::sql::statement::IdentityRequest,
+        effective: &SqlSupport,
+    ) -> Result<IdentityPlan, CompileError>;
+}
+
+#[derive(Debug)]
+pub struct IdentityPlan {
+    pub reservation: Option<CompiledQuery>,
+    pub allocation: IdentityReadPlan,
+}
+
+#[derive(Debug)]
+pub enum IdentityReadPlan {
+    Rows(CompiledQuery),
+    MaximumAndCounter {
+        maximum: CompiledQuery,
+        counter_exists: CompiledQuery,
+        counter: CompiledQuery,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -113,6 +138,12 @@ pub(crate) fn check(
             effective.insert_generated_identity,
             implemented.insert_generated_identity,
             "inserting generated identities",
+        ),
+        (
+            required.identity_allocation,
+            effective.identity_allocation,
+            implemented.identity_allocation,
+            "generated identity allocation",
         ),
         (
             required.default_expression,
@@ -274,7 +305,7 @@ fn comma(writer: &mut SqlWriter, index: usize) {
     }
 }
 
-fn write_table(writer: &mut SqlWriter, table: &Table) {
+pub(crate) fn write_table(writer: &mut SqlWriter, table: &Table) {
     writer.identifier(table.namespace().as_str());
     writer.sql.push('.');
     writer.identifier(table.name().as_str());

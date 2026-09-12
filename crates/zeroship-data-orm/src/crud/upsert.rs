@@ -103,7 +103,8 @@ pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements
         explicit_conflict_target: true,
         conditional_conflict_update: guard_identity,
         returning: true,
-        insert_generated_identity: crate::sql::identity::is_generated(schema),
+        insert_generated_identity: super::identity::is_generated(schema),
+        identity_allocation: guard_identity && super::identity::is_generated(schema),
         default_expression: false,
         bind_parameters: 0,
     }
@@ -145,7 +146,7 @@ fn resolve(
         .map(|c| c.column.as_str())
         .collect();
     let insert_generated_identity =
-        crate::sql::identity::is_generated(schema) && document.contains_key("id");
+        super::identity::is_generated(schema) && document.contains_key("id");
     let mut insert = Vec::new();
     let mut update = Vec::new();
     document.sort_keys();
