@@ -6,6 +6,7 @@
 )]
 
 mod fixtures;
+mod landing;
 
 use crate::common::database::Database;
 use ntex::web::test;

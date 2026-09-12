@@ -2683,13 +2683,14 @@ but unrevocable credentials are being accepted.
 
 VERIFIED: direct GET `/login` defaults `return_to=/me`, and its template always
 shows a magic-login form carrying that value
-(`crates/zeroship-auth/src/ui/login.rs:52-53`,
-`crates/zeroship-auth/src/ui/templates/login.html:51-61`). Magic start accepts only a
+(`get_native` in `crates/zeroship-auth/src/ui/login.rs`,
+`crates/zeroship-auth/src/ui/templates/login.html`). Magic start accepts only a
 syntactically valid `/oauth2/authorize` return target
-(`crates/zeroship-auth/src/ui/magic.rs:119-171`,
-`crates/zeroship-auth/src/oidc/auth_request.rs:63-72`). A regression test explicitly
+(`MagicTarget::from_return_to` in `crates/zeroship-auth/src/ui/magic.rs`,
+`AuthRequest::parse_return_to` in `crates/zeroship-auth/src/oidc/auth_request.rs`). A regression test explicitly
 asserts that `/me` is invalid
-(`crates/zeroship-auth/tests/e2e_magic_native.rs:481-494`). The visible direct-login
+(`invalid_return_targets_issue_no_state_or_mail_while_native_authorize_works` in
+`crates/zeroship-auth/tests/magic_login/native.rs`). The visible direct-login
 option is therefore unreachable as configured.
 
 ### 23. FIXED: Account-deletion cancellation cannot authenticate
