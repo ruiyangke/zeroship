@@ -200,6 +200,7 @@ impl WorkflowService {
         let expires = deadline(claim.now, claim.policy.lease_ms)?;
         claim.update_task(&tx, value!({"deadline":expires})).await?;
         claim.update_run(&tx, value!({"due_at":expires})).await?;
+        claim.validate_at(tx.now().await?)?;
         let control = ControlIntent::parse(&claim.run.text("control")?)?;
         tx.commit().await?;
         Ok(Heartbeat {
@@ -258,6 +259,7 @@ impl WorkflowService {
             "receipt":encode(&receipt)?, "finished_at":claim.now}),
             )
             .await?;
+        claim.validate_at(tx.now().await?)?;
         tx.commit().await?;
         Ok(receipt)
     }
@@ -296,6 +298,8 @@ impl AuthorizedTask {
     pub(crate) fn validate_live(&self) -> Result<(), WorkflowServiceError> {
         self.validate_at(self.now)
     }
+    /// Recheck after awaited writes: the final mutation can itself wait past
+    /// the deadline, even while this transaction holds the app and run locks.
     pub(crate) fn validate_at(&self, now: i64) -> Result<(), WorkflowServiceError> {
         if self.task.state != "leased"
             || self.task.deadline <= now

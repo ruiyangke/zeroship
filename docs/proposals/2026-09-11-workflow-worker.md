@@ -50,6 +50,9 @@ and run locks, retaining the original scope and generation identity. Lease
 recovery, claims, heartbeats, completion receipts and release use conditional
 ORM updates and check the affected row count. Native contracts cover stale
 completion, expired leases and a corrupt run reference to another app's task.
+Heartbeat and completion recheck database time after their final mutation;
+delayed-write tests prove an expired lease rolls back its receipt, history and
+deadline changes before another worker recovers the run.
 Task, schedule and broadcast discovery filter host-assigned apps before their
 batch limits, so a foreign backlog cannot starve the assigned scope.
 Signal delivery, subscription sequencing, broadcast publication and recipient
