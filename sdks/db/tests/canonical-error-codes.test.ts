@@ -23,13 +23,14 @@ describe("canonical SDK error codes", () => {
     assert.equal(new NotFoundError("users").code, "NOT_FOUND");
 
     const optimistic = mapOptimisticConcurrencyError(
-      nativeError("version_mismatch"),
+      nativeError("concurrency_mismatch"),
       "users",
-      7,
+      { column: "revision", expected: 7 },
     );
     assert.ok(optimistic instanceof OptimisticLockError);
     assert.equal(optimistic.code, "OPTIMISTIC_CONCURRENCY");
-    assert.equal(optimistic.expectedVersion, 7);
+    assert.equal(optimistic.concurrencyColumn, "revision");
+    assert.equal(optimistic.expectedValue, 7);
 
     assert.equal(
       new ValidationError({

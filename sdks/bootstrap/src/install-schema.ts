@@ -480,8 +480,6 @@ export function model<S extends Record<string, unknown>>(
   schema: S,
   native: NativeDb,
   namingStrategy: NamingStrategy = naming.asIs,
-  softDelete: boolean = false,
-  versioning: boolean = false,
   declaredIndexes: readonly NamedIndexSpec[] = [],
 ): Collection<S> {
   if (typeof name !== "string" || name.trim().length === 0) {
@@ -503,8 +501,6 @@ export function model<S extends Record<string, unknown>>(
 
   return new Collection<S>(name, normalized, native, {
     naming: namingStrategy,
-    softDelete,
-    versioning,
     indexes: declaredIndexes,
   });
 }
@@ -862,19 +858,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const collectionOptionsFor = (
     name: string,
   ): {
-    softDelete: boolean;
-    versioning: boolean;
     indexes: readonly NamedIndexSpec[];
   } => {
     const fromDescriptor = descriptorV2?.collections[name];
     if (fromDescriptor !== undefined) {
       return {
-        softDelete: fromDescriptor.options?.softDelete ?? false,
-        versioning: fromDescriptor.options?.versioning ?? false,
         indexes: fromDescriptor.indexes ?? [],
       };
     }
-    return { softDelete: false, versioning: false, indexes: [] };
+    return { indexes: [] };
   };
 
   for (const [name, rawSchema] of Object.entries(source)) {
@@ -888,8 +880,6 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         collectionFields as Record<string, unknown>,
         native,
         namingStrategy,
-        opts.softDelete,
-        opts.versioning,
         opts.indexes,
       ) as Collection<unknown, string, T>;
   }

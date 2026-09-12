@@ -784,7 +784,7 @@ const _procedures = { seed, nestedCasUpdate };
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
-            Some("version_filter_must_be_top_level"),
+            Some("concurrency_filter_must_be_top_level"),
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
@@ -867,7 +867,7 @@ const _procedures = { seed, nestedCasUpdateMany };
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
-            Some("version_filter_must_be_top_level"),
+            Some("concurrency_filter_must_be_top_level"),
             "nested CAS rejection must carry the canonical code: {body}"
         );
 

@@ -554,7 +554,7 @@ pub(crate) async fn run_update_one(
     let concurrency = extract_concurrency_guard(&filter, &coll, &schema)?;
     if !filter.has_non_null_equality("id") {
         if let Some(guard) = &concurrency {
-            return Err(DbError::multi_row_version_filter_unsupported(
+            return Err(DbError::multi_row_concurrency_filter_unsupported(
                 &coll,
                 &guard.column,
             ));
@@ -572,7 +572,7 @@ pub(crate) async fn run_update_one(
         let Some(target_row) = target_rows.first().cloned() else {
             if let Some(guard) = &concurrency {
                 let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-                return Err(DbError::version_mismatch(
+                return Err(DbError::concurrency_mismatch(
                     &coll,
                     row_id,
                     &guard.column,
@@ -645,7 +645,7 @@ pub(crate) async fn run_update_one(
     if let Some(guard) = &concurrency {
         if result.rows.is_empty() {
             let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-            return Err(DbError::version_mismatch(
+            return Err(DbError::concurrency_mismatch(
                 &coll,
                 row_id,
                 &guard.column,
@@ -657,9 +657,11 @@ pub(crate) async fn run_update_one(
             tracing::error!(
                 collection = %coll,
                 row_count = result.rows.len(),
-                "version_mismatch_unexpected_multi_row: CAS update returned >1 row"
+                "concurrency_mismatch_unexpected_multi_row: CAS update returned >1 row"
             );
-            return Err(DbError::internal("version_mismatch_unexpected_multi_row"));
+            return Err(DbError::internal(
+                "concurrency_mismatch_unexpected_multi_row",
+            ));
         }
     }
     Ok((result.rows, result.has_masked))
@@ -684,7 +686,7 @@ pub(crate) async fn run_update_many(
     let concurrency = extract_concurrency_guard(&filter, &coll, &schema)?;
     if !filter.has_non_null_equality("id") {
         if let Some(guard) = &concurrency {
-            return Err(DbError::multi_row_version_filter_unsupported(
+            return Err(DbError::multi_row_concurrency_filter_unsupported(
                 &coll,
                 &guard.column,
             ));
@@ -734,7 +736,7 @@ pub(crate) async fn run_update_many(
             if target_rows.is_empty() {
                 if let Some(guard) = &concurrency {
                     let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-                    return Err(DbError::version_mismatch(
+                    return Err(DbError::concurrency_mismatch(
                         &coll,
                         row_id,
                         &guard.column,
@@ -799,7 +801,7 @@ pub(crate) async fn run_update_many(
             if let Some(guard) = &concurrency {
                 if affected != target_count as u64 {
                     let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-                    return Err(DbError::version_mismatch(
+                    return Err(DbError::concurrency_mismatch(
                         &coll,
                         row_id,
                         &guard.column,
@@ -842,7 +844,7 @@ pub(crate) async fn run_update_many(
     if let Some(guard) = &concurrency {
         if affected == 0 {
             let row_id = filter.conjunctive_value("id").and_then(Value::as_str);
-            return Err(DbError::version_mismatch(
+            return Err(DbError::concurrency_mismatch(
                 &coll,
                 row_id,
                 &guard.column,

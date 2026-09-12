@@ -67,7 +67,7 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
     assert!(matches!(
         &error,
         DbError::ValidationFailed {
-            code: "version_mismatch",
+            code: "concurrency_mismatch",
             ..
         }
     ));

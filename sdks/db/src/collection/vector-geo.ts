@@ -6,7 +6,6 @@ import type { Filter, PlainObject, Result, Row, VectorMetric } from "../types";
 
 export interface VectorGeoCollectionInternals<S> {
   _name: string;
-  _softDelete: boolean;
   _run<T>(fn: () => Promise<T>): Promise<Result<T>>;
   _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
@@ -83,8 +82,6 @@ export function searchCollection<S>(
     }
     if (args.filter !== undefined) {
       nativeArgs.filter = mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn);
-    } else if (self._softDelete) {
-      nativeArgs.filter = {};
     }
     const results = await self._nativeCollection().search(nativeArgs);
     return (results ?? []).map(
@@ -176,8 +173,6 @@ export function nearCollection<S>(
     if (args.limit !== undefined) nativeArgs.limit = args.limit;
     if (args.filter !== undefined) {
       nativeArgs.filter = mapFilterOutbound(args.filter as ZeroshipDbFilter, self._toColumn);
-    } else if (self._softDelete) {
-      nativeArgs.filter = {};
     }
 
     const results = await self._nativeCollection().near(nativeArgs);

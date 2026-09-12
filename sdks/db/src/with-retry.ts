@@ -1,8 +1,7 @@
 import { readCanonicalErrorCode } from "./errors";
 
 /**
- * `withRetry` — a small helper for the optimistic-concurrency retry
- * loop that today lives at every CAS-update call site.
+ * Retry operations selected by a caller-supplied predicate.
  *
  * The default predicate matches `OptimisticLockError` (its `.code` is
  * `"OPTIMISTIC_CONCURRENCY"`). Users who want to retry on other
@@ -15,7 +14,7 @@ import { readCanonicalErrorCode } from "./errors";
  * });
  * ```
  *
- * The helper does NOT swallow errors — the final attempt's throw bubbles up.
+ * The final failure is rethrown unchanged.
  */
 
 /**
@@ -50,7 +49,7 @@ export interface WithRetryOptions {
  *   const { data: cur } = await db.products.get(id);
  *   if (!cur) throw new Error("not found");
  *   const { data, error } = await db.products.update(
- *     { id, version: cur.version },
+ *     { id, revision: cur.revision },
  *     { stock: { $dec: 1 } },
  *   );
  *   if (error) throw error;
@@ -73,10 +72,6 @@ export async function withRetry<T>(
   const backoff = opts?.backoff ?? (() => 0);
 
   let attempt = 0;
-  // We loop up to `max` total attempts. After each failure we ask the
-  // predicate whether to retry, and (if so) wait `backoff(attempt)` ms.
-  // The final attempt's throw bubbles up unchanged so callers see the
-  // exact Error their fn raised.
   // eslint-disable-next-line no-constant-condition
   while (true) {
     attempt += 1;
