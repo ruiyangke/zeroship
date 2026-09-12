@@ -818,11 +818,10 @@ pub async fn lock_and_read(
 
 /// The validating read that rotates the secret and slides the idle window.
 ///
-/// One `UPDATE ... RETURNING` enforces liveness (`revoked_at IS NULL`), both
-/// expiries, the grant's `subject_status`, the person's lifecycle columns and
-/// the credential epoch. Delete any one of those predicates and a credential
-/// becomes mintable that must not be; the arms in
-/// `crates/zeroship-auth/tests/store/sessions.rs` bind that.
+/// The validating update enforces session liveness, expiry, grant status,
+/// person lifecycle and the credential epoch. The store integration tests in
+/// `crates/zeroship-auth/tests/store/sessions.rs` exercise successful rotation
+/// and refusal after eligibility changes against the migrated schema.
 ///
 /// # Errors
 ///
