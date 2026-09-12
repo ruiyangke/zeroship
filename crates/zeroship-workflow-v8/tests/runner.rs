@@ -984,6 +984,158 @@ async fn missing_executable_never_constructs_an_app_isolate() {
 }
 
 #[compio::test]
+async fn persistent_worker_resumes_v8_without_a_request_isolate() {
+    use zeroship_workflow::service::runner::{WorkerOptions, WorkflowWorker};
+    let fixture = Fixture::new(
+        r"
+        export class Example {
+            async run(_trigger, step) {
+                await step.run('prepare', () => 'ready');
+                const signal = await step.waitForSignal('resume', { timeout: '1h' });
+                return signal.payload;
+            }
+        }
+    ",
+    )
+    .await;
+    let run = fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let tasks = Rc::new(
+        fixture
+            .service
+            .tasks(WorkerIdentity::new("background-worker".into()).unwrap()),
+    );
+    let executor = Rc::new(
+        V8TaskExecutor::new(
+            fixture.loader.clone(),
+            tasks.clone(),
+            TaskPayloadLimits::default(),
+        )
+        .unwrap(),
+    );
+    let mut worker = WorkflowWorker::new(
+        tasks,
+        executor,
+        WorkerOptions {
+            idle_poll_ms: 5,
+            ..WorkerOptions::default()
+        },
+    )
+    .unwrap();
+    compio::time::timeout(
+        Duration::from_secs(5),
+        worker.run_until(async {
+            while fixture.app.status(&run.id).await.unwrap().state != RunState::Waiting {
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+            fixture.assert_disposed().await;
+            fixture
+                .app
+                .signal(
+                    &RequestId::mint(),
+                    &run.id,
+                    SignalOptions {
+                        signal_type: "resume".into(),
+                        payload: json!({"accepted":true}),
+                    },
+                )
+                .await
+                .unwrap();
+            while fixture.app.status(&run.id).await.unwrap().state != RunState::Completed {
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }),
+    )
+    .await
+    .expect("background worker did not resume its durable signal wait");
+    assert_eq!(
+        fixture.app.status(&run.id).await.unwrap().output,
+        Some(json!({"accepted":true}))
+    );
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn concurrent_worker_shutdown_disposes_every_v8_isolate() {
+    use zeroship_workflow::service::runner::{WorkerOptions, WorkflowWorker};
+    let fixture = Fixture::new(
+        r"
+        import { env } from 'zeroship';
+        export class Example {
+            async run(_trigger, step) {
+                return await step.run('hold', async () => {
+                    env.probe.mark('entered');
+                    await new Promise(() => {});
+                });
+            }
+        }
+    ",
+    )
+    .await;
+    let mut runs = Vec::new();
+    for _ in 0..2 {
+        runs.push(
+            fixture
+                .app
+                .start(&RequestId::mint(), "Example", StartOptions::default())
+                .await
+                .unwrap()
+                .id,
+        );
+    }
+    let tasks = Rc::new(
+        fixture
+            .service
+            .tasks(WorkerIdentity::new("concurrent-worker".into()).unwrap()),
+    );
+    let executor = Rc::new(
+        V8TaskExecutor::new(
+            fixture.loader.clone(),
+            tasks.clone(),
+            TaskPayloadLimits::default(),
+        )
+        .unwrap(),
+    );
+    let mut worker = WorkflowWorker::new(
+        tasks,
+        executor,
+        WorkerOptions {
+            task_slots: runs.len(),
+            idle_poll_ms: 5,
+            ..WorkerOptions::default()
+        },
+    )
+    .unwrap();
+    compio::time::timeout(
+        Duration::from_secs(5),
+        worker.run_until(async {
+            while fixture.loader.markers.0.lock().unwrap().len() < runs.len() {
+                compio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert_eq!(
+                fixture
+                    .loader
+                    .probes
+                    .borrow()
+                    .iter()
+                    .filter(|probe| probe.strong_count() > 0)
+                    .count(),
+                runs.len()
+            );
+        }),
+    )
+    .await
+    .expect("concurrent V8 executions did not stop");
+    fixture.assert_disposed().await;
+    for run in runs {
+        assert!(!fixture.app.status(&run).await.unwrap().state.is_terminal());
+    }
+}
+
+#[compio::test]
 async fn native_runner_reloads_v8_to_resume_a_durable_signal_wait() {
     let fixture = Fixture::new(
         r#"

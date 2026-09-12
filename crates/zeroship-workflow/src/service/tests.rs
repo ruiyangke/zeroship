@@ -26,6 +26,7 @@ mod policy;
 mod runner;
 mod schema_binding;
 mod snapshots;
+mod worker;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;
 use snapshots::{fixture_snapshot_store, test_snapshot};

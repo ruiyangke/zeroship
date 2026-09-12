@@ -390,6 +390,26 @@ async fn runner_discards_assignments_whose_transport_consumed_the_lease() {
 }
 
 #[compio::test]
+async fn runner_bounds_a_stalled_poll_and_recovers_its_undelivered_claim() {
+    let (_dir, harness) = sqlite().await;
+    harness.tasks.poll_delay.set(Duration::from_secs(5));
+    let mut slot = harness.slot(Duration::from_millis(200));
+    let result = compio::time::timeout(Duration::from_secs(2), slot.run_once())
+        .await
+        .expect("poll remained unbounded before receiving task authority");
+    assert!(matches!(result, Err(WorkflowServiceError::Timeout)));
+    assert_eq!(harness.probe.count("start"), 0);
+    assert_eq!(harness.probe.count("complete"), 0);
+    harness.tasks.poll_delay.set(Duration::ZERO);
+    compio::time::sleep(Duration::from_millis(700)).await;
+    assert!(matches!(
+        slot.run_once().await.unwrap(),
+        RunnerOutcome::Completed(_)
+    ));
+    assert_eq!(harness.probe.count("execute"), 1);
+}
+
+#[compio::test]
 async fn runner_completion_retries_remain_bounded_while_heartbeats_succeed() {
     let (_dir, harness) = sqlite().await;
     harness.tasks.fail_completion.set(true);
