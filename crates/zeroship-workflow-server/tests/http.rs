@@ -446,11 +446,17 @@ async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
     }
     assert_eq!(received, data);
     let done: WorkflowExecution = serde_json::from_value(json!({"outcomes":[
-        {"kind":"StepCompleted","ordinal":0,"name":"payload","outputRef":reference},
-        {"kind":"RunCompleted","outputRef":reference}
+        {"kind":"StepCompleted","ordinal":0,"name":"payload","outputRef":reference}
     ]}))
     .unwrap();
     tasks.complete(&task.id, &task.token, done).await.unwrap();
+    let task = tasks.poll().await.unwrap().unwrap();
+    let reader = zeroship_workflow::service::runner::TaskPayloadReader::new(std::rc::Rc::new(replica_tasks.clone()), &task, data.len()).unwrap();
+    assert_eq!(reader.read_step_output("payload", 0).await.unwrap(), data);
+    tasks.complete(&task.id, &task.token, serde_json::from_value(json!({"outcomes":[
+        {"kind":"RunCompleted","outputRef":reference}
+    ]})).unwrap()).await.unwrap();
+    assert!(reader.read_step_output("payload", 0).await.is_err());
     {
         use zeroship_workflow::backend::WorkflowBackend;
         let backend = app.clone().into_backend(data.len()).unwrap();

@@ -5,7 +5,7 @@ use std::rc::Rc;
 use zeroship_runtime::{CancelFlag, EnvSnapshot, RequestCtx, Runtime, WorkflowOutcome};
 use zeroship_workflow::{
     service::{
-        runner::{ExecutionBudget, TaskExecution, TaskExecutor},
+        runner::{ExecutionBudget, TaskExecution, TaskExecutor, TaskPayloadReader, TaskPayloads},
         TaskAssignment,
     },
     WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
@@ -50,6 +50,8 @@ impl Drop for LoadedWorkflow {
 
 pub struct V8TaskExecutor {
     loader: Rc<dyn WorkflowRuntimeLoader>,
+    payloads: Rc<dyn TaskPayloads>,
+    max_payload_bytes: usize,
 }
 impl std::fmt::Debug for V8TaskExecutor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -57,9 +59,25 @@ impl std::fmt::Debug for V8TaskExecutor {
     }
 }
 impl V8TaskExecutor {
-    #[must_use]
-    pub fn new(loader: Rc<dyn WorkflowRuntimeLoader>) -> Self {
-        Self { loader }
+    /// Construct a host with bounded task-scoped payload reads.
+    ///
+    /// # Errors
+    /// Rejects an empty payload read limit.
+    pub fn new(
+        loader: Rc<dyn WorkflowRuntimeLoader>,
+        payloads: Rc<dyn TaskPayloads>,
+        max_payload_bytes: usize,
+    ) -> Result<Self, WorkflowServiceError> {
+        if max_payload_bytes == 0 {
+            return Err(WorkflowServiceError::InvalidRequest(
+                "workflow payload read limit must be positive".into(),
+            ));
+        }
+        Ok(Self {
+            loader,
+            payloads,
+            max_payload_bytes,
+        })
     }
 }
 impl TaskExecutor for V8TaskExecutor {
@@ -75,6 +93,11 @@ impl TaskExecutor for V8TaskExecutor {
             cancel: CancelFlag::new(),
             started: false,
             budget,
+            payloads: Some(Rc::new(TaskPayloadReader::new(
+                self.payloads.clone(),
+                assignment,
+                self.max_payload_bytes,
+            )?)),
         }))
     }
 }
@@ -86,6 +109,7 @@ pub(crate) struct V8Execution {
     cancel: CancelFlag,
     started: bool,
     budget: ExecutionBudget,
+    payloads: Option<Rc<TaskPayloadReader>>,
 }
 impl V8Execution {
     pub(crate) fn loaded(
@@ -100,6 +124,7 @@ impl V8Execution {
             cancel: CancelFlag::new(),
             started: false,
             budget,
+            payloads: None,
         }
     }
 }
@@ -113,6 +138,12 @@ impl TaskExecution for V8Execution {
         }
         self.started = true;
         self.budget.check()?;
+        if let Some(payloads) = &self.payloads {
+            if let Some(input) = payloads.input().await? {
+                self.invocation.trigger.input = Some(input);
+                self.invocation.trigger.input_ref = None;
+            }
+        }
         if self.loaded.is_none() {
             let (loader, assignment) = self.loader.as_ref().ok_or_else(|| {
                 WorkflowServiceError::Internal("workflow runtime loader is absent".into())
@@ -123,6 +154,16 @@ impl TaskExecution for V8Execution {
         let interrupt = loaded.runtime.interrupt_handle();
         self.budget.on_interrupt(move || interrupt.cancel())?;
         self.budget.check()?;
+        if let Some(payloads) = &self.payloads {
+            if loaded.runtime.app_id() != Some(payloads.app_id().uuid()) {
+                return Err(WorkflowServiceError::InvalidRequest(
+                    "workflow loader returned another app's runtime".into(),
+                ));
+            }
+            loaded.runtime.with_scope(|scope| {
+                scope.set_slot(crate::v8_class::TaskOutputReader(payloads.clone()));
+            });
+        }
         let envelope = serde_json::to_string(&self.invocation)
             .map_err(|_| WorkflowServiceError::Internal("invalid workflow invocation".into()))?;
         loaded.runtime.start_pump();

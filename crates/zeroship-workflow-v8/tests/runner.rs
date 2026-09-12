@@ -20,7 +20,9 @@ use zeroship_workflow::{
     },
     WorkflowServiceError,
 };
-use zeroship_workflow_v8::{LoadedWorkflow, V8TaskExecutor, WorkflowRuntimeLoader};
+use zeroship_workflow_v8::{
+    LoadedWorkflow, V8TaskExecutor, WorkflowBinding, WorkflowRuntimeLoader,
+};
 
 #[derive(Clone, Default)]
 struct Markers(Arc<Mutex<Vec<String>>>);
@@ -63,6 +65,7 @@ const BURN: &str = r"
 ";
 
 struct Loader {
+    service: WorkflowService,
     source: String,
     probes: RefCell<Vec<InnerProbe>>,
     cpu_limit: Option<Duration>,
@@ -85,7 +88,13 @@ impl WorkflowRuntimeLoader for Loader {
                 specifier: "index.js".into(),
                 source: self.source.clone(),
             }])
-            .plugins(vec![Arc::new(self.markers.clone())])
+            .plugins(vec![
+                Arc::new(self.markers.clone()),
+                Arc::new(WorkflowBinding::service(
+                    // Replay reads must use task authority and its own read budget.
+                    self.service.for_app(app.clone()).into_backend(1).unwrap(),
+                )),
+            ])
             .app_id(app.uuid());
         if let Some(limit) = self.cpu_limit {
             builder = builder.cpu_limit(limit);
@@ -118,6 +127,10 @@ impl Fixture {
         schema::initialize_sqlite(&path).unwrap();
         let service = WorkflowService::open(Arc::new(SqliteStore::new(path)))
             .await
+            .unwrap()
+            .with_payload_storage(zeroship_storage::StorageStore::from_backend(Arc::new(
+                zeroship_storage::LocalFs::new(dir.path().join("payloads")),
+            )))
             .unwrap();
         let app = AppId::mint();
         service.register_app(&app, &policy).await.unwrap();
@@ -136,8 +149,9 @@ impl Fixture {
         Self {
             _dir: dir,
             app: service.for_app(app),
-            service,
+            service: service.clone(),
             loader: Rc::new(Loader {
+                service,
                 source: source.into(),
                 probes: RefCell::new(Vec::new()),
                 cpu_limit,
@@ -146,12 +160,16 @@ impl Fixture {
         }
     }
     fn runner(&self, timeout: Duration) -> RunnerSlot {
+        self.runner_with_payload_limit(timeout, 1024 * 1024)
+    }
+    fn runner_with_payload_limit(&self, timeout: Duration, max_payload_bytes: usize) -> RunnerSlot {
+        let tasks = Rc::new(
+            self.service
+                .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
+        );
         RunnerSlot::new(
-            Rc::new(
-                self.service
-                    .tasks(WorkerIdentity::new("local-v8-worker".into()).unwrap()),
-            ),
-            Rc::new(V8TaskExecutor::new(self.loader.clone())),
+            tasks.clone(),
+            Rc::new(V8TaskExecutor::new(self.loader.clone(), tasks, max_payload_bytes).unwrap()),
             timeout,
         )
         .unwrap()
@@ -172,6 +190,108 @@ impl Fixture {
         .expect("finished workflow isolates must be disposed");
         assert!(!self.loader.probes.borrow().is_empty());
     }
+}
+
+async fn prepare_payload(fixture: &Fixture, continuation: bool) -> String {
+    use sha2::{Digest, Sha256};
+    use zeroship_workflow::{engine::WorkflowOutputRef, WorkflowExecution};
+    fixture
+        .app
+        .start(&RequestId::mint(), "Example", StartOptions::default())
+        .await
+        .unwrap();
+    let worker = WorkerIdentity::new("fixture-writer".into()).unwrap();
+    let task = fixture.service.poll(&worker).await.unwrap().unwrap();
+    let bytes = br#"{"secret":"retained"}"#;
+    let reference = WorkflowOutputRef {
+        hash: format!("{:x}", Sha256::digest(bytes)),
+        size: bytes.len() as i64,
+        content_type: Some("application/json".into()),
+    };
+    fixture
+        .service
+        .stage_payload(
+            &worker,
+            &task.id,
+            &task.token,
+            &RequestId::mint(),
+            reference.clone(),
+            Box::new(zeroship_storage::backend::OnceChunk::new(
+                bytes.to_vec().into(),
+            )),
+        )
+        .await
+        .unwrap();
+    let outcome = if continuation {
+        json!({"kind":"ContinueAsNew","inputRef":reference})
+    } else {
+        json!({"kind":"StepCompleted","ordinal":0,"name":"stored","outputRef":reference})
+    };
+    let receipt = fixture
+        .service
+        .complete(
+            &worker,
+            &task.id,
+            &task.token,
+            WorkflowExecution::from_runtime_value(json!({"outcomes":[outcome]})).unwrap(),
+        )
+        .await
+        .unwrap();
+    receipt.run_id
+}
+
+#[compio::test]
+async fn native_runner_reads_replay_payloads_through_its_task_authority() {
+    let fixture = Fixture::new(
+        r"
+        export class Example {
+            async run(_trigger, step) {
+                const saved = await step.run('stored', () => { throw new Error('must replay'); });
+                return await saved.json();
+            }
+        }
+    ",
+    )
+    .await;
+    let run = prepare_payload(&fixture, false).await;
+    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+    assert_eq!(done.run_id, run);
+    assert_eq!(done.state, RunState::Completed);
+    assert_eq!(
+        fixture.app.status(&run).await.unwrap().output,
+        Some(json!({"secret":"retained"}))
+    );
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn native_runner_hydrates_continuation_input_before_entering_v8() {
+    let fixture =
+        Fixture::new("export class Example { run(trigger) { return trigger.input; } }").await;
+    prepare_payload(&fixture, true).await;
+    let done = advance_until_suspended(&mut fixture.runner(Duration::from_secs(5))).await;
+    assert_eq!(done.state, RunState::Completed);
+    assert_eq!(
+        fixture.app.status(&done.run_id).await.unwrap().output,
+        Some(json!({"secret":"retained"}))
+    );
+    fixture.assert_disposed().await;
+}
+
+#[compio::test]
+async fn oversized_input_never_initializes_the_creator_module() {
+    let fixture =
+        Fixture::new("throw new Error('must not evaluate'); export class Example {}").await;
+    prepare_payload(&fixture, true).await;
+    let result = fixture
+        .runner_with_payload_limit(Duration::from_secs(5), 1)
+        .run_once()
+        .await;
+    assert!(
+        matches!(result, Err(WorkflowServiceError::PayloadTooLarge)),
+        "{result:?}"
+    );
+    assert!(fixture.loader.probes.borrow().is_empty());
 }
 
 async fn assert_deadline_interrupts(source: &str, timeout: Duration, policy: AppPolicy) {
