@@ -9,10 +9,10 @@ function fixture() {
     calls.push(input);
     return [{ order: { customer_id: "c", note: "paid" }, customer: null }];
   } }) } as unknown as NativeDb;
-  const orders = new Collection<{ customerId: string; note: string }>("orders", { customerId: { type: "string" }, note: { type: "string" } }, native, {
+  const orders = new Collection<{ customerId: string; note: string }>("orders", { id: { type: "string", required: true, primaryKey: true }, customerId: { type: "string" }, note: { type: "string" } }, native, {
     naming: { toColumn: field => field === "customerId" ? "customer_id" : field, toField: field => field === "customer_id" ? "customerId" : field },
   });
-  const customers = new Collection<{ name: string }>("customers", { name: { type: "string" } }, native);
+  const customers = new Collection<{ name: string }>("customers", { id: { type: "string", required: true, primaryKey: true }, name: { type: "string" } }, native);
   return { native, calls, o: orders.as("o"), c: customers.as("c") };
 }
 

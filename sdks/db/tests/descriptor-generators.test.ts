@@ -4,15 +4,15 @@ import { t, type Collection, type RowInput, type UpdateExpression } from "@zeros
 import { installSchema, normalizeSchema } from "@zeroship/bootstrap/install-schema";
 
 const fields = {
-  key: t.string().primaryKey().assigned({ by: "typedId", on: "insert" }).required(),
+  id: t.string().primaryKey().assigned({ by: "typedId", on: "insert" }).required(),
   revision: t.number().assigned({ by: "increment(1)", on: "write" }).required(),
   removed: t.timestamp().assigned({ by: "now", on: "delete" }),
   title: t.string().required(),
 };
 
-test("renamed keys and assignments drive SDK dispatch", async () => {
+test("id and renamed assignments drive SDK dispatch", async () => {
   const calls: Array<{ op: string; filter: unknown; options?: unknown }> = [];
-  const row = { key: "entry_a", revision: 1, removed: null, title: "hello" };
+  const row = { id: "entry_a", revision: 1, removed: null, title: "hello" };
   const native = {
     transaction: async (callback: (raw: unknown) => unknown) => callback(undefined),
     collection: () => ({
@@ -39,17 +39,17 @@ test("renamed keys and assignments drive SDK dispatch", async () => {
   void input; void forbidden;
   const result = await db.entries.get("entry_a");
   assert.equal(result.error, null);
-  assert.equal(result.data?.key, "entry_a");
-  assert.deepEqual(calls[0].filter, { key: { $in: ["entry_a"] } });
+  assert.equal(result.data?.id, "entry_a");
+  assert.deepEqual(calls[0].filter, { id: { $in: ["entry_a"] } });
   await db.entries.delete("entry_a");
   await db.entries.restore("entry_a");
   assert.deepEqual(calls.slice(1), [
-    { op: "delete", filter: { key: "entry_a" } },
-    { op: "restore", filter: { key: "entry_a" } },
+    { op: "delete", filter: { id: "entry_a" } },
+    { op: "restore", filter: { id: "entry_a" } },
   ]);
-  const conflict = await db.entries.update({ key: "entry_a", revision: 1 }, { title: "new" });
+  const conflict = await db.entries.update({ id: "entry_a", revision: 1 }, { title: "new" });
   assert.equal((conflict.error as { code?: string })?.code, "OPTIMISTIC_CONCURRENCY");
   await db.entries.find().paginate({ numItems: 1 });
   const last = calls.at(-1)!;
-  assert.deepEqual((last.options as { orderBy: unknown }).orderBy, { key: 1 });
+  assert.deepEqual((last.options as { orderBy: unknown }).orderBy, { id: 1 });
 });

@@ -40,6 +40,7 @@ const RUNTIME_DESCRIPTOR = `{
   "collections": {
     "notes": {
       "fields": {
+        "id": { "type": "string", "required": true, "primaryKey": true },
         "title": { "type": "string" }
       },
       "options": { "softDelete": false, "versioning": false, "strictness": "strict" },
@@ -92,6 +93,30 @@ describe("op.* runtime schema descriptor bundling", () => {
       );
     } finally {
       await fx.cleanup();
+    }
+  });
+
+  test("packing rejects collections without a sole required id primary key", async () => {
+    const id = { type: "string", required: true, primaryKey: true };
+    for (const fields of [{}, { key: id }, { id: { ...id, required: false } }, { id, tenant: id }]) {
+      const descriptor = JSON.parse(RUNTIME_DESCRIPTOR);
+      descriptor.collections.notes.fields = fields;
+      const fx = await makeFixture({
+        "dist/server/index.js": "export default { fetch(){ return new Response('ok'); } }\n",
+        "generated/zeroship/schema.runtime.json": JSON.stringify(descriptor),
+      });
+      try {
+        await assert.rejects(() => emitZship({
+          root: fx.root,
+          distDir: "dist",
+          silent: true,
+          userHasDefaultFetch: false,
+          migrations: { dir: "migrations", genTypesOut: "generated/zeroship" },
+        }), /runtime_descriptor collection "notes".*id/);
+        await assert.rejects(fs.access(join(fx.root, "dist/app.zship")), { code: "ENOENT" });
+      } finally {
+        await fx.cleanup();
+      }
     }
   });
 

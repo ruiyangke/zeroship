@@ -176,7 +176,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         posts: {
           fields: {
-            id: { type: "id", idPrefix: "post" },
+            id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
             title: { type: "string", required: true },
             created_at: { type: "date" },
           },
@@ -324,7 +324,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         posts: {
           fields: {
-            id: { type: "id", idPrefix: "post", primaryKey:true, assign:{by:"typedId", on:"insert"} },
+            id: { type: "id", idPrefix: "post", required: true, primaryKey:true, assign:{by:"typedId", on:"insert"} },
             revision: {type:"integer", concurrency:true, assign:{by:"increment(1)", on:"write"}},
             removed: {type:"timestamp", softDelete:true, assign:{by:"now", on:"delete"}},
             title: { type: "string", required: true },
@@ -370,7 +370,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     const native = makeOpRecordingNative(ops);
     const descriptor = {
       posts: {
-        id: { type: "id", idPrefix: "post" },
+        id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
         title: { type: "string", required: true },
       },
     };

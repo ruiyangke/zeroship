@@ -1,4 +1,3 @@
-import { primaryKey } from "./column-roles";
 import type { FieldDef } from "./types";
 /**
  * Lazy query builder for @zeroship/db.
@@ -174,10 +173,6 @@ export class Query<
     this._unmaskReason = readHints?.unmaskReason;
   }
 
-  private _primaryKey(): string {
-    return primaryKey(this._schema);
-  }
-
   /**
    * Sets the sort order.
    * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
@@ -312,10 +307,7 @@ export class Query<
       );
     }
 
-    let key: string;
-    try { key = this._primaryKey(); } catch (e) {
-      return err(e instanceof Error ? e : new Error(String(e)));
-    }
+    const key = "id";
 
     const orderBy: Record<string, 1 | -1> =
       this._sort !== undefined && Object.keys(this._sort).length > 0
@@ -437,7 +429,7 @@ export class Query<
     state: CursorState,
   ): ZeroshipDbFilter {
     const keys = Object.keys(orderBy);
-    const lastIdCol = this._toColumn(this._primaryKey());
+    const lastIdCol = this._toColumn("id");
 
     // Lexicographic seek over (k1, .., kn, id) - the SAME tuple the emitted
     // ORDER BY uses, which is what makes it sound. For each key i, one
@@ -468,7 +460,7 @@ export class Query<
     // The id tiebreak, unless `id` is already one of the ordering keys - in
     // which case the loop above has already compared it and appending another
     // term would add an unsatisfiable disjunct (id = X AND id > X).
-    if (!keys.includes(this._primaryKey())) {
+    if (!keys.includes("id")) {
       const idCmp = { $gt: state.lastId } as ZeroshipDbFilterValue;
       terms.push({ $and: [...eqPrefix, { [lastIdCol]: idCmp } as ZeroshipDbFilter] } as ZeroshipDbFilter);
     }
@@ -600,7 +592,7 @@ export class Query<
     // Merge cursor condition into filter
     let filter: ZeroshipDbFilter = this._filter;
     if (this._afterId !== undefined) {
-      const cursorCondition: ZeroshipDbFilter = { [this._toColumn(this._primaryKey())]: { $gt: this._afterId } };
+      const cursorCondition: ZeroshipDbFilter = { [this._toColumn("id")]: { $gt: this._afterId } };
       const hasKeys = Object.keys(filter).length > 0;
       filter = hasKeys
         ? { $and: [filter, cursorCondition] } as ZeroshipDbFilter

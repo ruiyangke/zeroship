@@ -1,4 +1,3 @@
-import { primaryKey } from "../column-roles";
 import type { NormalizedSchema } from "../schema";
 import type { Filter, PlainObject, Result, WithSpec } from "../types";
 import { readTransactionDepth } from "../tx-state.js";
@@ -134,7 +133,7 @@ export async function loadRelations(
     // can run concurrently outside a transaction, and fanning out here
     // too would multiply in-flight queries by the chunk count for a single
     // creator call.
-    const targetKey = fieldDef.refColumn ?? primaryKey(targetCol._schema);
+    const targetKey = fieldDef.refColumn ?? "id";
     const byId = new Map<string, PlainObject>();
     for (let i = 0; i < ids.length; i += MAX_ID_BATCH) {
       const chunk = ids.slice(i, i + MAX_ID_BATCH);
