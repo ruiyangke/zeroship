@@ -74,20 +74,7 @@ pub(crate) struct PendingEvent {
 
 /// Cross-thread payload shipped over the flume channel at COMMIT time.
 ///
-/// `commit_id` counts commits **within one dispatcher**, and a session has
-/// TWO - one per connection, since SC-2 gave the actor a `tx_conn` and an
-/// `op_conn` and both are write paths. Each starts its own counter at 0 and
-/// both publish into the same channel, so two packets from one session can
-/// carry the same `commit_id` and it identifies nothing on its own. Read it as
-/// "the Nth commit on whichever connection sent this", never as a session-wide
-/// commit sequence. (It said "the monotonic per-dispatcher sequence number"
-/// while the actor had one connection; the second one made that reading wrong.)
-///
-/// The `ChangeEvent` shape (`zeroship_data_orm::cdc::ChangeEvent`) does NOT carry
-/// `commit_id` today — surfacing it requires a broker-schema change
-/// (plan §10 Q-P2-E) deferred until a subscriber consumes it. Any such change
-/// has to pair it with the connection identity first, or subscribers inherit
-/// the collision above.
+/// The commit identifier is local to one dispatcher and is used only for logs.
 #[derive(Debug)]
 pub(crate) struct CommitPacket {
     pub(crate) events: Vec<DispositionedEvent>,
@@ -160,14 +147,8 @@ pub(crate) struct SqliteCdcDispatcher {
 /// automatically (rusqlite stores the boxed closures in
 /// `InnerConnection` and frees them in `Drop`).
 ///
-/// `app_id` is currently unused — the per-event app_id is derived
-/// from the `db_name` argument the preupdate hook reports (the ATTACH
-/// alias, which by convention equals the app id). The parameter is
-/// retained so future PRs can override the dispatcher's "default"
-/// label (e.g. for tests opening a connection without an ATTACH).
 pub(crate) fn install(
     conn: &Connection,
-    _app_id: Option<String>,
     packet_tx: CommitSender,
 ) -> Result<SqliteCdcDispatcher, DbError> {
     let buffer = Arc::new(Mutex::new(CdcTxBuffer::new()));
@@ -271,10 +252,7 @@ fn preupdate_callback(
             old_values: Some(materialise_old(old_value_accessor)),
         },
         PreUpdateCase::Unknown => {
-            // Plan §10 Q-P2-C — drop silently + tracing::warn once per
-            // session. The "once" gate would require a session-level
-            // flag; a per-fire warn is acceptable noise (the variant
-            // only appears with engine/binding version skew).
+            // The binding cannot describe this change safely, so drop it.
             tracing::warn!(
                 action = ?action,
                 db_name = %db_name,
@@ -765,7 +743,6 @@ mod tests {
         // Writer session: the real hook triplet, the real `commit_callback`.
         let writer = SqliteSession::open(
             &db_path,
-            None,
             Some(CommitSender::new(tx, sink.clone() as Arc<dyn ChangeSink>)),
         )
         .expect("open writer session");
@@ -805,7 +782,7 @@ mod tests {
         // so dropping the writer can disconnect the channel and let
         // `publisher_loop` return. One session cannot do both: the publisher
         // borrows it for the lifetime of the loop.
-        let reader = SqliteSession::open(&db_path, None, None).expect("open reader");
+        let reader = SqliteSession::open(&db_path, None).expect("open reader");
         reader
             .attach("app_window", &app_path)
             .await

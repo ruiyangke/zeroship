@@ -253,17 +253,10 @@ impl SqliteBackend {
         // this thread).
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
 
-        // Open the session WITH the `CommitSender` so the worker thread arms
-        // the hook triplet during PRAGMA bootstrap. The sender carries the sink
-        // as well as the channel because the commit hook samples
-        // `ChangeSink::disposition` before it enqueues — the commit boundary is
-        // where a suppression window is decided (see `cdc`'s module rustdoc).
-        // The `app_id` argument is currently unused inside the dispatcher
-        // (per-event app_id derives from the hook's `db_name`
-        // parameter — see `cdc::install` rustdoc), so we pass `None`.
+        // The worker installs CDC hooks during PRAGMA bootstrap. The sender
+        // carries the sink so suppression is sampled at the commit boundary.
         let session = SqliteSession::open(
             &session_path,
-            None,
             Some(cdc::CommitSender::new(packet_tx, sink)),
         )?;
 
