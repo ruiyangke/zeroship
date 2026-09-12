@@ -14,6 +14,10 @@ executor installs the runner's deadline interrupt before module initialization;
 app code receives replay inputs without task credentials. Shutdown quarantines
 the isolate and joins native work before the slot can be reused. The local
 executor also uses this lifecycle.
+The shared executor hydrates referenced input within its payload budget before
+module initialization. Lazy output reads use the assignment's captured journal
+and live task credentials, so replay never resolves through the app's current
+generation. Oversized input fails before a runtime is loaded.
 
 The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
 The CLI uses `WorkflowBinding::dev_sqlite` for the local development engine.

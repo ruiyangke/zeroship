@@ -52,6 +52,10 @@ generation under the restart fence and checks reference ownership before
 opening storage. `PayloadRead::into_bytes` verifies the stream within a host
 memory limit. `into_backend` adapts either app handle to `WorkflowBackend`;
 its bound identity cannot change between operations.
+Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
+journal, resolves named occurrences in that snapshot and reads referenced
+objects through the live task lease. `EmbeddedTasks` and `RemoteTasks` implement
+the same payload-read contract alongside their shared task protocol.
 The schema check uses the built `@zeroship/migrate` and `zero-migrate-cli`
 packages and their native migration addon; regenerate with
 `node crates/zeroship-workflow/schema/generate.mjs` from the repository root.

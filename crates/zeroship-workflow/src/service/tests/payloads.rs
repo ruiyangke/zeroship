@@ -4,6 +4,8 @@ use crate::{
     operations::RunState,
     service::{PayloadRead, PayloadSlot, WorkerIdentity},
 };
+use crate::service::runner::TaskPayloadReader;
+use std::rc::Rc;
 use bytes::Bytes;
 use zeroship_storage::{
     backend::{BoxChunkSource, OnceChunk},
@@ -335,6 +337,15 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
         .unwrap();
     let next = recovered.poll(&worker).await.unwrap().unwrap();
     assert_eq!(next.generation, 1);
+    let transport = Rc::new(recovered.tasks(worker.clone()));
+    let reader = TaskPayloadReader::new(transport.clone(), &next, data.len()).unwrap();
+    assert_eq!(reader.app_id(), &a);
+    assert_eq!(reader.run_id(), run.id);
+    assert_eq!(reader.read_step_output("result", 0).await.unwrap(), data);
+    assert!(matches!(reader.read_step_output("missing", 0).await, Err(WorkflowServiceError::NotFound(_))));
+    assert!(matches!(reader.read_step_output("result", 1).await, Err(WorkflowServiceError::NotFound(_))));
+    let limited = TaskPayloadReader::new(transport, &next, 1).unwrap();
+    assert!(matches!(limited.read_step_output("result", 0).await, Err(WorkflowServiceError::PayloadTooLarge)));
     assert_eq!(
         scope
             .read_step_output(&run.id, "result", 0)
@@ -380,6 +391,7 @@ async fn payload_contract(store: Arc<dyn WorkflowStore>, storage: StorageStore) 
         scope.status(&run.id).await.unwrap().output.unwrap()["hash"],
         output.hash
     );
+    assert!(reader.read_step_output("result", 0).await.is_err());
     assert_eq!(
         drain(
             scope
@@ -498,6 +510,8 @@ async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: 
         .unwrap();
     let successor = service.poll(worker).await.unwrap().unwrap();
     assert_eq!(successor.invocation.trigger.input_ref, Some(output.clone()));
+    let reader = TaskPayloadReader::new(Rc::new(service.tasks(worker.clone())), &successor, data.len()).unwrap();
+    assert_eq!(reader.input().await.unwrap(), Some(json!({"continued":true})));
     assert_eq!(
         drain(
             service

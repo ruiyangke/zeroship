@@ -9,6 +9,7 @@
 #![allow(unsafe_code)]
 
 use std::future::Future;
+use std::rc::Rc;
 
 use serde_json::{Map, Value};
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
@@ -40,6 +41,8 @@ pub struct WorkflowRun {
     pub(crate) backend: SharedWorkflowBackend,
     pub(crate) run_id: String,
 }
+
+pub(crate) struct TaskOutputReader(pub Rc<zeroship_workflow::service::runner::TaskPayloadReader>);
 
 // ---------------------------------------------------------------------------
 // JS value helpers
@@ -459,11 +462,19 @@ impl WorkflowRun {
         let (resolver, request_id, promise) = setup_promise(scope, &state);
         let backend = self.backend.clone();
         let run_id = self.run_id.clone();
+        let task_reader = scope
+            .get_slot::<TaskOutputReader>()
+            .filter(|reader| reader.0.run_id() == run_id)
+            .map(|reader| reader.0.clone());
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            let value = match backend
-                .read_step_output(run_id, name, occurrence as u32)
-                .await
-            {
+            let read = if let Some(reader) = task_reader {
+                reader.read_step_output(&name, occurrence as u32).await
+            } else {
+                backend
+                    .read_step_output(run_id, name, occurrence as u32)
+                    .await
+            };
+            let value = match read {
                 Ok(bytes) => ResolveValue::Bytes(bytes),
                 Err(error) => ResolveValue::RejectError(crate::error::to_op_error(error)),
             };
