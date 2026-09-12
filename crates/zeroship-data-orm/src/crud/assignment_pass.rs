@@ -276,7 +276,7 @@ pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::compile::SqlDialect;
+    use crate::sql::lifecycle::AssignedValue;
     use crate::value;
 
     fn schema() -> Value {
@@ -421,26 +421,36 @@ mod tests {
     fn delete_restore_and_write_expressions_follow_assignment_events() {
         let fields = schema();
         let plan = AssignmentPlan::from_schema(&fields).unwrap();
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            for (deleting, restoring) in [(false, false), (true, false), (false, true)] {
-                let mut params = Vec::new();
-                let expressions = plan
-                    .write_assignments(&fields, Some("usr_actor"), deleting, restoring)
-                    .render(dialect, &mut params, None)
-                    .unwrap()
-                    .join(", ");
-                assert!(expressions.contains("\"revision\" = \"revision\" + $"));
-                assert!(expressions.contains(&format!(
-                    "\"touched\" = {}",
-                    dialect.current_timestamp_expr()
-                )));
-                assert!(params.contains(&value!("usr_actor")));
-                assert_eq!(expressions.contains("\"removed\" ="), deleting || restoring);
-                if restoring {
-                    assert!(params.contains(&Value::Null));
-                }
-                assert!(!expressions.contains("\"born\""));
+        for (deleting, restoring) in [(false, false), (true, false), (false, true)] {
+            let assignments =
+                plan.write_assignments(&fields, Some("usr_actor"), deleting, restoring);
+            let value = |column: &str| {
+                assignments
+                    .columns
+                    .iter()
+                    .find(|assignment| assignment.column == column)
+                    .map(|assignment| &assignment.value)
+            };
+            assert!(matches!(
+                value("revision"),
+                Some(AssignedValue::Increment(1))
+            ));
+            assert!(matches!(
+                value("touched"),
+                Some(AssignedValue::CurrentTimestamp)
+            ));
+            assert!(matches!(
+                value("editor"),
+                Some(AssignedValue::Bound(actor)) if actor == &value!("usr_actor")
+            ));
+            assert_eq!(value("removed").is_some(), deleting || restoring);
+            if restoring {
+                assert!(matches!(
+                    value("removed"),
+                    Some(AssignedValue::Bound(Value::Null))
+                ));
             }
+            assert!(value("born").is_none());
         }
     }
 }

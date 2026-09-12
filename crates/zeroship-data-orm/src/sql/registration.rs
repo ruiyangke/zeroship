@@ -1,7 +1,6 @@
 //! Immutable SQL compiler and storage-codec registration.
 
 use super::{
-    compile::SqlDialect,
     compiler::{
         CompileError, CompiledQuery, PostgresCompiler, Requirements, SqlCompiler, SqlSupport,
         SqliteCompiler,
@@ -17,6 +16,24 @@ mod sqlite;
 use postgres::PostgresCodecs;
 use sqlite::SqliteCodecs;
 
+/// Open identifier for SQL implementations that share execution semantics.
+/// Downstream backends choose their own globally unique static name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SqlFamily(&'static str);
+
+impl SqlFamily {
+    pub const fn new(name: &'static str) -> Self {
+        Self(name)
+    }
+
+    const fn name(self) -> &'static str {
+        self.0
+    }
+}
+
+pub const POSTGRES_FAMILY: SqlFamily = SqlFamily::new("zeroship.postgresql");
+pub const SQLITE_FAMILY: SqlFamily = SqlFamily::new("zeroship.sqlite");
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegistrationIdentity([u8; 32]);
 
@@ -25,7 +42,7 @@ impl RegistrationIdentity {
         configuration: &str,
         compiler: &str,
         codecs: &str,
-        dialect: SqlDialect,
+        family: SqlFamily,
         support: SqlSupport,
     ) -> Self {
         let mut hash = Sha256::new();
@@ -33,7 +50,8 @@ impl RegistrationIdentity {
         hash.update(configuration.as_bytes());
         hash.update(compiler.as_bytes());
         hash.update(codecs.as_bytes());
-        hash.update(format!("\0{dialect:?}\0{support:?}").as_bytes());
+        hash.update(family.name().as_bytes());
+        hash.update(format!("\0{support:?}").as_bytes());
         Self(hash.finalize().into())
     }
 
@@ -57,7 +75,7 @@ pub trait SqlStorageCodecs: Send + Sync {
 #[derive(Clone)]
 pub struct SqlRegistration {
     identity: RegistrationIdentity,
-    dialect: SqlDialect,
+    family: SqlFamily,
     compiler: Arc<dyn SqlCompiler>,
     codecs: Arc<dyn SqlStorageCodecs>,
     effective: SqlSupport,
@@ -67,7 +85,7 @@ impl fmt::Debug for SqlRegistration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SqlRegistration")
             .field("identity", &self.identity)
-            .field("dialect", &self.dialect)
+            .field("family", &self.family)
             .field("effective", &self.effective)
             .finish_non_exhaustive()
     }
@@ -76,7 +94,7 @@ impl fmt::Debug for SqlRegistration {
 impl SqlRegistration {
     pub fn new<C, K>(
         identity: &str,
-        dialect: SqlDialect,
+        family: SqlFamily,
         compiler: C,
         codecs: K,
         effective: SqlSupport,
@@ -91,49 +109,46 @@ impl SqlRegistration {
                 identity,
                 std::any::type_name::<C>(),
                 std::any::type_name::<K>(),
-                dialect,
+                family,
                 effective,
             ),
-            dialect,
+            family,
             compiler: Arc::new(compiler),
             codecs: Arc::new(codecs),
             effective,
         })
     }
 
-    pub fn builtin(dialect: SqlDialect) -> Self {
-        match dialect {
-            SqlDialect::Postgres => {
-                let compiler = PostgresCompiler;
-                Self::new(
-                    "builtin-postgres",
-                    dialect,
-                    compiler,
-                    PostgresCodecs,
-                    compiler.support(),
-                )
-                .expect("built-in PostgreSQL SQL registration")
-            }
-            SqlDialect::Sqlite => {
-                let compiler = SqliteCompiler;
-                Self::new(
-                    "builtin-sqlite",
-                    dialect,
-                    compiler,
-                    SqliteCodecs,
-                    compiler.support(),
-                )
-                .expect("built-in SQLite SQL registration")
-            }
-        }
+    pub fn postgres() -> Self {
+        let compiler = PostgresCompiler;
+        Self::new(
+            "builtin-postgres",
+            POSTGRES_FAMILY,
+            compiler,
+            PostgresCodecs,
+            compiler.support(),
+        )
+        .expect("built-in PostgreSQL SQL registration")
+    }
+
+    pub fn sqlite() -> Self {
+        let compiler = SqliteCompiler;
+        Self::new(
+            "builtin-sqlite",
+            SQLITE_FAMILY,
+            compiler,
+            SqliteCodecs,
+            compiler.support(),
+        )
+        .expect("built-in SQLite SQL registration")
     }
 
     pub fn identity(&self) -> RegistrationIdentity {
         self.identity
     }
 
-    pub fn dialect(&self) -> SqlDialect {
-        self.dialect
+    pub fn family(&self) -> SqlFamily {
+        self.family
     }
 
     pub fn support(&self) -> SqlSupport {
@@ -170,5 +185,13 @@ impl SqlRegistration {
 
     pub fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
         self.codecs.decode(storage, value)
+    }
+
+    pub fn decode_rows(
+        &self,
+        schema: &Value,
+        rows: &mut [Value],
+    ) -> Result<(), crate::sql::codecs::CodecError> {
+        crate::sql::codecs::decode_rows(self, schema, rows)
     }
 }

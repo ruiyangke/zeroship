@@ -103,9 +103,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             let binding = DbBinding::cold_start("vector_topk");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                crate::sql::compile::SqlDialect::Sqlite,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let rows = backend
                 .vector_search(
                     None,
@@ -128,10 +126,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             assert_eq!(rows.len(), 10, "expected k=10 rows, got {}", rows.len());
             let ids: Vec<i64> = rows
                 .iter()
-                .filter_map(|r| {
-                    r.get("id")
-                        .and_then(crate::value::Value::as_i64)
-                })
+                .filter_map(|r| r.get("id").and_then(crate::value::Value::as_i64))
                 .collect();
             // SQLite's INTEGER PRIMARY KEY AUTOINCREMENT starts at 1; row
             // 1 is the i=0 insert, which has zero cosine distance to its
@@ -285,9 +280,7 @@ fn vector_search_respects_filter_sqlite() {
             let binding = DbBinding::cold_start("vector_filter");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                crate::sql::compile::SqlDialect::Sqlite,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let rows = backend
                 .vector_search(
                     None,
@@ -391,9 +384,7 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             let binding = DbBinding::cold_start("vector_math");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
                 .expect("descriptor slice for the search fixture");
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                crate::sql::compile::SqlDialect::Sqlite,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let cos_rows = backend
                 .vector_search(
                     None,
@@ -436,15 +427,8 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             // L2² ≈ 2 * cos_distance.
             let find = |rows: &[crate::value::Value], target_id: i64| -> f64 {
                 rows.iter()
-                    .find(|r| {
-                        r.get("id")
-                            .and_then(crate::value::Value::as_i64)
-                            == Some(target_id)
-                    })
-                    .and_then(|r| {
-                        r.get("_distance")
-                            .and_then(crate::value::Value::as_f64)
-                    })
+                    .find(|r| r.get("id").and_then(crate::value::Value::as_i64) == Some(target_id))
+                    .and_then(|r| r.get("_distance").and_then(crate::value::Value::as_f64))
                     .expect("row with target id must be present")
             };
             let cos_d = find(&cos_rows, 2);
@@ -556,9 +540,7 @@ fn near_returns_within_radius() {
             let binding = DbBinding::cold_start("near_radius");
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "places")
                 .expect("descriptor slice for the search fixture");
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                crate::sql::compile::SqlDialect::Sqlite,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let rows = backend
                 .spatial_near(
                     None,
@@ -580,10 +562,7 @@ fn near_returns_within_radius() {
 
             let returned_ids: std::collections::BTreeSet<i64> = rows
                 .iter()
-                .filter_map(|r| {
-                    r.get("id")
-                        .and_then(crate::value::Value::as_i64)
-                })
+                .filter_map(|r| r.get("id").and_then(crate::value::Value::as_i64))
                 .collect();
             let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
             assert_eq!(
@@ -706,9 +685,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let near_on = async |route| {
                 let plan = zeroship_data_orm::crud::plan_near(
                     &binding,
-                    &zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                        crate::sql::compile::SqlDialect::Sqlite,
-                    ),
+                    &zeroship_data_orm::sql::registration::SqlRegistration::sqlite(),
                     "places",
                     &args,
                 )
@@ -730,7 +707,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let outside = near_on(
                 zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
                     app,
-                    crate::sql::compile::SqlDialect::Sqlite,
+                    crate::sql::registration::SqlRegistration::sqlite(),
                 )
                 .bind(handle.clone())
                 .unwrap(),
@@ -746,7 +723,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let inside = near_on(
                 zeroship_data_orm::tx_route::CapturedRoute::tx_for_tests(
                     app,
-                    crate::sql::compile::SqlDialect::Sqlite,
+                    crate::sql::registration::SqlRegistration::sqlite(),
                 )
                 .bind(handle.clone())
                 .unwrap(),

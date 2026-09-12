@@ -1,7 +1,7 @@
 use zeroship_data_orm::{
     sql::{
         compiler::{CompileError, PostgresCompiler, Requirements, SqlCompiler, SqliteCompiler},
-        registration::{SqlRegistration, SqlStorageCodecs},
+        registration::{SqlFamily, SqlRegistration, SqlStorageCodecs},
         statement::{
             Assignment, Comparison, Expression, Insert, InsertParts, ResolvedJoin, ResolvedOperand,
             ResolvedPredicate, ResolvedPredicateValue, ReturnedColumn, SelectParts,
@@ -598,7 +598,7 @@ impl SqlStorageCodecs for DownstreamCodecs {
 fn a_downstream_compiler_and_codecs_register_without_a_vendor_enum_arm() {
     let registration = SqlRegistration::new(
         "fixture-sql",
-        zeroship_data_orm::sql::compile::SqlDialect::Postgres,
+        SqlFamily::new("example.test-sql"),
         DownstreamCompiler,
         DownstreamCodecs,
         DownstreamCompiler.support(),
@@ -606,7 +606,7 @@ fn a_downstream_compiler_and_codecs_register_without_a_vendor_enum_arm() {
     .unwrap();
     assert_ne!(
         registration.identity(),
-        SqlRegistration::builtin(zeroship_data_orm::sql::compile::SqlDialect::Postgres).identity()
+        SqlRegistration::postgres().identity()
     );
     assert_eq!(
         registration
@@ -624,13 +624,13 @@ fn identity_allocation_sql_belongs_to_the_registered_compiler() {
 
     let table = table();
     let request = || IdentityRequest::new(table.clone(), table.column("id").unwrap(), 2).unwrap();
-    let postgres = SqlRegistration::builtin(zeroship_data_orm::sql::compile::SqlDialect::Postgres)
+    let postgres = SqlRegistration::postgres()
         .compile_identity_allocation(request())
         .unwrap();
     assert!(postgres.reservation.is_none());
     assert!(matches!(postgres.allocation, IdentityReadPlan::Rows(_)));
 
-    let sqlite = SqlRegistration::builtin(zeroship_data_orm::sql::compile::SqlDialect::Sqlite)
+    let sqlite = SqlRegistration::sqlite()
         .compile_identity_allocation(request())
         .unwrap();
     assert!(sqlite.reservation.is_some());

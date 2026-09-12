@@ -231,8 +231,10 @@ mod tests {
             "precondition: nothing has opened a backend on this thread"
         );
         assert_eq!(
-            super::capture_route(scope, &app_a_binding()).dialect(),
-            crate::compile::SqlDialect::Sqlite
+            super::capture_route(scope, &app_a_binding())
+                .sql_registration()
+                .family(),
+            zeroship_data_orm::sql::registration::SQLITE_FAMILY
         );
         crate::tests::fixtures::reset_context();
     }
@@ -315,7 +317,10 @@ mod tests {
         assert!(crate::context::with(|context| context.backend()).is_none());
         run(async {
             let backend = super::ensure_backend().await.expect("open cold backend");
-            assert_eq!(backend.dialect(), crate::compile::SqlDialect::Sqlite);
+            assert_eq!(
+                backend.sql_registration().family(),
+                zeroship_data_orm::sql::registration::SQLITE_FAMILY
+            );
             assert!(crate::context::with(|context| context.backend()).is_some());
         });
         crate::tests::fixtures::reset_context();

@@ -1,7 +1,7 @@
 //! SQLite encryption contracts.
 use super::fixtures::*;
 
-use crate::tests::fixtures::schema::fixture_table_sql_for;
+use crate::tests::fixtures::schema::fixture_table_sql_sqlite;
 use crate::tests::fixtures::Host;
 
 use zeroship_migrate::schema::query::FkEmission;
@@ -35,7 +35,6 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         host.run(async {
             use std::collections::HashMap;
 
-            use crate::sql::compile::SqlDialect;
             use zeroship_data_orm::backend::sqlite::session::TypedCell;
             use zeroship_data_orm::encryption;
 
@@ -52,12 +51,11 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             }));
             let (backend, _dir) =
                 unmask_setup_with_schema(host, app_id, collection, schema.clone()).await;
-            let ddl = fixture_table_sql_for(
+            let ddl = fixture_table_sql_sqlite(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &FkEmission::Inline,
-                SqlDialect::Sqlite,
             )
             .expect("build DDL");
             for stmt in ddl.split(";\n") {
@@ -109,7 +107,6 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 collection,
                 &schema,
                 &docs,
-                SqlDialect::Sqlite,
             )
             .expect("build insertMany");
             let params = &built.params;
@@ -401,7 +398,6 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 #[test]
 fn encrypted_column_e2e_crud_round_trip_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::SqlDialect;
         use crate::tests::fixtures::DatabaseFixture;
         use zeroship_data_orm::backend::sqlite::session::TypedCell;
         use zeroship_data_orm::protection::encryption_pass::{
@@ -462,7 +458,6 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 "users",
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
             .expect("build_insert_with_dialect");
             assert!(

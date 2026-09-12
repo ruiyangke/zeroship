@@ -104,7 +104,6 @@ struct SourceLayout {
 #[derive(Debug)]
 pub(super) struct PreparedRead {
     query: CompiledQuery,
-    dialect: crate::sql::compile::SqlDialect,
     sources: Vec<SourceLayout>,
     projections: Vec<ReadProjection>,
     scalar_slots: BTreeMap<String, String>,
@@ -345,7 +344,6 @@ impl PreparedRead {
         }
         Ok(Self {
             query,
-            dialect: registration.dialect(),
             sources,
             projections: input.projection,
             scalar_slots,
@@ -364,7 +362,7 @@ impl PreparedRead {
             consume_budget(row, &mut budget)?;
         }
         if !self.scalar_slots.is_empty() {
-            decode_scalars(self.dialect, &self.scalar_schema, &mut rows)?;
+            decode_scalars(route.sql_registration(), &self.scalar_schema, &mut rows)?;
         }
         let mut blocks: Vec<Vec<Value>> = Vec::new();
         let mut has_masked = false;
@@ -833,7 +831,7 @@ fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<V
 }
 
 fn decode_scalars(
-    dialect: crate::sql::compile::SqlDialect,
+    registration: &crate::sql::registration::SqlRegistration,
     schema: &Value,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
@@ -861,7 +859,7 @@ fn decode_scalars(
             }
         }
     }
-    crate::sql::codecs::decode_rows(dialect, schema, rows)?;
+    registration.decode_rows(schema, rows)?;
     Ok(())
 }
 
@@ -881,9 +879,7 @@ mod tests {
                 .map(|(field, definition)| (field.clone(), definition.clone()))
                 .collect(),
         );
-        let registration = crate::sql::registration::SqlRegistration::builtin(
-            crate::sql::compile::SqlDialect::Postgres,
-        );
+        let registration = crate::sql::registration::SqlRegistration::postgres();
         let resolved = crate::crud::resolved::ResolvedTable::aliased(
             &crate::sql::SchemaName::new("read_tests").unwrap(),
             "records",

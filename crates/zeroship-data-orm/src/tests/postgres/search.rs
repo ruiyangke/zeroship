@@ -132,9 +132,7 @@ fn vector_search_returns_k_nearest() {
             let binding = DbBinding::cold_start(app);
             let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll)
                 .expect("descriptor slice for the search fixture");
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                zeroship_data_orm::sql::compile::SqlDialect::Postgres,
-            );
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::vector_search(
                 &backend,
                 None,
@@ -159,10 +157,7 @@ fn vector_search_returns_k_nearest() {
             // matches the query exactly).
             let ids: Vec<i64> = rows
                 .iter()
-                .filter_map(|r| {
-                    r.get("id")
-                        .and_then(crate::value::Value::as_i64)
-                })
+                .filter_map(|r| r.get("id").and_then(crate::value::Value::as_i64))
                 .collect();
             assert!(
                 ids.contains(&1),
@@ -499,9 +494,8 @@ fn near_returns_within_radius() {
             );
             let binding = DbBinding::cold_start(app);
             let schema = value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } });
-            let registration = zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                zeroship_data_orm::sql::compile::SqlDialect::Postgres,
-            );
+            let registration =
+                zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::spatial_near(
                 &backend,
                 None,

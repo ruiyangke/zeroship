@@ -126,7 +126,7 @@ pub async fn apply(
         crate::descriptor::collection_schema(binding, collection)?,
         &opts.schema_field_scope,
     );
-    crate::sql::codecs::decode_rows(route.dialect(), &schema, &mut rows)?;
+    route.sql_registration().decode_rows(&schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
         // The key store comes off the handle this read ran on, not off a
@@ -280,7 +280,8 @@ mod tests {
         // failed loudly on `not_configured`. It now reaches a working backend
         // instead, so the `assert_eq!` on `result.rows` below is the ONLY thing
         // that rules on the narrowing. Do not weaken it.
-        let (route, dir) = rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
+        let (route, dir) =
+            rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
                 &route,
@@ -296,10 +297,7 @@ mod tests {
             ))
             .expect("aggregate aliases must bypass schema-driven transforms");
 
-        assert_eq!(
-            result.rows,
-            vec![crate::value!({ "secret": 3 })]
-        );
+        assert_eq!(result.rows, vec![crate::value!({ "secret": 3 })]);
         assert!(!result.has_masked);
 
         // The control, and the reason `RowSurface` has no permissive arm: a
@@ -357,7 +355,8 @@ mod tests {
         // `wrap_masked: false` narrowing used to trip, so the `assert_eq!` on
         // `result.rows` and the `has_masked` assertion below are the ONLY
         // things ruling on it.
-        let (route, dir) = rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
+        let (route, dir) =
+            rt.block_on(async { crate::tests::fixtures::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
                 &route,

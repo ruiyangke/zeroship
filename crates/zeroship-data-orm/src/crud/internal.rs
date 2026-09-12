@@ -122,7 +122,7 @@ fn invalid(message: &str) -> QueryError {
 #[cfg(test)]
 mod tests {
     use crate::{
-        sql::{compile::SqlDialect, registration::SqlRegistration, SchemaName},
+        sql::{registration::SqlRegistration, SchemaName},
         value::Value,
     };
 
@@ -140,14 +140,14 @@ mod tests {
     #[test]
     fn raw_column_reads_compile_through_each_registered_backend() {
         let namespace = SchemaName::new("app").unwrap();
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
             let query = super::raw_column(
                 &namespace,
                 "people",
                 "__zs_raw__ssn",
                 Value::from("person-a"),
                 &schema(),
-                &SqlRegistration::builtin(dialect),
+                &registration,
             )
             .unwrap();
             assert!(query.sql.contains("$1"));
@@ -165,13 +165,8 @@ mod tests {
         .into_iter()
         .map(Value::from)
         .collect();
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let query = super::unmask_audit(
-                &namespace,
-                params.clone(),
-                &SqlRegistration::builtin(dialect),
-            )
-            .unwrap();
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            let query = super::unmask_audit(&namespace, params.clone(), &registration).unwrap();
             assert!(query.sql.contains("\"app\".\"__zeroship_audit_unmask\""));
             assert_eq!(query.params.len(), params.len());
             for value in &params {

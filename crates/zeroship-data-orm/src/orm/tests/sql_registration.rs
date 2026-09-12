@@ -17,21 +17,21 @@ struct FixtureCodecs;
 
 impl SqlStorageCodecs for FixtureCodecs {
     fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
-        SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite).storage_type(definition)
+        SqlRegistration::sqlite().storage_type(definition)
     }
 
     fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
-        SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite).encode(storage, value)
+        SqlRegistration::sqlite().encode(storage, value)
     }
 
     fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
-        SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite).decode(storage, value)
+        SqlRegistration::sqlite().decode(storage, value)
     }
 }
 
 #[test]
 fn sqlite_registration_owns_boolean_vector_and_geographic_storage() {
-    let registration = SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite);
+    let registration = SqlRegistration::sqlite();
     let boolean = registration
         .storage_type(&value!({"type":"boolean"}))
         .unwrap();
@@ -65,7 +65,7 @@ fn sqlite_registration_owns_boolean_vector_and_geographic_storage() {
 
 #[test]
 fn sqlite_registration_rejects_malformed_encoded_spatial_values() {
-    let registration = SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite);
+    let registration = SqlRegistration::sqlite();
     let vector = registration
         .storage_type(&value!({"type":"vector"}))
         .unwrap();
@@ -92,7 +92,7 @@ async fn constrained_database(
     configure(&mut effective);
     let registration = SqlRegistration::new(
         identity,
-        crate::sql::compile::SqlDialect::Sqlite,
+        crate::sql::registration::SQLITE_FAMILY,
         compiler,
         FixtureCodecs,
         effective,
@@ -175,7 +175,7 @@ async fn insert_is_refused_by_the_registered_compiler_before_identity_allocation
     support.returning = false;
     let registration = SqlRegistration::new(
         "fixture-without-returning",
-        crate::sql::compile::SqlDialect::Sqlite,
+        crate::sql::registration::SQLITE_FAMILY,
         compiler,
         FixtureCodecs,
         support,
@@ -362,7 +362,7 @@ async fn dynamic_find_uses_the_registered_compiler() {
     let compiler = CountingCompiler(calls.clone());
     let registration = SqlRegistration::new(
         "count-dynamic-find-compilation",
-        crate::sql::compile::SqlDialect::Sqlite,
+        crate::sql::registration::SQLITE_FAMILY,
         compiler.clone(),
         FixtureCodecs,
         compiler.support(),
@@ -416,7 +416,7 @@ async fn typed_update_and_delete_use_the_registered_compiler() {
     let compiler = CountingCompiler(calls.clone());
     let registration = SqlRegistration::new(
         "count-typed-write-compilation",
-        crate::sql::compile::SqlDialect::Sqlite,
+        crate::sql::registration::SQLITE_FAMILY,
         compiler.clone(),
         FixtureCodecs,
         compiler.support(),
@@ -467,7 +467,7 @@ async fn dynamic_distinct_uses_the_registered_compiler() {
     let compiler = CountingCompiler(calls.clone());
     let registration = SqlRegistration::new(
         "count-dynamic-distinct-compilation",
-        crate::sql::compile::SqlDialect::Sqlite,
+        crate::sql::registration::SQLITE_FAMILY,
         compiler.clone(),
         FixtureCodecs,
         compiler.support(),
@@ -496,7 +496,7 @@ async fn dynamic_aggregate_uses_the_registered_compiler() {
     let compiler = CountingCompiler(calls.clone());
     let registration = SqlRegistration::new(
         "count-dynamic-aggregate-compilation",
-        crate::sql::compile::SqlDialect::Sqlite,
+        crate::sql::registration::SQLITE_FAMILY,
         compiler.clone(),
         FixtureCodecs,
         compiler.support(),

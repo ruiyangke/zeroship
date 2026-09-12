@@ -692,9 +692,7 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: crate::sql::compile::raw_column_name(
-                                    &column,
-                                ),
+                                sibling_column: crate::sql::compile::raw_column_name(&column),
                             },
                         );
                     }
@@ -1008,10 +1006,7 @@ mod tests {
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("ssn").expect("ssn must be parsed");
-        assert!(matches!(
-            m.wraps,
-            crate::sql::catalog::WrappedType::String
-        ));
+        assert!(matches!(m.wraps, crate::sql::catalog::WrappedType::String));
         assert!(
             !got.contains_key("name"),
             "non-encrypted col must be absent"
@@ -1026,10 +1021,7 @@ mod tests {
             \"salary\" BYTEA /* zero-migrate:enc:number */ NOT NULL\n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("salary").expect("salary must be parsed");
-        assert!(matches!(
-            m.wraps,
-            crate::sql::catalog::WrappedType::Number
-        ));
+        assert!(matches!(m.wraps, crate::sql::catalog::WrappedType::Number));
     }
 
     /// Byte-valued plaintext retains its wrapped type.
@@ -1038,10 +1030,7 @@ mod tests {
         let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");
-        assert!(matches!(
-            m.wraps,
-            crate::sql::catalog::WrappedType::Bytes
-        ));
+        assert!(matches!(m.wraps, crate::sql::catalog::WrappedType::Bytes));
     }
 
     /// Multiple encrypted columns in one CREATE TABLE — each attaches
@@ -1108,9 +1097,7 @@ mod tests {
 
         {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
-                let meta = EncryptionMeta {
-                    wraps,
-                };
+                let meta = EncryptionMeta { wraps };
                 let sentinel = crate::sql::mask_codec::build_encryption_sentinel(&meta);
                 let ddl = format!("CREATE TABLE t (\"ssn\" BYTEA /* {sentinel} */ NOT NULL)");
                 let (got, events) = capture_events(|| parse_encryption_sentinels(&ddl));
@@ -1400,6 +1387,10 @@ mod protection;
 mod search;
 
 impl crate::backend::Backend for SqliteBackend {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        crate::sql::registration::SqlRegistration::sqlite()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         true
     }

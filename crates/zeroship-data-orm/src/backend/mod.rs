@@ -19,6 +19,8 @@ pub trait Backend:
     + crate::protection::Protection
     + crate::search::Search
 {
+    /// Pure compiler and storage codecs compatible with this execution host.
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration;
     /// Whether the host publishes changes from the database commit stream.
     fn publishes_committed_changes(&self) -> bool;
 }

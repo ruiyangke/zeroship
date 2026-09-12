@@ -92,6 +92,9 @@ impl SqlStorageCodecs for SqliteCodecs {
 
     fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
         match (storage, value) {
+            (StorageType::Json, Value::String(encoded) | Value::Json(encoded)) => {
+                serde_json::from_str(&encoded).map_err(|_| invalid_json())
+            }
             (StorageType::Vector, Value::Bytes(bytes)) => {
                 decode_vector_blob(&bytes).map(Value::Array)
             }
@@ -140,6 +143,10 @@ fn unsupported_type() -> CompileError {
 
 fn invalid_timestamp() -> CompileError {
     CompileError::InvalidStatement("invalid SQLite timestamp storage value".into())
+}
+
+fn invalid_json() -> CompileError {
+    CompileError::InvalidStatement("invalid SQLite JSON storage value".into())
 }
 
 fn invalid_vector() -> CompileError {

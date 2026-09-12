@@ -11,8 +11,8 @@
 //! the physical schema and immutable SQL registration used by query preparation.
 
 use crate::backend::BackendHandle;
+use crate::sql::registration::SqlRegistration;
 use crate::sql::SchemaName;
-use crate::sql::{compile::SqlDialect, registration::SqlRegistration};
 use crate::transaction::scope::TransactionScope;
 
 /// A synchronous routing decision awaiting backend binding.
@@ -92,11 +92,6 @@ impl CapturedRoute {
         self.in_tx
     }
 
-    /// Legacy dialect selector used by operations awaiting compiler cutover.
-    pub fn dialect(&self) -> SqlDialect {
-        self.registration.dialect()
-    }
-
     pub fn sql_registration(&self) -> &SqlRegistration {
         &self.registration
     }
@@ -138,13 +133,13 @@ impl CapturedRoute {
     /// Test-only autocommit route with the corresponding built-in registration.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn pool_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
+    pub fn pool_for_tests(app_id: &str, registration: SqlRegistration) -> Self {
         Self {
             app_id: app_id.to_string(),
             schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: false,
             scope: None,
-            registration: SqlRegistration::builtin(dialect),
+            registration,
             connection: None,
         }
     }
@@ -152,13 +147,13 @@ impl CapturedRoute {
     /// Test-only route claiming the app’s currently installed transaction scope.
     #[cfg(test)]
     #[doc(hidden)]
-    pub fn tx_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
+    pub fn tx_for_tests(app_id: &str, registration: SqlRegistration) -> Self {
         Self {
             app_id: app_id.to_string(),
             schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: true,
             scope: TransactionScope::current(app_id).ok(),
-            registration: SqlRegistration::builtin(dialect),
+            registration,
             connection: None,
         }
     }
@@ -192,11 +187,6 @@ impl TxRoute {
     /// holds by the time the statement finally runs.
     pub fn backend(&self) -> &BackendHandle {
         &self.backend
-    }
-
-    /// Legacy dialect selector used by operations awaiting compiler cutover.
-    pub fn dialect(&self) -> SqlDialect {
-        self.registration.dialect()
     }
 
     pub fn sql_registration(&self) -> &SqlRegistration {

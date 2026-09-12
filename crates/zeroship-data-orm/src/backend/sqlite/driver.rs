@@ -1,10 +1,9 @@
 //! SQLite implementation of the ORM execution contracts.
 use super::session::{SqliteCancelHandle, SqliteSessionHandle};
+use crate::value::Value;
 use crate::{driver::*, error::*};
 use async_trait::async_trait;
 use std::rc::Rc;
-use crate::value::Value;
-use crate::sql::{compile::SqlDialect};
 
 #[derive(Debug)]
 struct SqliteCancellation(SqliteCancelHandle);
@@ -69,9 +68,6 @@ impl SqliteDriver {
 }
 #[async_trait(?Send)]
 impl Driver for SqliteDriver {
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Sqlite
-    }
     async fn acquire(&self, kind: LeaseKind) -> Result<Session, DbError> {
         let handle = match kind {
             LeaseKind::Autocommit => SqliteSessionHandle::new(self.session.clone()),
@@ -159,7 +155,7 @@ mod tests {
         )
         .unwrap();
         let driver = backend.connection_driver("app_driver").await.unwrap();
-        crate::driver::tests::native_commands(driver).await;
+        crate::driver::tests::native_commands(driver, "BLOB").await;
     }
 
     #[compio::test]

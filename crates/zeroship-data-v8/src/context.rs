@@ -76,11 +76,7 @@ impl ThreadDbContext {
         self.connection
             .as_ref()
             .map(|connection| connection.factory().sql_registration().clone())
-            .unwrap_or_else(|| {
-                zeroship_data_orm::sql::registration::SqlRegistration::builtin(
-                    zeroship_data_orm::sql::compile::SqlDialect::Postgres,
-                )
-            })
+            .unwrap_or_else(zeroship_data_orm::sql::registration::SqlRegistration::postgres)
     }
     pub(crate) fn connection_identity(
         &self,
@@ -140,8 +136,8 @@ mod tests {
         use zeroship_data_orm::{connection::BackendFactory, error::DbError};
         struct DelayedFactory(ConnectionFactory, flume::Receiver<()>);
         impl BackendFactory for DelayedFactory {
-            fn dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
-                self.0.dialect()
+            fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+                self.0.sql_registration().clone()
             }
             fn connect(
                 &self,

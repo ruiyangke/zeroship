@@ -2,7 +2,7 @@
 
 use crate::{
     sql::{
-        compile::{quote_ident, raw_column_name, SqlDialect, WriteAssignments},
+        compile::{quote_ident, raw_column_name, WriteAssignments},
         registration::SqlRegistration,
         SchemaName,
     },
@@ -154,7 +154,7 @@ fn registered_writes_obey_column_scoped_read_grants() {
             let (app, role) = fixture(&admin, &unique_suffix()).await;
             let schema = people_schema();
             let namespace = SchemaName::new(&app).expect("namespace");
-            let registration = SqlRegistration::builtin(SqlDialect::Postgres);
+            let registration = SqlRegistration::postgres();
             let session = connect(&postgres.url()).await;
             let raw = raw_column_name("ssn");
             let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));

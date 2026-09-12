@@ -6,7 +6,7 @@
 //! PostgreSQL and its required extensions come from an owned testcontainer.
 
 #[allow(unused_imports)]
-use crate::tests::fixtures::schema::{fixture_table_sql, fixture_table_sql_for};
+use crate::tests::fixtures::schema::fixture_table_sql;
 use crate::tests::fixtures::Host;
 use crate::tests::fixtures::{self, schema};
 #[allow(unused_imports)]
@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 use crate::sql::compile::{raw_column_name, read_surface_columns, validate_field_name};
-use crate::sql::{compile::SqlDialect, registration::SqlRegistration, SchemaName};
+use crate::sql::{registration::SqlRegistration, SchemaName};
 use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
 use zeroship_data_orm::binding::DbBinding;
@@ -246,7 +246,7 @@ fn compile_insert(
         collection,
         schema,
         document.clone(),
-        &SqlRegistration::builtin(SqlDialect::Postgres),
+        &SqlRegistration::postgres(),
     )
 }
 
@@ -272,7 +272,7 @@ fn compile_find(
         select,
         &[],
         false,
-        &SqlRegistration::builtin(SqlDialect::Postgres),
+        &SqlRegistration::postgres(),
     )
 }
 
@@ -290,7 +290,7 @@ fn compile_distinct(
         field,
         filter.clone(),
         false,
-        &SqlRegistration::builtin(SqlDialect::Postgres),
+        &SqlRegistration::postgres(),
     )
 }
 
@@ -306,7 +306,7 @@ fn compile_aggregate(
         pipeline,
         false,
         schema,
-        &SqlRegistration::builtin(SqlDialect::Postgres),
+        &SqlRegistration::postgres(),
     )
     .map(|(query, _)| query)
 }
@@ -2613,8 +2613,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             host.prepare_insert_many_docs(&mut docs, app, "people", None)
                 .await
                 .expect("write pipeline");
-            let runtime_schema =
-                crate::tests::fixtures::schema::generated_fields(schema.clone());
+            let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
             let bq = compile_insert(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",

@@ -68,8 +68,6 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
 #[test]
 fn masked_insert_persists_visible_and_raw_columns_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::SqlDialect;
-
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -105,7 +103,6 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
                 "users",
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
             .unwrap();
             assert!(
@@ -153,8 +150,6 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
 #[test]
 fn a_select_serves_the_masked_column_sqlite() {
     Host::test(|host| {
-        use crate::sql::compile::SqlDialect;
-
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -203,7 +198,6 @@ fn a_select_serves_the_masked_column_sqlite() {
                 "users",
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
             .expect("build_insert_with_dialect");
             let param_refs = &bq.params;

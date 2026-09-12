@@ -31,15 +31,13 @@ pub(super) fn compile_insert(
     collection: &str,
     schema: &crate::value::Value,
     document: &crate::value::Value,
-    dialect: crate::sql::compile::SqlDialect,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
-    assert_eq!(dialect, crate::sql::compile::SqlDialect::Sqlite);
     crate::crud::insert::build_one(
         namespace,
         collection,
         schema,
         document.clone(),
-        &crate::sql::registration::SqlRegistration::builtin(dialect),
+        &crate::sql::registration::SqlRegistration::sqlite(),
     )
 }
 
@@ -48,15 +46,13 @@ pub(super) fn compile_insert_many(
     collection: &str,
     schema: &crate::value::Value,
     documents: &crate::value::Value,
-    dialect: crate::sql::compile::SqlDialect,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
-    assert_eq!(dialect, crate::sql::compile::SqlDialect::Sqlite);
     crate::crud::insert::build_many(
         namespace,
         collection,
         schema,
         documents.clone(),
-        &crate::sql::registration::SqlRegistration::builtin(dialect),
+        &crate::sql::registration::SqlRegistration::sqlite(),
     )
 }
 
@@ -82,9 +78,7 @@ pub(super) fn compile_find(
         select,
         &[],
         false,
-        &crate::sql::registration::SqlRegistration::builtin(
-            crate::sql::compile::SqlDialect::Sqlite,
-        ),
+        &crate::sql::registration::SqlRegistration::sqlite(),
     )
 }
 

@@ -14,7 +14,7 @@ use zeroship_data_orm::error::DbError;
 // They were private to this file, which made the BILLED surface accidentally
 // equal to "whatever flows through `run_sql` / `exec_mutation`" - and the search
 // family and every unmask statement do not.
-use crate::metrics::{DB_READS, DB_ROWS_WRITTEN, DB_WRITES, emit_db_metric};
+use crate::metrics::{emit_db_metric, DB_READS, DB_ROWS_WRITTEN, DB_WRITES};
 
 /// The op was dispatched inside a `db.transaction(fn)` callback whose
 /// transaction has since settled — a continuation that outlived its
@@ -436,16 +436,18 @@ pub fn clear_pending_emits(app_id: &str) {
 
 #[cfg(test)]
 pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHandle) -> TxRoute {
-    let dialect = backend.dialect();
+    let registration = backend.sql_registration().clone();
     let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
-        crate::tx_route::CapturedRoute::tx_for_tests(app_id, dialect)
+        crate::tx_route::CapturedRoute::tx_for_tests(app_id, registration)
     } else {
-        crate::tx_route::CapturedRoute::pool_for_tests(app_id, dialect)
+        crate::tx_route::CapturedRoute::pool_for_tests(app_id, registration)
     };
     // Sync, and it can be: only the COLD path needs to await, and a harness
     // driving exec directly has already opened a backend. Production binds
     // through `tx_scope::bind_route`, which owns the cold arm.
-    captured.bind(backend).expect("test route registration matches backend")
+    captured
+        .bind(backend)
+        .expect("test route registration matches backend")
 }
 
 #[cfg(test)]
@@ -570,13 +572,6 @@ mod tests {
             .block_on(f)
     }
 
-    /// A test route must speak the dialect of the connection it is bound to.
-    ///
-    /// [`ambient_route_for_tests`] stamped `SqlDialect::Postgres` on every route
-    /// it minted until 2026-09-03, because that is what
-    /// `CapturedRoute::pool_for_tests` hardcoded. Every SQLite harness that
-    /// reaches this helper - `tests::fixtures::unit_route` and the whole of
-    /// `crates/zeroship-data-orm/src/tests/sqlite/` - therefore carried a route claiming
     /// A captured compiler registration cannot be rebound to another backend.
     #[test]
     fn an_ambient_route_captures_and_verifies_the_sql_registration() {
@@ -593,15 +588,13 @@ mod tests {
 
             let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
             assert_eq!(
-                derived.dialect(),
-                crate::sql::compile::SqlDialect::Sqlite,
-                "a route bound to a SQLite handle must not claim PostgreSQL: \
-                 every builder it reaches would emit the wrong SQL",
+                derived.sql_registration().family(),
+                crate::sql::registration::SQLITE_FAMILY,
             );
 
             let mismatch = crate::tx_route::CapturedRoute::pool_for_tests(
                 "app_route_dialect",
-                crate::sql::compile::SqlDialect::Postgres,
+                crate::sql::registration::SqlRegistration::postgres(),
             )
             .bind(handle);
             assert!(mismatch.is_err());
@@ -1198,19 +1191,17 @@ mod tests {
                 .expect("count-only update");
                 assert_eq!(affected, expected);
             }
-            assert!(
-                exec_mutation_count_with_emit(
-                    CompiledQuery {
-                        sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
-                        params: vec![],
-                    },
-                    &ambient_route_for_tests(app_id, handle.clone()),
-                    "missing",
-                    ChangeOp::Delete,
-                )
-                .await
-                .is_err()
-            );
+            assert!(exec_mutation_count_with_emit(
+                CompiledQuery {
+                    sql: format!(r#"DELETE FROM "{app_id}"."missing""#),
+                    params: vec![],
+                },
+                &ambient_route_for_tests(app_id, handle.clone()),
+                "missing",
+                ChangeOp::Delete,
+            )
+            .await
+            .is_err());
 
             let events = meter.drain();
             let id = uuid::Uuid::parse_str(app_id).unwrap();

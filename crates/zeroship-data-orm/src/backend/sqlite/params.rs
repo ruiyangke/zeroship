@@ -43,7 +43,6 @@ mod tests {
     use super::*;
     use crate::{
         sql::{
-            compile::SqlDialect,
             registration::SqlRegistration,
             statement::{
                 Expression, Insert, InsertParts, ReturnedColumn, Statement, StorageType, Table,
@@ -59,7 +58,7 @@ mod tests {
         let db = rusqlite::Connection::open(db_file.path()).unwrap();
         db.execute_batch("CREATE TABLE documents (id TEXT, created_at TEXT, updated_at TEXT, created_by TEXT, updated_by TEXT, version INTEGER, deleted_at TEXT, payload TEXT, label TEXT)")
             .unwrap();
-        let registration = SqlRegistration::builtin(SqlDialect::Sqlite);
+        let registration = SqlRegistration::sqlite();
         let table = Table::new(
             SchemaName::new("main").unwrap(),
             Ident::parse_as("documents", IdentRole::Collection).unwrap(),

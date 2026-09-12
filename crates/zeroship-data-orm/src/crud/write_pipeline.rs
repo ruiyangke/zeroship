@@ -143,11 +143,10 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 
 /// Validate and protect a write using its runtime descriptor. Catalog markers
 /// prevent protection downgrades; row identity is established before encryption.
-/// Mask inputs survive encryption in a sidechannel, and physical storage is
-/// assigned after value encoding. Keys and dialect come from the caller’s setup.
+/// Mask inputs survive encryption in a sidechannel, and the statement builder
+/// performs storage encoding after physical columns are resolved.
 pub async fn apply(
     keys: &crate::encryption::KeyStore,
-    dialect: compile::SqlDialect,
     route: &TxRoute,
     binding: &DbBinding,
     collection: &str,
@@ -225,7 +224,7 @@ pub async fn apply(
             }
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -261,14 +260,14 @@ pub async fn apply(
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
                 stages
-                    .apply_to_doc(keys, dialect, app_id, collection, &row_pk, doc)
+                    .apply_to_doc(keys, app_id, collection, &row_pk, doc)
                     .await?;
             }
             Ok(())
         }
         ApplyMode::Update { row_pk } => {
             stages
-                .apply_to_update(keys, dialect, app_id, collection, row_pk, payload)
+                .apply_to_update(keys, app_id, collection, row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -309,7 +308,7 @@ pub async fn apply(
             }
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -320,7 +319,6 @@ struct WriteStages<'a> {
     schema: &'a Value,
     has_encrypted: bool,
     has_masked: bool,
-    has_storage_encoding: bool,
     has_plain_bytes: bool,
 }
 
@@ -329,7 +327,6 @@ impl<'a> WriteStages<'a> {
         Self {
             has_encrypted: super::schema_has_encrypted_columns(schema),
             has_masked: super::schema_has_masked_columns(schema),
-            has_storage_encoding: crate::sql::codecs::has_storage_encoding(schema),
             has_plain_bytes: super::bytes_pass::schema_has_plain_bytes_columns(schema),
             schema,
         }
@@ -338,17 +335,12 @@ impl<'a> WriteStages<'a> {
     /// Does any stage below have work to do for this collection? A schema with
     /// none of these facets skips the whole pipeline.
     fn any(&self) -> bool {
-        self.has_encrypted || self.has_masked || self.has_storage_encoding || self.has_plain_bytes
+        self.has_encrypted || self.has_masked || self.has_plain_bytes
     }
 
-    /// `keys` and `dialect` ride down from [`apply`] rather than being resolved
-    /// here: the encryption stage wants a key store, not a backend, the binary
-    /// stages want a dialect, not a connection, and this struct makes no
-    /// routing decision it could take either from.
     async fn apply_to_doc(
         &self,
         keys: &crate::encryption::KeyStore,
-        dialect: compile::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -379,9 +371,6 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_storage_encoding {
-            crate::sql::codecs::encode_document(dialect, schema, row)?;
-        }
         // Validate plain bytes after encryption; encrypted fields already hold ciphertext.
         if self.has_plain_bytes {
             super::bytes_pass::validate_bytes_on_write(schema, row)?;
@@ -395,12 +384,9 @@ impl<'a> WriteStages<'a> {
         Ok(())
     }
 
-    /// `keys` and `dialect` ride down from [`apply`], for the reason on
-    /// [`Self::apply_to_doc`].
     async fn apply_to_update(
         &self,
         keys: &crate::encryption::KeyStore,
-        dialect: compile::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -430,9 +416,6 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_storage_encoding {
-            crate::sql::codecs::encode_update(dialect, schema, patch)?;
-        }
         if self.has_plain_bytes {
             super::bytes_pass::validate_bytes_on_update(schema, patch)?;
         }
@@ -752,10 +735,7 @@ mod tests {
         use crate::{
             crud::predicate::Input,
             orm::ModelPredicate,
-            sql::{
-                compile::SqlDialect, predicate::CompareOp, registration::SqlRegistration,
-                SchemaName,
-            },
+            sql::{predicate::CompareOp, registration::SqlRegistration, SchemaName},
         };
 
         let namespace = SchemaName::new("app").unwrap();
@@ -770,8 +750,10 @@ mod tests {
             value: Value::from("Ada"),
         });
 
-        for (dialect, expects_lock) in [(SqlDialect::Postgres, true), (SqlDialect::Sqlite, false)] {
-            let registration = SqlRegistration::builtin(dialect);
+        for (registration, expects_lock) in [
+            (SqlRegistration::postgres(), true),
+            (SqlRegistration::sqlite(), false),
+        ] {
             let dynamic = super::compile_target_probe(
                 &namespace,
                 "people",
@@ -922,14 +904,9 @@ mod tests {
                 );
                 let mut doc = crate::value!({ "name": "Alice" });
 
-                // The dialect is unobservable in this case and stated rather
-                // than defaulted: the fixture schema declares no encrypted,
-                // masked or binary column, so `WriteStages::any()` is false and
-                // no dialect-sensitive stage runs before the refusal.
                 let (_dir, route) = empty_backend_route(&app_id);
                 let result = apply(
                     &test_key_store(),
-                    SqlDialect::Postgres,
                     &route,
                     &binding,
                     collection,
@@ -973,8 +950,6 @@ mod tests {
             let (_dir, route) = empty_backend_route(app_id);
             apply(
                 &test_key_store(),
-                // Unobservable here for the reason given in the sibling case.
-                SqlDialect::Postgres,
                 &route,
                 &binding,
                 collection,
@@ -993,7 +968,7 @@ mod tests {
     }
 
     use crate::encryption;
-    use crate::sql::{compile::SqlDialect, registration::SqlRegistration};
+    use crate::sql::registration::SqlRegistration;
     use crate::tests::fixtures::cache_schema;
     use crate::tests::fixtures::DatabaseFixture;
     use zeroship_migrate::schema::query::FkEmission;
@@ -1002,9 +977,7 @@ mod tests {
         table: &str,
         fields: &Value,
         fks: &FkEmission<'_>,
-        dialect: SqlDialect,
     ) -> Result<String, zeroship_migrate::schema::query::QueryError> {
-        assert_eq!(dialect, SqlDialect::Sqlite);
         let policy =
             zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
                 .unwrap()
@@ -1188,7 +1161,6 @@ mod tests {
                 collection,
                 &ddl_schema,
                 &FkEmission::Inline,
-                SqlDialect::Sqlite,
             )
             .expect("build DDL");
             for stmt in ddl.split(";\n") {
@@ -1207,13 +1179,8 @@ mod tests {
                 "name": "Seed",
                 "ssn": "123-45-6789"
             });
-            // SQLite, stated explicitly: the fixture stands up a real
-            // `SqliteBackend`, and this is the dialect a captured route would
-            // have stamped for it. Passing it in is what lets the case run with
-            // no isolate to capture from.
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1239,7 +1206,7 @@ mod tests {
                 collection,
                 &schema,
                 insert_doc.clone(),
-                &SqlRegistration::builtin(SqlDialect::Sqlite),
+                &SqlRegistration::sqlite(),
             )
             .expect("build insert");
             let insert_params = &insert_built.params;
@@ -1271,7 +1238,6 @@ mod tests {
             ]);
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1322,7 +1288,6 @@ mod tests {
             );
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1370,15 +1335,6 @@ mod tests {
             });
             apply(
                 backend.key_store(),
-                // The conflict probe below is the ONE pre-pass that issues SQL
-                // of its own, so this is the arm where the dialect is load
-                // bearing. `apply` takes it as its own parameter rather than
-                // reading the route's, which is why this line exists at all;
-                // the two now agree either way, because
-                // `ambient_route_for_tests` derives the route's dialect from
-                // the SQLite handle below instead of stamping `Postgres` on it
-                // (it did until 2026-09-03, and this comment called that inert).
-                SqlDialect::Sqlite,
                 // No isolate in a unit test: this path is exercised outside any
                 // transaction, which is what the pool route means.
                 &route,
@@ -1464,7 +1420,6 @@ mod tests {
                 collection,
                 &masked,
                 &FkEmission::Inline,
-                SqlDialect::Sqlite,
             )
             .expect("build DDL");
             for stmt in ddl.split(";\n") {
@@ -1484,7 +1439,6 @@ mod tests {
             let mut ok_doc = crate::value!({ "ssn": "123-45-6789", "nickname": "alice" });
             apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,
@@ -1511,7 +1465,6 @@ mod tests {
             let mut doc = crate::value!({ "ssn": "987-65-4321", "nickname": "bob" });
             let err = apply(
                 backend.key_store(),
-                SqlDialect::Sqlite,
                 &route,
                 &binding,
                 collection,

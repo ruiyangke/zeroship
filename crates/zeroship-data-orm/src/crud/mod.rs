@@ -412,7 +412,6 @@ pub async fn run_insert(
         // that will store the ciphertext.
         write_pipeline::apply(
             route.backend().key_store(),
-            route.dialect(),
             route,
             &binding,
             &coll,
@@ -483,7 +482,6 @@ pub async fn run_insert_many(
         let mut docs = docs;
         prepare_insert_many_docs_for_binding(
             route.backend().key_store(),
-            route.dialect(),
             route,
             &mut docs,
             &binding,
@@ -578,7 +576,6 @@ pub(crate) async fn run_update_one(
     // Key store off the route, for the reason given on [`run_insert`].
     write_pipeline::apply(
         route.backend().key_store(),
-        route.dialect(),
         &route,
         &binding,
         &coll,
@@ -673,7 +670,6 @@ pub(crate) async fn run_update_many(
     // route into `AtomicWriteFrame::begin` - the frame's route carries the same
     // stamp, so this is the same value either arm would read, taken before the
     // move rather than through two different accessors.
-    let dialect = route.dialect();
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
     let cas_version = extract_cas_version(&filter, &coll, &schema)?;
@@ -740,7 +736,6 @@ pub(crate) async fn run_update_many(
                 // this atomic write runs on.
                 write_pipeline::apply(
                     frame.route().backend().key_store(),
-                    dialect,
                     frame.route(),
                     &binding,
                     &coll,
@@ -801,7 +796,6 @@ pub(crate) async fn run_update_many(
     // here to supply the key store.
     write_pipeline::apply(
         route.backend().key_store(),
-        dialect,
         &route,
         &binding,
         &coll,
@@ -1586,7 +1580,6 @@ pub async fn run_near(
 /// Encrypt and lower insert documents using keys and dialect from the bound route.
 pub async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
-    dialect: compile::SqlDialect,
     route: &TxRoute,
     docs: &mut Value,
     binding: &DbBinding,
@@ -1595,7 +1588,6 @@ pub async fn prepare_insert_many_docs_for_binding(
 ) -> Result<(), DbError> {
     write_pipeline::apply(
         keys,
-        dialect,
         route,
         binding,
         collection,
@@ -1635,7 +1627,6 @@ async fn prepare_upsert_doc_for_write(
     // it keeps the probe's SQL in the same dialect the upsert was planned in.
     write_pipeline::apply(
         route.backend().key_store(),
-        route.dialect(),
         route,
         binding,
         collection,
