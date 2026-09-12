@@ -33,6 +33,243 @@ fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey) -> String {
             .unwrap()
     )
 }
+
+#[ntex::test]
+async fn native_worker_client_uses_the_authenticated_coordinator_api() {
+    use std::{num::NonZeroU32, sync::Arc};
+    use zeroship_core::{
+        service_assertion::{ServiceTrustBundle, TransportAssertionVerifier},
+        service_peers::{ServiceAuth, ServiceKeyring},
+        workflow_coordination::{
+            AcknowledgeManagement, AssignedScope, FailureCode, ManagementOutcome, PublishWakeHint,
+            RegisterWorker, ReleaseScope, ScopePage, WorkerState,
+        },
+    };
+    use zeroship_workflow::coordination::{Error, Options, WorkerCoordinator};
+
+    let fixture = platform::Platform::new().await;
+    let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+    let control_key = ServiceSigningKey::generate();
+    let peers = fixture.work.path().join("native-client-peers.json");
+    platform::write_private(
+        &peers,
+        serde_json::to_vec(&json!({"keys":[{
+            "iss":control.as_str(),"x":control_key.public_jwk_x()
+        }]}))
+        .unwrap(),
+    );
+    let http = Client::new().await;
+    let mut server = server_process::ServerProcess::start(
+        &fixture.runtime_url,
+        &peers,
+        fixture.work.path(),
+        "native-client",
+        &http,
+    )
+    .await;
+
+    let worker = WorkerId::mint();
+    let key = ServiceSigningKey::generate();
+    let public = key.verifying_key_bytes().to_vec();
+    let issuer = ServiceIssuer::parse(&format!(
+        "spiffe://zeroship.ai/svc/worker/{}",
+        worker.as_str()
+    ))
+    .unwrap();
+    let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new()).unwrap();
+    let auth = Arc::new(ServiceAuth::new(
+        keyring,
+        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+    ));
+    // The client receives only an endpoint and the enrolled host's signer.
+    let client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
+    assert_eq!(client.worker_id(), &worker);
+    let registration = RegisterWorker {
+        capacity: NonZeroU32::new(3).unwrap(),
+        state: WorkerState::Ready,
+    };
+    assert_eq!(
+        client.register(&registration).await.unwrap_err(),
+        Error::Refused(FailureCode::Unauthenticated)
+    );
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
+        &[&worker.as_str(), &vec![7u8], &public]).await.unwrap();
+    client.register(&registration).await.unwrap();
+    // Independent requests must mint fresh assertions despite sharing a signer.
+    client.register(&registration).await.unwrap();
+    assert!(client
+        .assignments(&ScopePage { after: None })
+        .await
+        .unwrap()
+        .is_empty());
+
+    let mut apps = [AppId::mint(), AppId::mint()];
+    apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    for app in &apps {
+        let (status, _) = post(
+            &http,
+            &server.url,
+            endpoints::WORKFLOW_ASSIGN.path_template(),
+            &assertion(&control, &control_key),
+            &json!({
+                "requestId":RequestId::mint(),"appId":app,"workerId":worker,"expectedRevision":null
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let assignments = client
+        .assignments(&ScopePage { after: None })
+        .await
+        .unwrap();
+    assert_eq!(
+        assignments.iter().map(|a| &a.app_id).collect::<Vec<_>>(),
+        apps.iter().collect::<Vec<_>>()
+    );
+    let page = client
+        .assignments(&ScopePage {
+            after: Some(apps[0].clone()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0], assignments[1]);
+    let scope = AssignedScope {
+        app_id: apps[0].clone(),
+        assignment_revision: assignments[0].revision,
+    };
+    client.renew(&scope).await.unwrap();
+    assert_eq!(
+        client
+            .pending_management(&AssignedScope {
+                app_id: AppId::mint(),
+                assignment_revision: scope.assignment_revision
+            })
+            .await
+            .unwrap_err(),
+        Error::Refused(FailureCode::Denied)
+    );
+
+    let command = ManageRun {
+        request_id: RequestId::mint(),
+        app_id: scope.app_id.clone(),
+        run_id: RunId::mint(),
+        command: ManagementOperation::Transition {
+            operation: RunOperation::Cancel,
+        },
+    };
+    let (status, _) = post(
+        &http,
+        &server.url,
+        endpoints::WORKFLOW_MANAGE.path_template(),
+        &assertion(&control, &control_key),
+        &serde_json::to_value(&command).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        client.pending_management(&scope).await.unwrap(),
+        vec![command.clone()]
+    );
+    server.restart(&http).await;
+    assert_eq!(
+        client.pending_management(&scope).await.unwrap(),
+        vec![command.clone()]
+    );
+    let ack = AcknowledgeManagement {
+        request_id: command.request_id,
+        app_id: scope.app_id.clone(),
+        assignment_revision: scope.assignment_revision,
+        outcome: ManagementOutcome::NotFound {},
+    };
+    let receipt = client.acknowledge_management(&ack).await.unwrap();
+    assert_eq!(client.acknowledge_management(&ack).await.unwrap(), receipt);
+    assert!(client.pending_management(&scope).await.unwrap().is_empty());
+    let changed = AcknowledgeManagement {
+        outcome: ManagementOutcome::Conflict {},
+        ..ack
+    };
+    assert_eq!(
+        client.acknowledge_management(&changed).await.unwrap_err(),
+        Error::Refused(FailureCode::Conflict)
+    );
+
+    let hint = PublishWakeHint {
+        app_id: scope.app_id.clone(),
+        assignment_revision: scope.assignment_revision,
+        revision: 1.try_into().unwrap(),
+        next_due_at: None,
+    };
+    let receipt = client.publish_wake(&hint).await.unwrap();
+    assert_eq!(client.publish_wake(&hint).await.unwrap(), receipt);
+    let release = ReleaseScope {
+        request_id: RequestId::mint(),
+        app_id: scope.app_id.clone(),
+        assignment_revision: scope.assignment_revision,
+        wake_revision: receipt.revision,
+    };
+    assert_eq!(
+        client.release(&release).await.unwrap_err(),
+        Error::Refused(FailureCode::Conflict)
+    );
+    let backup = WorkerId::mint();
+    let key = ServiceSigningKey::generate();
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
+        &[&backup.as_str(), &vec![8u8], &key.verifying_key_bytes().to_vec()]).await.unwrap();
+    let issuer = ServiceIssuer::parse(&format!(
+        "spiffe://zeroship.ai/svc/worker/{}",
+        backup.as_str()
+    ))
+    .unwrap();
+    let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new()).unwrap();
+    let auth = Arc::new(ServiceAuth::new(
+        keyring,
+        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+    ));
+    let backup_client = WorkerCoordinator::new(&server.url, auth, Options::default()).unwrap();
+    backup_client.register(&registration).await.unwrap();
+    let (status,_) = post(&http,&server.url,endpoints::WORKFLOW_ASSIGN.path_template(),&assertion(&control,&control_key),&json!({
+        "requestId":RequestId::mint(),"appId":scope.app_id,"workerId":backup,"expectedRevision":null
+    })).await;
+    assert_eq!(status, StatusCode::OK);
+    client.release(&release).await.unwrap();
+    client.release(&release).await.unwrap();
+    assert_eq!(
+        client.renew(&scope).await.unwrap_err(),
+        Error::Refused(FailureCode::Denied)
+    );
+    assert_eq!(
+        client
+            .assignments(&ScopePage { after: None })
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    client
+        .register(&RegisterWorker {
+            state: WorkerState::Draining,
+            ..registration
+        })
+        .await
+        .unwrap();
+
+    fixture
+        .admin
+        .execute(
+            "UPDATE zeroship.worker_instances SET status='gone' WHERE id=$1",
+            &[&worker.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        client
+            .assignments(&ScopePage { after: None })
+            .await
+            .unwrap_err(),
+        Error::Refused(FailureCode::Unauthenticated)
+    );
+}
 async fn post(
     client: &Client,
     url: &str,

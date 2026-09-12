@@ -39,7 +39,6 @@ jsonwebtoken = { workspace = true }
 parking_lot = "0.12"
 ipnet = { workspace = true }
 cyper = { workspace = true }
-futures = { workspace = true }
 # JWKS refresh bounds its outbound OP fetch with `compio::time::timeout`
 # (zero-tokio). The workspace `compio` carries the `time` feature; the
 # dev-dependency below additionally enables `polling` for sandboxed tests

@@ -1,14 +1,14 @@
 use super::{Error, Options};
-use crate::{
+use futures::StreamExt;
+use serde::{de::DeserializeOwned, Serialize};
+use std::{io::Write, sync::Arc};
+use url::{Host, Url};
+use zeroship_core::{
     service_assertion::ServiceIssuer,
     service_identity::ServiceEndpoint,
     service_peers::ServiceAuth,
     workflow_coordination::{Failure, FailureCode, AUDIENCE},
 };
-use futures::StreamExt;
-use serde::{de::DeserializeOwned, Serialize};
-use std::{io::Write, sync::Arc};
-use url::{Host, Url};
 
 #[derive(Clone, Debug)]
 pub(super) struct Transport {

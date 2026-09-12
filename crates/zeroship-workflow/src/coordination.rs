@@ -7,17 +7,17 @@
 
 mod transport;
 
-use super::{
+use std::{collections::HashSet, sync::Arc, time::Duration};
+use transport::Transport;
+use zeroship_core::workflow_coordination::{
     AcknowledgeManagement, AssignedScope, Assignment, FailureCode, ManageRun, ManagementReceipt,
     PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope, ScopePage, WakeHintReceipt,
     WorkerId,
 };
-use crate::{
+use zeroship_core::{
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
-use transport::Transport;
 
 /// Bounds the complete exchange, including streamed error bodies.
 #[derive(Clone, Copy, Debug)]
@@ -65,7 +65,7 @@ pub enum Error {
 /// mutation committed. The client neither retries mutations nor follows redirects.
 #[derive(Clone, Debug)]
 pub struct WorkerCoordinator {
-    worker: WorkerId,
+    worker_id: WorkerId,
     transport: Transport,
 }
 
@@ -81,17 +81,17 @@ impl WorkerCoordinator {
         if issuer.principal() != role.principal() {
             return Err(Error::Unauthenticated);
         }
-        let worker = WorkerId::parse(issuer.instance().ok_or(Error::Unauthenticated)?)
+        let worker_id = WorkerId::parse(issuer.instance().ok_or(Error::Unauthenticated)?)
             .map_err(|_| Error::Unauthenticated)?;
         Ok(Self {
-            worker,
+            worker_id,
             transport: Transport::new(url, auth, options)?,
         })
     }
 
     #[must_use]
     pub const fn worker_id(&self) -> &WorkerId {
-        &self.worker
+        &self.worker_id
     }
 
     /// # Errors
@@ -101,7 +101,7 @@ impl WorkerCoordinator {
             .transport
             .post(endpoints::WORKFLOW_REGISTER, request)
             .await?;
-        if registered.worker_id != self.worker
+        if registered.worker_id != self.worker_id
             || registered.capacity != request.capacity
             || registered.state != request.state
         {
@@ -119,7 +119,7 @@ impl WorkerCoordinator {
             .await?;
         let mut previous = request.after.as_ref();
         for assignment in &assignments {
-            if assignment.worker_id != self.worker
+            if assignment.worker_id != self.worker_id
                 || previous.is_some_and(|app| app.as_str() >= assignment.app_id.as_str())
             {
                 return Err(Error::InvalidResponse);
@@ -136,10 +136,15 @@ impl WorkerCoordinator {
             .transport
             .post(endpoints::WORKFLOW_RENEW, request)
             .await?;
-        if assignment.worker_id != self.worker
-            || assignment.app_id != request.app_id
-            || assignment.revision != request.assignment_revision
-        {
+        if (
+            &assignment.worker_id,
+            &assignment.app_id,
+            assignment.revision,
+        ) != (
+            &self.worker_id,
+            &request.app_id,
+            request.assignment_revision,
+        ) {
             return Err(Error::InvalidResponse);
         }
         Ok(assignment)
@@ -164,6 +169,7 @@ impl WorkerCoordinator {
     }
 
     /// Release after quiescing local scheduling and confirming its final wake hint.
+    /// The coordinator also requires a ready peer assigned to the same app.
     ///
     /// # Errors
     /// Refuses failed exchanges, stale assignments and unconfirmed wake hints.
