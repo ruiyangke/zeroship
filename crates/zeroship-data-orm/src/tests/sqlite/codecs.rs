@@ -76,7 +76,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
                 &runtime_schema,
                 &doc,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             assert_eq!(
                 bq.params[1],
                 crate::value!("2025-09-01T04:13:20.000Z"),

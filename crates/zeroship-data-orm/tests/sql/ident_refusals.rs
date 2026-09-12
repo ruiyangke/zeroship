@@ -245,10 +245,7 @@ fn an_alias_may_carry_a_platform_underscore_name_that_a_column_may_not() {
     println!("ruled on 4 alias vectors");
 }
 
-/// The seven system fields are query keys, not forbidden words.
-/// `db.users.find({ id: "..." })` is the canonical shape, and the declaration-
-/// time reservation (`query.rs:867-878`) is a different call site this crate
-/// does not have.
+/// Generated and ordinary application fields are query keys, not forbidden words.
 #[test]
 fn the_assigned_field_names_are_referenceable_columns() {
     // Spelled locally on purpose. The claim under test is about the IDENTIFIER
@@ -267,7 +264,7 @@ fn the_assigned_field_names_are_referenceable_columns() {
     ] {
         assert!(
             Ident::parse_as(name, IdentRole::Column).is_ok(),
-            "the platform field {name:?} is not referenceable as a column"
+            "the application field {name:?} is not referenceable as a column"
         );
         ruled_on += 1;
     }

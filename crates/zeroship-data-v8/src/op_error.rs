@@ -307,44 +307,32 @@ mod tests {
                 other => panic!("expected CodedError, got {other:?}"),
             }
         }
-        assert!(
-            op_hint(DbError::Serialization {
-                message: "x".into()
-            })
-            .is_some()
-        );
-        assert!(
-            op_hint(DbError::Transient {
-                message: "x".into()
-            })
-            .is_some()
-        );
+        assert!(op_hint(DbError::Serialization {
+            message: "x".into()
+        })
+        .is_some());
+        assert!(op_hint(DbError::Transient {
+            message: "x".into()
+        })
+        .is_some());
         // LockContention is retriable — must also carry a hint.
-        assert!(
-            op_hint(DbError::LockContention {
-                message: "x".into()
-            })
-            .is_some()
-        );
+        assert!(op_hint(DbError::LockContention {
+            message: "x".into()
+        })
+        .is_some());
         // Non-retryable violations must not advise a retry.
-        assert!(
-            op_hint(DbError::UniqueViolation {
-                message: "x".into()
-            })
-            .is_none()
-        );
-        assert!(
-            op_hint(DbError::FkViolation {
-                message: "x".into()
-            })
-            .is_none()
-        );
-        assert!(
-            op_hint(DbError::Internal {
-                message: "x".into()
-            })
-            .is_none()
-        );
+        assert!(op_hint(DbError::UniqueViolation {
+            message: "x".into()
+        })
+        .is_none());
+        assert!(op_hint(DbError::FkViolation {
+            message: "x".into()
+        })
+        .is_none());
+        assert!(op_hint(DbError::Internal {
+            message: "x".into()
+        })
+        .is_none());
     }
 
     /// The helper returns the first element of a non-empty slice. The
@@ -594,7 +582,7 @@ mod tests {
             "version",
             "deleted_at",
         ] {
-            crate::compile::validate_field_name_for_declaration(name).unwrap();
+            crate::compile::validate_field_name(name).unwrap();
         }
     }
 

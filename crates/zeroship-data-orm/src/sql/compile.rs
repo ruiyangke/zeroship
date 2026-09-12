@@ -70,10 +70,6 @@ pub fn validate_field_name(name: &str) -> Result<(), QueryError> {
         .map_err(|error| QueryError::InvalidIdent(error.to_string()))
 }
 
-pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError> {
-    validate_field_name(name)
-}
-
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
 pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {

@@ -692,7 +692,7 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: crate::sql::compile::raw_column_name(&column),
+                                raw_column: crate::sql::compile::raw_column_name(&column),
                             },
                         );
                     }
@@ -1233,7 +1233,7 @@ mod tests {
         let meta = got.get("ssn").expect("mask meta on the declared field");
         assert_eq!(meta.kind, MaskKind::Last4);
         assert_eq!(meta.classification, Classification::Spi);
-        assert_eq!(meta.sibling_column, raw);
+        assert_eq!(meta.raw_column, raw);
         assert_eq!(
             got.len(),
             1,
@@ -1265,13 +1265,7 @@ mod tests {
         );
     }
 
-    /// A sentinel with no recoverable column name before it is ignored, and
-    /// WARNS rather than being discarded in silence.
-    ///
-    /// This test used to assert that a sentinel on a column NOT ending
-    /// `_masked` was ignored - which, after the flip, is where every sentinel
-    /// legitimately sits. Keeping it would have asserted that the introspector
-    /// must drop all mask metadata.
+    /// A sentinel with no recoverable column name before it is ignored.
     #[test]
     fn sqlite_introspection_ignores_a_sentinel_with_no_column() {
         let ddl = "CREATE TABLE t (\n  /* zero-migrate:mask:kind=last4,classification=spi */\n)";
@@ -1294,8 +1288,8 @@ mod tests {
     /// stays unmasked.
     #[test]
     fn sqlite_introspection_malformed_sentinel_skipped() {
-        let ddl = "CREATE TABLE t (\n  \"ssn\" TEXT,\n  \
-             \"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic,classification=pii */\n)";
+        let ddl = "CREATE TABLE t (\n  \
+             \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic,classification=pii */\n)";
         let got = parse_mask_sentinels(ddl);
         assert!(
             got.is_empty(),
@@ -1309,7 +1303,7 @@ mod tests {
     /// the silence was the defect rather than the abort.
     #[test]
     fn sqlite_introspection_warns_on_an_unterminated_comment() {
-        let ddl = "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi";
+        let ddl = "CREATE TABLE t (\"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi";
         let (got, fields) = sole_warning(|| parse_mask_sentinels(ddl));
         assert!(
             got.is_empty(),

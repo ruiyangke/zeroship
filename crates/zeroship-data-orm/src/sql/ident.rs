@@ -105,8 +105,7 @@ impl fmt::Display for IdentRole {
     }
 }
 
-/// The shape of a reservation. Mirrors `query.rs`'s `ReservedName` so the
-/// fences can be compared row by row when the port moves them.
+/// A role-specific reserved-name rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Reservation {
     /// Refuse a name spelled exactly this.
@@ -119,10 +118,8 @@ impl Reservation {
     fn matches(self, name: &str) -> bool {
         match self {
             Self::Exact(n) => name == n,
-            // Case-insensitive, as both forks of `validate_collection` are:
-            // PostgreSQL folds unquoted identifiers to lower case, so `PG_Foo`
-            // and `pg_foo` are the same catalog name and a case-sensitive fence
-            // would miss one of them.
+            // PostgreSQL folds unquoted identifiers, so catalog-prefix fences
+            // are case-insensitive even though emitted identifiers are quoted.
             Self::Prefix(p) => {
                 name.len() >= p.len()
                     && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
@@ -173,10 +170,8 @@ const BACKEND_CATALOG_RESERVATIONS: &[Reservation] =
 /// Column-name fences, in `RESERVED_NAMES` order so the error a given name
 /// produces is the same one it produces today.
 ///
-/// `Prefix("_")` subsumes `__zs_` and `__zeroship_`; both are kept anyway,
-/// because the port SC-3 describes is a *move* of this table and a move that
-/// silently drops rows is exactly the failure the "pair, not a single
-/// guardian" note warns about.
+/// `Prefix("_")` subsumes the platform prefixes. They remain explicit so the
+/// reserved platform namespaces are visible in this table.
 const COLUMN_RESERVATIONS: &[Reservation] = &[
     // Synthetic result columns the runtime emits, e.g. `_distance` on vector
     // search. Reserved so a creator column cannot shadow one.
@@ -294,21 +289,15 @@ impl std::error::Error for IdentError {}
 /// is no `From<String>`, no `Deserialize`, and no `into_string`. See the module
 /// documentation for the compile-fail proofs of each of those.
 ///
-/// `Ident` does **not** remember which role validated it. That follows SC-3's
-/// own sketch, and it is a real limitation rather than an oversight: nothing
-/// stops a value parsed as an alias being stored in a field that wants a
-/// collection. What prevents it in practice is that the plan structs name their
-/// slots, so the miscarriage has to be written deliberately. Carrying the role
-/// in the type was considered and rejected because it forces a double parse at
-/// every stored projection, where the same text is both a column and an alias.
+/// `Ident` does not retain its validation role. Statement constructors own the
+/// role of each slot and validate text at that boundary.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ident(String);
 
 impl Ident {
     /// Validate `raw` for use in `role`.
     ///
-    /// Order matters and is the same order `query.rs` uses: emptiness, NUL,
-    /// length, charset, and only then the reservation table. Running the
+    /// Validation checks emptiness, NUL, length, charset, then reservations. Running the
     /// charset check before the reservations is what makes
     /// [`IdentError::Reserved`] safe to echo, and it is also why a name like
     /// `"caf\u{e9}"` reports the encoding problem rather than a spurious

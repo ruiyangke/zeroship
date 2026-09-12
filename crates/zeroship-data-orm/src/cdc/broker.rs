@@ -978,7 +978,6 @@ pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
     .to_string()
 }
 
-
 /// Suppress local delivery for an app until the last overlapping pause is released.
 /// The process-wide reference count coordinates pauses across worker threads.
 /// SQLite stamps suppression at commit, so publisher scheduling cannot move the window.
@@ -1274,7 +1273,7 @@ mod tests {
             ChangeOp::Insert,
             Some("3"),
         )))); // overflow
-        // Queue now contains a single Resync.
+              // Queue now contains a single Resync.
         assert!(matches!(s.pop(), Some(SubscriptionMessage::Resync)));
         assert!(s.pop().is_none());
     }
@@ -1958,27 +1957,6 @@ mod tests {
             Err(DbError::Coded { .. })
         ));
     }
-
-    // -----------------------------------------------------------------
-    // `cdc_event_carries_masked_value_for_masked_columns` (§11)
-    //
-    // The proposal (Q-MASK-G) asserts that CDC subscribers see the
-    // MASKED representation of a masked column — never the plaintext.
-    // With sibling-column storage (Path B, docs/archive/sensitive-field-masking.md)
-    // the WAL pipeline never
-    // decrypts: `tuple_to_map` (in `wal_consumer.rs`) zips pgoutput
-    // tuple bytes verbatim into `new_tuple`, so the parent column
-    // carries ciphertext text-encoded by PG (e.g. `\xDEADBEEF` for
-    // BYTEA) and the sibling carries the pre-computed mask string.
-    //
-    // The gate below pins the contract by constructing a synthetic
-    // `ChangeEvent` mirroring the wal_consumer's output (parent =
-    // ciphertext text-encoding, sibling = masked text) and asserts
-    // both that the WS frame round-trips both columns AND that the
-    // parent column NEVER carries an obvious plaintext "ssn-shape"
-    // string. A regression that wires decrypt-on-CDC would land the
-    // plaintext in `new_tuple["ssn"]` and flip this assertion.
-    // -----------------------------------------------------------------
 
     /// The CDC tuple after the storage flip, and what a subscriber may see of
     /// it.

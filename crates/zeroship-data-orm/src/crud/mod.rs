@@ -106,7 +106,7 @@ pub async fn exec_distinct_read(
     coll: String,
     route: crate::tx_route::TxRoute,
     bq: crate::sql::compiler::CompiledQuery,
-    reads_masked_sibling: bool,
+    reads_masked_value: bool,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
     read_pipeline::apply(
@@ -115,7 +115,7 @@ pub async fn exec_distinct_read(
         &coll,
         rows,
         read_pipeline::ApplyOptions {
-            apply_decrypt: !reads_masked_sibling,
+            apply_decrypt: !reads_masked_value,
             wrap_masked: false,
             ..read_pipeline::ApplyOptions::default()
         },
@@ -142,20 +142,6 @@ fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
     crate::cdc::read_set::record_if_active(collection, filter, &schema);
 }
 
-// `current_sql_dialect()` WAS HERE and is deleted (2026-09-03). It was
-// `crate::context::with(|c| c.sql_dialect())` - the last production
-// ENGINE-to-ADAPTER reference in the crate, and the whole of the
-// `ENGINE crud/mod.rs -> ADAPTER crate::context::with` row on
-// `tests/lib/tier_direction_census.sh`.
-//
-// It is not replaced by another lookup. The dialect is a CONFIGURATION fact,
-// so it is read ONCE per dispatch, in the adapter, by
-// `crate::tx_scope::configured_dialect`, and stamped into the
-// [`crate::tx_route::CapturedRoute`] that same prelude freezes. Every function
-// below is HANDED the dialect - off the route where it has one, as a parameter
-// where it does not - which is why the plan and the connection can no longer
-// disagree about which SQL was written.
-//
 pub fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
     let Some(stages) = pipeline.as_array() else {
         return Vec::new();
@@ -207,13 +193,7 @@ fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
 /// The eagerly-evaluated inputs of a `find`, produced by [`plan_find`] and
 /// consumed by [`run_find`].
 ///
-/// This type exists because `find` CANNOT be cut the way the nine `plan_*`
-/// functions above were. Those had a synchronous planning prologue that ran to
-/// a `CompiledQuery` before the promise. `find` has no such prologue: its schema
-/// resolution and SQL build sit BEHIND `authorize_query_hint(...).await`, so
-/// they cannot be hoisted ahead of the V8 boundary at all. The engine half is
-/// therefore an `async fn`, and this struct carries what must still be read
-/// eagerly across into it.
+/// The read-set and V8-owned inputs are captured before asynchronous execution.
 #[derive(Debug)]
 pub struct FindPlan {
     limit: Option<i64>,
@@ -230,14 +210,8 @@ pub struct FindPlan {
 /// The EAGER half of `find`. Everything here must run while the dispatching
 /// handler is still the active one on this thread.
 ///
-/// `record_read_set` is the reason this is a separate function rather than the
-/// head of [`run_find`]. It is ambient: `read_set::is_active` reads the
-/// `CURRENT_BUFFER` thread-local (`read_set.rs:368-373`), which is `Some` only
-/// inside a query handler. Moving it into the async body would defer it to
-/// first poll, where the buffer is either gone - silently dropping the entry
-/// the broker needs to narrow events - or belongs to a DIFFERENT query. That is
-/// the same hazard the `dispatch_insert` actor_id read is documented against.
-/// Verified by reading `read_set.rs`, not by a test.
+/// The read-set is thread-local query state, so it must be recorded before the
+/// returned future can be polled outside the dispatching handler.
 pub fn plan_find(binding: &DbBinding, collection: &str, filter: &Value, opts: &Value) -> FindPlan {
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
@@ -1125,7 +1099,7 @@ pub fn plan_distinct(
     // descriptor entry the builder uses; an undeclared collection rejects
     // before either.
     let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
-    let distinct_reads_masked_sibling = compile::column_is_masked(field, &schema_hint);
+    let distinct_reads_masked_value = compile::column_is_masked(field, &schema_hint);
 
     let built = read::distinct(
         binding.schema(),
@@ -1138,32 +1112,10 @@ pub fn plan_distinct(
     )
     .map_err(DbError::from)?;
 
-    Ok((built, distinct_reads_masked_sibling))
+    Ok((built, distinct_reads_masked_value))
 }
 
-/// Shared dispatch for `count`. Resolves with a real JS `number`
-/// (not a JSON-stringified integer).
-///
-/// `opts.include_deleted: true` opts out of the auto-
-/// filter.
-/// The ENGINE half of `count`: no `scope`, no `v8::`, no `ResolveValue`.
-///
-/// This is the cut the crate split requires, per
-/// `docs/proposals/2026-08-31-data-crate-shape.md:138-142` - "the 39 V8-signature
-/// functions belong in the thin layer, they ARE the boundary. Their `async move`
-/// bodies are not - those bodies are query pipeline. The engine must stop
-/// returning `OpResult`/`ResolveValue` and return data the adapter lowers."
-///
-/// It returns a `CompiledQuery`; `dispatch_count` below owns the promise, the route
-/// capture and the `i64 -> ResolveValue` lowering. This is the worked example for
-/// the other sixteen `dispatch_*` functions in this file.
-///
-/// ORDERING: `record_read_set` runs here, ahead of the V8 prologue, where it used
-/// to run between `runtime_state` and `setup_js_promise`. That is safe rather than
-/// merely convenient: it touches only the `read_set` thread-local and the
-/// descriptor cache, and none of `runtime_state` / `setup_js_promise` /
-/// `capture_route` reads or writes either. Reasoned from those three bodies, not
-/// proven by a test.
+/// Prepare a bounded count query and record its read dependency synchronously.
 pub fn plan_count(
     binding: &DbBinding,
     route: &crate::tx_route::CapturedRoute,
@@ -1568,12 +1520,7 @@ pub async fn run_near(
     .await
 }
 
-// `dispatch_find_or_create` was removed along with the
-// `Collection.findOrCreate` v8_method (absorbed by `upsert`). The
-// `compile::build_find_or_create` SQL builder stays for now —
-// `upsert({where, create})` shape lands in a follow-up.
-
-/// Encrypt and lower insert documents using keys and dialect from the bound route.
+/// Protect insert documents using the bound route.
 pub async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
     route: &TxRoute,
@@ -1616,11 +1563,7 @@ async fn prepare_upsert_doc_for_write(
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
-    // The key store and the dialect both come off the route this upsert already
-    // carries. That is not "thread a route to reach a key": the route is here
-    // because the conflict probe issues SQL, and taking the store from it keeps
-    // the write and its ciphertext on one handle - and taking the dialect from
-    // it keeps the probe's SQL in the same dialect the upsert was planned in.
+    // Use the key store bound to the backend that performs the write.
     write_pipeline::apply(
         route.backend().key_store(),
         route,
@@ -1667,9 +1610,7 @@ fn schema_has_encrypted_columns(schema: &Value) -> bool {
 }
 
 /// Cheap walk: does any field def on `schema` carry a
-/// `mask` entry with `kind != "none"`? Drives the per-write decision
-/// to invoke `mask_pass::apply_mask_on_write`. A `kind: "none"` opt-out
-/// returns false (no sibling column to populate).
+/// `mask` entry with `kind != "none"`? Drives the per-write mask pass.
 fn schema_has_masked_columns(schema: &Value) -> bool {
     schema
         .as_object()

@@ -1,19 +1,18 @@
-//! Comparison and logical predicates shared by query plans.
+//! Comparison and logical predicates shared by resolved statements.
 //!
 //! Null checks are distinct nodes. Canonicalization reduces empty conjunctions to
 //! true, empty disjunctions to false, and empty membership to a constant. Ranges
 //! become comparisons so equivalent predicates share a representation.
 //!
 //! Recursive consumers require a bounded tree. `depth` measures it iteratively,
-//! and plan validation enforces `MAX_PREDICATE_DEPTH` before canonicalization or
-//! rendering.
+//! and statement validation enforces `MAX_PREDICATE_DEPTH`.
 
 use crate::sql::ident::Ident;
 use crate::sql::literal::{Literal, LiteralError, LiteralSet};
 use crate::sql::path::FieldPath;
 use core::fmt;
 
-/// Maximum predicate-tree depth accepted by plan validation.
+/// Maximum predicate-tree depth accepted by statement validation.
 /// Leaves have depth one; a connective adds to its deepest child's depth.
 pub const MAX_PREDICATE_DEPTH: usize = 16;
 
@@ -30,7 +29,7 @@ pub enum CompareOp {
 
 impl CompareOp {
     /// The operator that means the same thing with the operands exchanged.
-    /// Used by [`Predicate::canonical`] so `1 < x` and `x > 1` are one plan.
+    /// Used by [`Predicate::canonical`] so `1 < x` and `x > 1` share a form.
     const fn mirrored(self) -> Self {
         match self {
             Self::Eq => Self::Eq,
@@ -55,8 +54,7 @@ pub enum MembershipOp {
 pub enum PatternOp {
     Like,
     NotLike,
-    /// Case-insensitive. `PostgreSQL`-only; a backend without it must refuse
-    /// rather than emulate, per SC-3's decision 2.
+    /// Case-insensitive. A backend without it must refuse the statement.
     ILike,
     NotILike,
 }
@@ -83,9 +81,7 @@ impl RangeBounds {
 
 /// A `LIKE` pattern.
 ///
-/// A validated newtype rather than a `String` for the same reason everything
-/// else here is one: a bare string reaching a renderer is the shape this crate
-/// exists to remove. The pattern is bound as a parameter, so its content is
+/// A validated newtype rather than a bare string. The pattern is bound as a parameter, so its content is
 /// never parsed as SQL - what this type fences is the NUL byte `PostgreSQL`
 /// `text` cannot carry.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -164,10 +160,8 @@ impl AggregateFunc {
 
 /// An aggregate over a column, or `COUNT(*)`.
 ///
-/// An aggregate is legal only in a `HAVING` position or a projection; SC-3
-/// names that as one of the invariants the shapes cannot enforce and that
-/// therefore needs a test. It is enforced in [`crate::sql::Select`]'s constructor,
-/// with `aggregate_operand_in_a_filter_is_refused` covering it.
+/// An aggregate is legal only in a `HAVING` position or a projection. The
+/// resolved statement constructor enforces that placement.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AggregateRef {
     func: AggregateFunc,
@@ -424,8 +418,7 @@ impl Predicate {
 
     /// A bounded range, desugared to two comparisons.
     ///
-    /// See the module note: this is a constructor rather than a node so that
-    /// one logical plan has one spelling.
+    /// This is a constructor rather than a node so equivalent ranges share a form.
     ///
     /// Infallible, and provably so rather than by omission: the result is
     /// `And([Compare, Compare])`, whose depth is 2 whatever the operands are,
@@ -442,12 +435,8 @@ impl Predicate {
 
     /// Membership, with the null rule applied at construction.
     ///
-    /// `members` is a list of **optional** literals, and that signature is the
-    /// whole mechanism: a caller translating a wire array cannot get a null
-    /// past this without the `None` arm being handled, because a null is not a
-    /// [`Literal`] and never becomes one. The partition below reproduces the
-    /// lowering `query.rs` arrived at after the defect
-    /// (`query.rs:5386-5409` for `In`, `:5424-5444` for `NotIn`):
+    /// Optional literals keep SQL null outside [`Literal`] and force callers to
+    /// handle it structurally:
     ///
     /// | values | nulls | `In`                          | `NotIn`                              |
     /// | ------ | ----- | ----------------------------- | ------------------------------------ |

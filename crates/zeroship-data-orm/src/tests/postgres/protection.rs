@@ -1771,12 +1771,7 @@ fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// refused entirely rather than quietly degraded to the columns the actor may
 /// see - which would conceal the authorisation failure from the caller.
 ///
-/// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
-/// as the batch, at `crates/zeroship-data-orm/src/protection/unmask.rs`.
-/// `dispatch_find` calls this at
-/// `crates/zeroship-data-orm/src/crud/mod.rs`, before
-/// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
-/// refusal here means the unmasking SELECT is never issued at all.
+/// A refusal happens before read compilation, so no unmasking SELECT is issued.
 ///
 /// This drives `authorize_query_hint` directly, as its SQLite twin does - the
 /// `find` entry point needs a live V8 scope. The gap that leaves is what the

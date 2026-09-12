@@ -889,8 +889,7 @@ async fn write_audit_bulk_row(
 /// entirely — we do NOT silently fall back to masked-only because
 /// that would conceal the authorisation failure from the caller.
 ///
-/// Called from `crud::dispatch_find` BEFORE
-/// `build_find_with_schema` fires the SQL.
+/// Called before read compilation and execution.
 ///
 /// Returns `Ok(())` on full authorisation; on denial returns
 /// `Err(DbError::Coded { code: "unmask_not_permitted", ... })`. The
@@ -1242,10 +1241,7 @@ pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
     })
 }
 
-fn require_string(
-    obj: &crate::value::Map<String, Value>,
-    key: &str,
-) -> Result<String, DbError> {
+fn require_string(obj: &crate::value::Map<String, Value>, key: &str) -> Result<String, DbError> {
     obj.get(key)
         .and_then(|v| v.as_str())
         .ok_or_else(|| DbError::ValidationFailed {
@@ -1435,45 +1431,37 @@ mod tests {
     #[test]
     fn authz_stub_grants_auto_actor() {
         let actor = Some(value!({ "kind": "auto", "id": null }));
-        assert!(
-            check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_grants_auto_1"),
-                &actor,
-                "spi"
-            )
-            .unwrap()
-        );
+        assert!(check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_grants_auto_1"),
+            &actor,
+            "spi"
+        )
+        .unwrap());
         let actor = Some(value!({ "kind": "auto", "id": "system" }));
-        assert!(
-            check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_grants_auto_2"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_grants_auto_2"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
     }
 
     #[test]
     fn authz_stub_denies_user_actor() {
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_denies_user_1"),
-                &actor,
-                "spi"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_denies_user_1"),
+            &actor,
+            "spi"
+        )
+        .unwrap());
         let actor = Some(value!({ "kind": "user", "id": "usr_xyz" }));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_denies_user_2"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_denies_user_2"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
     }
 
     #[test]
@@ -1491,34 +1479,28 @@ mod tests {
 
     #[test]
     fn authz_stub_denies_unauthenticated() {
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_unauth_1"),
-                &None,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_unauth_1"),
+            &None,
+            "pii"
+        )
+        .unwrap());
         // Empty object — no `kind` field — also denied.
         let actor = Some(value!({}));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_unauth_2"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_unauth_2"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
         // Actor that isn't an object (e.g. JS passed a string) — denied.
         let actor = Some(value!("auto"));
-        assert!(
-            !check_unmask_authorization(
-                &DbBinding::cold_start("authz_stub_unauth_3"),
-                &actor,
-                "pii"
-            )
-            .unwrap()
-        );
+        assert!(!check_unmask_authorization(
+            &DbBinding::cold_start("authz_stub_unauth_3"),
+            &actor,
+            "pii"
+        )
+        .unwrap());
     }
 
     // ---------------------------------------------------------------
