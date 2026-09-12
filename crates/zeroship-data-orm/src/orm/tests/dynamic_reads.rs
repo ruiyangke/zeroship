@@ -91,6 +91,56 @@ async fn exercise(postgres: bool) {
     owner.close().await;
 }
 
+async fn exercise_bigint_sum(postgres: bool) {
+    let owner = if postgres {
+        CollectionFixture::postgres("balances", value!({"amount":{"type":"bigInt"}})).await
+    } else {
+        CollectionFixture::sqlite("balances", value!({"amount":{"type":"bigInt"}})).await
+    };
+    let balances = owner.database.collection("balances").unwrap();
+    balances
+        .execute(Operation::InsertMany {
+            documents: value!([{"amount":10}, {"amount":20}]),
+        })
+        .await
+        .unwrap();
+
+    let aggregated = rows(
+        balances
+            .execute(Operation::Aggregate {
+                pipeline: value!([{"$group":{"total":{"$sum":"amount"}}}]),
+                options: value!({}),
+            })
+            .await
+            .unwrap(),
+    );
+    assert_eq!(aggregated, vec![value!({"total":30})]);
+    owner.close().await;
+}
+
+async fn exercise_boolean_accumulator_refusal(postgres: bool) {
+    let owner = if postgres {
+        CollectionFixture::postgres("flags", value!({"enabled":{"type":"boolean"}})).await
+    } else {
+        CollectionFixture::sqlite("flags", value!({"enabled":{"type":"boolean"}})).await
+    };
+    let flags = owner.database.collection("flags").unwrap();
+    let error = flags
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"total":{"$sum":"enabled"}}}]),
+            options: value!({}),
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("accumulator has no portable column type"),
+        "{error}"
+    );
+    owner.close().await;
+}
+
 #[compio::test]
 async fn sqlite_dynamic_reads_use_the_registered_compiler() {
     exercise(false).await;
@@ -99,6 +149,26 @@ async fn sqlite_dynamic_reads_use_the_registered_compiler() {
 #[compio::test]
 async fn postgres_dynamic_reads_use_the_registered_compiler() {
     exercise(true).await;
+}
+
+#[compio::test]
+async fn sqlite_bigint_sum_returns_an_integer() {
+    exercise_bigint_sum(false).await;
+}
+
+#[compio::test]
+async fn postgres_bigint_sum_returns_an_integer() {
+    exercise_bigint_sum(true).await;
+}
+
+#[compio::test]
+async fn sqlite_refuses_boolean_accumulators() {
+    exercise_boolean_accumulator_refusal(false).await;
+}
+
+#[compio::test]
+async fn postgres_refuses_boolean_accumulators() {
+    exercise_boolean_accumulator_refusal(true).await;
 }
 
 #[compio::test]
@@ -166,9 +236,11 @@ async fn other_dynamic_reads_reject_malformed_options() {
         .count(value!({}), value!({"include_deleted":"true"}))
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("include_deleted must be a boolean"));
+    assert!(
+        error
+            .to_string()
+            .contains("include_deleted must be a boolean")
+    );
 
     let error = records
         .execute(Operation::Distinct {
@@ -178,9 +250,11 @@ async fn other_dynamic_reads_reject_malformed_options() {
         })
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("distinct options must be an object"));
+    assert!(
+        error
+            .to_string()
+            .contains("distinct options must be an object")
+    );
 
     let error = records
         .execute(Operation::Aggregate {
@@ -189,9 +263,11 @@ async fn other_dynamic_reads_reject_malformed_options() {
         })
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("aggregate options must be an object"));
+    assert!(
+        error
+            .to_string()
+            .contains("aggregate options must be an object")
+    );
 
     for sort in [
         value!({"records":0}),
@@ -268,9 +344,11 @@ async fn dynamic_reads_reject_non_portable_value_semantics() {
         })
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("predicate operator is not supported"));
+    assert!(
+        error
+            .to_string()
+            .contains("predicate operator is not supported")
+    );
 
     let error = records
         .execute(Operation::Aggregate {
@@ -279,8 +357,10 @@ async fn dynamic_reads_reject_non_portable_value_semantics() {
         })
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("field 'secret' is not filterable"));
+    assert!(
+        error
+            .to_string()
+            .contains("field 'secret' is not filterable")
+    );
     owner.close().await;
 }
