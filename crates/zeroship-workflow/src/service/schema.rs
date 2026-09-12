@@ -26,8 +26,9 @@ pub(crate) fn fingerprint(dialect: &str) -> Result<String, WorkflowServiceError>
         .ok_or_else(|| WorkflowServiceError::Internal("unsupported workflow schema dialect".into()))
 }
 
-/// Initialize a new local journal using the shared migration definition.
-/// Existing journals are verified without altering or resetting their schema.
+/// Initialize workflow tables in the app's local database using the shared
+/// migration definition. Existing workflow tables are verified without altering
+/// or resetting their schema. Business tables can already exist in the database.
 ///
 /// # Errors
 /// Refuses incompatible journals and reports filesystem or database failures.
@@ -47,10 +48,13 @@ pub fn initialize_sqlite(path: &Path) -> Result<(), WorkflowServiceError> {
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(super::store::sqlite_error)?;
-    let populated: bool = tx.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%')",
-        [], |row| row.get(0),
-    ).map_err(super::store::sqlite_error)?;
+    let populated: bool = tx
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name GLOB '__zeroship_workflow_*')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(super::store::sqlite_error)?;
     if populated {
         let actual: String = tx
             .query_row(
