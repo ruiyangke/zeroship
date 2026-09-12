@@ -291,6 +291,7 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
     )
     .await
     .unwrap();
+    let second = second.with_snapshots(fixture_snapshot_store());
     second
         .register_app(&app, configured_policy(1, AppPolicy::default()))
         .await
@@ -304,6 +305,7 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
                 workflows: ["Example".into()].into(),
                 schedules: Vec::new(),
             },
+            &test_snapshot(),
         )
         .await
         .unwrap();

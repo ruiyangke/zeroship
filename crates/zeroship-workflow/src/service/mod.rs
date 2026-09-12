@@ -17,10 +17,12 @@ pub use policy::{HostPolicies, PolicySnapshot};
 pub mod runner;
 mod schedules;
 mod signals;
+mod snapshots;
 pub use schedules::{
     IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
 };
 pub use signals::AcceptedBroadcast;
+pub use snapshots::{ExecutableSnapshot, SnapshotStore};
 mod tasks;
 pub use app::{AppWorkflows, WorkflowService};
 pub mod schema;

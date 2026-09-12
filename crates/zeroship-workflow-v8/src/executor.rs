@@ -9,17 +9,20 @@ use zeroship_workflow::{
             ExecutionBudget, PreparedExecution, TaskExecution, TaskExecutor, TaskPayloadLimits,
             TaskPayloadReader, TaskPayloads,
         },
-        TaskAssignment,
+        ExecutableSnapshot, TaskAssignment,
     },
     WorkflowExecution, WorkflowInvocation, WorkflowServiceError,
 };
 
-/// A trusted host loads the assignment's immutable deployment and app context.
+/// A trusted host binds the retained executable and the assignment's app context.
+/// The module graph and runtime descriptor must come from the supplied snapshot;
+/// runtime variables and native handles come from the host's trusted app binding.
 #[async_trait(?Send)]
 pub trait WorkflowRuntimeLoader {
     async fn load(
         &self,
         assignment: &TaskAssignment,
+        snapshot: &ExecutableSnapshot,
     ) -> Result<LoadedWorkflow, WorkflowServiceError>;
 }
 
@@ -150,7 +153,16 @@ impl TaskExecution for V8Execution {
             let (loader, assignment) = self.loader.as_ref().ok_or_else(|| {
                 WorkflowServiceError::Internal("workflow runtime loader is absent".into())
             })?;
-            self.loaded = Some(loader.load(assignment).await?);
+            let snapshot = self
+                .payloads
+                .as_ref()
+                .ok_or_else(|| {
+                    WorkflowServiceError::Internal("workflow snapshot authority is absent".into())
+                })?
+                .snapshot()
+                .await?;
+            self.budget.check()?;
+            self.loaded = Some(loader.load(assignment, &snapshot).await?);
         }
         let loaded = self.loaded.as_ref().expect("loaded workflow runtime");
         let interrupt = loaded.runtime.interrupt_handle();

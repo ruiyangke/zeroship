@@ -8,8 +8,8 @@ mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
 
 use super::{
-    CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken,
-    WorkerIdentity, WorkflowService,
+    CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken, WorkerIdentity,
+    WorkflowService,
 };
 use crate::{WorkflowExecution, WorkflowServiceError};
 use async_trait::async_trait;
@@ -43,6 +43,24 @@ pub trait TaskTransport {
 pub struct EmbeddedTasks {
     service: WorkflowService,
     worker: WorkerIdentity,
+}
+impl EmbeddedTasks {
+    /// Read the deployment retained for this task's live execution claim.
+    ///
+    /// # Errors
+    /// Rejects stale claims and unavailable or corrupt snapshots.
+    #[expect(
+        clippy::future_not_send,
+        reason = "snapshot I/O runs on its owning compio thread"
+    )]
+    pub async fn snapshot(
+        &self,
+        task: &TaskAssignment,
+    ) -> Result<super::ExecutableSnapshot, WorkflowServiceError> {
+        self.service
+            .task_snapshot(&self.worker, &task.id, &task.token)
+            .await
+    }
 }
 impl WorkflowService {
     #[must_use]

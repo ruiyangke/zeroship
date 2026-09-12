@@ -12,9 +12,6 @@ use zeroship_storage::{
     LocalFs, StorageStore,
 };
 
-#[path = "../../../../../tests/fixtures/s3.rs"]
-mod s3_fixture;
-
 fn body(value: &'static [u8]) -> BoxChunkSource {
     Box::new(OnceChunk::new(Bytes::from_static(value)))
 }
