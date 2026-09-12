@@ -1,5 +1,6 @@
 use super::{
-    app::{decode, encode, insert_root_run, parse_state},
+    app::{current_run, decode, encode, insert_root_run, keyed_run, live_runs, parse_state},
+    models,
     store::{Row, Transaction},
     AppPolicy,
 };
@@ -10,6 +11,11 @@ use crate::{
 };
 use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, Operation},
+    sql::{Predicate, RowLimit},
+    value,
+};
 
 pub(crate) async fn load(
     tx: &mut Transaction,
@@ -17,8 +23,38 @@ pub(crate) async fn load(
     id: &str,
     generation: i64,
 ) -> Result<Vec<StepCheckpoint>, WorkflowServiceError> {
-    let steps = tx.table("steps");
-    tx.query(&format!("SELECT record FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 ORDER BY ordinal"), &[app.as_str().into(),id.into(),generation.into()]).await?.iter().map(|row| decode(&row.text("record")?)).collect()
+    let db = tx.database();
+    let source = db.entity::<models::steps::Entity>()?.alias("s")?;
+    let mut journal = Vec::new();
+    let mut after = None;
+    let page_limit = RowLimit::default().get();
+    loop {
+        let mut predicates = vec![
+            source.column(models::steps::app_id).eq(app.as_str())?,
+            source.column(models::steps::run_id).eq(id)?,
+            source.column(models::steps::generation).eq(generation)?,
+        ];
+        if let Some(after) = after {
+            predicates.push(source.column(models::steps::ordinal).gt(after)?);
+        }
+        let page = db
+            .from(&source)
+            .filter(Predicate::And(predicates))
+            .order_by(source.column(models::steps::ordinal).asc())
+            .select(source.row::<models::StoredStep>())?
+            .limit(page_limit)?
+            .all()
+            .await?;
+        let count = page.len();
+        for row in page {
+            after = Some(row.ordinal);
+            journal.push(decode(&row.record)?);
+        }
+        if count < page_limit as usize {
+            break;
+        }
+    }
+    Ok(journal)
 }
 pub(crate) fn replay(steps: &[StepCheckpoint]) -> Vec<JournalStep> {
     steps
@@ -44,8 +80,9 @@ pub(crate) async fn update(
     generation: i64,
     step: &StepCheckpoint,
 ) -> Result<(), WorkflowServiceError> {
-    let steps = tx.table("steps");
-    tx.execute(&format!("UPDATE {steps} SET state=$5,record=$6 WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"), &[app.as_str().into(),id.into(),generation.into(),i64::from(step.ordinal).into(),step.state.clone().into(),encode(step)?.into()]).await?;
+    tx.database().collection(models::steps::Entity::COLLECTION)?
+        .update(value!({"app_id":app.as_str(), "run_id":id, "generation":generation, "ordinal":i64::from(step.ordinal)}),
+            value!({"state":step.state.clone(), "record":encode(step)?})).await?;
     Ok(())
 }
 
@@ -65,7 +102,9 @@ pub(crate) async fn append(
             WorkflowServiceError::ResourceExhausted("workflow journal size overflow".into())
         })
     })?;
-    let steps = tx.table("steps");
+    let steps = tx
+        .database()
+        .collection(models::steps::Entity::COLLECTION)?;
     for mut step in checkpoints {
         if step.ordinal < 0
             || step.name.is_empty()
@@ -147,12 +186,20 @@ pub(crate) async fn append(
                 "workflow journal size limit reached".into(),
             ));
         }
-        tx.execute(&format!("INSERT INTO {steps} (app_id,run_id,generation,ordinal,name,occurrence,origin_generation,kind,state,record,compensation_retry_ms) VALUES ($1,$2,$3,$4,$5,$6,$3,$7,$8,$9,$10)"),
-            &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(step.ordinal).into(),step.name.clone().into(),i64::from(step.name_occurrence).into(),step.kind.clone().into(),step.state.clone().into(),encode(&step)?.into(),policy.compensation_retry_ms.into()]).await?;
+        steps.insert(value!({
+            "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
+            "ordinal":i64::from(step.ordinal), "name":step.name.clone(), "occurrence":i64::from(step.name_occurrence),
+            "origin_generation":generation, "kind":step.kind.clone(), "state":step.state.clone(),
+            "record":encode(&step)?, "compensation_retry_ms":policy.compensation_retry_ms,
+        })).await?;
         if step.state == "running" {
-            let waits = tx.table("waits");
-            tx.execute(&format!("INSERT INTO {waits} (app_id,run_id,generation,ordinal,kind,signal_type,topic,max_signal_age,due_at,child_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)"),
-                &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(step.ordinal).into(),step.kind.clone().into(),step.signal_type.clone().into(),step.topic.clone().into(),step.max_signal_age_ms.into(),step.wake_at.map(|time|time.timestamp_millis()).into(),step.child_run_id.clone().into()]).await?;
+            tx.database().collection(models::waits::Entity::COLLECTION)?
+                .insert(value!({
+                    "app_id":app.as_str(), "run_id":id.clone(), "generation":generation,
+                    "ordinal":i64::from(step.ordinal), "kind":step.kind.clone(), "signal_type":step.signal_type.clone(),
+                    "topic":step.topic.clone(), "max_signal_age":step.max_signal_age_ms,
+                    "due_at":step.wake_at.map(|time|time.timestamp_millis()), "child_id":step.child_run_id.clone(),
+                })).await?;
             super::signals::subscribe(tx, app, &id, generation, &step, now).await?;
         }
         journal.push(step);
@@ -172,14 +219,19 @@ async fn child(
         WorkflowServiceError::InvalidRequest("child workflow name is missing".into())
     })?;
     validation::workflow_name(name)?;
-    let deploys = tx.table("deploys");
     let deploy_id = parent.text("deploy_id")?;
     let rows = tx
-        .query(
-            &format!(
-                "SELECT manifest FROM {deploys} WHERE app_id=$1 AND id=$2 AND state='available'"
-            ),
-            &[app.as_str().into(), deploy_id.clone().into()],
+        .database()
+        .entity::<models::deploys::Entity>()?
+        .find::<models::DeploymentManifest>(
+            models::deploys::app_id
+                .eq(app.as_str())?
+                .and(models::deploys::id.eq(deploy_id.as_str())?)
+                .and(models::deploys::state.eq("available")?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
         )
         .await?;
     let deploy: super::DeployRegistration = decode(
@@ -188,7 +240,7 @@ async fn child(
             .ok_or_else(|| {
                 WorkflowServiceError::Unavailable("pinned child deployment is unavailable".into())
             })?
-            .text("manifest")?,
+            .manifest,
     )?;
     if !deploy.workflows.contains(name) {
         return invalid("child workflow is absent from the pinned deployment");
@@ -196,14 +248,8 @@ async fn child(
     let options = step.child_options.clone().unwrap_or_default();
     let runs = tx.table("runs");
     if let Some(key) = &options.key {
-        let rows = tx
-            .query(
-                &format!("SELECT id FROM {runs} WHERE app_id=$1 AND workflow_name=$2 AND key=$3"),
-                &[app.as_str().into(), name.into(), key.clone().into()],
-            )
-            .await?;
-        if let Some(row) = rows.first() {
-            let id = row.text("id")?;
+        if let Some(row) = keyed_run(tx, app, name, key).await? {
+            let id = row.id;
             // A keyed child must not introduce an ancestor wait cycle.
             let ancestors=tx.query(&format!("WITH RECURSIVE ancestors AS (SELECT id,parent_id FROM {runs} WHERE app_id=$1 AND id=$2 UNION ALL SELECT r.id,r.parent_id FROM {runs} r JOIN ancestors a ON a.parent_id=r.id WHERE r.app_id=$1) SELECT id FROM ancestors WHERE id=$3"), &[app.as_str().into(),parent.text("id")?.into(),id.clone().into()]).await?;
             if !ancestors.is_empty() {
@@ -223,8 +269,7 @@ async fn child(
             "workflow child depth limit reached".into(),
         ));
     }
-    let live=tx.query(&format!("SELECT COUNT(*) AS total FROM {runs} WHERE app_id=$1 AND state NOT IN ('completed','failed','cancelled')"), &[app.as_str().into()]).await?;
-    if live[0].integer("total")? >= policy.max_live_runs {
+    if live_runs(tx, app).await? >= policy.max_live_runs {
         return Err(WorkflowServiceError::ResourceExhausted(
             "workflow live-run limit reached".into(),
         ));
@@ -237,8 +282,17 @@ async fn child(
     };
     validation::start(&start)?;
     insert_root_run(tx, app, &id, name, &deploy_id, &start, now).await?;
-    tx.execute(&format!("UPDATE {runs} SET parent_id=$3,parent_generation=$4,parent_ordinal=$5,cascade=$6,depth=$7 WHERE app_id=$1 AND id=$2"),
-        &[app.as_str().into(),id.clone().into(),parent.text("id")?.into(),parent.integer("generation")?.into(),i64::from(step.ordinal).into(),i64::from(options.cascade).into(),(parent.integer("depth")?+1).into()]).await?;
+    tx.database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .update(
+            value!({"app_id":app.as_str(), "id":id.clone()}),
+            value!({
+                "parent_id":parent.text("id")?, "parent_generation":parent.integer("generation")?,
+                "parent_ordinal":i64::from(step.ordinal), "cascade":i64::from(options.cascade),
+                "depth":parent.integer("depth")? + 1,
+            }),
+        )
+        .await?;
     Ok(id)
 }
 
@@ -298,15 +352,15 @@ pub(crate) async fn resolve(
             }
         }
         if step.kind == "child" {
-            let runs = tx.table("runs");
-            let generations = tx.table("generations");
-            let rows=tx.query(&format!("SELECT r.state,r.generation,g.output,g.output_ref,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[app.as_str().into(),step.child_run_id.clone().into()]).await?;
-            let child = rows.first().ok_or_else(|| {
+            let child_id = step.child_run_id.as_deref().ok_or_else(|| {
                 WorkflowServiceError::Internal("workflow child reference is missing".into())
             })?;
-            let state = parse_state(&child.text("state")?)?;
+            let (child, outcome) = current_run(tx, app, child_id).await?.ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow child reference is missing".into())
+            })?;
+            let state = parse_state(&child.state)?;
             if state == crate::operations::RunState::Completed {
-                if child.optional_text("output_ref")?.is_some() {
+                if outcome.output_ref.is_some() {
                     step.output_ref = Some(
                         super::payloads::inherit_child_output(
                             tx,
@@ -315,7 +369,7 @@ pub(crate) async fn resolve(
                                 id: step.child_run_id.as_deref().ok_or_else(|| {
                                     WorkflowServiceError::Internal("missing workflow child".into())
                                 })?,
-                                generation: child.integer("generation")?,
+                                generation: child.generation,
                             },
                             super::payloads::RunGeneration {
                                 id: &id,
@@ -328,15 +382,15 @@ pub(crate) async fn resolve(
                     );
                 } else {
                     output = Some(
-                        child
-                            .optional_text("output")?
+                        outcome
+                            .output
                             .map(|value| decode(&value))
                             .transpose()?
                             .unwrap_or(Value::Null),
                     );
                 }
             } else if state.is_terminal() {
-                error=Some(child.optional_text("error")?.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"name":"ChildWorkflowError","message":"child workflow was cancelled"})));
+                error=Some(outcome.error.map(|value|decode(&value)).transpose()?.unwrap_or(json!({"name":"ChildWorkflowError","message":"child workflow was cancelled"})));
             } else if expired {
                 error = Some(
                     json!({"name":"WorkflowTimeoutError","message":"child workflow wait expired"}),
@@ -367,9 +421,14 @@ pub(crate) async fn clear_wait(
     generation: i64,
     ordinal: i32,
 ) -> Result<(), WorkflowServiceError> {
-    for name in ["waits", "subscriptions"] {
-        let table = tx.table(name);
-        tx.execute(&format!("DELETE FROM {table} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"), &[app.as_str().into(),id.into(),generation.into(),i64::from(ordinal).into()]).await?;
+    for table in [
+        models::waits::Entity::COLLECTION,
+        models::subscriptions::Entity::COLLECTION,
+    ] {
+        tx.database().collection(table)?.execute(Operation::Purge {
+            filter:value!({"app_id":app.as_str(), "run_id":id, "generation":generation, "ordinal":i64::from(ordinal)}),
+            many:false,
+        }).await?;
     }
     Ok(())
 }

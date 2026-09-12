@@ -16,7 +16,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    orm::{Entity, FindOptions, Operation},
+    orm::{Entity, FindOptions, Operation, Output},
+    sql::Predicate,
     value,
 };
 
@@ -139,14 +140,12 @@ impl AppWorkflows {
         let runs = tx.table("runs");
         let mut joined = None;
         if let Some(key) = &options.key {
-            let rows = tx.query(&format!("SELECT id,state FROM {runs} WHERE app_id=$1 AND workflow_name=$2 AND key=$3"),
-                &[self.app.as_str().into(),name.into(),key.clone().into()]).await?;
-            if let Some(existing) = rows.first() {
-                let state = parse_state(&existing.text("state")?)?;
+            if let Some(existing) = keyed_run(&tx, &self.app, name, key).await? {
+                let state = parse_state(&existing.state)?;
                 match options.on_conflict {
                     ConflictPolicy::Join => {
                         joined = Some(StartedRun {
-                            id: existing.text("id")?,
+                            id: existing.id,
                             state,
                         });
                     }
@@ -159,7 +158,7 @@ impl AppWorkflows {
                         // Release the business key while cancellation is durable. The
                         // incumbent's accepted frontier still belongs to its task.
                         tx.execute(&format!("UPDATE {runs} SET key=NULL,control='cancel',due_at=CASE WHEN task_id IS NULL THEN $3 ELSE due_at END WHERE app_id=$1 AND id=$2"),
-                            &[self.app.as_str().into(),existing.text("id")?.into(),now.into()]).await?;
+                            &[self.app.as_str().into(),existing.id.into(),now.into()]).await?;
                     }
                 }
             }
@@ -167,8 +166,7 @@ impl AppWorkflows {
         let result = if let Some(joined) = joined {
             joined
         } else {
-            let live = tx.query(&format!("SELECT COUNT(*) AS total FROM {runs} WHERE app_id=$1 AND state NOT IN ('completed','failed','cancelled')"), &[self.app.as_str().into()]).await?;
-            if live[0].integer("total")? >= policy.max_live_runs {
+            if live_runs(&tx, &self.app).await? >= policy.max_live_runs {
                 return Err(WorkflowServiceError::ResourceExhausted(
                     "workflow live-run limit reached".into(),
                 ));
@@ -196,27 +194,21 @@ impl AppWorkflows {
 
     pub async fn status(&self, run_id: &str) -> Result<RunStatus, WorkflowServiceError> {
         validate_run(run_id)?;
-        let mut tx = self.service.begin().await?;
-        let runs = tx.table("runs");
-        let generations = tx.table("generations");
-        let rows=tx.query(&format!("SELECT r.state,g.output,g.output_ref,g.error FROM {runs} r JOIN {generations} g ON g.app_id=r.app_id AND g.run_id=r.id AND g.generation=r.generation WHERE r.app_id=$1 AND r.id=$2"), &[self.app.as_str().into(),run_id.into()]).await?;
-        let row = rows.first().ok_or_else(|| not_found("workflow run"))?;
+        let tx = self.service.begin().await?;
+        let (run, outcome) = current_run(&tx, &self.app, run_id)
+            .await?
+            .ok_or_else(|| not_found("workflow run"))?;
         let status = RunStatus {
-            state: parse_state(&row.text("state")?)?,
-            output: if let Some(reference) = row.optional_text("output_ref")? {
+            state: parse_state(&run.state)?,
+            output: if let Some(reference) = outcome.output_ref {
                 let reference: crate::engine::WorkflowOutputRef = decode(&reference)?;
                 Some(
                     json!({"kind":"ref","ref":format!("wfblob:sha256:{}",reference.hash),"hash":reference.hash,"size":reference.size,"contentType":reference.content_type}),
                 )
             } else {
-                row.optional_text("output")?
-                    .map(|value| decode(&value))
-                    .transpose()?
+                outcome.output.map(|value| decode(&value)).transpose()?
             },
-            error: row
-                .optional_text("error")?
-                .map(|value| decode(&value))
-                .transpose()?,
+            error: outcome.error.map(|value| decode(&value)).transpose()?,
         };
         tx.commit().await?;
         Ok(status)
@@ -257,6 +249,84 @@ impl AppWorkflows {
         tx.commit().await?;
         Ok(result)
     }
+}
+
+pub(crate) async fn keyed_run(
+    tx: &Transaction,
+    app: &AppId,
+    workflow: &str,
+    key: &str,
+) -> Result<Option<models::KeyedRun>, WorkflowServiceError> {
+    Ok(tx
+        .database()
+        .entity::<models::runs::Entity>()?
+        .find::<models::KeyedRun>(
+            models::runs::app_id
+                .eq(app.as_str())?
+                .and(models::runs::workflow_name.eq(workflow)?)
+                .and(models::runs::key.eq(Some(key))?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next())
+}
+
+pub(crate) async fn live_runs(tx: &Transaction, app: &AppId) -> Result<i64, WorkflowServiceError> {
+    let output = tx
+        .database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .count(
+            value!({"app_id":app.as_str(), "state":{"$nin":["completed","failed","cancelled"]}}),
+            value!({}),
+        )
+        .await?;
+    match output {
+        Output::Count(count) => Ok(count),
+        _ => Err(WorkflowServiceError::Internal(
+            "workflow count returned rows".into(),
+        )),
+    }
+}
+
+/// Read the run and its current generation in one database snapshot.
+pub(crate) async fn current_run(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+) -> Result<Option<(models::RunHead, models::GenerationOutcome)>, WorkflowServiceError> {
+    let db = tx.database();
+    let run = db.entity::<models::runs::Entity>()?.alias("r")?;
+    let generation = db.entity::<models::generations::Entity>()?.alias("g")?;
+    Ok(db
+        .from(&run)
+        .inner_join(
+            &generation,
+            Predicate::And(vec![
+                run.column(models::runs::app_id)
+                    .eq_column(generation.column(models::generations::app_id))?,
+                run.column(models::runs::id)
+                    .eq_column(generation.column(models::generations::run_id))?,
+                run.column(models::runs::generation)
+                    .eq_column(generation.column(models::generations::generation))?,
+            ]),
+        )?
+        .filter(Predicate::And(vec![
+            run.column(models::runs::app_id).eq(app.as_str())?,
+            run.column(models::runs::id).eq(id)?,
+        ]))
+        .select((
+            run.row::<models::RunHead>(),
+            generation.row::<models::GenerationOutcome>(),
+        ))?
+        .limit(1)?
+        .all()
+        .await?
+        .into_iter()
+        .next())
 }
 
 pub(crate) async fn lock_app(

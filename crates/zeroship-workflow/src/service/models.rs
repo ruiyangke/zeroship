@@ -8,7 +8,8 @@ zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json"
 pub use journal::{
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
     __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
-    __zeroship_workflow_schema_version as schema_version,
+    __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_steps as steps,
+    __zeroship_workflow_subscriptions as subscriptions, __zeroship_workflow_waits as waits,
 };
 
 #[derive(FromRow)]
@@ -29,6 +30,35 @@ pub struct RequestResult {
     pub operation: String,
     pub digest: String,
     pub result: String,
+}
+
+#[derive(FromRow)]
+#[orm(entity = runs)]
+pub struct KeyedRun {
+    pub id: String,
+    pub state: String,
+}
+
+#[derive(FromRow)]
+#[orm(entity = runs)]
+pub struct RunHead {
+    pub state: String,
+    pub generation: i64,
+}
+
+#[derive(FromRow)]
+#[orm(entity = generations)]
+pub struct GenerationOutcome {
+    pub output: Option<String>,
+    pub output_ref: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = steps)]
+pub struct StoredStep {
+    pub ordinal: i64,
+    pub record: String,
 }
 
 /// Compose the journal with the app's existing descriptors in one publication.

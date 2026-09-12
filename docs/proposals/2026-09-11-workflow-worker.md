@@ -32,11 +32,13 @@ The replacement service now uses a shared `OrmStore`; its workflow-owned
 PostgreSQL and SQLite adapters have been removed. The CLI supplies its normal
 database binding and object storage. Transaction ownership stays on the engine's
 compio thread, with a bounded app-scoped client for V8 and other Rust threads.
-Journal fingerprint and deployment reads, root-run creation and request receipts
-use ORM models and collections. The remaining journal operations use the ORM's
-explicit SQL interface while conversion proceeds. ORM table references permit every table prefix
-for Rust and creator code within the bound customer schema. The existing Control
-store's removal remains pending.
+Journal fingerprint and deployment reads, root-run creation, request receipts,
+checkpoint persistence and wait cleanup use ORM models and collections. History
+reads seek through ordered pages, and status joins each run to its current
+generation using the complete app-scoped key. The remaining journal operations
+use the ORM's explicit SQL interface while conversion proceeds. ORM table
+references permit every table prefix for Rust and creator code within the bound
+customer schema. The existing Control store's removal remains pending.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
@@ -251,8 +253,10 @@ fingerprints and the runtime descriptor from the canonical migration. Native
 PostgreSQL and SQLite contracts compare descriptor columns and keys with the
 migrated catalog. The engine installs these models alongside the app's existing
 descriptors, refusing conflicting entries before publication. Fingerprint and
-deployment reads, root-run creation and request receipts use that metadata.
-The remaining journal conversion is unfinished.
+deployment reads, root-run creation, request receipts, status and checkpoint
+operations use that metadata. Native tests cross the history page boundary and
+reuse run IDs across apps and generations to verify complete, scoped reads and
+writes. The remaining journal conversion is unfinished.
 The public Rust and TypeScript ORM accepts declared named and composite keys.
 Bounded mutations, joined row projections, immutable-field checks, concurrency
 predicates and encrypted-row identity use every key component. Live database
