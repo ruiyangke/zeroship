@@ -6190,7 +6190,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // Security IMPORTANT #1 — validate_collection reserved-name checks
+    // Collection syntax and column declaration reservations
     // -----------------------------------------------------------------------
 
     /// Valid collection names must still pass — no regression.
@@ -6242,9 +6242,9 @@ mod tests {
             let engine_accepts =
                 zeroship_migrate_core::schema::query::validate_field_name(vendors, name).is_ok();
             let schema_accepts = validate_field_name(name).is_ok();
-            let plan_accepts = crate::sql::ident::Ident::parse_as(
-                name, crate::sql::ident::IdentRole::Column,
-            ).is_ok();
+            let plan_accepts =
+                crate::sql::ident::Ident::parse_as(name, crate::sql::ident::IdentRole::Column)
+                    .is_ok();
 
             if engine_accepts != schema_accepts || engine_accepts != plan_accepts {
                 mismatches.push(format!(
@@ -6263,9 +6263,14 @@ mod tests {
     #[test]
     fn table_references_accept_all_prefixes_in_the_bound_schema() {
         let mut names = [
-            "users", "__zeroship_workflow_runs", "__ZEROSHIP_STATE",
-            "__zero_migrate_state", "__zs_internal",
-        ].map(str::to_owned).to_vec();
+            "users",
+            "__zeroship_workflow_runs",
+            "__ZEROSHIP_STATE",
+            "__zero_migrate_state",
+            "__zs_internal",
+        ]
+        .map(str::to_owned)
+        .to_vec();
         names.extend(shipping_catalog_reservation_witnesses());
         for name in names {
             assert!(validate_collection(&name).is_ok(), "{name}");
