@@ -6,9 +6,7 @@
 //! module populates those values from PostgreSQL without embedding the driver
 //! in the shared schema floor.
 
-use crate::sql::catalog::{
-    ColumnInfo, EncryptionMeta, ForeignKeyInfo, IndexInfo, LiveSchema, MaskMeta,
-};
+use crate::sql::catalog::{ColumnInfo, ForeignKeyInfo, IndexInfo, LiveSchema, MaskMeta};
 use compio_postgres::Pool;
 
 /// Error from the live-schema introspection helpers.
@@ -118,26 +116,13 @@ SELECT c.relname AS table_name,
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
         // Recover protection markers from persisted column comments.
         // Mask metadata is attached after all columns have been collected.
-        let mut encryption: Option<EncryptionMeta> = None;
+        let mut encrypted = false;
         if let Some(comment) = &pg_comment {
             // The mask sentinel belongs to the visible field column.
             if comment.starts_with(crate::sql::mask_codec::MASK_SENTINEL_PREFIX) {
                 mask_sentinels.insert((table.clone(), column.clone()), comment.clone());
-            } else if comment.starts_with(crate::sql::mask_codec::ENC_SENTINEL_PREFIX) {
-                match crate::sql::mask_codec::parse_encryption_sentinel(comment) {
-                    Ok(meta) => encryption = Some(meta),
-                    Err(e) => {
-                        // Malformed sentinels are logged and omitted from the recovered metadata.
-                        tracing::warn!(
-                            table = %table,
-                            column = %column,
-                            comment = %comment,
-                            error = %e,
-                            "diff: malformed zero-migrate:enc sentinel on PG column; \
-                             treating column as unencrypted"
-                        );
-                    }
-                }
+            } else if crate::sql::mask_codec::is_encryption_sentinel(comment) {
+                encrypted = true;
             }
         }
         out.tables.entry(table).or_default().insert(
@@ -147,7 +132,7 @@ SELECT c.relname AS table_name,
                 not_null,
                 default_expr,
                 default_volatility,
-                encryption,
+                encrypted,
                 // Remaining fields default; vector/geo are populated
                 // from `information_schema` + `pg_indexes` introspection.
                 ..Default::default()

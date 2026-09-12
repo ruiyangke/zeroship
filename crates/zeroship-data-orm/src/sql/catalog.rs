@@ -52,12 +52,8 @@ pub struct ColumnInfo {
         reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
     )]
     pub is_geopoint: bool,
-    /// Encryption metadata recovered from the stored column sentinel.
-    #[allow(
-        dead_code,
-        reason = "This metadata is exported for test-helper diff assertions and future live-schema consumers beyond the current release path."
-    )]
-    pub encryption: Option<EncryptionMeta>,
+    /// Whether the stored catalog marks this column as encrypted.
+    pub encrypted: bool,
     /// Mask strategy, classification and raw-column metadata recovered from the catalog.
     pub mask: Option<MaskMeta>,
 }
@@ -72,28 +68,10 @@ impl Default for ColumnInfo {
             default_volatility: None,
             vector_dims: None,
             is_geopoint: false,
-            encryption: None,
+            encrypted: false,
             mask: None,
         }
     }
-}
-
-/// Plaintext type retained by the physical catalog for encrypted storage.
-/// PostgreSQL records the encryption sentinel in a column comment; SQLite
-/// retains its inline comment in `sqlite_master.sql`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EncryptionMeta {
-    /// The logical primitive hidden by the physical binary SQL type. Runtime
-    /// codecs use the installed field descriptor's `type`.
-    pub wraps: WrappedType,
-}
-
-/// Plaintext primitive encoded in a catalog encryption sentinel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WrappedType {
-    String,
-    Number,
-    Bytes,
 }
 
 /// Mask metadata recovered from a protection sentinel on the visible column.

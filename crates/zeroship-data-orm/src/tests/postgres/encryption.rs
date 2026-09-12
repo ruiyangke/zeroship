@@ -223,7 +223,7 @@ fn encrypted_randomised_row_swap_rejected() {
 ///
 /// **The metadata source changed and the round trip did not.** This test used to
 /// plant `COMMENT ON COLUMN ... 'zero-migrate:enc:...'` / `'zero-migrate:mask:...'` sentinels and
-/// assert the data plane RECOVERED the encryption mode and mask kind from the
+/// assert the data plane recovered encryption and mask policy from the
 /// live catalog. That recovery is deleted: the sentinels were emitted by the
 /// migration engine out of the same DSL the descriptor is folded from, so the
 /// catalog could only ever agree with the descriptor or be stale, and the read
