@@ -1,10 +1,11 @@
 //! Auth HTTP server scoped to an explicitly owned test database.
 
-use super::{database::Database, native_authorize_return_to, test_auth_config};
+use super::{database::Database, native_authorize_return_to, test_auth_config_with};
 use compio_postgres::Client;
 use ntex::web;
 use std::sync::Arc;
 use zeroship_auth::{
+    config::AuthConfig,
     headers::SecurityHeaders,
     oidc::{refresh::RefreshSessionPool, Issuer},
     server,
@@ -16,18 +17,23 @@ pub struct AuthServer {
     pub pg: Arc<Client>,
     pub http: cyper::Client,
     pub refresh_pool: RefreshSessionPool,
+    pub config: Arc<AuthConfig>,
 }
 
 impl AuthServer {
     pub async fn start(database: &Database) -> Self {
-        Self::start_with_issuer(database, None).await
+        Self::configured(database, None, &[]).await
     }
 
     pub async fn with_issuer(database: &Database, issuer: Arc<Issuer>) -> Self {
-        Self::start_with_issuer(database, Some(issuer)).await
+        Self::configured(database, Some(issuer), &[]).await
     }
 
-    async fn start_with_issuer(database: &Database, issuer: Option<Arc<Issuer>>) -> Self {
+    pub async fn configured(
+        database: &Database,
+        issuer: Option<Arc<Issuer>>,
+        extra: &[&str],
+    ) -> Self {
         let database_url = database.auth_url().to_string();
         let pg = Arc::new(database.connect_as_auth().await);
         if let Some(issuer) = &issuer {
@@ -36,7 +42,10 @@ impl AuthServer {
                 .await
                 .expect("publish fixture signing key");
         }
-        let cfg = Arc::new(test_auth_config(&database_url));
+        let config = Arc::new(test_auth_config_with(&database_url, extra));
+        let cfg = config.clone();
+        let google_enabled = cfg.google_client_id().is_some();
+        let github_enabled = cfg.github_client_id().is_some();
         let db_state = pg.clone();
         let refresh_pool = RefreshSessionPool::new(database_url, 4);
         let pool_state = refresh_pool.clone();
@@ -53,7 +62,7 @@ impl AuthServer {
                     .state(db_state)
                     .state(refresh_pool)
                     .middleware(SecurityHeaders::new(frame_ancestor_origins))
-                    .configure(server::configure(false, false));
+                    .configure(server::configure(google_enabled, github_enabled));
                 if let Some(issuer) = issuer {
                     app.state(issuer)
                 } else {
@@ -69,6 +78,7 @@ impl AuthServer {
             pg,
             http: cyper::Client::new(),
             refresh_pool,
+            config,
         }
     }
 

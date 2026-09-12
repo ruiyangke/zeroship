@@ -45,7 +45,7 @@ struct SeededUserProfile {
 
 struct Fixture {
     server: AuthServer,
-    db: Arc<Client>,
+    db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
     app_id: Uuid,
@@ -65,7 +65,7 @@ impl Fixture {
 
     #[allow(clippy::future_not_send)]
     async fn boot_with_email_verified(database: &Database, email_verified: bool) -> Self {
-        let db = Arc::new(database.connect().await);
+        let db = database.connect().await;
         let issuer = Arc::new(test_issuer());
 
         let user_id = Uuid::new_v4();
