@@ -4,6 +4,7 @@ pub use crate::protection::Catalog;
 use crate::tests::fixtures::DatabaseFixture;
 
 pub mod cancel;
+pub(crate) mod identity;
 pub mod postgres;
 pub mod sqlite;
 pub use crate::backend_handle::BackendHandle;
@@ -21,14 +22,14 @@ pub trait Backend:
     /// Whether the host publishes changes from the database commit stream.
     fn publishes_committed_changes(&self) -> bool;
 }
+pub use crate::sql::descriptors::{GeoPoint, VectorMetric};
 pub use crate::storage::{Backup, LockManager};
 #[cfg(test)]
 pub use postgres::lock_guard::LockGuard;
 #[cfg(test)]
-pub use postgres::{PgLockManager, lock_guard, pg_autocommit, pg_introspect, pg_session_sql};
-pub use postgres::{PostgresBackend, pg_error, pg_row_json};
+pub use postgres::{lock_guard, pg_autocommit, pg_introspect, pg_session_sql, PgLockManager};
+pub use postgres::{pg_error, pg_row_json, PostgresBackend};
 pub use sqlite::SqliteBackend;
-pub use crate::sql::descriptors::{GeoPoint, VectorMetric};
 #[cfg(test)]
 mod tests {
 

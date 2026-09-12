@@ -162,6 +162,42 @@ pub struct ReturnedColumn {
 }
 
 #[derive(Debug)]
+pub struct IdentityRequest {
+    table: Table,
+    column: Column,
+    count: usize,
+}
+
+impl IdentityRequest {
+    pub fn new(table: Table, column: Column, count: usize) -> Result<Self, CompileError> {
+        table.check_column(&column)?;
+        if column.storage() != StorageType::Integer {
+            return Err(invalid("generated identity requires integer storage"));
+        }
+        if count == 0 {
+            return Err(invalid("generated identity allocation cannot be empty"));
+        }
+        Ok(Self {
+            table,
+            column,
+            count,
+        })
+    }
+
+    pub fn table(&self) -> &Table {
+        &self.table
+    }
+
+    pub fn column(&self) -> &Column {
+        &self.column
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
+#[derive(Debug)]
 pub struct InsertParts {
     pub table: Table,
     pub columns: Vec<Column>,

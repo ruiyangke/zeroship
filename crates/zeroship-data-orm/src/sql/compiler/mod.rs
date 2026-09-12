@@ -1,14 +1,14 @@
 //! SQL compiler contracts and native execution output.
 
-mod query;
 mod postgres;
+mod query;
 mod shared;
 mod sqlite;
 mod writer;
-pub use query::{CompiledQuery, ParameterType};
 pub use postgres::PostgresCompiler;
+pub use query::{CompiledQuery, ParameterType};
+pub use shared::{IdentityPlan, IdentityReadPlan, Requirements, SqlCompiler, SqlSupport};
 pub use sqlite::SqliteCompiler;
-pub use shared::{Requirements, SqlCompiler, SqlSupport};
 pub(crate) use writer::{ParameterSlot, SqlWriter};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

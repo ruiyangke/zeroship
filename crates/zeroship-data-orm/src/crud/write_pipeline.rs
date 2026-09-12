@@ -203,8 +203,16 @@ pub async fn apply(
                 payload, &schema, collection, actor_id,
             )?;
             if super::identity::requires_allocation(&schema, payload) {
-                super::identity::reserve_writer(route, collection, &schema).await?;
-                payload["id"] = super::identity::allocate(route, collection, &schema, 1)
+                let request = super::identity::request(
+                    route.schema(),
+                    collection,
+                    &schema,
+                    1,
+                    route.sql_registration(),
+                )?;
+                payload["id"] = crate::backend::identity::reserve(route, request)
+                    .await?
+                    .allocate()
                     .await?
                     .remove(0);
             }
@@ -219,15 +227,18 @@ pub async fn apply(
                 payload, &schema, collection, actor_id,
             )?;
             let identities = if super::identity::requires_allocation(&schema, payload) {
-                super::identity::reserve_writer(route, collection, &schema).await?;
+                let request = super::identity::request(
+                    route.schema(),
+                    collection,
+                    &schema,
+                    payload.as_array().expect("batch").len(),
+                    route.sql_registration(),
+                )?;
                 Some(
-                    super::identity::allocate(
-                        route,
-                        collection,
-                        &schema,
-                        payload.as_array().expect("batch").len(),
-                    )
-                    .await?,
+                    crate::backend::identity::reserve(route, request)
+                        .await?
+                        .allocate()
+                        .await?,
                 )
             } else {
                 None
@@ -262,9 +273,18 @@ pub async fn apply(
                 payload, &schema, collection, actor_id,
             )?;
             let allocate_identity = super::identity::requires_allocation(&schema, payload);
-            if allocate_identity {
-                super::identity::reserve_writer(route, collection, &schema).await?;
-            }
+            let allocation = if allocate_identity {
+                let request = super::identity::request(
+                    route.schema(),
+                    collection,
+                    &schema,
+                    1,
+                    route.sql_registration(),
+                )?;
+                Some(crate::backend::identity::reserve(route, request).await?)
+            } else {
+                None
+            };
             rewrite_upsert_doc_id_to_existing_row_id(
                 dialect,
                 payload,
@@ -275,7 +295,9 @@ pub async fn apply(
             )
             .await?;
             if allocate_identity && payload.get("id").is_none_or(Value::is_null) {
-                payload["id"] = super::identity::allocate(route, collection, &schema, 1)
+                payload["id"] = allocation
+                    .expect("generated identity reservation")
+                    .allocate()
                     .await?
                     .remove(0);
             }

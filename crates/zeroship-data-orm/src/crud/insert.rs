@@ -16,7 +16,8 @@ use std::collections::BTreeSet;
 pub(crate) fn requirements(schema: &Value) -> Requirements {
     Requirements {
         returning: true,
-        insert_generated_identity: crate::sql::identity::is_generated(schema),
+        insert_generated_identity: super::identity::is_generated(schema),
+        identity_allocation: super::identity::is_generated(schema),
         ..Requirements::default()
     }
 }
@@ -85,7 +86,7 @@ fn compile(
             resolved.table.column(&input.column).map_err(Into::into)
         })
         .collect::<Result<Vec<_>, QueryError>>()?;
-    let insert_generated_identity = crate::sql::identity::is_generated(schema)
+    let insert_generated_identity = super::identity::is_generated(schema)
         && documents.iter().any(|document| document.contains_key("id"));
     let mut rows = Vec::with_capacity(documents.len());
     for document in &mut documents {

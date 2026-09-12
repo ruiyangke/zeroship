@@ -142,6 +142,14 @@ impl SqlCompiler for CountingCompiler {
         self.0.fetch_add(1, Ordering::Relaxed);
         SqliteCompiler.compile(statement, effective)
     }
+
+    fn compile_identity_allocation(
+        &self,
+        request: crate::sql::statement::IdentityRequest,
+        effective: &SqlSupport,
+    ) -> Result<crate::sql::compiler::IdentityPlan, CompileError> {
+        SqliteCompiler.compile_identity_allocation(request, effective)
+    }
 }
 
 async fn assert_empty(owner: &CollectionFixture) {
@@ -182,6 +190,34 @@ async fn insert_is_refused_by_the_registered_compiler_before_identity_allocation
         .unwrap_err();
     assert!(error.to_string().contains("returning projections"));
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_empty(&owner).await;
+    owner.close().await;
+}
+
+#[compio::test]
+async fn generated_identity_is_refused_before_the_write_frame_and_allocation() {
+    let mut owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let mut migration: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/identity-migration.json"
+    ))
+    .unwrap();
+    migration["ops"][0]["columns"][0]["identity"]["always"] = serde_json::json!(false);
+    owner
+        .replace_from_migration("records", &migration.to_string())
+        .await;
+    let constrained =
+        constrained_database(&owner, "fixture-without-identity-allocation", |support| {
+            support.identity_allocation = false;
+        })
+        .await;
+
+    let error = constrained
+        .collection("records")
+        .unwrap()
+        .insert(value!({"label":"blocked"}))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("generated identity allocation"));
     assert_empty(&owner).await;
     owner.close().await;
 }
