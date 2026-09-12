@@ -18,7 +18,7 @@ import {
   type Actor,
   type IdValue,
   type RowId,
-  type SortSpec,
+  type SortInput,
   type WithRelations,
   type WithSpec,
   ok,
@@ -205,10 +205,10 @@ export class Query<
 
   /**
    * Sets the sort order.
-   * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
-   * String: `"field"` for ASC, `"-field"` for DESC. Multiple: `"-created_at name"`.
+   * Objects can order by several fields: `{ score: -1, title: 1 }`.
+   * Strings order by one field: `"title"` or `"-score"`.
    */
-  sort(s: SortSpec<S> | string): this {
+  sort(s: SortInput<S>): this {
     if (typeof s === "string") {
       const obj: Record<string, number> = {};
       for (const part of s.split(/\s+/).filter(Boolean)) {

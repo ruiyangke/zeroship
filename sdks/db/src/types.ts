@@ -342,9 +342,14 @@ export type DistinctField<S> = string & (IsSchemaDict<S> extends true
           : never;
       }[keyof Row<S>] | "id");
 
+type AtLeastOne<T> = {
+  [K in keyof T]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
+}[keyof T];
+
 export type SortSpec<S> = [SortableField<S>] extends [never]
   ? never
-  : Partial<Record<SortableField<S>, 1 | -1>>;
+  : AtLeastOne<Record<SortableField<S>, 1 | -1>>;
+export type SortInput<S> = SortSpec<S> | SortableField<S> | `-${SortableField<S>}`;
 
 // ---------------------------------------------------------------------------
 // Update expression types — typed operators per field type
