@@ -130,6 +130,7 @@ fn registered_compilers_choose_the_spatial_execution_statement() {
                     column: table.column("id").unwrap(),
                     alias: None,
                 }],
+                identity: table.column("id").unwrap(),
                 spatial: table.column("location").unwrap(),
                 point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
                 radius_m: 1000.0,
@@ -146,6 +147,9 @@ fn registered_compilers_choose_the_spatial_execution_statement() {
         .unwrap();
     assert!(postgres.sql().contains("ST_DWithin"));
     assert!(postgres.sql().contains("ST_Distance"));
+    assert!(postgres
+        .sql()
+        .contains("ORDER BY \"_distance_m\", \"source\".\"id\""));
 
     let sqlite = SqliteCompiler
         .compile(statement(), &SqliteCompiler.support())
@@ -177,6 +181,7 @@ fn search_statements_require_a_positive_limit() {
             column: table.column("id").unwrap(),
             alias: None,
         }],
+        identity: table.column("id").unwrap(),
         spatial: table.column("location").unwrap(),
         point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
         radius_m: 1000.0,
@@ -209,6 +214,40 @@ fn search_projection_cannot_shadow_its_distance_output() {
             column: table.column("id").unwrap(),
             alias: Some(Ident::parse_as("_distance_m", IdentRole::Alias).unwrap()),
         }],
+        identity: table.column("id").unwrap(),
+        spatial: table.column("location").unwrap(),
+        point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
+        radius_m: 1000.0,
+        predicate: ResolvedPredicate::Const(true),
+        limit: 1,
+        table,
+    })
+    .is_err());
+}
+
+#[test]
+fn search_tie_breakers_require_the_collection_identity() {
+    let table = search_table();
+    assert!(VectorSearchStatement::new(VectorSearchParts {
+        projection: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: None,
+        }],
+        identity: table.column("label").unwrap(),
+        vector: table.column("embedding").unwrap(),
+        query: Value::Bytes(vec![0; 8]),
+        metric: zeroship_data_orm::sql::descriptors::VectorMetric::Cosine,
+        predicate: ResolvedPredicate::Const(true),
+        limit: 1,
+        table: table.clone(),
+    })
+    .is_err());
+    assert!(SpatialNearStatement::new(SpatialNearParts {
+        projection: vec![ReturnedColumn {
+            column: table.column("id").unwrap(),
+            alias: None,
+        }],
+        identity: table.column("label").unwrap(),
         spatial: table.column("location").unwrap(),
         point: zeroship_data_orm::value!({"lat":51.5,"lng":-0.1}),
         radius_m: 1000.0,
