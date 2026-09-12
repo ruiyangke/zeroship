@@ -73,5 +73,12 @@ const exactOnlyFields = {
 const exactOnlySort: SortSpec<typeof exactOnlyFields> = { missing: 1 };
 void exactOnlySort;
 
+declare const exactOnlyCollection: import("../src/index.js").Collection<typeof exactOnlyFields>;
+function exactDecimalSortTypes(): void {
+  // @ts-expect-error exact decimals have no portable string sort escape hatch
+  exactOnlyCollection.find().sort("amount");
+}
+void exactDecimalSortTypes;
+
 const typed: Decimal = amount;
 void typed;

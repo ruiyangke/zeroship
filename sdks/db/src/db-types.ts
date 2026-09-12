@@ -55,6 +55,7 @@ import type {
   RowId,
   RowInput,
   SortSpec,
+  SortInput,
   UpsertOptions,
   UpdateExpression,
   Filter,
@@ -161,7 +162,7 @@ export type TxQuery<
   P = Row<S>,
   AllSchemas extends Record<string, unknown> = Record<string, unknown>,
 > = {
-  sort(s: SortSpec<S> | string): TxQuery<S, P, AllSchemas>;
+  sort(s: SortInput<S>): TxQuery<S, P, AllSchemas>;
   limit(n: number): TxQuery<S, P, AllSchemas>;
   skip(n: number): TxQuery<S, P, AllSchemas>;
   select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
