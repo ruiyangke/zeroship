@@ -20,6 +20,9 @@ pub enum ConsumeError {
 
 /// Publish a completion for a magic-link nonce with an explicit expiry.
 /// Replacing an existing completion resets its attempts and reservation state.
+///
+/// # Errors
+/// Returns an error for an invalid email or a database failure.
 pub async fn create(
     db: &Client,
     csrf_nonce: &str,
@@ -56,10 +59,18 @@ pub async fn create(
     Ok(())
 }
 
-/// Atomically reserve a completion row, invalidating it after five
-/// failed code attempts. A second correct-code consume within 60
-/// seconds of an existing reservation reports `InFlight`; stale
-/// reservations can be retried.
+/// Reserve a completion, or classify why it cannot be reserved.
+///
+/// Active reservations exclude competing requests. Stale reservations can be
+/// retried; exhausting the attempt budget consumes the completion.
+///
+/// # Errors
+/// Returns `InFlight` for an active reservation, `WrongCode` for an invalid
+/// code or unavailable completion, and `Store` for a database failure.
+#[allow(
+    clippy::future_not_send,
+    reason = "database operations stay on their owning runtime"
+)]
 pub async fn consume_pending(
     db: &(impl GenericClient + ?Sized),
     csrf_nonce: &str,
@@ -144,6 +155,10 @@ pub async fn consume_pending(
     Err(ConsumeError::WrongCode)
 }
 
+/// Finish the reservation identified by its timestamp.
+///
+/// # Errors
+/// Returns an error if the database update fails.
 pub async fn finalize_consume(
     db: &Client,
     csrf_nonce: &str,
@@ -163,6 +178,13 @@ pub async fn finalize_consume(
     Ok(updated > 0)
 }
 
+/// Release a reservation after a handoff fails.
+///
+/// A supplied timestamp must match the current reservation. Without one, any
+/// unconsumed reservation for the nonce can be cleared.
+///
+/// # Errors
+/// Returns an error if the database update fails.
 pub async fn clear_consume_pending(
     db: &Client,
     csrf_nonce: &str,
