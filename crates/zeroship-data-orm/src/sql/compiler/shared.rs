@@ -446,20 +446,16 @@ pub(crate) fn compile_upsert(
     }
     if let Some(condition) = parts.condition {
         writer.sql.push_str(" WHERE ");
-        write_current(&mut writer, &condition.column);
-        writer.sql.push_str(match condition.op {
-            CompareOp::Eq => " = ",
-            CompareOp::Ne => " <> ",
-            CompareOp::Lt => " < ",
-            CompareOp::Lte => " <= ",
-            CompareOp::Gt => " > ",
-            CompareOp::Gte => " >= ",
-        });
-        write_bind(
+        write_comparison(
             &mut writer,
             syntax,
             condition.column.storage(),
-            condition.value,
+            condition.op,
+            ResolvedPredicateValue::Bind {
+                storage: condition.column.storage(),
+                value: condition.value,
+            },
+            |writer| write_current(writer, &condition.column),
         )?;
     }
     write_returning(&mut writer, &parts.returning);
@@ -705,35 +701,9 @@ pub(crate) fn write_predicate(
             writer.sql.push(')');
         }
         ResolvedPredicate::Compare { lhs, op, rhs } => {
-            if lhs.storage()? == StorageType::Json
-                && syntax.structural_json_equality
-                && matches!(op, CompareOp::Eq | CompareOp::Ne)
-            {
-                write_structural_json_equality(writer, syntax, &lhs, rhs, op == CompareOp::Ne)?;
-                return Ok(());
-            }
-            if lhs.storage()?.decimal().is_some()
-                && syntax.exact_decimal_functions
-                && matches!(op, CompareOp::Eq | CompareOp::Ne)
-            {
-                write_exact_decimal_equality(writer, syntax, &lhs, rhs, op == CompareOp::Ne)?;
-                return Ok(());
-            }
-            write_operand(writer, syntax, &lhs);
-            writer.sql.push_str(match op {
-                CompareOp::Eq => " = ",
-                CompareOp::Ne => " != ",
-                CompareOp::Lt => " < ",
-                CompareOp::Lte => " <= ",
-                CompareOp::Gt => " > ",
-                CompareOp::Gte => " >= ",
-            });
-            match rhs {
-                ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
-                ResolvedPredicateValue::Bind { storage, value } => {
-                    write_bind(writer, syntax, storage, value)?
-                }
-            }
+            write_comparison(writer, syntax, lhs.storage()?, op, rhs, |writer| {
+                write_operand(writer, syntax, &lhs)
+            })?;
         }
         ResolvedPredicate::Membership { lhs, op, values } => {
             let storage = lhs.storage()?;
@@ -750,7 +720,7 @@ pub(crate) fn write_predicate(
                     write_structural_json_equality(
                         writer,
                         syntax,
-                        &lhs,
+                        |writer| write_operand(writer, syntax, &lhs),
                         ResolvedPredicateValue::Bind { storage, value },
                         op == MembershipOp::NotIn,
                     )?;
@@ -771,7 +741,7 @@ pub(crate) fn write_predicate(
                     write_exact_decimal_equality(
                         writer,
                         syntax,
-                        &lhs,
+                        |writer| write_operand(writer, syntax, &lhs),
                         ResolvedPredicateValue::Bind { storage, value },
                         op == MembershipOp::NotIn,
                     )?;
@@ -829,10 +799,54 @@ pub(crate) fn write_predicate(
     Ok(())
 }
 
+fn write_comparison(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    storage: StorageType,
+    op: CompareOp,
+    rhs: ResolvedPredicateValue,
+    write_lhs: impl FnOnce(&mut SqlWriter),
+) -> Result<(), CompileError> {
+    if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+        if storage == StorageType::Json && syntax.structural_json_equality {
+            return write_structural_json_equality(
+                writer,
+                syntax,
+                write_lhs,
+                rhs,
+                op == CompareOp::Ne,
+            );
+        }
+        if storage.decimal().is_some() && syntax.exact_decimal_functions {
+            return write_exact_decimal_equality(
+                writer,
+                syntax,
+                write_lhs,
+                rhs,
+                op == CompareOp::Ne,
+            );
+        }
+    }
+    write_lhs(writer);
+    writer.sql.push_str(match op {
+        CompareOp::Eq => " = ",
+        CompareOp::Ne => " != ",
+        CompareOp::Lt => " < ",
+        CompareOp::Lte => " <= ",
+        CompareOp::Gt => " > ",
+        CompareOp::Gte => " >= ",
+    });
+    match rhs {
+        ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
+        ResolvedPredicateValue::Bind { storage, value } => write_bind(writer, syntax, storage, value)?,
+    }
+    Ok(())
+}
+
 fn write_exact_decimal_equality(
     writer: &mut SqlWriter,
     syntax: Syntax,
-    lhs: &ResolvedOperand,
+    write_lhs: impl FnOnce(&mut SqlWriter),
     rhs: ResolvedPredicateValue,
     negated: bool,
 ) -> Result<(), CompileError> {
@@ -840,7 +854,7 @@ fn write_exact_decimal_equality(
         writer.sql.push_str("NOT ");
     }
     writer.sql.push_str("zeroship_decimal_equal(");
-    write_operand(writer, syntax, lhs);
+    write_lhs(writer);
     writer.sql.push_str(", ");
     match rhs {
         ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
@@ -855,7 +869,7 @@ fn write_exact_decimal_equality(
 fn write_structural_json_equality(
     writer: &mut SqlWriter,
     syntax: Syntax,
-    lhs: &ResolvedOperand,
+    write_lhs: impl FnOnce(&mut SqlWriter),
     rhs: ResolvedPredicateValue,
     negated: bool,
 ) -> Result<(), CompileError> {
@@ -863,7 +877,7 @@ fn write_structural_json_equality(
         writer.sql.push_str("NOT ");
     }
     writer.sql.push_str("zeroship_json_equal(");
-    write_operand(writer, syntax, lhs);
+    write_lhs(writer);
     writer.sql.push_str(", ");
     match rhs {
         ResolvedPredicateValue::Operand(rhs) => write_operand(writer, syntax, &rhs),
