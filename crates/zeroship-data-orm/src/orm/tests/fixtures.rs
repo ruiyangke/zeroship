@@ -145,12 +145,13 @@ impl CollectionFixture {
     }
 
     pub async fn replace_from_migration(&mut self, collection: &str, migration: &str) {
+        self.replace_from_migration_with_policy(collection, migration, zeroship_migrate_server::policy::CONFINED_CEILING_TOML).await;
+    }
+
+    pub async fn replace_from_migration_with_policy(&mut self, collection: &str, migration: &str, policy: &str) {
         let migration: zeroship_migrate::model::ir::MigrationIr =
             serde_json::from_str(migration).unwrap();
-        let policy = zeroship_migrate::effective_policy_from_charter_toml(
-            zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
-        )
-        .unwrap();
+        let policy = zeroship_migrate::effective_policy_from_charter_toml(policy).unwrap();
         let namespace = if self.sqlite_file.is_some() {
             "main"
         } else {

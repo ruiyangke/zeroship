@@ -465,7 +465,7 @@ pub fn declared_raw_column(
 
 /// Bind a logical value using its field descriptor. Timestamp conversion stays
 /// on the parameter, so indexed columns remain bare in comparisons.
-fn push_field_value_bind(
+pub(crate) fn push_field_value_bind(
     params: &mut Vec<Value>,
     value: &Value,
     field: &str,
@@ -558,7 +558,9 @@ pub fn build_write_target_probe(
     limit: i64,
     dialect: SqlDialect,
 ) -> Result<CompiledQuery, QueryError> {
-    let select = project_read_field("id", schema_hint, None);
+    let select = crate::sql::descriptors::primary_key_fields(schema_hint)
+        .map_err(|message| QueryError::InvalidFilter(message.into()))?
+        .into_iter().map(|name| project_read_field(name, schema_hint, None)).collect::<Vec<_>>().join(", ");
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
             schema_name,
@@ -605,7 +607,7 @@ pub fn build_conflict_probe_with_dialect(
     for (field, value) in obj {
         validate_field_name(field)?;
         validate_value_operation(field, schema_hint)?;
-        let col = quote_ident(field);
+        let col = quote_ident(&value_column_for_field(field, schema_hint));
         if value.is_null() {
             conditions.push(format!("{col} IS NULL"));
             continue;
@@ -637,7 +639,10 @@ pub fn build_conflict_probe_with_dialect(
     }
 
     let sql = format!(
-        "SELECT \"id\" FROM {schema}.{table} WHERE {} LIMIT 1",
+        "SELECT {} FROM {schema}.{table} WHERE {} LIMIT 1",
+        crate::sql::descriptors::primary_key_fields(schema_hint)
+            .map_err(|message| QueryError::InvalidFilter(message.into()))?
+            .into_iter().map(|name| project_read_field(name, schema_hint, None)).collect::<Vec<_>>().join(", "),
         conditions.join(" AND ")
     );
     Ok(CompiledQuery { sql, params })
@@ -916,14 +921,17 @@ fn build_masked_aware_select_expr_with_unmask(
                 validate_read_identifier(name, schema_hint)?;
                 cols.push(project_read_field(name, schema_hint, None));
             }
-            if !arr.iter().any(|field| field.as_str() == Some("id"))
-                && (!unmask_columns.is_empty()
+            if !unmask_columns.is_empty()
                     || arr
                         .iter()
                         .filter_map(Value::as_str)
-                        .any(|name| field_needs_identity(&schema_hint[name])))
+                        .any(|name| field_needs_identity(&schema_hint[name]))
             {
-                cols.push(project_read_field("id", schema_hint, None));
+                for key in crate::sql::descriptors::declared_primary_key_fields(schema_hint) {
+                    if !arr.iter().any(|field| field.as_str() == Some(key)) {
+                        cols.push(project_read_field(key, schema_hint, None));
+                    }
+                }
             }
             return Ok(cols.join(", "));
         }
@@ -1003,13 +1011,12 @@ pub(crate) fn implicit_read_fields(schema_hint: &Value) -> Result<Vec<&str>, Que
         fields.push(field.as_str());
     }
     if schema_obj
-        .get("id")
-        .is_some_and(|id| !field_is_readable(id))
-        && schema_obj
             .values()
             .any(|def| field_is_readable(def) && field_needs_identity(def))
     {
-        fields.push("id");
+        for key in crate::sql::descriptors::declared_primary_key_fields(schema_hint) {
+            if !fields.contains(&key) { fields.push(key); }
+        }
     }
     if fields.is_empty() {
         return Err(QueryError::InvalidFilter(
@@ -1219,7 +1226,7 @@ pub fn build_insert_with_dialect(
     }
 
     let overriding =
-        crate::sql::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
+        crate::sql::identity::overriding_clause(schema_hint, dialect, crate::sql::identity::generated_fields(schema_hint).iter().any(|key| obj.contains_key(*key)));
     let sql = format!(
         "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) RETURNING {returning}",
         columns.join(", "),
@@ -1570,7 +1577,7 @@ pub fn build_insert_many_with_dialect(
     let overriding = crate::sql::identity::overriding_clause(
         schema_hint,
         dialect,
-        arr.iter().any(|doc| doc.get("id").is_some()),
+        arr.iter().any(|doc| crate::sql::identity::generated_fields(schema_hint).iter().any(|key| doc.get(*key).is_some())),
     );
     let sql = format!(
         "INSERT INTO {schema}.{table} ({}){overriding} VALUES {} RETURNING {returning}",

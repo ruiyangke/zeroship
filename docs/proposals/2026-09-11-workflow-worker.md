@@ -249,14 +249,12 @@ handwritten schema in Rust or JSON. The workflow generator emits DDL,
 fingerprints and the runtime descriptor from the canonical migration. Native
 PostgreSQL and SQLite contracts compare descriptor columns and keys with the
 migrated catalog. Model adoption remains unfinished.
-The shared single-row mutation compiler uses every declared key component on
-PostgreSQL and SQLite. The public model and collection identity contract still
-requires a sole `id`, so composite app/run/generation model integration remains
-unfinished. Preserve conditional updates when converting those operations.
-Generalizing the model contract must also carry the complete key through joined
-row projections, immutable-field checks, concurrency predicates and encrypted-row
-identity. Accepting composite descriptors before those operations agree would
-make metadata validation promise behavior the execution path does not provide.
+The public Rust and TypeScript ORM accepts declared named and composite keys.
+Bounded mutations, joined row projections, immutable-field checks, concurrency
+predicates and encrypted-row identity use every key component. Live database
+tests cover composite encrypted writes, unmasking, rollback and conflicting
+upserts across generations. Workflow model adoption remains unfinished; preserve
+conditional updates when converting journal operations.
 
 Extend the shared ORM where workflow models need a general table capability.
 Do not introduce workflow-specific database adapters or another query builder.

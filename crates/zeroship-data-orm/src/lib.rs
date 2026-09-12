@@ -40,6 +40,7 @@ pub mod cdc;
 pub mod connection;
 pub mod crud;
 pub mod descriptor;
+pub(crate) mod row_identity;
 pub mod driver;
 pub mod encryption;
 pub mod error;

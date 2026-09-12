@@ -147,10 +147,14 @@ export type InferInsertSchema<S> = S extends infer T
 export type Row<S> = InferSchema<S>;
 
 export type IdValue = string | number | bigint;
-/** The identity type declared by the collection schema. */
-export type RowId<S> = "id" extends keyof Row<S>
-  ? unknown extends Row<S>["id"] ? IdValue : Extract<Row<S>["id"], IdValue>
+type ScalarIdentity<R, K> = K extends keyof R
+  ? unknown extends R[K] ? IdValue : Extract<R[K], IdValue>
   : IdValue;
+type IsUnion<T, Whole = T> = T extends Whole ? [Whole] extends [T] ? false : true : never;
+/** Scalar convenience operations use the sole declared key; composite keys use filters. */
+export type RowId<S> = [PrimaryKeyKeys<S>] extends [never]
+  ? ScalarIdentity<Row<S>, "id">
+  : IsUnion<PrimaryKeyKeys<S>> extends true ? never : ScalarIdentity<Row<S>, PrimaryKeyKeys<S>>;
 
 export type AssignedKeys<S> = {
   [K in keyof S]: S[K] extends { readonly _assigned: true } ? K : never
@@ -259,7 +263,11 @@ type UpdateFieldValue<T> =
   (NonNullable<T> extends number | bigint ? NumericUpdateOps<NonNullable<T>> : never) |
   (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
 
-type UpdateKeys<S> = Exclude<keyof InferSchema<S>, AssignedKeys<S> | "id">;
+type PrimaryKeyKeys<S> = {
+  [K in keyof S]: S[K] extends { readonly _primaryKey: true } ? K : never
+}[keyof S];
+
+type UpdateKeys<S> = Exclude<keyof InferSchema<S>, AssignedKeys<S> | PrimaryKeyKeys<S>>;
 
 /** Typed update expression — per-field operators. */
 export type UpdateExpression<S> = {
@@ -925,7 +933,7 @@ const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
  * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
  * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
-type AssignmentBrand<T> = Pick<T, Extract<keyof T, "_assigned">>;
+type FieldBrands<T> = Pick<T, Extract<keyof T, "_assigned" | "_primaryKey">>;
 
 export class TypeBuilder<
   T = unknown,
@@ -969,9 +977,9 @@ export class TypeBuilder<
     return this as this & { readonly _assigned: true };
   }
 
-  primaryKey(): this {
+  primaryKey(): this & { readonly _primaryKey: true } {
     this._def.primaryKey = true;
-    return this;
+    return this as this & { readonly _primaryKey: true };
   }
 
   /** Returns a frozen copy of the field definition. */
@@ -980,9 +988,9 @@ export class TypeBuilder<
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E, D> & AssignmentBrand<this> {
+  required(): TypeBuilder<T, true, M, E, D> & FieldBrands<this> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, true, M, E, D> & FieldBrands<this>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -1006,9 +1014,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> & AssignmentBrand<this> {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> & FieldBrands<this> {
     this._def.default = val;
-    return this as unknown as TypeBuilder<T, R, M, E, true> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, M, E, true> & FieldBrands<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1026,9 +1034,9 @@ export class TypeBuilder<
   /** Restricts the field to a fixed set of allowed values. */
   enum<const Values extends readonly (T & (string | number))[]>(
     ...values: Values
-  ): TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this> {
+  ): TypeBuilder<Values[number], R, M, E, D> & FieldBrands<this> {
     this._def.enum = [...values];
-    return this as unknown as TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D> & FieldBrands<this>;
   }
 
   /** For strings: a RegExp the value must match. */
@@ -1074,7 +1082,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> & AssignmentBrand<this> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> & FieldBrands<this> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1145,12 +1153,12 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, K, E, D> & FieldBrands<this>;
   }
 
   /** Allow null in the field's value type. */
-  nullable(): TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this> {
-    return this as TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this>;
+  nullable(): TypeBuilder<T | null, R, M, E, D> & FieldBrands<this> {
+    return this as TypeBuilder<T | null, R, M, E, D> & FieldBrands<this>;
   }
 
   /** Assign the database timestamp on insert. */

@@ -1,15 +1,31 @@
 //! Dialect plans for reserving database-generated identities before encryption.
 use crate::sql::compiler::CompiledQuery;
 
+use crate::sql::{
+    SchemaName,
+    compile::{
+        MAX_INSERT_MANY_BATCH, QueryError, SqlDialect, quote_ident, validate_collection,
+        value_column_for_field,
+    },
+};
 use crate::value::Value;
-use crate::sql::{SchemaName, compile::{
-        MAX_INSERT_MANY_BATCH, QueryError, SqlDialect, quote_ident,
-        validate_collection, value_column_for_field,
-    }};
+
+pub fn generated_fields(schema: &Value) -> Vec<&str> {
+    schema
+        .as_object()
+        .into_iter()
+        .flat_map(|fields| fields.iter())
+        .filter(|(_, field)| {
+            field["primaryKey"].as_bool() == Some(true)
+                && field["assign"]["by"].as_str() == Some("identity")
+                && field["assign"]["on"].as_str() == Some("insert")
+        })
+        .map(|(name, _)| name.as_str())
+        .collect()
+}
 
 pub fn is_generated(schema: &Value) -> bool {
-    schema["id"]["assign"]["by"].as_str() == Some("identity")
-        && schema["id"]["assign"]["on"].as_str() == Some("insert")
+    !generated_fields(schema).is_empty()
 }
 
 #[derive(Debug)]
@@ -29,8 +45,14 @@ pub fn reserve_sqlite_writer(
     schema: &Value,
 ) -> Result<CompiledQuery, QueryError> {
     validate_collection(collection)?;
-    let table = format!("{}.{}", crate::sql::compile::quote_ident(namespace.as_str()), quote_ident(collection));
-    let id = quote_ident(&value_column_for_field("id", schema));
+    let table = format!(
+        "{}.{}",
+        crate::sql::compile::quote_ident(namespace.as_str()),
+        quote_ident(collection)
+    );
+    let key = crate::sql::descriptors::primary_key_fields(schema)
+        .map_err(|message| QueryError::InvalidFilter(message.into()))?;
+    let id = quote_ident(&value_column_for_field(key[0], schema));
     Ok(CompiledQuery {
         sql: format!("UPDATE {table} SET {id} = {id} WHERE FALSE"),
         params: vec![],
@@ -43,6 +65,7 @@ pub fn allocation(
     schema: &Value,
     dialect: SqlDialect,
     count: usize,
+    field: &str,
 ) -> Result<Allocation, QueryError> {
     validate_collection(collection)?;
     if count == 0 || count > MAX_INSERT_MANY_BATCH {
@@ -50,8 +73,12 @@ pub fn allocation(
             "identity allocation exceeds the insert batch limit".into(),
         ));
     }
-    let table = format!("{}.{}", crate::sql::compile::quote_ident(namespace.as_str()), quote_ident(collection));
-    let id = value_column_for_field("id", schema);
+    let table = format!(
+        "{}.{}",
+        crate::sql::compile::quote_ident(namespace.as_str()),
+        quote_ident(collection)
+    );
+    let id = value_column_for_field(field, schema);
     match dialect {
         SqlDialect::Postgres => Ok(Allocation::Sequence(CompiledQuery {
             sql:"SELECT nextval(pg_get_serial_sequence($1, $2)) AS id FROM generate_series(1, $3::integer)".into(),
@@ -65,8 +92,12 @@ pub fn allocation(
     }
 }
 
-pub(crate) fn overriding_clause(schema: &Value, dialect: SqlDialect, has_id: bool) -> &'static str {
-    if dialect == SqlDialect::Postgres && is_generated(schema) && has_id {
+pub(crate) fn overriding_clause(
+    schema: &Value,
+    dialect: SqlDialect,
+    has_generated_key: bool,
+) -> &'static str {
+    if dialect == SqlDialect::Postgres && is_generated(schema) && has_generated_key {
         " OVERRIDING SYSTEM VALUE"
     } else {
         ""

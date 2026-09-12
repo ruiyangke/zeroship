@@ -173,26 +173,16 @@ pub async fn read_raw_column_value(
     schema: &Value,
 ) -> Result<ScalarRead<Value>, DbError> {
     let namespace = route.backend().namespace(route.app_id(), route.schema());
-    let key_column = "id";
-    let key_value = match schema[key_column]["type"].as_str() {
-        Some("int" | "integer" | "bigInt" | "bigint") => {
-            Value::from(row_pk.parse::<i64>().map_err(|_| {
-                DbError::validation("invalid_row_identity", "row identity must be an integer")
-            })?)
-        }
-        _ => Value::from(row_pk),
-    };
-    let physical_key = schema[key_column]["storage"]["valueColumn"]
-        .as_str()
-        .unwrap_or(key_column);
+    let mut key = Value::Object(crate::row_identity::from_token(schema, row_pk)?);
+    crate::sql::codecs::lower_document(route.dialect(), schema, &mut key);
     let query = crate::sql::internal::raw_column(
         namespace,
         collection,
         raw_column,
-        physical_key,
-        key_value,
+        key.as_object().expect("key record"),
+        schema,
         route.dialect(),
-    );
+    )?;
     let rows = crate::exec::run_sql(route, &query.sql, &query.params).await?;
     Ok(native_scalar(rows, raw_column))
 }

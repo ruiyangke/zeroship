@@ -43,13 +43,14 @@ pub(super) async fn allocate(
     collection: &str,
     schema: &Value,
     count: usize,
+    field: &str,
 ) -> Result<Vec<Value>, DbError> {
     if !route.in_tx() {
         return Err(DbError::internal(
             "identity allocation requires a transaction",
         ));
     }
-    match identity::allocation(route.schema(), collection, schema, route.dialect(), count)? {
+    match identity::allocation(route.schema(), collection, schema, route.dialect(), count, field)? {
         Allocation::Sequence(query) => {
             let rows = exec_query(route, query).await?;
             if rows.len() != count {
@@ -99,4 +100,42 @@ pub(super) async fn allocate(
                 .collect()
         }
     }
+}
+
+/// Reserve generated key values before encrypting a document or batch.
+pub(super) async fn assign(
+    route: &TxRoute,
+    collection: &str,
+    schema: &Value,
+    payload: &mut Value,
+) -> Result<(), DbError> {
+    if !requires_allocation(schema, payload) {
+        return Ok(());
+    }
+    reserve_writer(route, collection, schema).await?;
+    for field in identity::generated_fields(schema) {
+        let missing = |document: &Value| document.get(field).is_none_or(Value::is_null);
+        let count = match &*payload {
+            Value::Array(documents) => documents
+                .iter()
+                .filter(|document| missing(document))
+                .count(),
+            document => usize::from(missing(document)),
+        };
+        if count == 0 {
+            continue;
+        }
+        let mut values = allocate(route, collection, schema, count, field)
+            .await?
+            .into_iter();
+        match &mut *payload {
+            Value::Array(documents) => {
+                for document in documents.iter_mut().filter(|document| missing(document)) {
+                    document[field] = values.next().expect("reserved key value");
+                }
+            }
+            document => document[field] = values.next().expect("reserved key value"),
+        }
+    }
+    Ok(())
 }

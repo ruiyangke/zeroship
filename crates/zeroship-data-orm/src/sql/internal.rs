@@ -1,7 +1,9 @@
 //! SQL for ORM-owned protection operations. Caller values remain parameters.
+use crate::sql::compile::{
+    QueryError, SqlDialect, push_field_value_bind, quote_ident_for_dialect, value_column_for_field,
+};
 use crate::sql::compiler::CompiledQuery;
-use crate::value::Value;
-use crate::sql::{compile::{SqlDialect, quote_ident_for_dialect}};
+use crate::value::{Record, Value};
 
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
@@ -16,21 +18,35 @@ pub fn raw_column(
     namespace: &str,
     collection: &str,
     column: &str,
-    key_column: &str,
-    key: Value,
+    key: &Record,
+    schema: &Value,
     dialect: SqlDialect,
-) -> CompiledQuery {
-    CompiledQuery {
+) -> Result<CompiledQuery, QueryError> {
+    let mut params = Vec::new();
+    let mut predicates = Vec::new();
+    for name in crate::sql::descriptors::primary_key_fields(schema)
+        .map_err(|message| QueryError::InvalidFilter(message.into()))?
+    {
+        let value = key
+            .get(name)
+            .filter(|value| !value.is_null())
+            .ok_or_else(|| QueryError::InvalidFilter("raw reads require a complete key".into()))?;
+        let bind = push_field_value_bind(&mut params, value, name, schema, dialect)?;
+        predicates.push(format!(
+            "{} = {bind}",
+            quote_ident_for_dialect(&value_column_for_field(name, schema), dialect)
+        ));
+    }
+    let predicate = predicates.join(" AND ");
+    Ok(CompiledQuery {
         sql: format!(
-            "SELECT {} FROM {}.{} WHERE {} = {}",
+            "SELECT {} FROM {}.{} WHERE {predicate}",
             quote_ident_for_dialect(column, dialect),
             quote_ident_for_dialect(namespace, dialect),
             quote_ident_for_dialect(collection, dialect),
-            quote_ident_for_dialect(key_column, dialect),
-            placeholder(dialect, 1)
         ),
-        params: vec![key],
-    }
+        params,
+    })
 }
 
 pub fn unmask_audit(namespace: &str, dialect: SqlDialect, params: Vec<Value>) -> CompiledQuery {

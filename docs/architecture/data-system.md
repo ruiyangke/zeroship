@@ -350,9 +350,8 @@ Two consequences measured on live PostgreSQL:
 - **Bounded writes narrow through the primary key.** PostgreSQL refuses `SELECT ctid` with 42501
   under column-scoped SELECT, which made update, soft-delete and restore unusable and also blocked
   purge once its separately required table DELETE privilege was present. Those paths now select
-  the immutable, readable `id TEXT PRIMARY KEY` and retain `FOR UPDATE`; live tests execute all four
-  shipped builders and the replacement data-plan's bounded update/delete with column-scoped read
-  authority. PostgreSQL has no column-level DELETE privilege, so readwrite bindings necessarily
+  every declared primary-key column and retain `FOR UPDATE`; live tests exercise bounded
+  writes with column-scoped read authority and composite-key row isolation. PostgreSQL has no column-level DELETE privilege, so readwrite bindings necessarily
   grant DELETE at table scope; it does not confer SELECT on any column.
 
 ---

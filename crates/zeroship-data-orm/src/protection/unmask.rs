@@ -399,7 +399,7 @@ async fn fetch_and_decrypt(
         app_id,
         &args.collection,
         &args.column,
-        args.row_pk.as_bytes(),
+        &crate::row_identity::aad(schema, &args.row_pk)?,
     );
 
     {
@@ -1055,11 +1055,7 @@ pub async fn dispatch_unmask_for_query(
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
-        let Some(row_pk) = row.get("id").map(|v| match v {
-            Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
-            _ => String::new(),
-        }) else {
+        let Some(row_pk) = row.as_object().and_then(|fields| crate::row_identity::token(&schema, fields)) else {
             continue;
         };
         if row_pk.is_empty() {

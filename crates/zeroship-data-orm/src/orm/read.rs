@@ -231,7 +231,7 @@ impl PreparedRead {
                         }
                         add_field(layout, &field, &mut projected)?;
                     }
-                    add_field(layout, "id", &mut projected)?;
+                    add_identity_fields(layout, &mut projected)?;
                 }
                 ReadProjection::Scalar { expression, .. } => {
                     if !aggregating {
@@ -250,7 +250,7 @@ impl PreparedRead {
                             return Err(invalid("unreadable scalar projection"));
                         }
                         add_field(layout, path.root().as_str(), &mut projected)?;
-                        add_field(layout, "id", &mut projected)?;
+                        add_identity_fields(layout, &mut projected)?;
                     } else {
                         let slot = ident(&format!("v{}", projected.len()), IdentRole::Alias)?;
                         scalar_schema.insert(
@@ -361,16 +361,19 @@ impl PreparedRead {
                 if source.fields.is_empty() {
                     continue;
                 }
-                let slot = source
-                    .fields
-                    .get("id")
-                    .ok_or_else(|| DbError::internal("read layout has no identity"))?;
-                let id = row
-                    .get(slot)
-                    .ok_or_else(|| DbError::internal("missing read identity"))?;
-                if id.is_null() {
-                    if !source.nullable {
-                        return Err(DbError::internal("required source has no identity"));
+                let keys = crate::sql::descriptors::primary_key_fields(&source.schema)
+                    .map_err(invalid)?;
+                let mut absent = 0;
+                for key in &keys {
+                    let slot = source.fields.get(*key)
+                        .ok_or_else(|| DbError::internal("read layout has no identity"))?;
+                    let value = row.get(slot)
+                        .ok_or_else(|| DbError::internal("missing read identity"))?;
+                    absent += usize::from(value.is_null());
+                }
+                if absent > 0 {
+                    if !source.nullable || absent != keys.len() {
+                        return Err(DbError::internal("source has an incomplete identity"));
                     }
                     continue;
                 }
@@ -487,6 +490,17 @@ fn consume_budget(value: &Value, budget: &mut usize) -> Result<(), DbError> {
         *budget = budget
             .checked_sub(size)
             .ok_or_else(|| invalid("read result exceeds its size budget"))?;
+    }
+    Ok(())
+}
+
+fn add_identity_fields(
+    source: &mut SourceLayout,
+    projection: &mut Vec<ProjectedField>,
+) -> Result<(), DbError> {
+    let schema = source.schema.clone();
+    for key in crate::sql::descriptors::primary_key_fields(&schema).map_err(invalid)? {
+        add_field(source, key, projection)?;
     }
     Ok(())
 }

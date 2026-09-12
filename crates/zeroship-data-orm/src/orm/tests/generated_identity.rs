@@ -1,7 +1,7 @@
 use super::fixtures::CollectionFixture;
 use super::*;
 
-async fn fixture(postgres: bool) -> CollectionFixture {
+async fn fixture(postgres: bool, key: &str) -> CollectionFixture {
     let keys = std::sync::Arc::new(crate::encryption::SuppliedProjectKeys::new());
     keys.insert_hex("generated_identity", &"3".repeat(64))
         .unwrap();
@@ -24,8 +24,10 @@ async fn fixture(postgres: bool) -> CollectionFixture {
     ))
     .unwrap();
     migration["ops"][0]["columns"][0]["identity"]["always"] = serde_json::json!(postgres);
+    migration["ops"][0]["columns"][0]["name"] = serde_json::json!(key);
+    migration["ops"][0]["primaryKey"] = serde_json::json!([key]);
     owner
-        .replace_from_migration("records", &migration.to_string())
+        .replace_from_migration_with_policy("records", &migration.to_string(), zeroship_migrate_server::policy::PLATFORM_CEILING_TOML)
         .await;
     owner
 }
@@ -37,11 +39,11 @@ fn rows(output: Output) -> Vec<Value> {
     rows
 }
 
-async fn generated_insert(postgres: bool, batch: bool) {
-    let owner = fixture(postgres).await;
+async fn generated_insert(postgres: bool, batch: bool, key: &str) {
+    let owner = fixture(postgres, key).await;
     let records = owner.database.collection("records").unwrap();
     let plain = rows(records.insert(value!({"label":"plain"})).await.unwrap()).remove(0);
-    assert!(plain["id"].as_i64().is_some());
+    assert!(plain[key].as_i64().is_some());
     let inserted = if batch {
         rows(records.execute(Operation::InsertMany { documents:value!([
             {"label":"encrypted", "secret":"private"}, {"label":"null", "secret":null}, {"label":"second", "secret":"other"}
@@ -56,9 +58,9 @@ async fn generated_insert(postgres: bool, batch: bool) {
     };
     let all = rows(records.find(value!({}), value!({})).await.unwrap());
     for row in &inserted {
-        assert!(row["id"].as_i64().unwrap() > plain["id"].as_i64().unwrap());
+        assert!(row[key].as_i64().unwrap() > plain[key].as_i64().unwrap());
         assert_eq!(
-            all.iter().find(|stored| stored["id"] == row["id"]),
+            all.iter().find(|stored| stored[key] == row[key]),
             Some(row)
         );
     }
@@ -68,12 +70,12 @@ async fn generated_insert(postgres: bool, batch: bool) {
     }
     let last = inserted
         .iter()
-        .map(|row| row["id"].as_i64().unwrap())
+        .map(|row| row[key].as_i64().unwrap())
         .max()
         .unwrap();
     records
         .execute(Operation::Purge {
-            filter: value!({"id":last}),
+            filter: Value::Object([(key.to_owned(), value!(last))].into()),
             many: false,
         })
         .await
@@ -86,7 +88,7 @@ async fn generated_insert(postgres: bool, batch: bool) {
     )
     .remove(0);
     assert!(
-        next["id"].as_i64().unwrap() > last,
+        next[key].as_i64().unwrap() > last,
         "deleted identities cannot be reused"
     );
 
@@ -99,14 +101,14 @@ async fn generated_insert(postgres: bool, batch: bool) {
     let mut identities = std::collections::BTreeSet::new();
     for (index, output) in concurrent.into_iter().enumerate() {
         let row = rows(output.unwrap()).remove(0);
-        assert!(identities.insert(row["id"].as_i64().unwrap()));
+        assert!(identities.insert(row[key].as_i64().unwrap()));
         assert_eq!(row["secret"], value!(format!("private_{index}")));
     }
     owner.close().await;
 }
 
-async fn generated_upsert(postgres: bool) {
-    let owner = fixture(postgres).await;
+async fn generated_upsert(postgres: bool, key: &str) {
+    let owner = fixture(postgres, key).await;
     let records = owner.database.collection("records").unwrap();
     let mut identity = Value::Null;
     for secret in ["private", "updated"] {
@@ -122,9 +124,9 @@ async fn generated_upsert(postgres: bool) {
         .remove(0);
         assert_eq!(row["secret"], value!(secret));
         if identity.is_null() {
-            identity = row["id"].clone();
+            identity = row[key].clone();
         }
-        assert_eq!(row["id"], identity);
+        assert_eq!(row[key], identity);
     }
     let failure: Result<(), DbError> = owner
         .database
@@ -161,25 +163,36 @@ async fn generated_upsert(postgres: bool) {
 
 #[compio::test]
 async fn sqlite_generated_encrypted_insert() {
-    generated_insert(false, false).await;
+    generated_insert(false, false, "id").await;
 }
 #[compio::test]
 async fn postgres_generated_encrypted_insert() {
-    generated_insert(true, false).await;
+    generated_insert(true, false, "id").await;
 }
 #[compio::test]
 async fn sqlite_generated_encrypted_batch() {
-    generated_insert(false, true).await;
+    generated_insert(false, true, "id").await;
 }
 #[compio::test]
 async fn postgres_generated_encrypted_batch() {
-    generated_insert(true, true).await;
+    generated_insert(true, true, "id").await;
 }
 #[compio::test]
 async fn sqlite_generated_encrypted_upsert_and_rollback() {
-    generated_upsert(false).await;
+    generated_upsert(false, "id").await;
 }
 #[compio::test]
 async fn postgres_generated_encrypted_upsert_and_rollback() {
-    generated_upsert(true).await;
+    generated_upsert(true, "id").await;
+}
+
+#[compio::test]
+async fn sqlite_named_generated_encrypted_identity() {
+    generated_insert(false, true, "record_key").await;
+    generated_upsert(false, "record_key").await;
+}
+#[compio::test]
+async fn postgres_named_generated_encrypted_identity() {
+    generated_insert(true, true, "record_key").await;
+    generated_upsert(true, "record_key").await;
 }

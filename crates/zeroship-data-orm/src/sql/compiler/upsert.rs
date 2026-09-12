@@ -33,14 +33,14 @@ impl Requirements {
                 let values = parts.insert.iter().chain(&parts.update).map(|a| &a.value);
                 Self {
                     explicit_conflict_target: true,
-                    conditional_conflict_update: parts.condition.is_some(),
+                    conditional_conflict_update: !parts.conditions.is_empty(),
                     returning: !parts.returning.is_empty(),
                     insert_generated_identity: parts.insert_generated_identity,
                     default_expression: values.clone().any(|v| matches!(v, Expression::Default)),
                     bind_parameters: values
                         .filter(|v| matches!(v, Expression::Bind(_) | Expression::Increment { .. }))
                         .count()
-                        + usize::from(parts.condition.is_some()),
+                        + parts.conditions.len(),
                 }
             }
         }
@@ -235,8 +235,8 @@ fn compile(
                     assignment.value,
                 )?;
             }
-            if let Some(condition) = parts.condition {
-                writer.sql.push_str(" WHERE ");
+            for (index, condition) in parts.conditions.into_iter().enumerate() {
+                writer.sql.push_str(if index == 0 { " WHERE " } else { " AND " });
                 write_current(&mut writer, &condition.column);
                 writer.sql.push_str(match condition.op {
                     CompareOp::Eq => " = ",

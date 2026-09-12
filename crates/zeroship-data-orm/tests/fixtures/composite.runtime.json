@@ -1,0 +1,124 @@
+{
+  "version": 2,
+  "collections": {
+    "records": {
+      "fields": {
+        "app_key": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_key"
+          },
+          "primaryKey": true
+        },
+        "run_key": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "run_key"
+          },
+          "primaryKey": true
+        },
+        "generation": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "generation"
+          },
+          "primaryKey": true
+        },
+        "id": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          }
+        },
+        "label": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "label"
+          }
+        },
+        "parent": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "parent"
+          }
+        },
+        "secret": {
+          "type": "string",
+          "encrypted": true,
+          "mask": {
+            "kind": "none",
+            "classification": "pii"
+          },
+          "readable": true,
+          "filterable": false,
+          "sortable": false,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "secret"
+          }
+        },
+        "masked": {
+          "type": "string",
+          "encrypted": true,
+          "mask": {
+            "kind": "last4",
+            "classification": "pii"
+          },
+          "readable": true,
+          "filterable": false,
+          "sortable": false,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "masked",
+            "rawColumn": "__zs_raw__masked",
+            "rawFilterable": false,
+            "rawSortable": false,
+            "rawProjectable": false
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "records_label_key",
+          "fields": [
+            "label"
+          ],
+          "unique": true
+        }
+      ]
+    }
+  }
+}

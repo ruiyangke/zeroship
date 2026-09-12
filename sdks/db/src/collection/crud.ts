@@ -1,3 +1,4 @@
+import { scalarPrimaryKey } from "../schema";
 import { isIdValue } from "../identity.js";
 import {
   ValidationError,
@@ -205,6 +206,7 @@ export function getCollection<
   const isBareId = isIdValue(idOrFilter);
   if (
     isBareId &&
+    Object.keys(self._schema).filter(name => self._schema[name]?.primaryKey === true).join() === "id" &&
     opts.select === undefined &&
     opts.orderBy === undefined &&
     opts.unmask === undefined &&
@@ -216,7 +218,7 @@ export function getCollection<
     return self._run(() => self._loadById(idOrFilter, txDepthAtCall));
   }
   return self._run(async () => {
-    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
       _maybeWarnUnindexedFilter(
@@ -399,7 +401,7 @@ export function updateCollection<S, N extends string, AllSchemas extends Record<
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -471,7 +473,7 @@ export function deleteCollection<S, N extends string, AllSchemas extends Record<
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -516,7 +518,7 @@ export function purgeCollection<S, N extends string, AllSchemas extends Record<s
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }
@@ -567,7 +569,7 @@ export function restoreCollection<S, N extends string, AllSchemas extends Record
 ): Promise<Result<Row<S> | null>> {
   return self._run(async () => {
     const isBareId = isIdValue(idOrFilter);
-    const filter = isBareId ? ({ id: idOrFilter } as unknown as Filter<S>) : idOrFilter;
+    const filter = isBareId ? ({ [scalarPrimaryKey(self._schema)]: idOrFilter } as unknown as Filter<S>) : idOrFilter;
     if (!isBareId) {
       validateEncryptedFieldsInFilter(filter as PlainObject, self._schema);
     }

@@ -45,11 +45,11 @@ fn parts(table: &Table) -> UpsertParts {
                 step: 1,
             },
         }],
-        condition: Some(Comparison {
+        conditions: vec![Comparison {
             column: table.column("id").unwrap(),
             op: CompareOp::Eq,
             value: Value::from(7),
-        }),
+        }],
         returning: vec![ReturnedColumn {
             column: table.column("id").unwrap(),
             alias: None,
@@ -69,7 +69,7 @@ fn source_membership_cannot_be_forged_with_the_same_table_name() {
             "insert" => input.insert[0].column = foreign,
             "update" => input.update[0].value = Expression::Incoming(foreign),
             "conflict" => input.conflict[0] = foreign,
-            "condition" => input.condition.as_mut().unwrap().column = foreign,
+            "condition" => input.conditions[0].column = foreign,
             "returning" => input.returning[0].column = foreign,
             _ => unreachable!(),
         }

@@ -7,6 +7,7 @@ use test_schema::posts;
 
 mod bulk;
 mod calendar_date;
+mod composite_identity;
 mod fixtures;
 mod generated_identity;
 mod identity;

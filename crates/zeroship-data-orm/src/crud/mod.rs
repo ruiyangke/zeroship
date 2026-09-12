@@ -535,9 +535,9 @@ pub async fn run_update_one(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
     // Detect creator-supplied CAS version + reject
-    // the unsupported "version filter without id" shape eagerly.
+    // a revision check without the complete row key eagerly.
     let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some() && !assignment_pass::filter_has_id_predicate(&filter) {
+    if cas_version.is_some() && !assignment_pass::filter_has_key_predicate(&filter, &schema) {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
@@ -546,7 +546,7 @@ pub async fn run_update_one(
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
-        let target_rows = write_pipeline::resolve_target_row_ids(
+        let target_rows = write_pipeline::resolve_target_rows(
             &route,
             route.dialect(),
             &coll,
@@ -559,9 +559,8 @@ pub async fn run_update_one(
             if let Some(expected_version) = cas_version {
                 let row_id = filter
                     .as_object()
-                    .and_then(|o| o.get("id"))
-                    .and_then(|v| v.as_str());
-                return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                    .and_then(|fields| crate::row_identity::token(&schema, fields));
+                return Err(DbError::version_mismatch(&coll, row_id.as_deref(), expected_version));
             }
             // An absent match has no row to decode or masked value to rehydrate.
             return Ok((Vec::new(), false));
@@ -586,7 +585,7 @@ pub async fn run_update_one(
     .await?;
     lower_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
-        let mut sql_filter = crate::value!({ "id": target_row.id_value });
+        let mut sql_filter = Value::Object(target_row.key);
         if let Some(expected_version) = cas_version {
             sql_filter[concurrency_column(&schema)?.expect("CAS column")] =
                 Value::from(expected_version);
@@ -644,13 +643,10 @@ pub async fn run_update_one(
         if result.rows.is_empty() {
             let row_id = filter
                 .as_object()
-                .and_then(|o| o.get("id"))
-                .and_then(|v| v.as_str());
-            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                .and_then(|fields| crate::row_identity::token(&schema, fields));
+            return Err(DbError::version_mismatch(&coll, row_id.as_deref(), expected_version));
         }
-        // The `id` PK ensures at most one row matches
-        // `{ id: ..., version: N }`; a result set >1 is
-        // a regression in the dispatcher contract.
+        // Equality on the complete primary key permits at most one row.
         if result.rows.len() > 1 {
             tracing::error!(
                 collection = %coll,
@@ -681,7 +677,7 @@ pub async fn run_update_many(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     write_pipeline::inspect_update(&schema, &mut update)?;
     let cas_version = assignment_pass::extract_cas_version(&filter, &coll, &schema)?;
-    if cas_version.is_some() && !assignment_pass::filter_has_id_predicate(&filter) {
+    if cas_version.is_some() && !assignment_pass::filter_has_key_predicate(&filter, &schema) {
         return Err(DbError::multi_row_version_filter_unsupported(&coll));
     }
 
@@ -701,7 +697,7 @@ pub async fn run_update_many(
     if per_row_encrypted_update {
         let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
         let work_result: Result<u64, DbError> = async {
-            let target_rows = write_pipeline::resolve_target_row_ids(
+            let target_rows = write_pipeline::resolve_target_rows(
                 frame.route(),
                 dialect,
                 &coll,
@@ -730,9 +726,8 @@ pub async fn run_update_many(
                 if let Some(expected_version) = cas_version {
                     let row_id = filter
                         .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                        .and_then(|fields| crate::row_identity::token(&schema, fields));
+                    return Err(DbError::version_mismatch(&coll, row_id.as_deref(), expected_version));
                 }
                 return Ok(0);
             }
@@ -741,7 +736,7 @@ pub async fn run_update_many(
             let mut row_queries = Vec::with_capacity(target_count);
             for target_row in &target_rows {
                 let row_pk = target_row.row_pk.clone();
-                let row_id = target_row.id_value.clone();
+                let row_key = target_row.key.clone();
                 let mut row_update = update.clone();
                 // The route moved into the frame, so the key store comes off
                 // the frame's route - the same connection every statement in
@@ -757,7 +752,7 @@ pub async fn run_update_many(
                 )
                 .await?;
                 lower_update(dialect, &schema, &mut row_update);
-                let mut row_filter = crate::value!({ "id": row_id });
+                let mut row_filter = Value::Object(row_key);
                 if let Some(expected_version) = cas_version {
                     row_filter[concurrency_column(&schema)?.expect("CAS column")] =
                         Value::from(expected_version);
@@ -796,9 +791,8 @@ pub async fn run_update_many(
                 if affected != target_count as u64 {
                     let row_id = filter
                         .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                        .and_then(|fields| crate::row_identity::token(&schema, fields));
+                    return Err(DbError::version_mismatch(&coll, row_id.as_deref(), expected_version));
                 }
             }
             Ok(affected)
@@ -842,9 +836,8 @@ pub async fn run_update_many(
         if affected == 0 {
             let row_id = filter
                 .as_object()
-                .and_then(|o| o.get("id"))
-                .and_then(|v| v.as_str());
-            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+                .and_then(|fields| crate::row_identity::token(&schema, fields));
+            return Err(DbError::version_mismatch(&coll, row_id.as_deref(), expected_version));
         }
     }
     Ok(affected)
@@ -1231,14 +1224,14 @@ pub async fn run_upsert(
             )
             .await?;
             lower_document(route.dialect(), &schema, &mut doc);
-            let expected_id =
-                if guard_identity {
-                    Some(doc.get("id").cloned().ok_or_else(|| {
-                        DbError::internal("encrypted upsert requires an identity")
-                    })?)
-                } else {
-                    None
-                };
+            let expected_key = if guard_identity {
+                Some(crate::row_identity::key(
+                    &schema,
+                    doc.as_object().expect("prepared upsert record"),
+                )?)
+            } else {
+                None
+            };
             let bq = upsert::build_upsert_with_assignments(
                 binding.schema(),
                 &coll,
@@ -1247,7 +1240,7 @@ pub async fn run_upsert(
                 &conflict_fields,
                 route.dialect(),
                 &assignments,
-                expected_id,
+                expected_key,
             )
             .map_err(DbError::from)?;
             let rows = exec_mutation_with_emit(
