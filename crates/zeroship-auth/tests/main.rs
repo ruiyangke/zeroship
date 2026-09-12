@@ -25,7 +25,6 @@ mod consent_ui_test;
 mod device_grant_test;
 mod e2e_github;
 mod e2e_google;
-mod e2e_magic_native;
 mod enum_defense;
 mod link_lockout_test;
 mod link_ratelimit_test;
