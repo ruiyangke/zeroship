@@ -2,7 +2,7 @@ import { ValidationError } from "../errors";
 import { trackCollectionAccess } from "../live";
 import type { NativeCollection } from "../native";
 import { mapFilterOutbound, mapResultDoc } from "../utils";
-import type { Filter, PlainObject, Result, Row, VectorMetric } from "../types";
+import type { Filter, GeoField, PlainObject, Result, Row, VectorField, VectorMetric } from "../types";
 
 export interface VectorGeoCollectionInternals<S> {
   _name: string;
@@ -41,7 +41,7 @@ export function searchCollection<S>(
     vector: number[];
     k?: number;
     metric?: VectorMetric;
-    column?: string;
+    column?: VectorField<S>;
     filter?: Filter<S>;
   },
 ): Promise<Result<(Row<S> & { _distance?: number })[]>> {
@@ -97,7 +97,7 @@ export function searchCollection<S>(
 export function nearCollection<S>(
   self: VectorGeoCollectionInternals<S>,
   args: {
-    field: keyof S & string;
+    field: GeoField<S>;
     point: { lat: number; lng: number };
     radius: number;
     filter?: Filter<S>;

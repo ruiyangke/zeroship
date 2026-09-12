@@ -8,6 +8,7 @@ const fields = {
   payload: t.bytes(),
   document: t.json(),
   embedding: t.vector(3),
+  location: t.geoPoint(),
   secret: t.encrypted(),
 };
 
@@ -61,6 +62,13 @@ async function portableReadTypes(): Promise<void> {
   await records.distinct("embedding");
   // @ts-expect-error encrypted values cannot participate in distinct queries
   await records.distinct("secret");
+
+  records.search({ vector: [1, 2, 3], column: "embedding" });
+  // @ts-expect-error vector search columns must be vector fields
+  records.search({ vector: [1, 2, 3], column: "title" });
+  records.near({ field: "location", point: { lat: 0, lng: 0 }, radius: 1 });
+  // @ts-expect-error spatial search fields must be geographic fields
+  records.near({ field: "embedding", point: { lat: 0, lng: 0 }, radius: 1 });
 }
 
 void portableReadTypes;

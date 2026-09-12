@@ -20,6 +20,7 @@ import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
 import type {
   Actor,
   Filter,
+  GeoField,
   DistinctField,
   Id,
   IdValue,
@@ -33,6 +34,7 @@ import type {
   SortSpec,
   UpsertOptions,
   UpdateExpression,
+  VectorField,
   WithRelations,
   WithSpec,
 } from "./types";
@@ -431,7 +433,7 @@ export class Collection<
       vector: number[];
       k?: number;
       metric?: import("./types").VectorMetric;
-      column?: string;
+      column?: VectorField<S>;
       filter?: Filter<S>;
     },
   ): Promise<Result<(Row<S> & { _distance?: number })[]>> {
@@ -439,7 +441,7 @@ export class Collection<
   }
 
   async near(args: {
-    field: keyof S & string;
+    field: GeoField<S>;
     point: { lat: number; lng: number };
     radius: number;
     filter?: Filter<S>;
