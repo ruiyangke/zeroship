@@ -113,7 +113,7 @@ pub fn build_select(
     namespace: &SchemaName,
     sources: &[ReadSource<'_>],
     dialect: SqlDialect,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     if sources.len() != plan.joins().len() + 1
         || sources.first().map(|s| s.alias) != Some(plan.alias())
     {
@@ -229,5 +229,5 @@ pub fn build_select(
     if params.len() > 32766 {
         return Err(invalid("SELECT exceeds its parameter budget"));
     }
-    Ok(BuiltQuery { sql, params })
+    Ok(CompiledQuery { sql, params })
 }

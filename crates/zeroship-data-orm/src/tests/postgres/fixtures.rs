@@ -85,7 +85,7 @@ pub(super) async fn setup(pool: &Pool, schema: &str) {
 /// Helper: build + execute a query, return parsed JSON array.
 pub(super) async fn exec_query(
     pool: &Pool,
-    bq: crate::sql::compile::BuiltQuery,
+    bq: crate::sql::compiler::CompiledQuery,
 ) -> Vec<Value> {
     let param_refs = &bq.params;
     let rows = zeroship_data_orm::backend::postgres::params::query(
@@ -101,7 +101,7 @@ pub(super) async fn exec_query(
 /// Helper: build + execute a mutation, return parsed JSON array.
 pub(super) async fn exec_mutation(
     pool: &Pool,
-    bq: crate::sql::compile::BuiltQuery,
+    bq: crate::sql::compiler::CompiledQuery,
 ) -> Vec<Value> {
     let param_refs = &bq.params;
     let rows = zeroship_data_orm::backend::postgres::params::query(

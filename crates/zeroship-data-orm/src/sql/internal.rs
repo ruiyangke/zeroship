@@ -1,6 +1,7 @@
 //! SQL for ORM-owned protection operations. Caller values remain parameters.
+use crate::sql::compiler::CompiledQuery;
 use crate::value::Value;
-use crate::sql::{compile::{BuiltQuery, SqlDialect, quote_ident_for_dialect}};
+use crate::sql::{compile::{SqlDialect, quote_ident_for_dialect}};
 
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
@@ -18,8 +19,8 @@ pub fn raw_column(
     key_column: &str,
     key: Value,
     dialect: SqlDialect,
-) -> BuiltQuery {
-    BuiltQuery {
+) -> CompiledQuery {
+    CompiledQuery {
         sql: format!(
             "SELECT {} FROM {}.{} WHERE {} = {}",
             quote_ident_for_dialect(column, dialect),
@@ -32,7 +33,7 @@ pub fn raw_column(
     }
 }
 
-pub fn unmask_audit(namespace: &str, dialect: SqlDialect, params: Vec<Value>) -> BuiltQuery {
+pub fn unmask_audit(namespace: &str, dialect: SqlDialect, params: Vec<Value>) -> CompiledQuery {
     let columns = [
         "actor_id",
         "actor_role",
@@ -48,7 +49,7 @@ pub fn unmask_audit(namespace: &str, dialect: SqlDialect, params: Vec<Value>) ->
         .map(|index| placeholder(dialect, index))
         .collect::<Vec<_>>()
         .join(", ");
-    BuiltQuery {
+    CompiledQuery {
         sql: format!(
             "INSERT INTO {}.{} ({}) VALUES ({placeholders})",
             quote_ident_for_dialect(namespace, dialect),

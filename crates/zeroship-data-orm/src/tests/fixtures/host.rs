@@ -183,7 +183,7 @@ impl Host {
 
     pub(crate) async fn exec_mutation_with_emit(
         &self,
-        bq: compile::BuiltQuery,
+        bq: crate::sql::compiler::CompiledQuery,
         app_id: &str,
         collection: &str,
         op: zeroship_data_orm::cdc::ChangeOp,
@@ -204,7 +204,7 @@ impl Host {
     pub(crate) async fn exec_query(
         &self,
         app_id: &str,
-        bq: compile::BuiltQuery,
+        bq: crate::sql::compiler::CompiledQuery,
     ) -> Result<Vec<crate::value::Value>, String> {
         let backend = self.backend().await.map_err(DbError::into_string)?;
         let route = exec::ambient_route_for_tests(app_id, backend);

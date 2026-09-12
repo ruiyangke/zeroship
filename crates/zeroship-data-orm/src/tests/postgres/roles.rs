@@ -364,7 +364,7 @@ fn exec_autocommit_query_runs_under_per_app_role() {
             let rows = host
                 .exec_query(
                     app,
-                    crate::sql::compile::BuiltQuery {
+                    crate::sql::compiler::CompiledQuery {
                         sql: "SELECT current_user AS u".to_string(),
                         params: vec![],
                     },

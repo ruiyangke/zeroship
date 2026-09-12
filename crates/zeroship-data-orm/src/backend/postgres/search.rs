@@ -144,7 +144,7 @@ impl PostgresBackend {
         metric: VectorMetric,
         filter: &crate::value::Value,
         schema: &crate::value::Value,
-    ) -> Result<crate::sql::compile::BuiltQuery, DbError> {
+    ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
         // Probe so a missing extension surfaces with the same typed
         // error shape the capability probe produces — the SDK branches
         // on `e.code === "vector_extension_missing"` regardless of
@@ -247,7 +247,7 @@ impl PostgresBackend {
         filter: &crate::value::Value,
         limit: Option<usize>,
         schema: &crate::value::Value,
-    ) -> Result<crate::sql::compile::BuiltQuery, DbError> {
+    ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
         self.ensure_postgis_available().await?;
 
         crate::sql::compile::build_spatial_near(

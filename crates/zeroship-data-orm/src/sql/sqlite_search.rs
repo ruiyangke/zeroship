@@ -1,4 +1,5 @@
 //! SQLite search statement compilation. Extension availability is a host concern.
+use crate::sql::compiler::CompiledQuery;
 use crate::value::Value;
 use crate::sql::{compile::*, descriptors::VectorMetric, sqlite_values::vec_to_le_bytes};
 
@@ -14,7 +15,7 @@ pub fn build_vector_search(
     metric: VectorMetric,
     filter: &Value,
     schema: &Value,
-) -> Result<BuiltQuery, QueryError> {
+) -> Result<CompiledQuery, QueryError> {
     let distance = match metric {
         VectorMetric::Cosine => "vec_distance_cosine",
         VectorMetric::L2 => "vec_distance_l2",
@@ -42,7 +43,7 @@ pub fn build_vector_search(
     } else {
         format!(" AND {where_expr}")
     };
-    Ok(BuiltQuery {
+    Ok(CompiledQuery {
         sql: format!(
             "SELECT {select}, {distance}(t.{column}, $1) AS _distance \
             FROM {namespace}.{table} t \
