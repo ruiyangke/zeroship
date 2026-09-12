@@ -976,12 +976,19 @@ on `error.message`.
 
 ## Filter operators
 
-- Comparison: `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`
-- Inclusion: `$in`, `$nin`
-- String: `$like`, `$ilike`
+- Equality: `$eq`, `$ne`, `$in`, `$nin` on ordinary scalar and JSON fields
+- Ordering: `$gt`, `$gte`, `$lt`, `$lte` on text, integer, floating-point,
+  temporal, ID, and reference fields
+- Pattern: `$like`, `$ilike` on text-backed fields
 - Null shape: `field: null`, `{ $ne: null }`, `{ $exists: true }`
 - Logical: `$and`, `$or`, `$not` (each takes an array of sub-filters,
   except `$not` which takes one)
+
+JSON equality is structural on both backends: object key order and equivalent
+number spellings do not affect the result. Use an explicit operator such as
+`{ payload: { $eq: value } }` for JSON so object keys beginning with `$` cannot
+be mistaken for filter operators. Vector and geographic fields use `search`
+and `near`; ordinary comparisons on them are refused.
 
 ```ts
 { role: "admin", age: { $gte: 18 } }   // implicit AND

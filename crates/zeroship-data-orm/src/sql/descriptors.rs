@@ -91,6 +91,80 @@ pub fn effective_mask(field: &crate::value::Value) -> Option<EffectiveMask<'_>> 
     })
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PredicateOperator {
+    Equality,
+    Ordering,
+    Pattern,
+}
+
+pub(crate) fn supports_predicate_operator(
+    field: &crate::value::Value,
+    operator: PredicateOperator,
+) -> bool {
+    let kind = field.get("type").and_then(crate::value::Value::as_str);
+    match operator {
+        PredicateOperator::Equality => matches!(
+            kind,
+            Some(
+                "string"
+                    | "text"
+                    | "id"
+                    | "ref"
+                    | "enum"
+                    | "boolean"
+                    | "bool"
+                    | "integer"
+                    | "int"
+                    | "bigint"
+                    | "bigInt"
+                    | "number"
+                    | "float"
+                    | "double"
+                    | "decimal"
+                    | "bytes"
+                    | "date"
+                    | "timestamp"
+                    | "timestamptz"
+                    | "calendarDate"
+                    | "time"
+                    | "json"
+                    | "object"
+                    | "array"
+                    | "union"
+            )
+        ),
+        PredicateOperator::Ordering => {
+            effective_mask(field).is_none()
+                && matches!(
+                    kind,
+                    Some(
+                        "string"
+                            | "text"
+                            | "id"
+                            | "ref"
+                            | "enum"
+                            | "integer"
+                            | "int"
+                            | "bigint"
+                            | "bigInt"
+                            | "number"
+                            | "float"
+                            | "double"
+                            | "date"
+                            | "timestamp"
+                            | "timestamptz"
+                            | "calendarDate"
+                            | "time"
+                    )
+                )
+        }
+        PredicateOperator::Pattern => {
+            matches!(kind, Some("string" | "text" | "id" | "ref" | "enum"))
+        }
+    }
+}
+
 /// Distance metric for a vector index. The three metrics map 1:1 to
 /// pgvector's operator class set (`vector_cosine_ops`,
 /// `vector_l2_ops`, `vector_ip_ops`) and the SQLite Rust-side distance

@@ -145,6 +145,7 @@ pub(crate) fn resolve_model(
                     negated: op == CompareOp::Ne,
                 }
             } else {
+                validate_comparison(definition, op)?;
                 crate::sql::codecs::prepare_value(field, definition, &mut value)
                     .map_err(|error| invalid(error.to_string()))?;
                 let storage = column.storage();
@@ -268,6 +269,7 @@ fn condition(
                 negated: op == CompareOp::Ne,
             });
         }
+        validate_comparison(definition, op)?;
         return Ok(ResolvedPredicate::Compare {
             rhs: ResolvedPredicateValue::Bind {
                 storage: column.storage(),
@@ -279,6 +281,7 @@ fn condition(
     }
     match operator {
         "$in" | "$nin" => {
+            validate_equality(definition)?;
             let Value::Array(values) = value else {
                 return Err(invalid(format!("{operator} must be an array")));
             };
@@ -334,6 +337,7 @@ fn condition(
                 .ok_or_else(|| invalid("$exists must be a boolean"))?,
         }),
         "$like" | "$ilike" => {
+            validate_pattern(definition)?;
             let value = value
                 .as_str()
                 .ok_or_else(|| invalid(format!("{operator} must be a string")))?
@@ -354,6 +358,36 @@ fn condition(
         }
         _ => Err(invalid(format!("unsupported operator: {operator}"))),
     }
+}
+
+fn validate_comparison(definition: &Value, op: CompareOp) -> Result<(), QueryError> {
+    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
+    let operator = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+        PredicateOperator::Equality
+    } else {
+        PredicateOperator::Ordering
+    };
+    if supports_predicate_operator(definition, operator) {
+        Ok(())
+    } else {
+        Err(invalid(
+            "comparison operator is not supported for this field type",
+        ))
+    }
+}
+
+fn validate_equality(definition: &Value) -> Result<(), QueryError> {
+    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
+    supports_predicate_operator(definition, PredicateOperator::Equality)
+        .then_some(())
+        .ok_or_else(|| invalid("ordinary equality is not supported for this field type"))
+}
+
+fn validate_pattern(definition: &Value) -> Result<(), QueryError> {
+    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
+    supports_predicate_operator(definition, PredicateOperator::Pattern)
+        .then_some(())
+        .ok_or_else(|| invalid("pattern operator requires a text field"))
 }
 
 fn encode(
@@ -415,4 +449,77 @@ fn operand_shape(operand: &ResolvedOperand) -> String {
 
 fn invalid(message: impl Into<String>) -> QueryError {
     QueryError::InvalidFilter(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sql::SchemaName;
+
+    fn resolves(definition: Value, filter: Value) -> Result<ResolvedPredicate, QueryError> {
+        let schema = crate::value!({
+            "id": {"type":"string", "required":true, "primaryKey":true},
+            "field": definition,
+        });
+        let registration = SqlRegistration::sqlite();
+        let table = ResolvedTable::new(
+            &SchemaName::new("main").unwrap(),
+            "records",
+            &schema,
+            &registration,
+        )?;
+        resolve(filter, &schema, &table, &registration)
+    }
+
+    #[test]
+    fn dynamic_filters_enforce_the_portable_operator_matrix() {
+        for (definition, filter) in [
+            (
+                crate::value!({"type":"boolean"}),
+                crate::value!({"field":{"$gt":false}}),
+            ),
+            (
+                crate::value!({"type":"decimal"}),
+                crate::value!({"field":{"$lt":"10.5"}}),
+            ),
+            (
+                crate::value!({"type":"json"}),
+                crate::value!({"field":{"$gte":{"key":true}}}),
+            ),
+            (
+                crate::value!({"type":"bytes"}),
+                crate::value!({"field":{"$lt":[1,2]}}),
+            ),
+            (
+                crate::value!({"type":"vector", "vectorDims":2}),
+                crate::value!({"field":{"$eq":[1,2]}}),
+            ),
+            (
+                crate::value!({"type":"geoPoint"}),
+                crate::value!({"field":{"$in":[{"lat":1,"lng":2}]}}),
+            ),
+            (
+                crate::value!({"type":"number", "mask":{"kind":"full"}}),
+                crate::value!({"field":{"$gt":10}}),
+            ),
+        ] {
+            assert!(resolves(definition, filter).is_err());
+        }
+
+        assert!(resolves(
+            crate::value!({"type":"json"}),
+            crate::value!({"field":{"$eq":{"key":true}}}),
+        )
+        .is_ok());
+        assert!(resolves(
+            crate::value!({"type":"calendarDate"}),
+            crate::value!({"field":{"$gte":"2026-01-01"}}),
+        )
+        .is_ok());
+        assert!(resolves(
+            crate::value!({"type":"string"}),
+            crate::value!({"field":{"$like":"prefix%"}}),
+        )
+        .is_ok());
+    }
 }

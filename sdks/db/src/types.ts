@@ -41,7 +41,7 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
  * declared field appears, with the masked-value wrapper around it.
  */
 export type InferFieldDef<T> =
-  T extends TypeBuilder<infer U, any, infer M, any, any>
+  T extends TypeBuilder<infer U, any, infer M, any, any, any>
     ? M extends MaskKind
       ? M extends "none"
         ? U
@@ -102,7 +102,10 @@ type IsSchemaDict<S> =
       // Otherwise it's already an inferred shape (top-level union
       // variant) and we return S unchanged.
       true extends {
-        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any, any, any, any> ? true : false;
+        [K in keyof S]-?: NonNullable<S[K]> extends {
+          readonly _type: unknown;
+          toFieldDef(): Readonly<FieldDef>;
+        } ? true : false;
       }[keyof S]
       ? true
       : false
@@ -167,19 +170,27 @@ export type UpsertOptions<S> = {
 // Filter types — typed query operators per field type
 // ---------------------------------------------------------------------------
 
-/** Comparison operators available on any field type. */
-type ComparisonOps<T> = {
+type EqualityOps<T> = {
   $eq?: T;
   $ne?: T | null;
-  $gt?: T;
-  $gte?: T;
-  $lt?: T;
-  $lte?: T;
   $in?: T[];
   $nin?: T[];
   $exists?: boolean;
 };
 
+type OrderingOps<T> = {
+  $gt?: T;
+  $gte?: T;
+  $lt?: T;
+  $lte?: T;
+};
+
+type FilterKind = "text" | "ordered" | "equality" | "json" | "search";
+type InferredFilterKind<T> = NonNullable<T> extends string
+  ? "text"
+  : NonNullable<T> extends number | bigint
+    ? "ordered"
+    : "equality";
 
 /** String-specific operators. */
 type StringOps = {
@@ -194,12 +205,17 @@ type StringOps = {
  * `$like` / `$ilike` are real backend operators: the ORM query builder
  * validates them and lowers them to SQL predicates.
  */
-type PlainFilterValue<T> =
-  T | null |
-  (NonNullable<T> extends string ? ComparisonOps<NonNullable<T>> & StringOps :
-   NonNullable<T> extends number ? ComparisonOps<NonNullable<T>> :
-   NonNullable<T> extends boolean ? ComparisonOps<NonNullable<T>> :
-   ComparisonOps<NonNullable<T>>);
+type PlainFilterValue<T, K extends FilterKind = InferredFilterKind<T>> =
+  K extends "search"
+    ? never
+    : (K extends "json" ? null : T | null) | (
+      EqualityOps<NonNullable<T>> &
+      (K extends "text"
+        ? OrderingOps<NonNullable<T>> & StringOps
+        : K extends "ordered"
+          ? OrderingOps<NonNullable<T>>
+          : object)
+    );
 
 
 /**
@@ -211,25 +227,24 @@ type PlainFilterValue<T> =
  * - plain fields keep the normal operator surface
  */
 type FilterValueForFieldBuilder<F> =
-  F extends TypeBuilder<infer U, any, any, infer E, any>
-    ? E extends true
+  F extends {
+    readonly _type: unknown;
+    readonly _encryption: true | undefined;
+    readonly _filterKind: FilterKind;
+  }
+    ? true extends F["_encryption"]
       ? never
-      : PlainFilterValue<NonNullable<U>>
+      : PlainFilterValue<NonNullable<F["_type"]>, F["_filterKind"]>
     : never;
 
-type FilterValueForKey<S, K extends keyof Row<S>> =
-  IsSchemaDict<S> extends true
-    ? K extends keyof S
-      ? FilterValueForFieldBuilder<NonNullable<S[K]>>
-      : PlainFilterValue<NonNullable<Row<S>[K]>>
-    : PlainFilterValue<NonNullable<Row<S>[K]>>;
+type FieldFilters<S> = IsSchemaDict<S> extends true
+  ? { [K in keyof S]?: FilterValueForFieldBuilder<NonNullable<S[K]>> }
+  : { [K in keyof Row<S>]?: PlainFilterValue<NonNullable<Row<S>[K]>> };
 
 /** Typed filter for a document — each field accepts its value type or operators.
  *  Field values use `NonNullable<Row<S>[K]>` so `undefined` is rejected at the
  *  type layer; pass `null` to match SQL NULL explicitly. */
-export type Filter<S> = {
-  [K in keyof Row<S>]?: FilterValueForKey<S, K>
-} & {
+export type Filter<S> = FieldFilters<S> & {
   $and?: Filter<S>[];
   $or?: Filter<S>[];
   $not?: Filter<S>;
@@ -932,6 +947,7 @@ export class TypeBuilder<
   M extends MaskKind | undefined = undefined,
   E extends true | undefined = undefined,
   D extends boolean = false,
+  F extends FilterKind = FilterKind,
 > {
   /** @internal Type-level brand — do not access at runtime. */
   declare readonly _type: T;
@@ -943,6 +959,8 @@ export class TypeBuilder<
   declare readonly _encryption: E;
   /** @internal Type-level brand for `.default()`-backed insert optionality. */
   declare readonly _hasDefault: D;
+  /** @internal Type-level brand for portable filter operators. */
+  declare readonly _filterKind: F;
 
   readonly [TYPE_BUILDER_BRAND] = true;
 
@@ -979,9 +997,9 @@ export class TypeBuilder<
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E, D> & AssignmentBrand<this> {
+  required(): TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -1005,9 +1023,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> & AssignmentBrand<this> {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this> {
     this._def.default = val;
-    return this as unknown as TypeBuilder<T, R, M, E, true> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1025,9 +1043,9 @@ export class TypeBuilder<
   /** Restricts the field to a fixed set of allowed values. */
   enum<const Values extends readonly (T & (string | number))[]>(
     ...values: Values
-  ): TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this> {
+  ): TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this> {
     this._def.enum = [...values];
-    return this as unknown as TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** For strings: a RegExp the value must match. */
@@ -1073,7 +1091,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> & AssignmentBrand<this> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1144,12 +1162,12 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this>;
   }
 
   /** Allow null in the field's value type. */
-  nullable(): TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this> {
-    return this as TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this>;
+  nullable(): TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this> {
+    return this as TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** Assign the database timestamp on insert. */
@@ -1192,20 +1210,20 @@ export class TypeBuilder<
  */
 export const t = {
   /** Creates a string field definition. */
-  string(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "string" });
+  string(): TypeBuilder<string, false, undefined, undefined, false, "text"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "string" });
   },
   /** Creates a number field definition. */
-  number(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "number" });
+  number(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "number" });
   },
   /** Creates an integer field with exact bigint input and output beyond the safe number range. */
-  bigInt(): TypeBuilder<number | bigint> {
-    return new TypeBuilder<number | bigint>({ type: "bigInt" });
+  bigInt(): TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered">({ type: "bigInt" });
   },
   /** Creates a boolean field definition. */
-  boolean(): TypeBuilder<boolean> {
-    return new TypeBuilder<boolean>({ type: "boolean" });
+  boolean(): TypeBuilder<boolean, false, undefined, undefined, false, "equality"> {
+    return new TypeBuilder<boolean, false, undefined, undefined, false, "equality">({ type: "boolean" });
   },
   /**
    * Creates a timestamp field — `TIMESTAMPTZ` in Postgres, Unix-ms
@@ -1214,12 +1232,12 @@ export const t = {
    * `number` (millisecond epoch). For wall-clock dates without a
    * time-of-day component, use {@link calendarDate} instead.
    */
-  timestamp(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "date" });
+  timestamp(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "date" });
   },
   /** Creates a JSON field definition for objects, arrays, and scalars. */
-  json(): TypeBuilder<JsonValue> {
-    return new TypeBuilder<JsonValue>({ type: "json" });
+  json(): TypeBuilder<JsonValue, false, undefined, undefined, false, "json"> {
+    return new TypeBuilder<JsonValue, false, undefined, undefined, false, "json">({ type: "json" });
   },
   /**
    * Creates an array field definition. Pass the item type builder as the argument:
@@ -1233,7 +1251,7 @@ export const t = {
    * malformed `FieldDef`s (e.g. dropping `refTarget` so `validateRefTargets`
    * could not visit array items).
    */
-  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[]> {
+  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[], false, undefined, undefined, false, "json"> {
     if (!(items instanceof TypeBuilder)) {
       throw Object.assign(
         new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
@@ -1256,17 +1274,17 @@ export const t = {
       );
     }
     const itemType = itemDef.type as PrimitiveTypeName;
-    return new TypeBuilder<U[]>({ type: "array", items: itemType });
+    return new TypeBuilder<U[], false, undefined, undefined, false, "json">({ type: "array", items: itemType });
   },
   /** Declare a branded reference, optionally naming its target column and FK actions. */
-  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
+  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>, false, undefined, undefined, false, "text"> {
     if (typeof table !== "string" || table.length === 0) {
       throw Object.assign(
         new Error("t.ref(table) requires a non-empty table name"),
         { code: "REF_EMPTY_TABLE" as const },
       );
     }
-    return new TypeBuilder<Id<T>>({
+    return new TypeBuilder<Id<T>, false, undefined, undefined, false, "text">({
       type: "ref",
       refTarget: table,
       ...(opts?.column !== undefined ? { refColumn: opts.column } : {}),
@@ -1295,7 +1313,7 @@ export const t = {
    * `string | undefined` — the same rules as the top-level schema apply
    * recursively (`required()` keeps a key required, otherwise optional).
    */
-  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
+  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>, false, undefined, undefined, false, "json"> {
     if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
       throw Object.assign(
         new Error("t.object(shape) requires a record of nested type builders"),
@@ -1312,7 +1330,7 @@ export const t = {
       }
       nested[key] = { ...val.toFieldDef() };
     }
-    return new TypeBuilder<InferSchema<S>>({ type: "object", shape: nested });
+    return new TypeBuilder<InferSchema<S>, false, undefined, undefined, false, "json">({ type: "object", shape: nested });
   },
   /**
    * vector embedding field. Stored as pgvector's
@@ -1336,7 +1354,7 @@ export const t = {
    * back as the same shape. Use `collection.search({ vector, k })` for
    * nearest-neighbour queries.
    */
-  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[]> {
+  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[], false, undefined, undefined, false, "search"> {
     if (typeof dims !== "number" || !Number.isInteger(dims) || dims < 1 || dims > 16000) {
       throw Object.assign(
         new Error(
@@ -1354,7 +1372,7 @@ export const t = {
         { code: "VECTOR_INVALID_METRIC" as const },
       );
     }
-    return new TypeBuilder<number[]>({
+    return new TypeBuilder<number[], false, undefined, undefined, false, "search">({
       type: "vector",
       vectorDims: dims,
       vectorMetric: metric,
@@ -1380,8 +1398,8 @@ export const t = {
    * the database; the runtime probes `pg_extension WHERE extname='postgis'`
    * and surfaces a typed `POSTGIS_EXTENSION_MISSING` error when absent.
    */
-  geoPoint(): TypeBuilder<{ lat: number; lng: number }> {
-    return new TypeBuilder<{ lat: number; lng: number }>({ type: "geoPoint" });
+  geoPoint(): TypeBuilder<{ lat: number; lng: number }, false, undefined, undefined, false, "search"> {
+    return new TypeBuilder<{ lat: number; lng: number }, false, undefined, undefined, false, "search">({ type: "geoPoint" });
   },
   /**
    * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and
@@ -1393,12 +1411,12 @@ export const t = {
    * birthday: t.calendarDate(),
    * ```
    */
-  calendarDate(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "calendarDate" });
+  calendarDate(): TypeBuilder<string, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "ordered">({ type: "calendarDate" });
   },
   /** Native binary column, also usable as an encrypted field's wrap. */
-  bytes(): TypeBuilder<Uint8Array> {
-    return new TypeBuilder<Uint8Array>({ type: "bytes" });
+  bytes(): TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality"> {
+    return new TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality">({ type: "bytes" });
   },
   /**
    * Encrypt string, number or byte values with a fresh random nonce per write.
@@ -1575,7 +1593,7 @@ export const t = {
   actor(): TypeBuilder<string | null> & { readonly _assigned: true } {
     return new TypeBuilder<string | null>({ type: "string" }).assigned({ by: "actor", on: "insert" });
   },
-  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
+  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>, false, undefined, undefined, false, "json"> {
     if (variants.length < 2) {
       throw Object.assign(
         new Error(
@@ -1616,7 +1634,7 @@ export const t = {
     // key that is `t.literal()` in EVERY variant AND has distinct
     // literal values across variants.
     const discriminator = detectDiscriminator(normalized);
-    return new TypeBuilder<InferUnion<V>>({
+    return new TypeBuilder<InferUnion<V>, false, undefined, undefined, false, "json">({
       type: "union",
       variants: normalized,
       discriminator,

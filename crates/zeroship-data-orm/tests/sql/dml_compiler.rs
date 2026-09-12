@@ -13,7 +13,7 @@ use zeroship_data_orm::{
             SpatialNearStatement, Statement, StorageType, Table, Update, UpdateParts, Upsert,
             UpsertParts, VectorSearchParts, VectorSearchStatement,
         },
-        CompareOp, Ident, IdentRole, JoinKind, SchemaName,
+        CompareOp, Ident, IdentRole, JoinKind, MembershipOp, SchemaName,
     },
     value::Value,
 };
@@ -22,6 +22,27 @@ fn table() -> Table {
     Table::new(
         SchemaName::new("app-upserts").unwrap(),
         Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        [
+            ("id", StorageType::Integer),
+            ("payload", StorageType::Bytes),
+            ("document", StorageType::Json),
+            ("revision", StorageType::Integer),
+        ]
+        .map(|(name, storage)| {
+            (
+                Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                storage,
+            )
+        }),
+    )
+    .unwrap()
+}
+
+fn aliased_table() -> Table {
+    Table::aliased(
+        SchemaName::new("app-upserts").unwrap(),
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        Ident::parse_as("source", IdentRole::Alias).unwrap(),
         [
             ("id", StorageType::Integer),
             ("payload", StorageType::Bytes),
@@ -58,6 +79,102 @@ fn search_table() -> Table {
         }),
     )
     .unwrap()
+}
+
+fn select_with_predicate(
+    table: Table,
+    predicate: ResolvedPredicate,
+) -> Result<SelectStatement, CompileError> {
+    SelectStatement::new(SelectParts {
+        projection: vec![SelectedExpression {
+            expression: ResolvedOperand::Column(table.column("id").unwrap()),
+            alias: Ident::parse_as("id", IdentRole::Alias).unwrap(),
+        }],
+        predicate,
+        joins: Vec::new(),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        lock: zeroship_data_orm::sql::statement::RowLock::None,
+        table,
+    })
+}
+
+#[test]
+fn resolved_predicates_refuse_non_portable_storage_operators() {
+    let table = search_table();
+    for (field, value) in [
+        ("amount", Value::Decimal("1.5".into())),
+        ("embedding", Value::Bytes(vec![0; 8])),
+        ("location", Value::Bytes(vec![0; 16])),
+    ] {
+        let predicate = ResolvedPredicate::Compare {
+            lhs: ResolvedOperand::Column(table.column(field).unwrap()),
+            op: CompareOp::Gt,
+            rhs: ResolvedPredicateValue::Bind {
+                storage: table.column(field).unwrap().storage(),
+                value,
+            },
+        };
+        assert!(
+            select_with_predicate(table.clone(), predicate).is_err(),
+            "{field}"
+        );
+    }
+
+    for field in ["embedding", "location"] {
+        let column = table.column(field).unwrap();
+        let values = vec![match field {
+            "embedding" => Value::Bytes(vec![0; 8]),
+            _ => Value::Bytes(vec![0; 16]),
+        }];
+        let predicate = ResolvedPredicate::Membership {
+            lhs: ResolvedOperand::Column(column),
+            op: MembershipOp::In,
+            values,
+        };
+        assert!(
+            select_with_predicate(table.clone(), predicate).is_err(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_uses_structural_json_equality_for_filters() {
+    let table = aliased_table();
+    let document = table.column("document").unwrap();
+    let predicate = ResolvedPredicate::Compare {
+        lhs: ResolvedOperand::Column(document.clone()),
+        op: CompareOp::Eq,
+        rhs: ResolvedPredicateValue::Bind {
+            storage: StorageType::Json,
+            value: Value::Json(r#"{"b":2,"a":1}"#.into()),
+        },
+    };
+    let compiled = SqliteCompiler
+        .compile(
+            Statement::Select(select_with_predicate(table.clone(), predicate).unwrap()),
+            &SqliteCompiler.support(),
+        )
+        .unwrap();
+    assert!(compiled.sql().contains("zeroship_json_equal("));
+
+    let predicate = ResolvedPredicate::Membership {
+        lhs: ResolvedOperand::Column(document),
+        op: MembershipOp::NotIn,
+        values: vec![Value::Json(r#"{"a":1,"b":2}"#.into())],
+    };
+    let compiled = SqliteCompiler
+        .compile(
+            Statement::Select(select_with_predicate(table, predicate).unwrap()),
+            &SqliteCompiler.support(),
+        )
+        .unwrap();
+    assert!(compiled.sql().contains("NOT zeroship_json_equal("));
 }
 
 #[test]
