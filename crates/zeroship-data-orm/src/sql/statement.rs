@@ -35,7 +35,7 @@ impl StorageType {
             Self::Boolean => matches!(value, Value::Bool(_)),
             Self::Integer => matches!(value, Value::Number(value) if value.as_i64().is_some()),
             Self::Real => match value {
-                Value::Number(_) => true,
+                Value::Number(value) => value.as_i64().is_some() || value.is_f64(),
                 Value::Decimal(value) => valid_decimal(value),
                 _ => false,
             },
@@ -1096,6 +1096,7 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
     }
     if let Some(condition) = &parts.condition {
         parts.table.check_column(&condition.column)?;
+        validate_comparison_operator(condition.column.storage(), condition.op)?;
         if condition.value.is_null() || !condition.column.storage().accepts(&condition.value) {
             return Err(invalid(
                 "comparison requires a non-null value with matching storage type",
@@ -1198,6 +1199,21 @@ fn validate_predicate(table: &Table, predicate: &ResolvedPredicate) -> Result<()
     validate_predicate_for_tables(&[table], predicate, false)
 }
 
+fn validate_comparison_operator(storage: StorageType, op: CompareOp) -> Result<(), CompileError> {
+    let supported = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+        storage.supports_equality()
+    } else {
+        storage.supports_ordering()
+    };
+    if supported {
+        Ok(())
+    } else {
+        Err(invalid(
+            "comparison operator is not portable for this storage type",
+        ))
+    }
+}
+
 fn validate_predicate_for_tables(
     tables: &[&Table],
     predicate: &ResolvedPredicate,
@@ -1223,16 +1239,7 @@ fn validate_predicate_for_tables(
             ResolvedPredicate::Compare { lhs, op, rhs } => {
                 validate_operand(tables, lhs, allow_aggregate)?;
                 let lhs_storage = lhs.storage()?;
-                let supported = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
-                    lhs_storage.supports_equality()
-                } else {
-                    lhs_storage.supports_ordering()
-                };
-                if !supported {
-                    return Err(invalid(
-                        "comparison operator is not portable for this storage type",
-                    ));
-                }
+                validate_comparison_operator(lhs_storage, *op)?;
                 match rhs {
                     ResolvedPredicateValue::Operand(rhs) => {
                         validate_operand(tables, rhs, allow_aggregate)?;
