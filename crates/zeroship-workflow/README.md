@@ -55,7 +55,13 @@ extending an existing task lease. History and completion under an already live
 claim remain available. Deploy selection also comes from the trusted host,
 through `activate_deploy`, without querying platform tables.
 
-`activate_deploy` requires an `ExecutableSnapshot`: the built entry module,
+The [worker design](../../docs/proposals/2026-09-11-workflow-worker.md) requires
+workflow execution to reuse the app's existing deployed bundle, protected by
+durable platform retention metadata. The executable snapshot copies and local
+workflow-only archive feed described below are the current branch implementation
+and are being replaced. They are not a separate deployment contract.
+
+`activate_deploy` currently requires an `ExecutableSnapshot`: the built entry module,
 dependency sources and runtime schema descriptor. `with_snapshots` binds a
 `SnapshotStore` in customer object storage. Activation verifies the retained
 bytes before selecting the deployment; upload failure preserves the previous

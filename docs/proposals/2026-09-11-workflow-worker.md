@@ -7,7 +7,7 @@ lightweight coordinator for registry, placement, wake-up hints and high-level
 management. The previously proposed data-owning server violated that boundary.
 
 The [workflow reference](../reference/workflows.md) describes the existing
-Control/Gateway dispatch implementation. The replacement engine, embedded task
+Control/Gateway dispatch implementation. The replacement engine, worker task
 runner, V8 lifecycle adapter and payload contracts are implemented in the
 refactor branch, but their production composition remains unfinished. The engine
 now requires an explicit customer schema binding and host-owned policy
@@ -21,8 +21,11 @@ wire tests reject execution data and credentials at the message boundary,
 including nested management operations and acknowledgements. The coordinator
 metadata store, HTTP host and platform migration now use the metadata-only
 contract. Native PostgreSQL and real-process tests cover scoped authority,
-replica retries, startup privileges and restart recovery. Worker/CLI engine
-composition remains unfinished.
+replica retries, startup privileges and restart recovery. The CLI now composes
+the shared engine and background runner. Production composition remains
+unfinished. The branch's separate workflow archive feed and customer executable
+snapshot copies are superseded by the app-deployment contract below and must
+be removed together with their callers.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),
@@ -57,7 +60,10 @@ Customer's worker
   |
   +------------------------------> Customer's object storage
                                     workflow payloads
-                                    retained executable snapshots
+
+Customer's worker ----------------> App deployment bundle store
+  load the run's pinned deployment   existing hosted app manifests and blobs
+                                     retained by platform deployment metadata
 ```
 
 The workflow engine is a Rust library embedded in the worker. The workflow
@@ -74,7 +80,8 @@ host configuration, never an argument chosen by app code.
 | Customer worker, Rust host | Own workflow acceptance, scheduling, leases, history writes, signal delivery, payload access and retention through its resolved customer storage binding. |
 | Customer worker, V8 | Execute the pinned app code with app-scoped native handles and replay input. No database connection, task token or raw storage credential enters V8. |
 | Customer database | Authoritative workflow history, run state, durable ready work, timers, signals, leases and payload references. |
-| Customer object storage | Large inputs/results and executable snapshots retained for replay. |
+| Customer object storage | Large workflow inputs and results. |
+| App deployment bundle store | The app's existing deployed code, dependencies and runtime descriptor. Workflow execution reuses this artifact under a durable deployment hold. |
 | Provisioning host | Apply the canonical migration definition with explicitly authorized customer migration credentials. Runtime workflow operations use ordinary DML. |
 
 The platform may route customer requests as it does other app traffic; routing
@@ -291,16 +298,45 @@ that race a task completion are resolved transactionally. Pausing or cancelling
 must not erase a signal or a pending child transition. Restart requires
 quiescence and retains only the explicitly selected immutable replay prefix.
 
-Deployment snapshots are durable in customer storage before accepting runs
-pinned to them. Their content identity covers the executable module and its
-dependencies. A cache entry or a live Vite URL is not a durable deployment pin.
-New deployments affect new runs and schedule reconciliation; existing runs
-continue with their retained snapshot. Missing snapshots park affected work.
+Workflow classes ship inside the app's normal `.zship` deployment. A run pins
+the trusted app identity, deployment identity and deployment hash. Its worker
+loads that deployment through the normal app manifest and blob loader, including
+the pinned runtime descriptor and dependencies. There is no separate workflow
+bundle, upload, executable snapshot store or `--workflow-bundle` option in the
+target interface. New deployments affect new runs and schedule reconciliation;
+existing runs continue using their original app deployment. Missing or corrupt
+code parks affected work; it never selects the current deployment as a fallback.
 
-Journal-aware retention runs at the customer worker and preserves snapshots,
-payloads, restart generations and child/parent dependencies as required. Platform
-bundle collection must not require SQL access to customer journals; runnable
-work uses the durable customer snapshot rather than an evictable platform cache.
+The platform retains its existing app artifact through durable deployment holds.
+The customer's worker determines journal dependencies, including retained restart
+generations and child/parent edges. It reports retention metadata under scoped
+host authority. Neither the coordinator nor deployment garbage collection reads
+customer SQL or receives history, payloads or source-code copies.
+
+The hold protocol must close the admission-versus-deletion race:
+
+- The worker durably records acquisition intent before requesting an app-scoped
+  deployment hold. Platform acquisition and bundle reclamation serialize on the
+  same deployment record. A deployment being reclaimed cannot gain a new hold.
+- The worker admits runs only after the platform acknowledges the hold and the
+  worker records it durably. A lost response is retried using the same operation
+  identity; accepting a run and sending an asynchronous pin afterward is unsafe.
+- Before release, the worker closes admission for that deployment and verifies
+  that its customer journal has no remaining replay dependencies under the app
+  lock. It records a durable release intent. New admission must reacquire a hold
+  before reopening the deployment.
+- Hold generations and scoped host authority fence stale releases. Retries of an
+  old release cannot remove a reacquired hold. Ownership handoff preserves pending
+  intents and existing holds.
+- Holds survive worker disconnection, placement expiry and coordinator restart.
+  A missed heartbeat or an unreachable customer database is never evidence that
+  a bundle is reclaimable. Failed release delivery retains the bundle until the
+  idempotent operation is acknowledged.
+
+Journal-aware payload retention stays in the customer worker. Platform bundle
+collection consults platform-owned deployment holds, active routing and other
+deployment consumers. The existing Control journal-reading retention sweep must
+be replaced as part of the production cutover.
 
 The JS replay interpreter has a shared implementation consumed by the runtime,
 SDK and bootstrap. The local host does not maintain a smaller workflow engine
@@ -308,16 +344,20 @@ with different lifecycle or replay semantics.
 
 ## Local development
 
-`zeroship serve` embeds the same Rust engine and task runner with SQLite, local
-payload files and retained executable snapshots. The CLI persists a trusted
+`zeroship serve` embeds the same Rust engine and task runner with SQLite and local
+payload files. Local development builds the normal app deployment and retains
+its manifests and content-addressed blobs locally. HTTP and workflow execution
+derive from the same app build; creators do not supply a workflow-only entry or
+archive. The CLI persists a trusted
 project app identity under `.zeroship`; the creator need not set `APP_ID`.
 Separate projects receive separate storage and identities by default.
 
-Stopping the CLI preserves journals and snapshots. Startup discovers due work
+Stopping the CLI preserves journals and retained app deployments. Startup discovers due work
 and expired leases. Hot reload installs a new immutable active deployment while
 old runs retain their original code. An explicit workflow reset removes only
-workflow-owned state, payloads and unneeded snapshots, leaving business DB, KV
-and storage data untouched.
+workflow-owned state and payloads, leaving app deployment artifacts, business DB,
+KV and storage data untouched. App deployment collection applies its own
+reference checks before reclaiming bundles no longer needed by any local consumer.
 
 Programmatic Rust construction and TOML resolve to the same validated host
 configuration. Customer connections and storage credentials use the existing
@@ -340,7 +380,10 @@ centralized history and payload ownership are not a temporary production mode.
   Keep platform persistence limited to explicitly defined coordination metadata.
 - Compose acceptance, maintenance and task runners in the customer worker with
   bounded slots independent of request isolates. Keep scheduling active across
-  V8 eviction and load retained snapshots for replay.
+  V8 eviction and load the pinned app deployment for replay.
+- Replace workflow-only archives and executable snapshot copies with the normal
+  app bundle loader. Establish durable deployment holds before admission and
+  replace platform journal reads with the metadata retention protocol.
 - Compose that engine in the CLI and remove the old local mini-engine. Complete
   shared interpreter, retry, effect identity and payload behavior before cutover.
 - Route management and public signal operations to the customer's worker under
@@ -358,7 +401,8 @@ centralized history and payload ownership are not a temporary production mode.
 | Lease fencing | Worker death, expired authority, stale completion, cancellation and synchronous app execution preserve safety and permit recovery. |
 | History and payloads | Upload/commit failures, corrupt reads, app background tasks and collection races cannot admit invalid references or delete retained results. |
 | Lifecycle | Signal, child, pause, cancellation, restart and compensation races have matching PostgreSQL and SQLite behavior. |
-| Deployment | Restart and hot reload retain executable snapshots; missing code is visible and never replaced silently with the current deployment. |
+| Deployment | HTTP and workflow code come from the same app artifact. Restart and hot reload preserve pinned deployments. Missing code is visible and never replaced silently with the current deployment. |
+| Bundle retention | Admission, reclamation, handoff and lost acknowledgements cannot race away a needed deployment. Stale releases and expired placement cannot remove a live hold. Platform collection has no customer journal access. |
 | Local parity | Worker and CLI exercise the shared engine, including scheduling, children, continuation, compensation and large outputs. |
 
 Required environments belong to Testcontainers using major image tags, and
