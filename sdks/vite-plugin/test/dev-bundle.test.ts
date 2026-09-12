@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { zstdDecompressSync } from "node:zlib";
 import { extract } from "tar";
-import { buildWorkflowBundle } from "../src/workflow-bundle.js";
+import { buildDevBundle } from "../src/dev-bundle.js";
 import { defaultProjectConfig } from "../src/project-config/index.js";
 
 const sdkRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -32,7 +32,7 @@ export const periodic = schedule({
 `;
 
 async function fixture(): Promise<string> {
-  const root = await fs.mkdtemp(join(tmpdir(), "zs-workflow-bundle-"));
+  const root = await fs.mkdtemp(join(tmpdir(), "zs-app-bundle-"));
   await fs.mkdir(join(root, "src"));
   await fs.symlink(join(sdkRoot, "node_modules"), join(root, "node_modules"), "dir");
   await fs.writeFile(join(root, "src/server.ts"), entry);
@@ -77,7 +77,7 @@ test("local workflow bundles retain dependencies and rebuild declarations indepe
       project: defaultProjectConfig(),
       runtimeDescriptor: descriptor,
     };
-    const original = await buildWorkflowBundle(opts);
+    const original = await buildDevBundle(opts);
     assert.ok(original.dependencies.includes(opts.entry));
     assert.ok(original.dependencies.includes(join(root, "src/dependency.js")));
     assert.ok(original.dependencies.includes(join(root, "src/lazy.js")));
@@ -89,12 +89,12 @@ test("local workflow bundles retain dependencies and rebuild declarations indepe
     assert.equal(await fs.readFile(join(oldPath, "blobs", manifest.runtime_descriptor.hash), "utf8"), descriptor);
 
     await fs.writeFile(join(root, "src/dependency.js"), 'import { basename } from "node:path"; export const prefix = basename("/values/replacement:");');
-    const replacement = await buildWorkflowBundle(opts);
+    const replacement = await buildDevBundle(opts);
     const newPath = join(retained, "replacement");
     const updated = await unpack(replacement.archive, newPath);
 
     await fs.writeFile(opts.entry, "export default { fetch() { return new Response('no workflows'); } };");
-    const removed = await buildWorkflowBundle({ ...opts, runtimeDescriptor: undefined });
+    const removed = await buildDevBundle({ ...opts, runtimeDescriptor: undefined });
     const absent = await unpack(removed.archive, join(retained, "removed"));
     assert.equal(absent.workflows, undefined);
     assert.equal(absent.schedules, undefined);
@@ -130,10 +130,10 @@ test("failed workflow builds remove staging and never produce a partial archive"
       runtimeDescriptor: descriptor,
     };
     await fs.writeFile(opts.entry, 'import "./missing.js";');
-    await assert.rejects(buildWorkflowBundle(opts), /missing/);
+    await assert.rejects(buildDevBundle(opts), /missing/);
     assert.deepEqual(await fs.readdir(join(root, ".zeroship")), []);
     await fs.writeFile(opts.entry, entry);
-    await assert.rejects(buildWorkflowBundle({ ...opts, runtimeDescriptor: "{}" }), /runtime_descriptor/);
+    await assert.rejects(buildDevBundle({ ...opts, runtimeDescriptor: "{}" }), /runtime_descriptor/);
     assert.deepEqual(await fs.readdir(join(root, ".zeroship")), []);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

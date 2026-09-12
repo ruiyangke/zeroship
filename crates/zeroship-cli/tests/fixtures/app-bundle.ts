@@ -1,7 +1,7 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildWorkflowBundle } from "../../../../sdks/vite-plugin/src/workflow-bundle.js";
+import { buildDevBundle } from "../../../../sdks/vite-plugin/src/dev-bundle.js";
 import { defaultProjectConfig } from "../../../../sdks/vite-plugin/src/project-config/index.js";
 
 const [root, version] = process.argv.slice(2);
@@ -26,10 +26,27 @@ export class Example extends Workflow {
     return saved + ":" + version + suffix;
   }
 }
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/ping") return Response.json({ ready: true });
+    if (url.pathname === "/version") {
+      const { suffix } = await import("./tail.js");
+      return Response.json({ version: version + suffix });
+    }
+    if (url.pathname === "/start") {
+      const run = await env.workflows.Example.start();
+      return Response.json({ id: run.id });
+    }
+    const run = env.workflows.Example.get(url.searchParams.get("id"));
+    if (url.pathname === "/signal") return Response.json(await run.signal({ type: "resume" }));
+    return Response.json(await run.status());
+  }
+};
 `);
-const bundle = await buildWorkflowBundle({
+const bundle = await buildDevBundle({
   root, entry, project: defaultProjectConfig(), runtimeDescriptor: undefined,
 });
 const pending = join(root, "pending.zship");
 await fs.writeFile(pending, bundle.archive);
-await fs.rename(pending, join(root, "workflows.zship"));
+await fs.rename(pending, join(root, "app.zship"));

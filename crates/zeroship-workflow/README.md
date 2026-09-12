@@ -57,9 +57,9 @@ through `activate_deploy`, without querying platform tables.
 
 The [worker design](../../docs/proposals/2026-09-11-workflow-worker.md) requires
 workflow execution to reuse the app's existing deployed bundle, protected by
-durable platform retention metadata. The executable snapshot copies and local
-workflow-only archive feed described below are the current branch implementation
-and are being replaced. They are not a separate deployment contract.
+durable platform retention metadata. The executable snapshot copies described
+below are being replaced. Local hosts already load the app's normal archive for
+HTTP and workflow execution; there is no separate workflow artifact input.
 
 `activate_deploy` currently requires an `ExecutableSnapshot`: the built entry module,
 dependency sources and runtime schema descriptor. `with_snapshots` binds a
@@ -80,12 +80,13 @@ Schedules for unavailable code keep their due frontier without admitting runs
 or consuming occurrences. Repair resumes the configured catch-up behavior;
 unavailable deployments do not occupy the schedule discovery budget.
 Native contracts cover these boundaries against SQLite, PostgreSQL and S3.
-The Vite plugin's `workflow-bundle.ts` builds local workflow archives through
+The Vite plugin's `dev-bundle.ts` builds local app archives through
 the deployment compiler and `.zship` packer, retaining static and dynamic module
 dependencies and the captured runtime descriptor. Each build discovers fresh
 declarations. The dev server publishes complete archives atomically; the CLI
-ingests them and retains executable bytes before activation. Production worker
-ingestion and journal-aware snapshot collection remain unfinished.
+ingests them into its app bundle store. The engine currently also retains
+executable bytes before activation. Replacing that copy with app deployment
+reads, production worker composition and metadata bundle retention remain unfinished.
 
 The obsolete central task transport has been removed. The engine's
 native contracts exercise app isolation, retry receipts, expired leases,

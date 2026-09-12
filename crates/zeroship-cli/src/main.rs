@@ -23,6 +23,7 @@ use zeroship_runtime::{ModuleEntry, NativePlugin};
 
 mod auth;
 mod dev;
+mod deployment;
 mod migrate;
 mod organizations;
 mod parent_death;
@@ -67,7 +68,6 @@ fn main() {
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
         "dev" => exit_on_error("dev", dev::cmd_dev(&args)),
-        "workflows" => exit_on_error("workflows", workflow::command(&args)),
         "organization" => exit_on_error("organization", organizations::cmd_organization(&args)),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
@@ -108,10 +108,8 @@ fn cmd_serve(args: &[String]) {
     }
     let port = parse_flag_u16(args, "--port").unwrap_or(3000);
     let workers: usize = parse_flag_usize(args, "--workers").unwrap_or(0);
-    let cpu_limit = parse_flag_u64(args, "--cpu-limit")
-        .map(std::time::Duration::from_millis);
-    let wall_timeout = parse_flag_u64(args, "--wall-timeout")
-        .map(std::time::Duration::from_millis);
+    let cpu_limit = parse_flag_u64(args, "--cpu-limit").map(std::time::Duration::from_millis);
+    let wall_timeout = parse_flag_u64(args, "--wall-timeout").map(std::time::Duration::from_millis);
     // Dev default: 512 MB. Single-tenant dev apps routinely load big libraries
     // (LangChain + provider SDKs = ~100 MB by themselves). The production
     // worker's 128 MB default is sized for multi-tenant isolation, not for
@@ -127,31 +125,46 @@ fn cmd_serve(args: &[String]) {
     let input_path = PathBuf::from(input);
     if !input_path.is_file() {
         eprintln!(
-            "zeroship serve: expected a JS file path; got {}",
+            "zeroship serve: expected a JS file or app .zship path; got {}",
             input_path.display()
         );
         eprintln!("Directory builds now go through @zeroship/vite-plugin.");
         std::process::exit(1);
     }
 
-    let source = std::fs::read_to_string(&input_path).unwrap_or_else(|e| {
-        eprintln!("Failed to read {}: {e}", input_path.display());
+    let is_archive = input_path
+        .extension()
+        .is_some_and(|extension| extension == "zship");
+    let dev_bootstrap = parse_flag(args, "--dev-bootstrap").map(PathBuf::from);
+    if dev_bootstrap.is_some() && (!is_archive || !zeroship_runtime::dev_mode_enabled()) {
+        eprintln!(
+            "zeroship serve: --dev-bootstrap requires an app .zship and Vite development mode"
+        );
         std::process::exit(1);
-    });
-    let name = input_path
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-    eprintln!(
-        "[zeroship] Loaded {} ({:.1}KB)",
-        input_path.display(),
-        source.len() as f64 / 1024.0
-    );
-    let modules = vec![ModuleEntry {
-        specifier: name,
-        source,
-    }];
+    }
+    let script_path = dev_bootstrap.as_ref().unwrap_or(&input_path);
+    let modules = if is_archive && dev_bootstrap.is_none() {
+        Vec::new()
+    } else {
+        let source = std::fs::read_to_string(script_path).unwrap_or_else(|e| {
+            eprintln!("Failed to read {}: {e}", script_path.display());
+            std::process::exit(1);
+        });
+        let name = script_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        eprintln!(
+            "[zeroship] Loaded {} ({:.1}KB)",
+            input_path.display(),
+            source.len() as f64 / 1024.0
+        );
+        vec![ModuleEntry {
+            specifier: name,
+            source,
+        }]
+    };
 
     // Pre-check port availability so a bind failure surfaces as a clean error
     // message instead of a panic stacktrace. We briefly bind the port with the
@@ -232,7 +245,13 @@ fn cmd_serve(args: &[String]) {
                             project_keys: project_keys::load(
                                 std::path::Path::new(".zeroship/private"),
                                 &env_vars["APP_ID"],
-                            ).map_err(|error| zeroship_data_orm::error::DbError::config("local_project_key", error))?,
+                            )
+                            .map_err(|error| {
+                                zeroship_data_orm::error::DbError::config(
+                                    "local_project_key",
+                                    error,
+                                )
+                            })?,
                             connection,
                             cdc_relay: None,
                             meter: Some(Arc::clone(&dev_meter)),
@@ -257,8 +276,8 @@ fn cmd_serve(args: &[String]) {
     // vite-plugin's scaffolded .gitignore already excludes `.zeroship/`.
     let storage_url =
         zeroship_core::declared_env!(cli, "ZEROSHIP_STORAGE_URL", crate::ZeroshipCliConsumer)
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "file://.zeroship/storage".to_string());
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "file://.zeroship/storage".to_string());
     let storage_cfg = match zeroship_storage::StorageBackendConfig::parse(&storage_url) {
         Ok(c) => c,
         Err(e) => {
@@ -329,14 +348,14 @@ fn cmd_serve(args: &[String]) {
         Some(Arc::clone(&dev_meter)),
     )));
 
-    let workflow_config = workflow::config_from_args(args)
-        .unwrap_or_else(|error| {
-            eprintln!("[zeroship] workflows: {error}");
-            std::process::exit(1);
-        });
+    let workflow_config = workflow::config_from_args(args).unwrap_or_else(|error| {
+        eprintln!("[zeroship] workflows: {error}");
+        std::process::exit(1);
+    });
     let workflow_host = workflow::LocalHost::start(
         &std::env::current_dir().expect("project directory"),
         workflow_config,
+        is_archive.then(|| input_path.clone()),
         env_vars.clone(),
         plugins.clone(),
         zeroship_runtime::RuntimeLimits {
@@ -350,6 +369,32 @@ fn cmd_serve(args: &[String]) {
         std::process::exit(1);
     });
     plugins.push(Arc::new(workflow_host.binding.clone()));
+    let modules = if is_archive && dev_bootstrap.is_none() {
+        let executable = workflow_host
+            .executable
+            .as_ref()
+            .expect("loaded app deployment");
+        if let Some(descriptor) = executable.runtime_descriptor() {
+            env_vars.insert("ZEROSHIP_RUNTIME_DESCRIPTOR".into(), descriptor.to_string());
+        } else {
+            env_vars.remove("ZEROSHIP_RUNTIME_DESCRIPTOR");
+        }
+        std::iter::once(executable.entry())
+            .chain(
+                executable
+                    .modules()
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| *name != executable.entry()),
+            )
+            .map(|name| ModuleEntry {
+                specifier: name.into(),
+                source: executable.modules()[name].clone(),
+            })
+            .collect()
+    } else {
+        modules
+    };
     eprintln!(
         "[zeroship] workflow worker ready (app={})",
         workflow_host.app.as_str()
@@ -1126,11 +1171,9 @@ fn print_usage() {
     eprintln!("zeroship — JavaScript runtime powered by V8 + io_uring");
     eprintln!();
     eprintln!("Usage:");
-    eprintln!("  zeroship serve    <file> [--port=3000] [--workers=0]");
-    eprintln!("                   [--workflow-config=PATH] [--workflow-bundle=PATH]");
-    eprintln!("                   Run a single JS file with the V8 runtime.");
-    eprintln!("  zeroship workflows reset [--workflow-config=PATH]");
-    eprintln!("                   Reset local workflow state after stopping its workers.");
+    eprintln!("  zeroship serve    <app.zship|file.js> [--port=3000] [--workers=0]");
+    eprintln!("                   [--workflow-config=PATH]");
+    eprintln!("                   Run the app deployment or a JS file with the V8 runtime.");
     eprintln!("  zeroship deploy   [<path-to-.zship>] [--app=<id>] [--app-name=<name>] [--control=URL] [--token=TOKEN] [--no-create] [--config=PATH] [--env=NAME]");
     eprintln!("                   Upload a pre-built .zship to the control plane.");
     eprintln!("                   --app takes the app's ID; --app-name its routing label.");
@@ -1216,7 +1259,7 @@ const SERVE_KNOWN_FLAGS: &[&str] = &[
     "--wall-timeout",
     "--heap-limit-mb",
     "--workflow-config",
-    "--workflow-bundle",
+    "--dev-bootstrap",
 ];
 
 /// Return `Err` if any `--flag` argument in `args[2..]` is not a known `serve` flag.

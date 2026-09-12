@@ -25,14 +25,10 @@ impl Host {
         let mut command = Command::new(env!("CARGO_BIN_EXE_zeroship"));
         command
             .current_dir(root)
-            .args([
-                "serve",
-                "app.js",
-                "--workers=1",
-                "--workflow-bundle=workflows.zship",
-            ])
+            .args(["serve", "app.zship", "--workers=1"])
             .arg(format!("--port={port}"))
             .env("APP_ID", "untrusted-variable")
+            .env("ZEROSHIP_WORKFLOW_SQLITE_PATH", root.join("unused.sqlite"))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log.reopen().unwrap()))
             .stderr(Stdio::from(log.reopen().unwrap()));
@@ -41,7 +37,7 @@ impl Host {
             "ZEROSHIP_KV_CONFIG_FILE",
             "ZEROSHIP_KV_PATH",
             "ZEROSHIP_STORAGE_URL",
-            "ZEROSHIP_WORKFLOW_SQLITE_PATH",
+            "ZEROSHIP_DEV",
             "ZEROSHIP_DIE_WITH_PARENT",
             "ZEROSHIP_RUNTIME_DESCRIPTOR",
         ] {
@@ -148,7 +144,7 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
     let compiled = Command::new("pnpm")
         .current_dir(workspace.join("sdks/vite-plugin"))
         .args(["exec", "tsx"])
-        .arg(manifest.join("tests/fixtures/workflow-bundle.ts"))
+        .arg(manifest.join("tests/fixtures/app-bundle.ts"))
         .arg(root.path())
         .arg("original")
         .output()
@@ -158,26 +154,13 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
         "{}",
         String::from_utf8_lossy(&compiled.stderr)
     );
-    std::fs::write(
-        root.path().join("app.js"),
-        r"
-        export default {
-          async fetch(request, env) {
-            const url = new URL(request.url);
-            if (url.pathname === '/ping') return Response.json({ ready: true });
-            if (url.pathname === '/start') {
-              const run = await env.workflows.Example.start();
-              return Response.json({ id: run.id });
-            }
-            const run = env.workflows.Example.get(url.searchParams.get('id'));
-            if (url.pathname === '/signal') return Response.json(await run.signal({type:'resume'}));
-            return Response.json(await run.status());
-          }
-        };
-    ",
-    )
-    .unwrap();
     let mut host = Host::start(root.path());
+    assert_eq!(
+        host.request("/version").unwrap(),
+        json!({"version":"original:lazy"})
+    );
+    assert!(!root.path().join("unused.sqlite").exists());
+    assert!(root.path().join(".zeroship/workflows.sqlite").exists());
     let started = host.request("/start").unwrap();
     let run = started["id"].as_str().unwrap();
     let status = format!("/status?id={run}");
@@ -185,12 +168,13 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
     let identity = std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap();
     assert!(zeroship_core::app_id::AppId::parse(&identity).is_ok());
     assert_ne!(identity, "untrusted-variable");
-    let refused = reset(root.path());
-    assert!(!refused.status.success());
-    assert!(String::from_utf8_lossy(&refused.stderr).contains("in use"));
     drop(host);
     std::fs::remove_dir_all(root.path().join("src")).unwrap();
     let mut host = Host::start(root.path());
+    assert_eq!(
+        host.request("/version").unwrap(),
+        json!({"version":"original:lazy"})
+    );
     assert_eq!(
         std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap(),
         identity
@@ -198,30 +182,15 @@ fn cli_resumes_a_workflow_from_retained_code_after_process_death() {
     host.request(&format!("/signal?id={run}")).unwrap();
     let completed = host.until(&status, |value| value["state"] == "completed");
     assert_eq!(completed["output"], "original:original:lazy");
-    drop(host);
-    let cleared = reset(root.path());
-    assert!(
-        cleared.status.success(),
-        "{}",
-        String::from_utf8_lossy(&cleared.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(root.path().join(".zeroship/app-id")).unwrap(),
-        identity
-    );
-    assert!(root.path().join("workflows.zship").exists());
-    let mut host = Host::start(root.path());
-    assert!(host.request(&status).is_err(), "reset retained the old run");
-    let started = host.request("/start").unwrap();
-    assert_ne!(started["id"], run);
 }
 
-fn reset(root: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_zeroship"))
-        .current_dir(root)
-        .args(["workflows", "reset"])
-        .env_remove("ZEROSHIP_WORKFLOW_SQLITE_PATH")
+#[test]
+fn removed_workflow_bundle_flag_is_rejected() {
+    let output = Command::new(env!("CARGO_BIN_EXE_zeroship"))
+        .args(["serve", "app.zship", "--workflow-bundle=another.zship"])
         .env_remove("ZEROSHIP_DIE_WITH_PARENT")
         .output()
-        .unwrap()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown flag `--workflow-bundle`"));
 }

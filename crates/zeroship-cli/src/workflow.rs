@@ -2,7 +2,6 @@
 
 #![expect(clippy::future_not_send, reason = "the worker owns a compio thread")]
 
-use compio::io::AsyncReadAtExt;
 use futures::{channel::oneshot, FutureExt};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -15,9 +14,7 @@ use std::{
         Arc,
     },
     thread::JoinHandle,
-    time::Duration,
 };
-use zeroship_bundle::{BlobStore, LocalDiskBlobStore, Manifest};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_storage::{LocalFs, StorageStore};
@@ -26,26 +23,21 @@ use zeroship_workflow::{
         runner::{TaskPayloadLimits, WorkerOptions, WorkflowWorker},
         schema,
         store::SqliteStore,
-        AppBackend, AppPolicy, BundleExecutable, HostPolicies, PolicySnapshot, SnapshotStore,
+        AppBackend, AppPolicy, ExecutableSnapshot, HostPolicies, PolicySnapshot, SnapshotStore,
         WorkerIdentity, WorkflowService,
     },
     WorkflowServiceError,
 };
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor, WorkflowBinding};
 
-mod reset;
-mod state;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LocalConfig {
     pub journal: PathBuf,
     pub objects: PathBuf,
-    pub bundle: Option<PathBuf>,
     pub max_archive_bytes: usize,
     pub max_source_bytes: usize,
     pub max_snapshot_bytes: usize,
-    pub bundle_poll_ms: u64,
     pub worker: WorkerOptions,
     pub payloads: TaskPayloadLimits,
 }
@@ -54,11 +46,9 @@ impl Default for LocalConfig {
         Self {
             journal: ".zeroship/workflows.sqlite".into(),
             objects: ".zeroship/workflow-objects".into(),
-            bundle: None,
             max_archive_bytes: zeroship_bundle::MAX_COMPRESSED_BYTES,
             max_source_bytes: 32 * 1024 * 1024,
             max_snapshot_bytes: 64 * 1024 * 1024,
-            bundle_poll_ms: 250,
             worker: WorkerOptions::default(),
             payloads: TaskPayloadLimits::default(),
         }
@@ -66,18 +56,7 @@ impl Default for LocalConfig {
 }
 pub fn config_from_args(args: &[String]) -> Result<LocalConfig, String> {
     let path = crate::parse_flag(args, "--workflow-config").map(PathBuf::from);
-    let mut config = LocalConfig::read(path.as_deref())?;
-    if let Some(path) = zeroship_core::declared_env_os!(
-        cli,
-        "ZEROSHIP_WORKFLOW_SQLITE_PATH",
-        crate::ZeroshipCliConsumer
-    ) {
-        config.journal = path.into();
-    }
-    if let Some(path) = crate::parse_flag(args, "--workflow-bundle") {
-        config.bundle = Some(path.into());
-    }
-    Ok(config)
+    LocalConfig::read(path.as_deref())
 }
 impl LocalConfig {
     pub fn read(path: Option<&Path>) -> Result<Self, String> {
@@ -96,7 +75,6 @@ impl LocalConfig {
             || self.max_archive_bytes > zeroship_bundle::MAX_COMPRESSED_BYTES
             || self.max_source_bytes == 0
             || self.max_snapshot_bytes == 0
-            || self.bundle_poll_ms == 0
         {
             return Err("invalid local workflow limits".into());
         }
@@ -105,7 +83,6 @@ impl LocalConfig {
             .map_err(|error| error.to_string())?;
         self.journal = root.join(self.journal);
         self.objects = root.join(self.objects);
-        self.bundle = self.bundle.map(|path| root.join(path));
         Ok(self)
     }
 }
@@ -113,26 +90,25 @@ impl LocalConfig {
 pub struct LocalHost {
     pub app: AppId,
     pub binding: WorkflowBinding,
+    pub executable: Option<ExecutableSnapshot>,
     stop: Option<oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
     stopping: Arc<AtomicBool>,
-    _state: state::StateLock,
 }
 impl LocalHost {
     pub fn start(
         root: &Path,
         config: LocalConfig,
+        deployment: Option<PathBuf>,
         env_vars: HashMap<String, String>,
         peers: Vec<Arc<dyn NativePlugin>>,
         limits: RuntimeLimits,
     ) -> Result<Self, String> {
-        let mut config = config.resolve(root)?;
+        let config = config.resolve(root)?;
         let app = project_identity(root)?;
-        let paths = state::StatePaths::new(root, &config, &app)?;
-        let state = paths.lock(false)?;
-        paths.ensure_ready()?;
-        config.journal = paths.journal;
-        config.objects = paths.objects;
+        let deployment = deployment
+            .map(|path| crate::deployment::AppDeployment::new(root, &path))
+            .transpose()?;
         let worker_app = app.clone();
         let (ready, receive) = std::sync::mpsc::sync_channel(1);
         let (stop, stopped) = oneshot::channel();
@@ -150,29 +126,32 @@ impl LocalHost {
                     }
                 };
                 runtime.block_on(async move {
-                    let initialized =
-                        initialize(&config, &worker_app, env_vars, peers, limits).await;
-                    let (service, backend, mut worker, archive_hash) = match initialized {
+                    let initialized = initialize(
+                        &config,
+                        deployment.as_ref(),
+                        &worker_app,
+                        env_vars,
+                        peers,
+                        limits,
+                    )
+                    .await;
+                    let (backend, mut worker, installed) = match initialized {
                         Ok(host) => host,
                         Err(error) => {
                             let _ = ready.send(Err(error.to_string()));
                             return;
                         }
                     };
-                    if ready.send(Ok(backend)).is_err() {
+                    let executable = installed.map(|app| app.executable.snapshot().clone());
+                    if ready.send(Ok((backend, executable))).is_err() {
                         return;
                     }
                     let _liveness = WorkerLiveness(worker_stopping);
-                    let shutdown = stopped.map(|_| ()).boxed_local().shared();
-                    futures::join!(worker.run_until(shutdown.clone()), async {
-                        let updates = watch_bundle(&config, &service, &worker_app, archive_hash)
-                            .boxed_local();
-                        let _ = futures::future::select(shutdown, updates).await;
-                    });
+                    worker.run_until(stopped.map(|_| ())).await;
                 });
             })
             .map_err(|error| format!("start workflow worker: {error}"))?;
-        let backend = match receive.recv() {
+        let (backend, executable) = match receive.recv() {
             Ok(Ok(backend)) => backend,
             outcome => {
                 let _ = thread.join();
@@ -185,10 +164,10 @@ impl LocalHost {
         Ok(Self {
             app,
             binding: WorkflowBinding::service(backend),
+            executable,
             stop: Some(stop),
             thread: Some(thread),
             stopping,
-            _state: state,
         })
     }
 }
@@ -247,47 +226,21 @@ fn read_project_identity(root: &Path) -> Result<AppId, String> {
     AppId::parse(encoded.trim()).map_err(|_| "invalid persisted project app identity".into())
 }
 
-pub fn command(args: &[String]) -> Result<(), String> {
-    const USAGE: &str =
-        "Usage: zeroship workflows reset [--workflow-config=PATH] (local workflow state only)";
-    if args.get(2).map(String::as_str) != Some("reset") {
-        return Err(USAGE.into());
-    }
-    let mut arguments = args.iter().skip(3);
-    let mut configured = false;
-    while let Some(argument) = arguments.next() {
-        if configured {
-            return Err(format!("unexpected reset argument: {argument}; {USAGE}"));
-        }
-        if argument == "--workflow-config" {
-            arguments
-                .next()
-                .filter(|value| !value.is_empty() && !value.starts_with("--"))
-                .ok_or("--workflow-config requires a path")?;
-        } else if let Some(value) = argument.strip_prefix("--workflow-config=") {
-            if value.is_empty() {
-                return Err("--workflow-config requires a path".into());
-            }
-        } else {
-            return Err(format!("unexpected reset argument: {argument}; {USAGE}"));
-        }
-        configured = true;
-    }
-    reset::reset(
-        &std::env::current_dir().map_err(|error| error.to_string())?,
-        config_from_args(args)?,
-    )?;
-    eprintln!("[zeroship] local workflow state reset; project identity and other stores preserved");
-    Ok(())
-}
-
 async fn initialize(
     config: &LocalConfig,
+    deployment: Option<&crate::deployment::AppDeployment>,
     app: &AppId,
     env_vars: HashMap<String, String>,
     peers: Vec<Arc<dyn NativePlugin>>,
     limits: RuntimeLimits,
-) -> Result<(WorkflowService, AppBackend, WorkflowWorker, Option<String>), WorkflowServiceError> {
+) -> Result<
+    (
+        AppBackend,
+        WorkflowWorker,
+        Option<crate::deployment::LoadedApp>,
+    ),
+    WorkflowServiceError,
+> {
     schema::initialize_sqlite(&config.journal)?;
     let storage = StorageStore::from_backend(Arc::new(LocalFs::new(&config.objects)));
     let service = WorkflowService::open(
@@ -306,7 +259,7 @@ async fn initialize(
             )?,
         )
         .await?;
-    let archive_hash = install_bundle(config, &service, app, None).await?;
+    let installed = install_bundle(config, deployment, &service, app).await?;
     let backend = service
         .for_app(app.clone())
         .into_backend(config.payloads.max_payload_bytes)?;
@@ -321,87 +274,32 @@ async fn initialize(
     )?);
     let executor = Rc::new(V8TaskExecutor::new(loader, tasks.clone(), config.payloads)?);
     let worker = WorkflowWorker::new(tasks, executor, config.worker)?;
-    Ok((service, backend, worker, archive_hash))
+    Ok((backend, worker, installed))
 }
 
 async fn install_bundle(
     config: &LocalConfig,
+    deployment: Option<&crate::deployment::AppDeployment>,
     service: &WorkflowService,
     app: &AppId,
-    previous: Option<&str>,
-) -> Result<Option<String>, WorkflowServiceError> {
-    let Some(path) = &config.bundle else {
+) -> Result<Option<crate::deployment::LoadedApp>, WorkflowServiceError> {
+    let Some(deployment) = deployment else {
         return Ok(None);
     };
-    let file = compio::fs::File::open(path)
-        .await
-        .map_err(|_| artifact_unavailable())?;
-    let size = usize::try_from(
-        file.metadata()
-            .await
-            .map_err(|_| artifact_unavailable())?
-            .len(),
-    )
-    .map_err(|_| WorkflowServiceError::PayloadTooLarge)?;
-    if size > config.max_archive_bytes {
-        return Err(WorkflowServiceError::PayloadTooLarge);
-    }
-    let (result, archive) = file.read_exact_at(vec![0; size], 0).await.into();
-    result.map_err(|_| artifact_unavailable())?;
-    let hash = zeroship_bundle::sha256_hex(&archive);
-    if previous == Some(hash.as_str()) {
-        return Ok(Some(hash));
-    }
-    let directory = tempfile::tempdir().map_err(|_| artifact_unavailable())?;
-    let blobs: Arc<dyn BlobStore> = Arc::new(
-        LocalDiskBlobStore::new(directory.path().to_path_buf())
-            .map_err(|_| artifact_unavailable())?,
-    );
-    let ingested = zeroship_bundle::ingest(&blobs, &app.uuid(), &archive)
-        .await
-        .map_err(|_| artifact_unavailable())?;
-    let manifest: Manifest =
-        serde_json::from_str(&ingested.manifest_json).map_err(|_| artifact_unavailable())?;
-    let executable =
-        BundleExecutable::load(&manifest, blobs.as_ref(), config.max_source_bytes).await?;
+    let installed = deployment
+        .load(app, config.max_archive_bytes, config.max_source_bytes)
+        .await?;
+    let executable = &installed.executable;
     let registration = service
-        .deployment_by_hash(app, executable.content_hash())
+        .deployment_by_hash(app, &installed.deploy_hash)
         .await?
         .unwrap_or_else(|| {
-            executable.registration(typed_id::generate("dep"), executable.content_hash().into())
+            executable.registration(typed_id::generate("dep"), installed.deploy_hash.clone())
         });
     service
         .activate_deploy(app, &registration, executable.snapshot())
         .await?;
-    Ok(Some(hash))
-}
-
-async fn watch_bundle(
-    config: &LocalConfig,
-    service: &WorkflowService,
-    app: &AppId,
-    mut hash: Option<String>,
-) {
-    let mut error_code = None;
-    loop {
-        compio::time::sleep(Duration::from_millis(config.bundle_poll_ms)).await;
-        match install_bundle(config, service, app, hash.as_deref()).await {
-            Ok(current) => {
-                hash = current;
-                error_code = None;
-            }
-            Err(error) => {
-                if error_code != Some(error.code()) {
-                    eprintln!("[zeroship] workflow bundle update failed ({}); retained workflows remain available", error.code());
-                    error_code = Some(error.code());
-                }
-            }
-        }
-    }
-}
-
-fn artifact_unavailable() -> WorkflowServiceError {
-    WorkflowServiceError::Unavailable("workflow bundle could not be read or validated".into())
+    Ok(Some(installed))
 }
 
 #[cfg(test)]

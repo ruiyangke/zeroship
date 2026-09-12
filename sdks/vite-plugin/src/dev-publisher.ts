@@ -1,21 +1,21 @@
 import { promises as fs } from "node:fs";
 import { dirname, join } from "node:path";
-import type { WorkflowBundle } from "./workflow-bundle.js";
+import type { DevBundle } from "./dev-bundle.js";
 
 /** Serialize rebuilds and replace the host's archive only with a complete image. */
-export class WorkflowPublisher {
+export class DevPublisher {
   private revision = 0;
   private running: Promise<void> | undefined;
   private closed = false;
 
   constructor(
     readonly path: string,
-    private readonly build: () => Promise<WorkflowBundle>,
+    private readonly build: () => Promise<DevBundle>,
     private readonly observe: (dependencies: string[]) => void,
   ) {}
 
   refresh(): Promise<void> {
-    if (this.closed) return Promise.reject(new Error("workflow publisher is closed"));
+    if (this.closed) return Promise.reject(new Error("app publisher is closed"));
     this.revision += 1;
     this.running ??= this.drain().finally(() => { this.running = undefined; });
     return this.running;
@@ -29,7 +29,7 @@ export class WorkflowPublisher {
   private async drain(): Promise<void> {
     while (!this.closed) {
       const revision = this.revision;
-      let bundle: WorkflowBundle;
+      let bundle: DevBundle;
       try {
         bundle = await this.build();
       } catch (error) {
@@ -42,7 +42,7 @@ export class WorkflowPublisher {
       if (revision !== this.revision) continue;
       const directory = dirname(this.path);
       await fs.mkdir(directory, { recursive: true });
-      const staging = await fs.mkdtemp(join(directory, "workflow-publish-"));
+      const staging = await fs.mkdtemp(join(directory, "app-publish-"));
       try {
         const pending = join(staging, "bundle.zship");
         await fs.writeFile(pending, bundle.archive);

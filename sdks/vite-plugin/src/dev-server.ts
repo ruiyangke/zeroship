@@ -35,8 +35,8 @@ import {
   createZeroshipEnvironmentOptions,
 } from "./environment.js";
 import { findServerEntry } from "./build.js";
-import { buildWorkflowBundle } from "./workflow-bundle.js";
-import { WorkflowPublisher } from "./workflow-publisher.js";
+import { buildDevBundle } from "./dev-bundle.js";
+import { DevPublisher } from "./dev-publisher.js";
 import {
   defaultProjectConfig,
   type ProjectConfigHolder,
@@ -558,9 +558,9 @@ export function devServerPlugin(
   let serverProcess: ChildProcess | null = null;
   let devDb: DevDatabase | null = null;
   let disposeRuntime: (() => void) | null = null;
-  let restartRuntimeForDescriptorChange: (() => void) | null = null;
-  let workflowPublisher: WorkflowPublisher | undefined;
-  let workflowPublicationStopped: Promise<void> = Promise.resolve();
+  let restartRuntimeForAppChange: (() => void) | null = null;
+  let devPublisher: DevPublisher | undefined;
+  let devPublicationStopped: Promise<void> = Promise.resolve();
 
   // Migration-first gen-types. The absolute migrations dir is resolved in
   // configureServer (once `root` is known) so the `hotUpdate` branch can match
@@ -809,17 +809,17 @@ export function devServerPlugin(
       } else {
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
         let healthyTimer: ReturnType<typeof setTimeout> | null = null;
-        let descriptorRestartPending = false;
+        let appRestartPending = false;
         let spawnInFlight = false;
         let tornDown = false;
 
         const dependencies = new Set<string>();
         if (serverEntry) {
-          workflowPublisher = new WorkflowPublisher(
-            resolve(root, ".zeroship/workflows.zship"),
+          devPublisher = new DevPublisher(
+            resolve(root, ".zeroship/app.zship"),
             async () => {
               await bootRegenDone;
-              return buildWorkflowBundle({
+              return buildDevBundle({
                 root, entry: serverEntry, project: projectConfig,
                 runtimeDescriptor: runtimeDescriptorJson,
               });
@@ -831,18 +831,15 @@ export function devServerPlugin(
             },
           );
         }
-        const refreshWorkflows = () => {
-          void workflowPublisher?.refresh().then(() => {
-            if (!tornDown && !serverProcess && !spawnInFlight) {
-              resetSupervisorForDescriptorChange();
-              runSpawn();
-            }
+        const refreshDeployment = () => {
+          void devPublisher?.refresh().then(() => {
+            if (!tornDown) restartRuntimeForAppChange?.();
           }).catch(error => {
-            console.warn(`[zeroship] workflow build failed: ${(error as Error).message}`);
+            console.warn(`[zeroship] app build failed: ${(error as Error).message}`);
           });
         };
-        const workflowSourceChanged = (_event: string, file: string) => {
-          if (tornDown || !workflowPublisher) return;
+        const appSourceChanged = (_event: string, file: string) => {
+          if (tornDown || !devPublisher) return;
           if (migrationsAbs && isUnderMigrationsDir(file, migrationsAbs)) return;
           const path = relative(root, file);
           if (path.split(/[\\/]/).some(part => part === ".zeroship" || part === "node_modules")) return;
@@ -850,9 +847,9 @@ export function devServerPlugin(
           if (isUnderMigrationsDir(file, resolve(root, projectConfig.migrations.out))) return;
           // Hidden host state is not an input unless the compiler observed it.
           if (!dependencies.has(file) && path.split(/[\\/]/).some(part => part.startsWith("."))) return;
-          if (dependencies.has(file) || /\.(?:[cm]?[jt]sx?|json)$/.test(extname(file))) refreshWorkflows();
+          if (dependencies.has(file) || /\.(?:[cm]?[jt]sx?|json)$/.test(extname(file))) refreshDeployment();
         };
-        server.watcher.on("all", workflowSourceChanged);
+        server.watcher.on("all", appSourceChanged);
 
         /**
          * Distinguish "never came up" from "ran, then died".
@@ -879,7 +876,7 @@ export function devServerPlugin(
           runtimeStatus.health = "ok";
         };
 
-        const resetSupervisorForDescriptorChange = () => {
+        const resetSupervisorForAppChange = () => {
           if (restartTimer) {
             clearTimeout(restartTimer);
             restartTimer = null;
@@ -899,10 +896,10 @@ export function devServerPlugin(
             }
             if (tornDown) return;
 
-            if (descriptorRestartPending) {
-              descriptorRestartPending = false;
-              resetSupervisorForDescriptorChange();
-              console.log("[zeroship] runtime descriptor changed - starting a fresh runtime");
+            if (appRestartPending) {
+              appRestartPending = false;
+              resetSupervisorForAppChange();
+              console.log("[zeroship] app changed - starting a fresh runtime");
               runSpawn();
               return;
             }
@@ -960,9 +957,9 @@ export function devServerPlugin(
         // SIGKILL has no graceful window left to protect.
         const killChild = () => {
           tornDown = true;
-          server.watcher.off("all", workflowSourceChanged);
-          workflowPublicationStopped = workflowPublisher?.close() ?? Promise.resolve();
-          workflowPublisher = undefined;
+          server.watcher.off("all", appSourceChanged);
+          devPublicationStopped = devPublisher?.close() ?? Promise.resolve();
+          devPublisher = undefined;
           if (restartTimer) {
             clearTimeout(restartTimer);
             restartTimer = null;
@@ -990,10 +987,10 @@ export function devServerPlugin(
           // Wait for the boot-time gen-types regen so the child is spawned WITH a
           // fresh runtime descriptor (the pre-in-process CLI path was synchronous).
           await bootRegenDone;
-          const publisher = workflowPublisher;
+          const publisher = devPublisher;
           await publisher?.refresh().catch(error => {
             if (!existsSync(publisher.path)) throw error;
-            console.warn(`[zeroship] workflow build failed; starting with the retained archive: ${(error as Error).message}`);
+            console.warn(`[zeroship] app build failed; starting with the retained archive: ${(error as Error).message}`);
           });
           if (tornDown) return;
 
@@ -1057,8 +1054,8 @@ export function devServerPlugin(
             const spawnedAt = Date.now();
             const child = spawn(
               cmd,
-              ["serve", bootstrapPath, `--port=${devPort}`, "--workers=1",
-                ...(workflowPublisher ? [`--workflow-bundle=${workflowPublisher.path}`] : [])],
+              ["serve", devPublisher?.path ?? bootstrapPath, `--port=${devPort}`, "--workers=1",
+                ...(devPublisher ? [`--dev-bootstrap=${bootstrapPath}`] : [])],
               {
                 cwd: root,
                 stdio: ["ignore", "pipe", "pipe"],
@@ -1109,8 +1106,8 @@ export function devServerPlugin(
         // Native plugins bind the validated descriptor during runtime boot, so
         // a successful migration regeneration replaces the child instead of
         // mutating JavaScript globals in the live isolate.
-        restartRuntimeForDescriptorChange = () => {
-          if (tornDown || descriptorRestartPending) return;
+        restartRuntimeForAppChange = () => {
+          if (tornDown || appRestartPending) return;
 
           const child = serverProcess;
           if (
@@ -1123,12 +1120,12 @@ export function devServerPlugin(
             // descriptor also starts a fresh failure budget: otherwise a child
             // that exhausted the old descriptor's budget can start cleanly
             // while the proxy remains permanently marked fatal.
-            resetSupervisorForDescriptorChange();
+            resetSupervisorForAppChange();
             if (!spawnInFlight) runSpawn();
             return;
           }
 
-          descriptorRestartPending = true;
+          appRestartPending = true;
           runtimeStatus.health = "failing";
           child.kill("SIGTERM");
           setTimeout(() => {
@@ -1164,7 +1161,7 @@ export function devServerPlugin(
           killChild();
           cleanupListeners();
           disposeRuntime = null;
-          restartRuntimeForDescriptorChange = null;
+          restartRuntimeForAppChange = null;
         };
         disposeRuntime = dispose;
         server.httpServer?.once("close", dispose);
@@ -1251,7 +1248,7 @@ export function devServerPlugin(
     },
 
     async hotUpdate({ file }: { file: string }) {
-      // Retained workflow build output must not invalidate the live app graph.
+      // Publishing the local app archive must not invalidate its live source graph.
       if (isUnderMigrationsDir(file, resolve(root, ".zeroship"))) return;
       // Migration-first gen-types: a change under the migrations dir regenerates
       // the typed `env.db` surface. A successfully generated descriptor is
@@ -1273,10 +1270,10 @@ export function devServerPlugin(
         );
         if (generated && descriptorJson !== runtimeDescriptorJson) {
           runtimeDescriptorJson = descriptorJson;
-          await workflowPublisher?.refresh().catch(error => {
-            console.warn(`[zeroship] workflow build failed: ${(error as Error).message}`);
+          await devPublisher?.refresh().catch(error => {
+            console.warn(`[zeroship] app build failed: ${(error as Error).message}`);
           });
-          restartRuntimeForDescriptorChange?.();
+          restartRuntimeForAppChange?.();
         }
         return;
       }
@@ -1296,7 +1293,7 @@ export function devServerPlugin(
 
     async buildEnd() {
       disposeRuntime?.();
-      await workflowPublicationStopped;
+      await devPublicationStopped;
     },
   };
 

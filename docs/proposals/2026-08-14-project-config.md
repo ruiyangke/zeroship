@@ -291,7 +291,6 @@ into the `linkme` slice `DECLARED_ENV_READS`
 | `ZEROSHIP_STORAGE_URL` | cli | `main.rs:188-190` | `serve`, default `file://.zeroship/storage` |
 | `ZEROSHIP_KV_URL` | cli | `main.rs:231-235` | `serve` |
 | `ZEROSHIP_KV_PATH` | cli | `main.rs:244-250` | `serve`, default `.zeroship/kv.redb` |
-| `ZEROSHIP_WORKFLOW_SQLITE_PATH` | cli | `main.rs:290-296` | `serve`, default `.zeroship/workflows.sqlite` |
 | `ZEROSHIP_DIE_WITH_PARENT` | cli | `parent_death.rs:82-87` | every subcommand, armed at `main.rs:41` |
 | whole-process snapshot | creator | `main.rs:286-288` | `serve` -> V8 `process.env` |
 
@@ -461,7 +460,7 @@ argument in 7.4.
 | `serve` runtime limits (`--cpu-limit`, `--wall-timeout`, `--heap-limit-mb`, `--workers`, `--port`) | These configure a **local process**, not the app. The deployed equivalents are per-app `AppRuntimeLimits` held by the control plane (`docs/reference/runtime-limits.md`). Putting local process tuning in the app's config file invites the belief that it applies in production. It does not. |
 | `dev init` flags | Operator command for the Compose stack (`crates/zeroship-cli/src/dev.rs:13-15`). Not a creator surface. |
 | `ZEROSHIP_CONFIG_HOME` / `XDG_CONFIG_HOME` / `HOME` | Machine identity, not project identity. |
-| `ZEROSHIP_STORAGE_URL`, `ZEROSHIP_KV_URL`, `ZEROSHIP_KV_PATH`, `ZEROSHIP_WORKFLOW_SQLITE_PATH` | Local `serve` backend selection. Per-machine. |
+| `ZEROSHIP_STORAGE_URL`, `ZEROSHIP_KV_URL`, `ZEROSHIP_KV_PATH` | Local `serve` backend selection. Per-machine. |
 
 ### 3.4 Genuinely build-only - keep in `vite.config.ts`
 
