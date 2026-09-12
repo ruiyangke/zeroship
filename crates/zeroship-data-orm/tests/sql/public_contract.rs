@@ -93,3 +93,30 @@ fn compiled_output_exposes_bind_types_and_transfers_owned_buffers() {
     assert_eq!(values[1], Value::Timestamp(0));
     assert_eq!(values[2], Value::Json("\"text\"".into()));
 }
+
+#[test]
+fn typed_plan_output_debug_does_not_disclose_bound_values() {
+    use zeroship_data_orm::sql::{
+        BindBudget, ColumnValue, Ident, IdentRole, Insert, Literal, Returning, WriteValue,
+        render::postgres,
+    };
+    let secret = "private-typed-plan-value";
+    let insert = Insert::builder(
+        Ident::parse_as("entries", IdentRole::Collection).unwrap(),
+        Returning::nothing(),
+        BindBudget::POSTGRES,
+    )
+    .row(vec![ColumnValue::new(
+        Ident::parse_as("title", IdentRole::Column).unwrap(),
+        WriteValue::Bind(Literal::text(secret).unwrap()),
+    )])
+    .build()
+    .unwrap();
+    let query: zeroship_data_orm::sql::compiler::CompiledQuery =
+        postgres::render_insert(&insert).unwrap();
+    assert!(
+        !format!("{query:?}").contains(secret),
+        "typed plan output debug disclosed a bound value"
+    );
+    assert_eq!(query.params(), &[Value::from(secret)]);
+}
