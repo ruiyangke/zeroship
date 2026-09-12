@@ -11,6 +11,8 @@
 //! that looks like SQL, a value that looks like a quote, a value that looks
 //! like a comment.
 
+use zeroship_data_orm::Value;
+use crate::NumberedParameters;
 use zeroship_data_orm::sql::render::postgres;
 use zeroship_data_orm::sql::{
     ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, CompareOp, Delete,
@@ -27,7 +29,7 @@ fn users() -> Ident {
     Ident::parse_as("users", IdentRole::Collection).expect("collection")
 }
 
-fn read_with(filter: Predicate) -> zeroship_data_orm::sql::RenderedSql {
+fn read_with(filter: Predicate) -> zeroship_data_orm::sql::compiler::CompiledQuery {
     let projection = Projection::rows(vec![
         ProjectedField::column(column("name")).expect("projectable"),
     ])
@@ -74,7 +76,7 @@ fn a_value_reaches_the_parameter_list_and_never_the_statement() {
         );
         assert_eq!(
             rendered.params().first(),
-            Some(&Literal::Text(vector.to_string())),
+            Some(&Value::String(vector.to_string())),
             "the value did not reach the parameter list"
         );
         ruled_on += 1;
@@ -170,7 +172,7 @@ fn limit_and_offset_are_bound_not_interpolated() {
     );
     assert_eq!(
         rendered.params(),
-        &[Literal::Int(10), Literal::Int(20)],
+        &[Value::from(10), Value::from(20)],
         "pagination values did not reach the parameter list"
     );
     println!("ruled on 1 paginated plan");
@@ -205,7 +207,7 @@ fn a_binary_value_is_a_typed_parameter_with_no_wrapper_and_no_sentinel() {
     }
     assert_eq!(
         rendered.params().first(),
-        Some(&Literal::Bytes(payload)),
+        Some(&Value::Bytes(payload)),
         "the bytes must arrive as bytes, not as a tagged string"
     );
     println!("ruled on 1 binary parameter and 5 absent mechanisms");
@@ -259,7 +261,7 @@ fn a_written_value_reaches_the_parameter_list_and_never_the_statement() {
             );
             assert_eq!(
                 rendered.params().first(),
-                Some(&value),
+                Some(&Value::from(vector)),
                 "the value did not reach the parameter list"
             );
             ruled_on += 1;
@@ -294,7 +296,7 @@ fn a_null_shaped_string_is_a_parameter_and_a_null_node_is_a_keyword() {
     );
     assert_eq!(
         as_string.params(),
-        &[Literal::Text("NULL".to_string())],
+        &[Value::String("NULL".to_string())],
         "a string that spells NULL is still a value"
     );
 
@@ -423,7 +425,7 @@ fn a_like_escape_character_is_bound() {
         "the escape character was interpolated: {}",
         rendered.sql()
     );
-    assert_eq!(rendered.params()[0], Literal::Text("100!%".to_string()));
-    assert_eq!(rendered.params()[1], Literal::Text("!".to_string()));
+    assert_eq!(rendered.params()[0], Value::String("100!%".to_string()));
+    assert_eq!(rendered.params()[1], Value::String("!".to_string()));
     println!("ruled on 1 escaped pattern");
 }

@@ -41,7 +41,6 @@ pub use projection::{
     Exposure, ProjectedField, Projection, ProjectionError, ProjectionKind, ProjectionSource,
     SearchScalarKind,
 };
-pub use render::RenderedSql;
 pub use search::{
     GeoPoint, MAX_RADIUS_METRES, RadiusMetres, Search, SearchBuilder, SearchCriterion, SearchError,
     VectorMetric,

@@ -374,10 +374,11 @@ compilation work, and statement reuse across equivalent inputs. Keep results in
 benchmark output rather than prose. Do not infer a performance improvement from
 removing code or from a standalone renderer benchmark.
 
-Native collection builders now return `sql::compiler::CompiledQuery`. Its Debug
-output reports SQL and native parameter types; execution can borrow bindings or
-consume the output to transfer its buffers. The typed-plan renderer still uses
-`RenderedSql` and remains part of the output consolidation work.
+Native collection builders and typed-plan rendering now return
+`sql::compiler::CompiledQuery`. Its Debug output reports SQL and native parameter
+types; execution can borrow bindings or consume the output to transfer its
+buffers. Typed-plan database tests use the production native parameter encoder.
+Shared writer and statement cutovers remain in progress.
 
 ## Implementation checklist
 

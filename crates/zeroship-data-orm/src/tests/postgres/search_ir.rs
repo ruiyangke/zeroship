@@ -172,40 +172,6 @@ fn vector_text(values: &[f32]) -> String {
     out
 }
 
-/// The seam a consumer of [`crate::sql::RenderedSql`] must implement:
-/// a typed parameter to whatever the driver takes.
-///
-/// It is written **here** rather than in the IR because it is the driver's
-/// half. Parameters are encoded from their types, and binary interpretation
-/// belongs to the compiled expression.
-///
-/// Text format is used because it is the channel the shipped path uses
-/// (`query_text_params`, reached from
-/// `crates/zeroship-data-orm/src/exec.rs`), so the differential arm below
-/// compares two statements over one execution mechanism rather than over two.
-fn bind_text(params: &[Literal]) -> Vec<String> {
-    params
-        .iter()
-        .map(|value| match value {
-            Literal::Bool(b) => b.to_string(),
-            Literal::Int(i) => i.to_string(),
-            Literal::Float(f) => f.get().to_string(),
-            Literal::Text(t) | Literal::Json(t) => t.clone(),
-            Literal::Bytes(b) => {
-                let mut out = String::from("\\x");
-                for byte in b {
-                    out.push_str(&format!("{byte:02x}"));
-                }
-                out
-            }
-            Literal::Vector(v) => {
-                let elements: Vec<f32> = v.elements().iter().map(|e| e.get()).collect();
-                vector_text(&elements)
-            }
-        })
-        .collect()
-}
-
 fn column(name: &str) -> Ident {
     Ident::parse_as(name, IdentRole::Column).expect("valid column")
 }
@@ -234,10 +200,11 @@ fn docs_search(criterion: SearchCriterion, limit: i64) -> Search {
 /// Execute a rendered plan and return the `id` column in result order.
 async fn ranked_ids(pool: &Pool, plan: &Search) -> Vec<String> {
     let sql = render_search(plan).expect("the postgres backend serves this plan");
-    let owned = bind_text(sql.params());
-    let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-    let rows = pool
-        .query_text_params(sql.sql(), &params)
+    let rows = crate::backend::postgres::params::query(
+        &pool.acquire().await.unwrap(),
+        sql.sql(),
+        sql.params(),
+    )
         .await
         .unwrap_or_else(|e| panic!("the IR rendered SQL the server refused: {e}\n{}", sql.sql()));
     rows.iter().map(|r| r.get::<_, String>("id")).collect()
@@ -311,10 +278,11 @@ fn a_vector_search_ranks_by_distance_on_real_pgvector() {
                 10,
             );
             let sql = render_search(&plan).expect("renderable");
-            let owned = bind_text(sql.params());
-            let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-            let rows = pool
-                .query_text_params(sql.sql(), &params)
+            let rows = crate::backend::postgres::params::query(
+                &pool.acquire().await.unwrap(),
+                sql.sql(),
+                sql.params(),
+            )
                 .await
                 .unwrap_or_else(|e| panic!("pgvector refused the IR's SQL: {e}\n{}", sql.sql()));
 
@@ -684,10 +652,11 @@ fn one_statement_serves_every_k() {
 
             let mut counts = Vec::new();
             for rendered in [&five, &twenty] {
-                let owned = bind_text(rendered.params());
-                let params: Vec<&str> = owned.iter().map(String::as_str).collect();
-                let rows = pool
-                    .query_text_params(rendered.sql(), &params)
+                let rows = crate::backend::postgres::params::query(
+                    &pool.acquire().await.unwrap(),
+                    rendered.sql(),
+                    rendered.params(),
+                )
                     .await
                     .expect("runs");
                 counts.push(rows.len());
