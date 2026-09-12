@@ -20,7 +20,7 @@ use crate::tests::fixtures::DatabaseFixture;
 #[test]
 fn inserting_a_row_without_user_fields_succeeds_via_assigned_fields_only() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::SqlDialect;
+        use crate::sql::compile::SqlDialect;
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -30,9 +30,9 @@ fn inserting_a_row_without_user_fields_succeeds_via_assigned_fields_only() {
                 .expect("ensure_app_schema");
 
             let sql = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
-                &zeroship_data_sql::value!({}),
+                &crate::value!({}),
                 &FkEmission::Inline,
                 SqlDialect::Sqlite,
             )
@@ -100,7 +100,7 @@ fn inserting_a_row_without_user_fields_succeeds_via_assigned_fields_only() {
 fn insert_end_to_end_populates_assigned_fields_sqlite() {
     Host::test(|host| {
         use zeroship_data_orm::crud::assignment_pass::apply_assignments_on_insert;
-        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -110,11 +110,11 @@ fn insert_end_to_end_populates_assigned_fields_sqlite() {
                 .expect("ensure_app_schema");
 
             // 1. Stand up the table with the 7 system-field columns.
-            let schema = generated_fields(zeroship_data_sql::value!({
+            let schema = generated_fields(crate::value!({
                 "title": {"type": "string", "required": true},
             }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -136,7 +136,7 @@ fn insert_end_to_end_populates_assigned_fields_sqlite() {
             // field. The auto-mint pass injects `id`, `created_by`,
             // `updated_by`; the DB fires its DEFAULT for the timestamps +
             // version.
-            let mut doc = zeroship_data_sql::value!({ "title": "PR 3 hello" });
+            let mut doc = crate::value!({ "title": "PR 3 hello" });
             // The pass takes the collection's descriptor entry (the write pipeline
             // resolves it once per op and hands it down); the only thing it reads
             // out of it is a declared `t.id(prefix)`, and this one declares none.
@@ -159,7 +159,7 @@ fn insert_end_to_end_populates_assigned_fields_sqlite() {
             // so route through the dedicated client's `query` path (the
             // pool's `execute_fixture` rejects result-bearing statements).
             let built = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -217,7 +217,7 @@ fn insert_end_to_end_populates_assigned_fields_sqlite() {
 fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
     Host::test(|host| {
         use zeroship_data_orm::crud::assignment_pass::apply_assignments_on_insert;
-        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
@@ -230,12 +230,12 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
             // One binding for the table's shape and for the write's projection: the
             // DDL emitter and the INSERT builder must not read two literals.
-            let schema = generated_fields(zeroship_data_sql::value!({
+            let schema = generated_fields(crate::value!({
                 "title": {"type": "string", "required": true},
                 "authorId": {"type": "ref", "refTarget": "users", "refColumn": "id"},
             }));
             let posts_ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Deferred(&empty),
@@ -266,7 +266,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             // declared INTEGER affinity at introspection. With the
             // cascade applied the affinity is TEXT - no surprise on
             // read-back.
-            let mut post_doc = zeroship_data_sql::value!({
+            let mut post_doc = crate::value!({
                 "title": "fk-ok",
                 "authorId": "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
             });
@@ -278,7 +278,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
             )
             .expect("derived prefix must be accepted");
             let built = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &post_doc,
@@ -320,7 +320,7 @@ fn insert_with_fk_uses_text_keys_end_to_end_sqlite() {
 #[test]
 fn update_end_to_end_bumps_version_by_one_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_update_many_with_assignments,
         };
 
@@ -331,11 +331,11 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
                 .await
                 .expect("ensure_app_schema");
 
-            let schema = generated_fields(zeroship_data_sql::value!({
+            let schema = generated_fields(crate::value!({
                 "title": {"type": "string", "required": true},
             }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -354,12 +354,12 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
             }
 
             // INSERT row at version 1 (DDL default).
-            let doc = zeroship_data_sql::value!({
+            let doc = crate::value!({
                 "id": "post_v1bump",
                 "title": "original",
             });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -374,11 +374,11 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
                 .expect("INSERT");
 
             // UPDATE with descriptor assignments.
-            let filter = zeroship_data_sql::value!({ "id": "post_v1bump" });
-            let update = zeroship_data_sql::value!({ "title": "v2" });
+            let filter = crate::value!({ "id": "post_v1bump" });
+            let update = crate::value!({ "title": "v2" });
             let autobump = Some("usr_e2e_updater");
             let upd = build_update_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter,
@@ -423,7 +423,7 @@ fn update_end_to_end_bumps_version_by_one_sqlite() {
 #[test]
 fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_update_many_with_assignments,
         };
 
@@ -432,9 +432,9 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             backend.attach_app_file("app_demo").await.unwrap();
 
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": {"type": "string"} }));
+                generated_fields(crate::value!({ "title": {"type": "string"} }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -449,9 +449,9 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_cas_ok", "title": "v1" });
+            let doc = crate::value!({ "id": "post_cas_ok", "title": "v1" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -463,11 +463,11 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
             client.query_values(&ins.sql, ins_params).await.unwrap();
 
             // CAS at the correct version (1).
-            let filter = zeroship_data_sql::value!({ "id": "post_cas_ok", "version": 1 });
-            let update = zeroship_data_sql::value!({ "title": "v2" });
+            let filter = crate::value!({ "id": "post_cas_ok", "version": 1 });
+            let update = crate::value!({ "title": "v2" });
             let autobump = Some("usr_cas_ok");
             let upd = build_update_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter,
@@ -505,7 +505,7 @@ fn update_end_to_end_with_correct_version_succeeds_and_bumps_sqlite() {
 #[test]
 fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_update_many_with_assignments,
         };
 
@@ -514,9 +514,9 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             backend.attach_app_file("app_demo").await.unwrap();
 
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": {"type": "string"} }));
+                generated_fields(crate::value!({ "title": {"type": "string"} }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -531,9 +531,9 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_cas_stale", "title": "v1" });
+            let doc = crate::value!({ "id": "post_cas_stale", "title": "v1" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -545,11 +545,11 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
             client.query_values(&ins.sql, ins_params).await.unwrap();
 
             // CAS at the wrong version (row is at 1; we expect 99).
-            let filter = zeroship_data_sql::value!({ "id": "post_cas_stale", "version": 99 });
-            let update = zeroship_data_sql::value!({ "title": "v_nope" });
+            let filter = crate::value!({ "id": "post_cas_stale", "version": 99 });
+            let update = crate::value!({ "title": "v_nope" });
             let autobump = Some("usr_cas_stale");
             let upd = build_update_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter,
@@ -584,7 +584,7 @@ fn update_end_to_end_with_stale_version_affects_zero_rows_sqlite() {
 #[test]
 fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_update_many_with_assignments,
         };
 
@@ -593,9 +593,9 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             backend.attach_app_file("app_demo").await.unwrap();
 
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": {"type": "string"} }));
+                generated_fields(crate::value!({ "title": {"type": "string"} }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -610,9 +610,9 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_race", "title": "v0" });
+            let doc = crate::value!({ "id": "post_race", "title": "v0" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -624,11 +624,11 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             client.query_values(&ins.sql, ins_params).await.unwrap();
 
             // First UPDATE at version=1 wins.
-            let filter1 = zeroship_data_sql::value!({ "id": "post_race", "version": 1 });
-            let update1 = zeroship_data_sql::value!({ "title": "v_winner" });
+            let filter1 = crate::value!({ "id": "post_race", "version": 1 });
+            let update1 = crate::value!({ "title": "v_winner" });
             let ab = Some("usr_a");
             let upd1 = build_update_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter1,
@@ -644,10 +644,10 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
             assert_eq!(r1, 1, "first CAS wins");
 
             // Second UPDATE at version=1 loses (row is now at version=2).
-            let filter2 = zeroship_data_sql::value!({ "id": "post_race", "version": 1 });
-            let update2 = zeroship_data_sql::value!({ "title": "v_loser" });
+            let filter2 = crate::value!({ "id": "post_race", "version": 1 });
+            let update2 = crate::value!({ "title": "v_loser" });
             let upd2 = build_update_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter2,
@@ -681,7 +681,7 @@ fn update_end_to_end_concurrent_two_updates_one_wins_one_loses_sqlite() {
 #[test]
 fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_update_many_with_assignments,
         };
 
@@ -690,9 +690,9 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             backend.attach_app_file("app_demo").await.unwrap();
 
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": {"type": "string"} }));
+                generated_fields(crate::value!({ "title": {"type": "string"} }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -707,9 +707,9 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_blind", "title": "v0" });
+            let doc = crate::value!({ "id": "post_blind", "title": "v0" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -723,11 +723,11 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
             // No version in filter — last-writer-wins. Three consecutive
             // updates land in order; version is bumped each time.
             for new_title in ["v1", "v2", "v3"] {
-                let filter = zeroship_data_sql::value!({ "id": "post_blind" });
-                let update = zeroship_data_sql::value!({ "title": new_title });
+                let filter = crate::value!({ "id": "post_blind" });
+                let update = crate::value!({ "title": new_title });
                 let ab = Some("usr_blind");
                 let upd = build_update_many_with_assignments(
-                    &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                     "posts",
                     &schema,
                     &filter,
@@ -763,16 +763,16 @@ fn update_end_to_end_without_version_filter_succeeds_blindly_sqlite() {
 #[test]
 fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_soft_delete_many_with_assignments,
         };
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
-            let schema = generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+            let schema = generated_fields(crate::value!({ "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -787,9 +787,9 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_sd1", "title": "to be deleted" });
+            let doc = crate::value!({ "id": "post_sd1", "title": "to be deleted" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -800,10 +800,10 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
             let client = backend.fixture_session("app_demo").await.unwrap();
             client.query_values(&ins.sql, p).await.unwrap();
 
-            let filter = zeroship_data_sql::value!({ "id": "post_sd1" });
+            let filter = crate::value!({ "id": "post_sd1" });
             let ab = Some("usr_deleter");
             let sd = build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter,
@@ -837,7 +837,7 @@ fn soft_delete_end_to_end_sets_deleted_at_and_bumps_version_sqlite() {
 #[test]
 fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_soft_delete_many_with_assignments,
         };
 
@@ -845,9 +845,9 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+                generated_fields(crate::value!({ "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -862,9 +862,9 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_idem", "title": "x" });
+            let doc = crate::value!({ "id": "post_idem", "title": "x" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -875,10 +875,10 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
             let client = backend.fixture_session("app_demo").await.unwrap();
             client.query_values(&ins.sql, p).await.unwrap();
 
-            let filter = zeroship_data_sql::value!({ "id": "post_idem" });
+            let filter = crate::value!({ "id": "post_idem" });
             let ab = Some("usr_x");
             let sd = build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &filter,
@@ -900,7 +900,7 @@ fn soft_delete_on_already_soft_deleted_row_affects_zero_rows_sqlite() {
 #[test]
 fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_find_with_schema_and_unmask_and_soft_delete,
             build_insert_with_dialect, build_soft_delete_many_with_assignments,
         };
@@ -909,9 +909,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+                generated_fields(crate::value!({ "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -927,9 +927,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             }
 
             for id in &["post_alive_a", "post_alive_b", "post_dead"] {
-                let doc = zeroship_data_sql::value!({ "id": id, "title": id });
+                let doc = crate::value!({ "id": id, "title": id });
                 let ins = build_insert_with_dialect(
-                    &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                     "posts",
                     &schema,
                     &doc,
@@ -942,10 +942,10 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             }
             let ab = Some("usr_actor");
             let sd = build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "id": "post_dead" }),
+                &crate::value!({ "id": "post_dead" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema)
                     .unwrap()
@@ -957,9 +957,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             client.exec_values(&sd.sql, p).await.unwrap();
 
             let q = build_find_with_schema_and_unmask_and_soft_delete(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
-                &zeroship_data_sql::value!({}),
+                &crate::value!({}),
                 None,
                 None,
                 None,
@@ -973,9 +973,9 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
             assert_eq!(rows.len(), 2, "soft-deleted row hidden by auto-filter");
 
             let q2 = build_find_with_schema_and_unmask_and_soft_delete(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
-                &zeroship_data_sql::value!({}),
+                &crate::value!({}),
                 None,
                 None,
                 None,
@@ -994,7 +994,7 @@ fn find_with_soft_delete_filter_hides_soft_deleted_rows_sqlite() {
 #[test]
 fn restore_clears_deleted_at_and_bumps_version_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_restore_many_with_assignments,
             build_soft_delete_many_with_assignments,
         };
@@ -1002,9 +1002,9 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
-            let schema = generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+            let schema = generated_fields(crate::value!({ "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -1019,9 +1019,9 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_rs", "title": "x" });
+            let doc = crate::value!({ "id": "post_rs", "title": "x" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -1034,10 +1034,10 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 
             let ab = Some("usr_x");
             let sd = build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "id": "post_rs" }),
+                &crate::value!({ "id": "post_rs" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema).unwrap().write_assignments(&schema, ab, true, false),
             )
@@ -1046,10 +1046,10 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
             client.exec_values(&sd.sql, p).await.unwrap();
 
             let rs = build_restore_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "id": "post_rs" }),
+                &crate::value!({ "id": "post_rs" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema).unwrap().write_assignments(&schema, ab, false, true),
             )
@@ -1074,7 +1074,7 @@ fn restore_clears_deleted_at_and_bumps_version_sqlite() {
 #[test]
 fn restore_on_already_live_row_affects_zero_rows_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_restore_many_with_assignments,
         };
 
@@ -1082,9 +1082,9 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+                generated_fields(crate::value!({ "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -1099,9 +1099,9 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_live", "title": "x" });
+            let doc = crate::value!({ "id": "post_live", "title": "x" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -1114,10 +1114,10 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 
             let ab = Some("usr_x");
             let rs = build_restore_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "id": "post_live" }),
+                &crate::value!({ "id": "post_live" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema)
                     .unwrap()
@@ -1142,7 +1142,7 @@ fn restore_on_already_live_row_affects_zero_rows_sqlite() {
 #[test]
 fn soft_delete_then_restore_full_lifecycle_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_find_with_schema_and_unmask_and_soft_delete,
             build_insert_with_dialect, build_restore_many_with_assignments,
             build_soft_delete_many_with_assignments,
@@ -1152,9 +1152,9 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
             let schema =
-                generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+                generated_fields(crate::value!({ "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -1169,9 +1169,9 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
                 backend.execute_fixture(t, &[]).await.unwrap();
             }
 
-            let doc = zeroship_data_sql::value!({ "id": "post_lc", "title": "lifecycle" });
+            let doc = crate::value!({ "id": "post_lc", "title": "lifecycle" });
             let ins = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &doc,
@@ -1183,9 +1183,9 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             client.query_values(&ins.sql, p).await.unwrap();
 
             let find_default = build_find_with_schema_and_unmask_and_soft_delete(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
-                &zeroship_data_sql::value!({}),
+                &crate::value!({}),
                 None,
                 None,
                 None,
@@ -1200,10 +1200,10 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 
             let ab = Some("usr_x");
             let sd = build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "id": "post_lc" }),
+                &crate::value!({ "id": "post_lc" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema)
                     .unwrap()
@@ -1217,9 +1217,9 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             assert!(r.is_empty(), "soft-deleted row hidden");
 
             let find_inc = build_find_with_schema_and_unmask_and_soft_delete(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
-                &zeroship_data_sql::value!({}),
+                &crate::value!({}),
                 None,
                 None,
                 None,
@@ -1233,10 +1233,10 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
             assert_eq!(r.len(), 1, "include_deleted reveals it");
 
             let rs = build_restore_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "id": "post_lc" }),
+                &crate::value!({ "id": "post_lc" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema)
                     .unwrap()
@@ -1264,16 +1264,16 @@ fn soft_delete_then_restore_full_lifecycle_sqlite() {
 #[test]
 fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{
+        use crate::sql::compile::{
             SqlDialect, build_insert_with_dialect, build_soft_delete_many_with_assignments,
         };
 
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend.attach_app_file("app_demo").await.unwrap();
-            let schema = generated_fields(zeroship_data_sql::value!({ "author": { "type": "string" }, "title": { "type": "string" } }));
+            let schema = generated_fields(crate::value!({ "author": { "type": "string" }, "title": { "type": "string" } }));
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -1295,9 +1295,9 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
                 ("post_b1", "usr_b"),
                 ("post_b2", "usr_b"),
             ] {
-                let doc = zeroship_data_sql::value!({ "id": id, "author": author, "title": id });
+                let doc = crate::value!({ "id": id, "author": author, "title": id });
                 let ins = build_insert_with_dialect(
-                    &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                    &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                     "posts",
                     &schema,
                     &doc,
@@ -1318,10 +1318,10 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 
             let ab = Some("usr_admin");
             let sd = build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new("app_demo").expect("fixture schema name"),
+                &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "posts",
                 &schema,
-                &zeroship_data_sql::value!({ "author": "usr_a" }),
+                &crate::value!({ "author": "usr_a" }),
                 SqlDialect::Sqlite,
                 &AssignmentPlan::from_schema(&schema).unwrap().write_assignments(&schema, ab, true, false),
             )
@@ -1358,14 +1358,14 @@ fn soft_delete_many_sets_deleted_at_on_all_matching_live_rows_sqlite() {
 #[test]
 fn purge_path_uses_hard_delete_sql_unchanged_sqlite() {
     Host::test(|_| {
-        use zeroship_data_sql::compile::build_delete_one;
+        use crate::sql::compile::build_delete_one;
 
-        let schema = generated_fields(zeroship_data_sql::value!({ "title": { "type": "string" } }));
+        let schema = generated_fields(crate::value!({ "title": { "type": "string" } }));
         let q = build_delete_one(
-            &zeroship_data_sql::SchemaName::new("app1").expect("fixture schema name"),
+            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
             "posts",
             &schema,
-            &zeroship_data_sql::value!({ "id": "x" }),
+            &crate::value!({ "id": "x" }),
         )
         .unwrap();
         assert!(q.sql.starts_with("DELETE FROM"));

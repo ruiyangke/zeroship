@@ -159,7 +159,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
     let classified = match backend
         .open_tx_session(
             app_id,
-            &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema name"),
+            &zeroship_data_orm::sql::SchemaName::new(app_id).expect("fixture schema name"),
             zeroship_data_orm::error::BeginIntent::Default,
         )
         .await

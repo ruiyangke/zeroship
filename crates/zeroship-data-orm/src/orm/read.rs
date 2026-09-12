@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
 };
-use zeroship_data_sql::{
+use crate::sql::{
     FieldPath, Ident, IdentRole, Join, JoinKind, Operand, OrderKey, Predicate, ProjectedField,
     Projection, RowLimit, RowOffset, Select,
 };
@@ -98,7 +98,7 @@ struct SourceLayout {
 #[derive(Debug)]
 pub(super) struct PreparedRead {
     query: BuiltQuery,
-    dialect: crate::compile::SqlDialect,
+    dialect: crate::sql::compile::SqlDialect,
     sources: Vec<SourceLayout>,
     projections: Vec<ReadProjection>,
     scalar_slots: BTreeMap<String, String>,
@@ -108,10 +108,10 @@ pub(super) struct PreparedRead {
 impl PreparedRead {
     pub(super) fn new(
         binding: &DbBinding,
-        dialect: crate::compile::SqlDialect,
+        dialect: crate::sql::compile::SqlDialect,
         input: ReadQuery,
     ) -> Result<Self, DbError> {
-        if input.joins.len() >= zeroship_data_sql::MAX_READ_SOURCES {
+        if input.joins.len() >= crate::sql::MAX_READ_SOURCES {
             return Err(invalid("read exceeds its source budget"));
         }
         if input.projection.is_empty() || input.projection.len() > MAX_READ_FIELDS {
@@ -218,7 +218,7 @@ impl PreparedRead {
                             "a nullable source requires an optional row projection",
                         ));
                     }
-                    let allowed = zeroship_data_sql::descriptors::readable_fields(&layout.schema);
+                    let allowed = crate::sql::descriptors::readable_fields(&layout.schema);
                     let selected = fields
                         .clone()
                         .unwrap_or_else(|| allowed.iter().cloned().collect());
@@ -245,7 +245,7 @@ impl PreparedRead {
                             .find(|s| s.source.alias == alias)
                             .unwrap();
                         let allowed =
-                            zeroship_data_sql::descriptors::readable_fields(&layout.schema);
+                            crate::sql::descriptors::readable_fields(&layout.schema);
                         if !allowed.contains(path.root().as_str()) {
                             return Err(invalid("unreadable scalar projection"));
                         }
@@ -316,12 +316,12 @@ impl PreparedRead {
         let descriptors = sources
             .iter()
             .zip(&aliases)
-            .map(|(s, alias)| crate::compile::ReadSource {
+            .map(|(s, alias)| crate::sql::compile::ReadSource {
                 alias: Some(alias),
                 schema: &s.schema,
             })
             .collect::<Vec<_>>();
-        let query = crate::compile::build_select(&plan, binding.schema(), &descriptors, dialect)?;
+        let query = crate::sql::compile::build_select(&plan, binding.schema(), &descriptors, dialect)?;
         for source in &sources {
             crate::cdc::read_set::record_if_active(
                 &source.source.collection,
@@ -508,7 +508,7 @@ fn add_field(
 }
 fn visible(source: &ReadSource, schema: &Value) -> Result<Predicate, DbError> {
     Ok(
-        match zeroship_data_sql::lifecycle::soft_delete_column(schema)? {
+        match crate::sql::lifecycle::soft_delete_column(schema)? {
             Some(column) => Predicate::is_null(Operand::Path(source.column(column)?)),
             None => Predicate::always(),
         },
@@ -533,14 +533,14 @@ fn source_for<'a>(
 fn check_field(path: &FieldPath, sources: &[SourceLayout], plain: bool) -> Result<(), DbError> {
     let source = source_for(path, sources)?;
     let field = path.root().as_str();
-    if !zeroship_data_sql::descriptors::readable_fields(&source.schema).contains(field) {
+    if !crate::sql::descriptors::readable_fields(&source.schema).contains(field) {
         return Err(invalid(format!("unreadable field '{field}'")));
     }
     if source
         .schema
         .get(field)
-        .is_some_and(zeroship_data_sql::descriptors::is_encrypted)
-        || (plain && crate::compile::column_is_masked(field, &source.schema))
+        .is_some_and(crate::sql::descriptors::is_encrypted)
+        || (plain && crate::sql::compile::column_is_masked(field, &source.schema))
     {
         return Err(invalid("protected field is not valid in this expression"));
     }
@@ -566,7 +566,7 @@ fn validate_predicate(
     join: bool,
 ) -> Result<(), DbError> {
     for path in
-        zeroship_data_sql::joins::predicate_paths(predicate).map_err(|e| invalid(e.to_string()))?
+        crate::sql::joins::predicate_paths(predicate).map_err(|e| invalid(e.to_string()))?
     {
         check_field(path, sources, join)?;
         check_capability(path, sources, "filterable")?;
@@ -614,12 +614,12 @@ fn scalar_kind<'a>(path: &FieldPath, sources: &'a [SourceLayout]) -> Result<&'a 
 }
 
 fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<Value, DbError> {
-    use zeroship_data_sql::AggregateFunc;
+    use crate::sql::AggregateFunc;
     let path = match expression {
         Operand::Path(path) => path,
         Operand::Aggregate(aggregate) => {
             if aggregate.func() == AggregateFunc::Count {
-                return Ok(zeroship_data_sql::value!({"type":"bigInt"}));
+                return Ok(crate::value!({"type":"bigInt"}));
             }
             let path = aggregate
                 .argument()
@@ -630,7 +630,7 @@ fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<V
                     return Err(invalid("sum and avg require an integer or number column"));
                 }
                 return Ok(
-                    zeroship_data_sql::value!({"type": if aggregate.func() == AggregateFunc::Avg || kind == "number" { "number" } else { "bigInt" }}),
+                    crate::value!({"type": if aggregate.func() == AggregateFunc::Avg || kind == "number" { "number" } else { "bigInt" }}),
                 );
             }
             if matches!(kind, "boolean" | "bytes" | "decimal") {
@@ -646,7 +646,7 @@ fn scalar_definition(expression: &Operand, sources: &[SourceLayout]) -> Result<V
 }
 
 fn decode_scalars(
-    dialect: crate::compile::SqlDialect,
+    dialect: crate::sql::compile::SqlDialect,
     schema: &Value,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
@@ -674,14 +674,14 @@ fn decode_scalars(
             }
         }
     }
-    zeroship_data_sql::codecs::decode_rows(dialect, schema, rows)?;
+    crate::sql::codecs::decode_rows(dialect, schema, rows)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeroship_data_sql::value;
+    use crate::value;
 
     fn source(schema: Value) -> SourceLayout {
         SourceLayout {
@@ -714,7 +714,7 @@ mod tests {
             assert!(scalar_kind(&sources[0].source.column(field).unwrap(), &sources).is_err());
         }
         assert_eq!(
-            zeroship_data_sql::descriptors::readable_fields(&sources[0].schema),
+            crate::sql::descriptors::readable_fields(&sources[0].schema),
             ["id", "created_at", "version", "event_time", "missing_type"]
                 .map(String::from)
                 .into()

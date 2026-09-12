@@ -274,7 +274,7 @@ tier_of_file() {
     # true of ONE `#[cfg(test)]` assertion, which moved to `change_stream_pg.rs`
     # on 2026-09-03 - the fact it pins is about `PgChangeStream`, so it belongs
     # beside it. What is left is a prelude of re-exports from data-core, both
-    # vendor crates and zeroship-data-sql, plus this tier's own `BackendHandle`
+    # vendor crates and zeroship-data-orm::sql, plus this tier's own `BackendHandle`
     # and a test-only conformance marker: all at or below ENGINE. Issue #170
     # closes here.
     ./backend/mod.rs)                                    echo ENGINE ;;

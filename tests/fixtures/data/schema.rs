@@ -1,7 +1,7 @@
 //! Database fixtures use the migration engine that creates creator tables.
 
-use zeroship_data_sql::value::Value;
-use zeroship_data_sql::{SchemaName, compile::SqlDialect};
+use zeroship_data_orm::value::Value;
+use zeroship_data_orm::sql::{SchemaName, compile::SqlDialect};
 use zeroship_migrate::schema::query::{FkEmission, IndexSpec, QueryError};
 
 #[allow(dead_code)]
@@ -70,7 +70,7 @@ pub fn fixture_indexes(
 
 #[allow(dead_code)]
 pub fn fixture_schema_sql(schema: &SchemaName) -> String {
-    format!("CREATE SCHEMA IF NOT EXISTS {}", schema.quoted())
+    format!("CREATE SCHEMA IF NOT EXISTS {}", zeroship_data_orm::sql::compile::quote_ident(schema.as_str()))
 }
 
 /// Add the fields emitted by the fixture's confined migration policy.
@@ -85,7 +85,7 @@ pub fn generated_fields(fields: Value) -> Value {
         .iter()
         .filter(|(_, definition)| definition.get("assign").is_some())
         .map(|(name, definition)| (name.clone(), definition.clone()))
-        .collect::<zeroship_data_sql::value::Map<_, _>>();
+        .collect::<zeroship_data_orm::value::Map<_, _>>();
     for (name, definition) in fields.as_object().expect("fixture field map") {
         if let Some(existing) = generated.get_mut(name) {
             existing

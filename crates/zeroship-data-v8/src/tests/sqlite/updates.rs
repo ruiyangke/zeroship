@@ -3,14 +3,14 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_sql::compile::raw_column_name;
+use zeroship_data_orm::sql::compile::raw_column_name;
 
 #[test]
 fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let total = zeroship_data_sql::compile::MAX_QUERY_LIMIT + 17;
+        let total = zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 17;
         let body = r#"
 async function bulk() {
     const users = env.db.collection(COLLECTION);
@@ -40,7 +40,7 @@ const _procedures = { bulk };
 "#
         .replace("BULK_TOTAL", &total.to_string());
         let mut source = sqlite_runtime_source("users", &users_encrypted_ssn_schema(), &body);
-        source.descriptor = serde_json::to_string(&zeroship_data_sql::value!({
+        source.descriptor = serde_json::to_string(&zeroship_data_orm::value!({
             "version":2,
             "collections":{"users":{
                 "fields":crate::tests::fixtures::schema::generated_fields(users_encrypted_ssn_schema()),
@@ -52,7 +52,7 @@ const _procedures = { bulk };
         let result = parity::extract_json(&dispatch_sqlite_runtime(&dir, &source, "bulk"));
         assert_eq!(
             result,
-            zeroship_data_sql::value!({
+            zeroship_data_orm::value!({
                 "updated":total, "missing":0, "deleted":total, "restored":total,
                 "purged":total, "remaining":0,
             })
@@ -243,7 +243,7 @@ const _procedures = { seed, updateManyByName };
             !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(" LIMIT {}", zeroship_data_sql::compile::MAX_QUERY_LIMIT + 1);
+        let expected_limit = format!(" LIMIT {}", zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1);
         for sql in &counters {
             assert!(
                 sql.ends_with(&expected_limit),
@@ -316,7 +316,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target_cap = usize::try_from(zeroship_data_sql::compile::MAX_QUERY_LIMIT)
+        let target_cap = usize::try_from(zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT)
             .expect("MAX_QUERY_LIMIT must fit usize");
         let seeded = target_cap + 1;
         let values = (0..seeded)

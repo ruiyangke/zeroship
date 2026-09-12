@@ -1,6 +1,6 @@
 //! Runtime and database state owned explicitly by each engine test.
 use crate::connection::{ConnectionFactory, LocalConnection};
-use crate::{backend, compile, crud, encryption, error::DbError, exec, transaction};
+use crate::{backend, sql::compile, crud, encryption, error::DbError, exec, transaction};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 
 type ProjectKeys = Option<Arc<encryption::SuppliedProjectKeys>>;
@@ -132,7 +132,7 @@ impl Host {
 
     pub(crate) async fn prepare_insert_many_docs(
         &self,
-        docs: &mut zeroship_data_sql::value::Value,
+        docs: &mut crate::value::Value,
         app_id: &str,
         collection: &str,
         actor_id: Option<&str>,
@@ -161,8 +161,8 @@ impl Host {
         &self,
         app_id: &str,
         collection: &str,
-        rows: Vec<zeroship_data_sql::value::Value>,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, DbError> {
+        rows: Vec<crate::value::Value>,
+    ) -> Result<Vec<crate::value::Value>, DbError> {
         let binding = zeroship_data_orm::binding::DbBinding::cold_start(app_id);
         let backend = self.backend().await?;
         // The route comes from the ambient parked-tx slot rather than from a V8
@@ -187,7 +187,7 @@ impl Host {
         app_id: &str,
         collection: &str,
         op: zeroship_data_orm::cdc::ChangeOp,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
+    ) -> Result<Vec<crate::value::Value>, String> {
         let backend = self.backend().await.map_err(DbError::into_string)?;
         let route = exec::ambient_route_for_tests(app_id, backend);
         exec::exec_mutation_with_emit(
@@ -205,7 +205,7 @@ impl Host {
         &self,
         app_id: &str,
         bq: compile::BuiltQuery,
-    ) -> Result<Vec<zeroship_data_sql::value::Value>, String> {
+    ) -> Result<Vec<crate::value::Value>, String> {
         let backend = self.backend().await.map_err(DbError::into_string)?;
         let route = exec::ambient_route_for_tests(app_id, backend);
         exec::exec_query(&route, bq)
@@ -224,7 +224,7 @@ impl Host {
             false,
             None,
             app_id,
-            zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema"),
+            crate::sql::SchemaName::new(app_id).expect("fixture schema"),
             backend,
         )
         .await

@@ -189,14 +189,14 @@ These are not separate cache reads; they are what the `schema_hint` is used FOR.
 | # | file:line | Function | Fact | What it does |
 |---|---|---|---|---|
 | 23 | `zeroship-schema/src/query.rs:921-926` | `schema_declares_readable_field` | is `name` a declared key that is not `_meta`/`_indexes` | membership test |
-| 24 | `crates/zeroship-data-sql/src/compile.rs` | `validate_read_identifier` | declared readable fields | validates identifiers against the required descriptor; no implicit field-name allowance |
+| 24 | `crates/zeroship-data-orm/src/sql/compile.rs` | `validate_read_identifier` | declared readable fields | validates identifiers against the required descriptor; no implicit field-name allowance |
 | 25 | `query.rs:3368-3380` | `column_is_masked` | `def.mask.kind != "none"` (missing kind defaults `"full"`) | the single predicate behind every sibling substitution |
 | 26 | `query.rs:3326-3343` | `project_read_field` | 25 | emits `"<col>_masked" AS "<col>"` when masked, bare column otherwise. **The sibling name is derived by `format!("{field}_masked")` at `:3336`** |
-| 27 | `crates/zeroship-data-sql/src/compile.rs` | `implicit_read_projection_parts` | declared readable fields | builds an explicit projection from descriptor fields and storage metadata |
+| 27 | `crates/zeroship-data-orm/src/sql/compile.rs` | `implicit_read_projection_parts` | declared readable fields | builds an explicit projection from descriptor fields and storage metadata |
 | 28 | `query.rs:3394-3400` | `aggregate_read_ident` | 25 | sibling name again, `format!("{field}_masked")` at `:3396` |
 | 29 | `query.rs:3407-3422` | `push_group_by_field` | 25 | sibling name again, `format!("{field}_masked")` at `:3415` |
 | 30 | `query.rs:3258-3269` | `build_masked_aware_select_expr_for_table_alias` | 27 | the search-path (`t` alias) form; `None` -> `"t".*` |
-| 31 | `crates/zeroship-data-orm/src/assignments.rs` | `AssignmentPlan::from_schema` | per-field assignment metadata | replaces the implicit field list; operation roles resolve through `crates/zeroship-data-sql/src/lifecycle.rs` |
+| 31 | `crates/zeroship-data-orm/src/assignments.rs` | `AssignmentPlan::from_schema` | per-field assignment metadata | replaces the implicit field list; operation roles resolve through `crates/zeroship-data-orm/src/sql/lifecycle.rs` |
 | 32 | `query.rs:738-762` | `RESERVED_NAMES` const | `_masked` suffix, `_` prefix, `__zs_`/`__zeroship_`/`sqlite_` prefixes, 6 classification names | field-name reservation at declaration AND filter time |
 
 ### 1.4 Facts derived inside the CRUD passes
@@ -250,7 +250,7 @@ rejects ambiguous or missing generators. See
 [per-collection options](../reference/db.md#per-collection-options).
 
 - **Soft deletion:** `soft_delete_column` in
-  [SQL lifecycle resolution](../../crates/zeroship-data-sql/src/lifecycle.rs)
+  [SQL lifecycle resolution](../../crates/zeroship-data-orm/src/sql/lifecycle.rs)
   locates the marker. `should_filter_soft_deleted` in
   [assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
   still returns `!include_deleted`: it expresses caller intent, while the SQL
@@ -364,7 +364,7 @@ which I read directly.
 
 3. **Primary-key identity now comes from the descriptor.**
    `primary_key` in
-   [SQL lifecycle resolution](../../crates/zeroship-data-sql/src/lifecycle.rs)
+   [SQL lifecycle resolution](../../crates/zeroship-data-orm/src/sql/lifecycle.rs)
    selects the field marked `primaryKey`. Row operations requiring a scalar key
    reject missing or ambiguous declarations. The former assumption that the key
    must be named `id` no longer describes the ORM.
@@ -745,13 +745,13 @@ column name into the AEAD tag. Consequences the specification must respect:
 | `context.rs:642-664` | `is_model_registered` / `mark_model_registered` / `registered_models` go away - the gate they serve (`introspect_schema.rs:118-120`) no longer exists |
 | `register_model/mod.rs` (238 lines) | the PG arm becomes a no-op with nothing to cache; the SQLite arm's `attach_app_file` must move into the data plane (the module already names this as a known defect at `:22-35`) |
 | `zeroship-schema/src/query.rs:3326-3343`, `:3394-3400`, `:3407-3422` | `format!("{field}_masked")` -> `storage.valueColumn` / `storage.rawColumn` |
-| `crates/zeroship-data-sql/src/compile.rs` | implemented: `implicit_read_projection_parts` and `build_returning_expr` project declared readable fields from the required descriptor |
+| `crates/zeroship-data-orm/src/sql/compile.rs` | implemented: `implicit_read_projection_parts` and `build_returning_expr` project declared readable fields from the required descriptor |
 | `zeroship-schema/src/query.rs:928-939` | the `if schema_hint.is_some()` guard (`:933`) disappears; a missing collection becomes an error, not a pass |
 | `crud/mask_pass.rs:150`, `:469`; `crud/encryption_pass.rs:295`; `crud/mask_drift.rs:135` | same sibling-name replacement |
 | `zeroship-schema/src/diff.rs:670`, `:714-718` | the `ends_with("_masked")` / `strip_suffix("_masked")` sentinel round-trip: the SENTINEL SIDE stays (the migration engine still needs it for drift), but the data plane stops consuming it |
 | `backend/postgres.rs:454-490`, `:609-650` | both `ensure_*_available` probes deleted; `vector_search`/`spatial_near` map SQLSTATE instead |
 | `backend/sqlite/cdc.rs:652-675` | `fetch_column_names` reads `physicalColumns` - CONDITIONAL on C-1 |
-| `crates/zeroship-data-sql/src/lifecycle.rs` | implemented: `soft_delete_column` selects the declared marker; the caller's `includeDeleted` flag only controls visibility |
+| `crates/zeroship-data-orm/src/sql/lifecycle.rs` | implemented: `soft_delete_column` selects the declared marker; the caller's `includeDeleted` flag only controls visibility |
 | `crates/zeroship-data-orm/src/assignments.rs` | implemented: write generators supply counter expressions, and the declared concurrency column selects revision checks |
 | `sdks/bootstrap/src/install-schema.ts` | historical proposal: extend descriptor validation to cover dialect, epoch, physical columns and storage metadata |
 | `crates/zeroship-migrate-core/src/render/gen_types.rs:121-243` | `RuntimeSchemaDescriptorV1` -> `V2`; `render_runtime_descriptor_v1` gains the storage/order/dialect/epoch projections |

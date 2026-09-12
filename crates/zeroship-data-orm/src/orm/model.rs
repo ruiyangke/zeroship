@@ -1,7 +1,7 @@
 //! Typed mappings over native records and migration-derived column contracts.
 use std::marker::PhantomData;
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::value::{Record, Value};
+use crate::value::{Record, Value};
 
 /// Collection metadata generated from the deployment's runtime descriptor.
 pub trait Entity: Sized + 'static {

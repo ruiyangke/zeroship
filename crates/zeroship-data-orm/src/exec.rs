@@ -2,10 +2,10 @@
 //! Shared CRUD uses the registered driver for autocommit and the owned session
 //! for transaction work. Successful operations emit usage and queued effects.
 
-use zeroship_data_sql::value::Value;
+use crate::value::Value;
 
 use crate::backend::BackendHandle;
-use crate::compile::BuiltQuery;
+use crate::sql::compile::BuiltQuery;
 
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::error::DbError;
@@ -161,7 +161,7 @@ pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError>
 }
 
 /// Execute an insert/update/delete query, returning the affected
-/// rows as `Vec<zeroship_data_sql::value::Value>` (one `Value::Object` per row).
+/// rows as `Vec<crate::value::Value>` (one `Value::Object` per row).
 ///
 /// Native records feed the protection passes and adapters. Broker events
 /// encode their explicit wire contract separately.
@@ -606,19 +606,19 @@ mod tests {
             let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
             assert_eq!(
                 derived.dialect(),
-                crate::compile::SqlDialect::Sqlite,
+                crate::sql::compile::SqlDialect::Sqlite,
                 "a route bound to a SQLite handle must not claim PostgreSQL: \
                  every builder it reaches would emit the wrong SQL",
             );
 
             let stated = crate::tx_route::CapturedRoute::pool_for_tests(
                 "app_route_dialect",
-                crate::compile::SqlDialect::Postgres,
+                crate::sql::compile::SqlDialect::Postgres,
             )
             .bind(handle);
             assert_eq!(
                 stated.dialect(),
-                crate::compile::SqlDialect::Postgres,
+                crate::sql::compile::SqlDialect::Postgres,
                 "the dialect is the constructor's input; `bind` must not \
                  re-derive it from the handle",
             );
@@ -635,7 +635,7 @@ mod tests {
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
-            .collect::<zeroship_data_sql::value::Map<_, _>>(),
+            .collect::<crate::value::Map<_, _>>(),
         )
     }
 
@@ -646,7 +646,7 @@ mod tests {
                 ("title".to_string(), Value::from("hi")),
             ]
             .into_iter()
-            .collect::<zeroship_data_sql::value::Map<_, _>>(),
+            .collect::<crate::value::Map<_, _>>(),
         )
     }
 
@@ -1033,7 +1033,7 @@ mod tests {
                 false,
                 None,
                 "app_exec",
-                zeroship_data_sql::SchemaName::new("app_exec").unwrap(),
+                crate::sql::SchemaName::new("app_exec").unwrap(),
                 handle.clone(),
             )
             .await
@@ -1397,7 +1397,7 @@ mod tests {
                 false,
                 None,
                 "app_exec_cancel",
-                zeroship_data_sql::SchemaName::new("app_exec_cancel").unwrap(),
+                crate::sql::SchemaName::new("app_exec_cancel").unwrap(),
                 handle.clone(),
             )
             .await
@@ -1558,7 +1558,7 @@ mod tests {
             let app_id = "p2c1leak";
             let role = zeroship_core::database_role::per_app_role_name(app_id)
                 .expect("test app role name");
-            let role_ident = crate::compile::quote_ident(&role);
+            let role_ident = crate::sql::compile::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
             // in the app role (required for SET LOCAL ROLE) and (b)
@@ -1584,7 +1584,7 @@ mod tests {
                     .expect("create app role");
                 c.simple_query(&format!(
                     "GRANT {role_ident} TO {}",
-                    crate::compile::quote_ident(&login_user)
+                    crate::sql::compile::quote_ident(&login_user)
                 ))
                 .await
                 .expect("grant membership");
@@ -1598,7 +1598,7 @@ mod tests {
                 Duration::from_millis(100),
                 crate::backend::pg_autocommit::roled_rows(
                     &pool,
-                    &zeroship_data_sql::SchemaName::new(app_id).expect("fixture schema"),
+                    &crate::sql::SchemaName::new(app_id).expect("fixture schema"),
                     "SELECT pg_sleep(1)",
                     &[],
                 ),
@@ -1642,7 +1642,7 @@ mod tests {
             let _ = c
                 .simple_query(&format!(
                     "REVOKE {role_ident} FROM {}",
-                    crate::compile::quote_ident(&login_user)
+                    crate::sql::compile::quote_ident(&login_user)
                 ))
                 .await;
             let _ = c

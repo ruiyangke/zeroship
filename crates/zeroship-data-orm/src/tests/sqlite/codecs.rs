@@ -16,7 +16,7 @@ use crate::tests::fixtures::DatabaseFixture;
 #[test]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
     Host::test(|host| {
-        use zeroship_data_sql::compile::{SqlDialect, build_insert_with_dialect};
+        use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
 
         host.run(async {
             let app = "t134_spelling";
@@ -28,9 +28,9 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             // this test wrote `DEFAULT CURRENT_TIMESTAMP` as a literal, which meant
             // it could never observe a change to the emitter it claimed to test -
             // the comment asserted a mechanism the code did not drive.
-            let schema = zeroship_data_sql::value!({ "occurred_at": { "type": "date" } });
+            let schema = crate::value!({ "occurred_at": { "type": "date" } });
             let ddl = fixture_table_sql_for(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &FkEmission::Inline,
@@ -68,12 +68,12 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 
             // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
             // for a declared timestamp column.
-            let doc = zeroship_data_sql::value!({
+            let doc = crate::value!({
                 "id": "b_bind",
                 "occurred_at": 1_756_700_000_000_i64,
             });
             let bq = build_insert_with_dialect(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,
                 &schema,
                 &doc,
@@ -82,7 +82,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             .expect("build_insert_with_dialect");
             assert_eq!(
                 bq.params[1],
-                zeroship_data_sql::value!("2025-09-01T04:13:20.000Z"),
+                crate::value!("2025-09-01T04:13:20.000Z"),
                 "the builder must bind canonical UTC text",
             );
             // `build_insert` emits a RETURNING clause, so this goes through `query`

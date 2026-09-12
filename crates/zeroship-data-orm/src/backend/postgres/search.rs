@@ -2,8 +2,8 @@
 use super::{PostgresBackend, pg_error};
 use crate::{driver::Session, error::DbError, executor::ScopedExecutor, search::*};
 use async_trait::async_trait;
-use zeroship_data_sql::descriptors::{GeoPoint, VectorMetric};
-use zeroship_data_sql::value::Value;
+use crate::sql::descriptors::{GeoPoint, VectorMetric};
+use crate::value::Value;
 
 #[async_trait(?Send)]
 impl Search for PostgresBackend {
@@ -142,9 +142,9 @@ impl PostgresBackend {
         query: &[f32],
         k: usize,
         metric: VectorMetric,
-        filter: &zeroship_data_sql::value::Value,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<zeroship_data_sql::compile::BuiltQuery, DbError> {
+        filter: &crate::value::Value,
+        schema: &crate::value::Value,
+    ) -> Result<crate::sql::compile::BuiltQuery, DbError> {
         // Probe so a missing extension surfaces with the same typed
         // error shape the capability probe produces — the SDK branches
         // on `e.code === "vector_extension_missing"` regardless of
@@ -154,7 +154,7 @@ impl PostgresBackend {
         // The projection allowlist and the `column` identifier check both come
         // off the descriptor. A collection this deploy does not declare is
         // refused here rather than searched with an unbounded projection.
-        zeroship_data_sql::compile::build_vector_search(
+        crate::sql::compile::build_vector_search(
             binding.schema(),
             collection,
             column,
@@ -244,13 +244,13 @@ impl PostgresBackend {
         column: &str,
         point: GeoPoint,
         radius_m: f64,
-        filter: &zeroship_data_sql::value::Value,
+        filter: &crate::value::Value,
         limit: Option<usize>,
-        schema: &zeroship_data_sql::value::Value,
-    ) -> Result<zeroship_data_sql::compile::BuiltQuery, DbError> {
+        schema: &crate::value::Value,
+    ) -> Result<crate::sql::compile::BuiltQuery, DbError> {
         self.ensure_postgis_available().await?;
 
-        zeroship_data_sql::compile::build_spatial_near(
+        crate::sql::compile::build_spatial_near(
             binding.schema(),
             collection,
             column,

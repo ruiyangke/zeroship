@@ -49,7 +49,7 @@ text_codec!(Text, Time);
 
 impl EncodeValue<CalendarDate> for String {
     fn encode_value(self) -> Result<Value, DbError> {
-        if zeroship_data_sql::temporal::parse_calendar_date(&self).is_none() {
+        if crate::sql::temporal::parse_calendar_date(&self).is_none() {
             return Err(invalid("a valid YYYY-MM-DD calendar date"));
         }
         Ok(Value::String(self))
@@ -57,7 +57,7 @@ impl EncodeValue<CalendarDate> for String {
 }
 impl EncodeValue<CalendarDate> for &str {
     fn encode_value(self) -> Result<Value, DbError> {
-        if zeroship_data_sql::temporal::parse_calendar_date(self).is_none() {
+        if crate::sql::temporal::parse_calendar_date(self).is_none() {
             return Err(invalid("a valid YYYY-MM-DD calendar date"));
         }
         Ok(Value::String(self.into()))
@@ -67,7 +67,7 @@ impl DecodeValue<CalendarDate> for String {
     fn decode_value(value: Value) -> Result<Self, DbError> {
         match value {
             Value::String(value)
-                if zeroship_data_sql::temporal::parse_calendar_date(&value).is_some() =>
+                if crate::sql::temporal::parse_calendar_date(&value).is_some() =>
             {
                 Ok(value)
             }
@@ -217,7 +217,7 @@ impl DecodeValue<Number> for Decimal {
 
 impl EncodeValue<Timestamp> for i64 {
     fn encode_value(self) -> Result<Value, DbError> {
-        if zeroship_data_sql::temporal::is_timestamp_millis(self) {
+        if crate::sql::temporal::is_timestamp_millis(self) {
             Ok(Value::Timestamp(self))
         } else {
             Err(invalid("portable timestamp in Unix milliseconds"))
@@ -228,7 +228,7 @@ impl DecodeValue<Timestamp> for i64 {
     fn decode_value(value: Value) -> Result<Self, DbError> {
         value
             .as_i64()
-            .filter(|value| zeroship_data_sql::temporal::is_timestamp_millis(*value))
+            .filter(|value| crate::sql::temporal::is_timestamp_millis(*value))
             .ok_or_else(|| invalid("portable timestamp in Unix milliseconds"))
     }
 }

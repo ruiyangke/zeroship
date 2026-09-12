@@ -39,7 +39,7 @@
 //! the byte order on read — this module does not handle that case.
 
 use zeroship_data_orm::error::DbError;
-use zeroship_data_sql::descriptors::GeoPoint;
+use crate::sql::descriptors::GeoPoint;
 
 /// Earth's mean radius in metres (IUGG / WGS84 standard). The
 /// haversine formula treats Earth as a perfect sphere — actual
@@ -104,7 +104,7 @@ pub(crate) fn sqlite_geopoint_column_ddl(name: &str) -> String {
 }
 
 #[cfg(test)]
-use zeroship_data_sql::sqlite_values::point_to_blob;
+use crate::sql::sqlite_values::point_to_blob;
 
 /// Decode a `BLOB` cell back into a [`GeoPoint`].
 ///

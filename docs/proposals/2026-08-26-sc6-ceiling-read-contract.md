@@ -2,7 +2,7 @@
 
 **Status.** PARTIAL. The storage half is SHIPPED - the masked field's own column
 holds the mask, `__zs_raw__<field>` holds the authoritative value
-(`crates/zeroship-schema/src/query.rs`, (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+(`crates/zeroship-schema/src/query.rs`, (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `crates/zeroship-data-orm/src/protection/mask_pass.rs`,
 `crates/zeroship-migrate-core/src/schema/diff.rs`, `docs/reference/db.md`). The
 operator-ceiling half is NOT: `check_unmask_authorization`
@@ -194,7 +194,7 @@ Shipped.
   mask-only field, ciphertext for an encrypted one - and carries the **declared
   type and the whole constraint set** (`NOT NULL`, `DEFAULT`, range `CHECK`,
   literal `CHECK`, enum `CHECK`). The name comes from `raw_column_name`
-  (`crates/zeroship-schema/src/query.rs:2232`) via `raw_column_for_field` (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+  (`crates/zeroship-schema/src/query.rs:2232`) via `raw_column_for_field` (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
   (`:2264`), the DDL emitter's own functions.
 - **The raw column is unqueryable** - not in a filter, not in a projection, not
   in a sort, not a field of the generated type.
@@ -367,7 +367,7 @@ satisfy a deny-only arm **vacuously**, with every non-`auto` unmask bricked.
   covers `.unmask()` calls; a filter comparison is not one.
 - **The raw column's unreachability rests on the leading underscore**, enforced
   by two independent reservation tables with no dependency edge between them
-  (`crates/zeroship-schema/src/query.rs:785` and (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+  (`crates/zeroship-schema/src/query.rs:785` and (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
   `crates/zeroship-migrate-core/src/schema/query.rs:365`). A rename that drops
   the underscore needs a new fence on every inbound surface first.
 - **Masking clamps; the migration ceiling rejects.** Do not unify them because
@@ -467,7 +467,7 @@ DO-NOT notes, each recording something that broke or would have:
   enum `CHECK` refuses every write, and encrypted+masked leaves it `BYTEA`. The
   type and the whole constraint set travel to the raw column; pinned by
   `a_masked_columns_type_and_constraints_travel_to_the_raw_column`
-  (`crates/zeroship-schema/src/query.rs:12318`). (DELETED; runtime compilation now lives in `crates/zeroship-data-sql/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+  (`crates/zeroship-schema/src/query.rs:12318`). (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 - **Do not strip a `_masked` suffix when recovering SQLite mask sentinels.** The
   strip that used to be there had no `else` arm, so after the flip it would have
   matched every sentinel and reported every masked column as unmasked - silently,

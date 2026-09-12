@@ -44,16 +44,16 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
-use zeroship_data_sql::compile::{
+use crate::sql::compile::{
     SqlDialect, WriteAssignments, build_delete_many, build_delete_one, build_insert,
     build_insert_many, build_restore_many_with_assignments, build_restore_one_with_assignments,
     build_returning_expr, build_soft_delete_many_with_assignments,
     build_soft_delete_one_with_assignments, build_update_many_with_assignments,
     build_update_one_with_assignments, build_upsert, quote_ident, raw_column_name,
 };
-use zeroship_data_sql::render::postgres::{render_delete, render_update};
-use zeroship_data_sql::value::{Value, value};
-use zeroship_data_sql::{
+use crate::sql::render::postgres::{render_delete, render_update};
+use crate::value::{Value, value};
+use crate::sql::{
     Assignment as PlanAssignment, ColumnAssignment as PlanColumnAssignment,
     CompareOp as PlanCompareOp, Delete as PlanDelete, Ident as PlanIdent,
     IdentRole as PlanIdentRole, Literal as PlanLiteral, Operand as PlanOperand,
@@ -142,7 +142,7 @@ async fn fixture(admin: &Client, suffix: &str) -> (String, String) {
         .expect("create the app schema");
 
     let ddl = fixture_table_sql(
-        &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &FkEmission::Inline,
@@ -277,12 +277,12 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: zeroship_data_sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: crate::sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "insert",
             build_insert(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &value!({ "id": "psn_ins", "nickname": "a" }),
@@ -292,7 +292,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "insertMany",
             build_insert_many(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &value!([{ "id": "psn_m1", "nickname": "b" }, { "id": "psn_m2", "nickname": "c" }]),
@@ -302,7 +302,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "upsert",
             build_upsert(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &value!({ "id": "psn_up", "nickname": "d" }),
@@ -313,7 +313,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "updateMany",
             build_update_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -326,7 +326,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "softDeleteMany",
             build_soft_delete_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -338,7 +338,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "restoreMany",
             build_restore_many_with_assignments(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -350,7 +350,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "deleteMany",
             build_delete_many(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &value!({ "id": "psn_ins" }),
@@ -368,12 +368,12 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = value!({ "id": "psn_seed" });
     let update = value!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: zeroship_data_sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: crate::sql::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "updateOne",
             build_update_one_with_assignments(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -386,7 +386,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "softDeleteOne",
             build_soft_delete_one_with_assignments(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -398,7 +398,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "restoreOne",
             build_restore_one_with_assignments(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -410,7 +410,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "deleteOne",
             build_delete_one(
-                &zeroship_data_sql::SchemaName::new(app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &filter,
@@ -422,7 +422,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
 
 /// Render the replacement data-plan's two bounded PostgreSQL writes against
 /// the same physical fixture as the shipped builders.
-fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_sql::RenderedSql)> {
+fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, crate::sql::RenderedSql)> {
     let namespace = PlanIdent::parse_as(app, PlanIdentRole::Namespace).expect("namespace");
     let collection =
         PlanIdent::parse_as(COLLECTION, PlanIdentRole::Collection).expect("collection");
@@ -554,7 +554,7 @@ fn column_scoped_reads_complete_every_projected_write_verb() {
             // Seed one row the update / delete / restore verbs act on, as the ROLE.
             begin_as_role(&session, &role).await;
             let seed = build_insert(
-        &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+        &crate::sql::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", (raw.clone()): "123-45-6789" }),
@@ -641,7 +641,7 @@ fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
             let session = connect(&url).await;
             begin_as_role(&session, &role).await;
             let seed = build_insert(
-                &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 &schema,
                 &value!({ "id": "psn_seed", "nickname": "s" }),
@@ -745,7 +745,7 @@ fn the_single_row_verbs_succeed_without_ctid_access() {
 
             let raw = raw_column_name("ssn");
             let seed = build_insert(
-                &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 &schema,
                 &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
@@ -806,7 +806,7 @@ fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
             begin_as_role(&session, &role).await;
             let raw = raw_column_name("ssn");
             let seed = build_insert(
-                &zeroship_data_sql::SchemaName::new(&app).expect("fixture schema name"),
+                &crate::sql::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 &schema,
                 &value!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),

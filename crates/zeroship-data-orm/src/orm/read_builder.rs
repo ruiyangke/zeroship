@@ -1,6 +1,6 @@
 //! Typed Rust aliases and model projections over the shared read operation.
 use super::*;
-use zeroship_data_sql::{
+use crate::sql::{
     CompareOp, Direction, FieldPath, JoinKind, NullOrder, Operand, OrderKey, Predicate, RowLimit,
 };
 
@@ -12,7 +12,7 @@ pub struct EntityAlias<E: Entity> {
 }
 impl<E: Entity> EntityCollection<E> {
     pub fn alias(&self, alias: &str) -> Result<EntityAlias<E>, DbError> {
-        read::ident(alias, zeroship_data_sql::IdentRole::Alias)?;
+        read::ident(alias, crate::sql::IdentRole::Alias)?;
         Ok(EntityAlias {
             database: self.collection.database.clone(),
             source: ReadSource::new(E::COLLECTION, alias),
@@ -69,7 +69,7 @@ impl<C: Column> SourceColumn<C> {
 }
 impl<C: FilterableColumn> SourceColumn<C> {
     pub fn eq<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
-        let filter = zeroship_data_sql::filter::decode(&Value::Object(
+        let filter = crate::sql::filter::decode(&Value::Object(
             [(
                 C::NAME.into(),
                 Value::Object([("$eq".into(), value.encode_value()?)].into()),

@@ -41,7 +41,7 @@ Implementation:
 - [CRUD assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs),
   including prefix validation and assignment events.
 - [Write input validation](../../crates/zeroship-data-orm/src/crud/write_pipeline.rs).
-- [SQL column roles](../../crates/zeroship-data-sql/src/lifecycle.rs), which resolve
+- [SQL column roles](../../crates/zeroship-data-orm/src/sql/lifecycle.rs), which resolve
   roles from metadata rather than column names.
 
 The earlier proposal's runtime charter, implicit field lists and generator

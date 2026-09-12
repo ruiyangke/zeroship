@@ -243,7 +243,7 @@ the decoded row, as the last stage of `read_pipeline::apply`.**
 New in `crates/zeroship-schema/src/query.rs`, beside `read_column_for`:
 
 `read_surface_columns` in the
-[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs) admits declared
+[SQL compiler](../../crates/zeroship-data-orm/src/sql/compile.rs) admits declared
 readable fields and the known synthetic result columns in
 `SYNTHETIC_RESULT_COLUMNS`. Generated columns enter through their field
 declarations, just like other columns. Internal storage columns do not gain
@@ -305,11 +305,11 @@ Assigned columns are declared fields, and there is no extra field-name set to
 union into a projection.
 
 `build_returning_expr` in the
-[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs) uses
+[SQL compiler](../../crates/zeroship-data-orm/src/sql/compile.rs) uses
 `implicit_read_projection_parts` to return declared readable fields through
 their storage mappings.
 [Assignment preparation](../../crates/zeroship-data-orm/src/crud/assignment_pass.rs)
-and [SQL column roles](../../crates/zeroship-data-sql/src/lifecycle.rs) determine
+and [SQL column roles](../../crates/zeroship-data-orm/src/sql/lifecycle.rs) determine
 write behavior from metadata, independently of the column's name.
 
 A SQL projection alone does not constrain a replication stream. CDC event
@@ -399,7 +399,7 @@ The inbound half needs **no new parameter, no new check, and no new call site.**
 
 **The descriptor is now required by the write compiler.** Mutation builders and
 filter compilation in the
-[SQL compiler](../../crates/zeroship-data-sql/src/compile.rs) take
+[SQL compiler](../../crates/zeroship-data-orm/src/sql/compile.rs) take
 `schema_hint: &Value`. They resolve fields and storage through that descriptor.
 Missing schema metadata does not permit an unrestricted projection. The earlier
 signature-change proposal is implemented, rather than an outstanding task.

@@ -150,7 +150,7 @@ pub struct StepConfig {
     /// `Option` for exactly the reason `backend` is: the seven
     /// `StepConfig::default()` paths drive events that cannot emit `IssueBegin`.
     /// [`begin_top_level`] always supplies `Some`.
-    pub schema: Option<zeroship_data_sql::SchemaName>,
+    pub schema: Option<crate::sql::SchemaName>,
 }
 
 /// Admit a top-level transaction, then drive it to `Idle`.
@@ -166,7 +166,7 @@ pub struct StepConfig {
 /// held. The orchestrator no longer has to remember to release it per-arm.
 pub async fn begin_top_level(
     app_id: &str,
-    schema: zeroship_data_sql::SchemaName,
+    schema: crate::sql::SchemaName,
     isolation_level: Option<IsolationLevel>,
     backend: crate::backend::BackendHandle,
 ) -> Result<Driven, DbError> {
@@ -805,7 +805,7 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 /// to lose if the worker role stops inheriting app roles.
 async fn open_session(
     app_id: &str,
-    schema: &zeroship_data_sql::SchemaName,
+    schema: &crate::sql::SchemaName,
     begin: BeginIntent,
     backend: &crate::backend::BackendHandle,
     completion: &Completion,
@@ -849,7 +849,7 @@ async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(),
     let client = crate::tx_lanes::TxClientSlotGuard::take(app_id)?;
     let params: Vec<_> = params
         .iter()
-        .map(|value| zeroship_data_sql::value::Value::from(*value))
+        .map(|value| crate::value::Value::from(*value))
         .collect();
     client.client().exec(sql, &params).await.map(|_| ())
 }

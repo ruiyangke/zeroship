@@ -6,9 +6,10 @@ license.workspace = true
 description = "Backend-independent ORM with native Rust models, protected execution, and database driver adapters."
 
 [dependencies]
+indexmap = { workspace = true }
+time = { workspace = true }
 scoped-tls = "1"
 async-trait = { workspace = true }
-zeroship-data-sql = { workspace = true }
 zeroship-data-macros = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-metering = { workspace = true }
@@ -37,6 +38,8 @@ sha2 = { workspace = true }
 zeroize = { version = "1", features = ["alloc", "derive"] }
 
 [dev-dependencies]
+zeroship-migrate-core = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 criterion = { workspace = true }
 trybuild = "1.0"
@@ -55,4 +58,8 @@ harness = false
 
 [[bench]]
 name = "bench_first_row_or_null"
+harness = false
+
+[[bench]]
+name = "bench_query_build"
 harness = false
