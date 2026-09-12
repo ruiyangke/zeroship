@@ -90,9 +90,11 @@ impl CollectionFixture {
             ))
             .await
             .unwrap();
-        backend.pool().batch_execute(
-            &zeroship_migrate_server::provisioning::audit_unmask_table_sql(&app)
-        ).await.unwrap();
+        backend
+            .pool()
+            .batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(&app))
+            .await
+            .unwrap();
         crate::tests::fixtures::roles::ensure_per_app_role(backend.pool(), &app)
             .await
             .unwrap();
@@ -125,6 +127,73 @@ impl CollectionFixture {
             postgres: Some((backend, schema, role)),
             server: Some(server),
         }
+    }
+
+    pub async fn replace_from_migration(&mut self, collection: &str, migration: &str) {
+        let migration: zeroship_migrate::model::ir::MigrationIr =
+            serde_json::from_str(migration).unwrap();
+        let policy = zeroship_migrate::effective_policy_from_charter_toml(
+            zeroship_migrate_server::policy::CONFINED_CEILING_TOML,
+        )
+        .unwrap();
+        let namespace = if self.sqlite_file.is_some() {
+            "main"
+        } else {
+            self.database.binding.schema().as_str()
+        };
+        let dialect = if self.sqlite_file.is_some() {
+            &zeroship_migrate_sqlite::DIALECT
+        } else {
+            &zeroship_migrate_postgres::DIALECT
+        };
+        let artifacts = zeroship_migrate::render_artifacts(
+            zeroship_migrate::shipping_vendors(),
+            &migration.ops,
+            dialect,
+            namespace,
+            &policy,
+        )
+        .unwrap();
+        let (_, statements) = zeroship_migrate::render_ir_envelope_sql_statements(
+            zeroship_migrate::shipping_vendors(),
+            &serde_json::to_string(&migration).unwrap(),
+            dialect,
+            &zeroship_migrate::PreviewOpts {
+                default_schema: namespace.into(),
+                owner_app: namespace.into(),
+                effective_policy: policy,
+            },
+        )
+        .unwrap();
+        let table = format!(
+            "{}.{}",
+            crate::compile::quote_ident(namespace),
+            crate::compile::quote_ident(collection)
+        );
+        let ddl = format!("DROP TABLE {table};{}", statements.join(";"));
+        if let Some(file) = &self.sqlite_file {
+            rusqlite::Connection::open(file)
+                .unwrap()
+                .execute_batch(&ddl)
+                .unwrap();
+        } else {
+            let (backend, _, role) = self.postgres.as_ref().unwrap();
+            backend.pool().batch_execute(&ddl).await.unwrap();
+            backend.pool().batch_execute(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {role}; GRANT USAGE ON ALL SEQUENCES IN SCHEMA {} TO {role}",
+                crate::compile::quote_ident(namespace),
+            )).await.unwrap();
+        }
+        let runtime: Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
+        self.database = Database::from_schema(
+            self.database.binding.clone(),
+            self.database.backend.clone(),
+            vec![(
+                collection.into(),
+                runtime["collections"][collection]["fields"].clone(),
+            )],
+        )
+        .unwrap();
     }
 
     pub async fn rename_fields(&mut self, collection: &str, names: &[(&str, &str)]) {

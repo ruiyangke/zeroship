@@ -1251,8 +1251,9 @@ pub fn build_insert_with_dialect(
         }
     }
 
+    let overriding = crate::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES ({}) RETURNING {returning}",
+        "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) RETURNING {returning}",
         columns.join(", "),
         placeholders.join(", ")
     );
@@ -1599,8 +1600,9 @@ pub fn build_insert_many_with_dialect(
         value_groups.push(format!("({})", placeholders.join(", ")));
     }
 
+    let overriding = crate::identity::overriding_clause(schema_hint, dialect, arr.iter().any(|doc| doc.get("id").is_some()));
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES {} RETURNING {returning}",
+        "INSERT INTO {schema}.{table} ({}){overriding} VALUES {} RETURNING {returning}",
         columns.join(", "),
         value_groups.join(", ")
     );
@@ -3180,8 +3182,9 @@ pub fn build_upsert_with_assignments(
         }
     }
 
+    let overriding = crate::identity::overriding_clause(schema_hint, dialect, obj.contains_key("id"));
     let sql = format!(
-        "INSERT INTO {schema}.{table} ({}) VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {returning}",
+        "INSERT INTO {schema}.{table} ({}){overriding} VALUES ({}) ON CONFLICT ({}) DO UPDATE SET {} RETURNING {returning}",
         columns.join(", "),
         placeholders.join(", "),
         conflict_cols.join(", "),

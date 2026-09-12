@@ -8,6 +8,7 @@ use test_schema::posts;
 mod bulk;
 mod calendar_date;
 mod fixtures;
+mod generated_identity;
 mod identity;
 mod identity_contract;
 mod joins;
