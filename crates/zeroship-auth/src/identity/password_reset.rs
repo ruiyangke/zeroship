@@ -275,7 +275,8 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 ///      gateway always requests `offline_access`, so one app login writes both
 ///      rows. Deduplicating the two sources into ONE insert is what makes the
 ///      key unique within the command. Regression:
-///      `reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app`.
+///      `reset_completes_with_an_identity_and_refresh_grant_for_the_same_family`
+///      in `tests/password_reset/mod.rs`.
 ///   3. revokes (`revoked_at = NOW()`) every `app_session_anchors` row for the
 ///      user, so `anchors::read_live` returns `None` and `?mint=1` fails closed
 ///      — no fresh cookie can be minted to outrun the family marker.
