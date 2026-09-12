@@ -342,6 +342,26 @@ export type DistinctField<S> = string & (IsSchemaDict<S> extends true
           : never;
       }[keyof Row<S>] | "id");
 
+type SearchField<S, Shape> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: NonNullable<S[K]> extends {
+        readonly _filterKind: "search";
+        readonly _type: infer T;
+      }
+        ? T extends Shape ? K : never
+        : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends Shape ? K : never;
+      }[keyof Row<S>]);
+
+/** Fields accepted as vector-search inputs. */
+export type VectorField<S> = SearchField<S, readonly number[]>;
+/** Fields accepted as within-radius spatial-search inputs. */
+export type GeoField<S> = SearchField<S, { lat: number; lng: number }>;
+
 type AtLeastOne<T> = {
   [K in keyof T]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
 }[keyof T];

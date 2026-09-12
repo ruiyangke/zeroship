@@ -50,6 +50,7 @@ import type { PaginationResult } from "./query";
 import type {
   PlainObject,
   DistinctField,
+  GeoField,
   Result,
   Row,
   RowId,
@@ -60,6 +61,7 @@ import type {
   SortInput,
   UpsertOptions,
   UpdateExpression,
+  VectorField,
   Filter,
   IsolationLevel,
   WithSpec,
@@ -145,12 +147,12 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
       vector: number[];
       k?: number;
       metric?: import("./types").VectorMetric;
-      column?: string;
+      column?: VectorField<S>;
       filter?: Filter<S>;
     },
   ): Promise<(Row<S> & { _distance?: number })[]>;
   near(args: {
-    field: keyof S & string;
+    field: GeoField<S>;
     point: { lat: number; lng: number };
     radius: number;
     filter?: Filter<S>;
