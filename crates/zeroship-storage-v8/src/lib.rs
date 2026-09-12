@@ -65,10 +65,11 @@ impl NativePlugin for StorageBinding {
         r.add("cancelStream", callbacks::cancel_stream);
     }
 
-    fn bind_runtime_descriptor(
+    fn bind_runtime_descriptor<'s>(
         &self,
-        scope: &mut v8::PinScope<'_, '_>,
+        scope: &mut v8::PinScope<'s, '_>,
         app_id: &str,
+        _namespace: v8::Local<'s, v8::Object>,
         _descriptor: Option<&serde_json::Value>,
     ) -> Result<(), String> {
         let has_identity = scope

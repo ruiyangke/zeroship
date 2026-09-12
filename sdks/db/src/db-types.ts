@@ -44,11 +44,13 @@
  */
 
 import type { Collection } from "./collection";
+import type { NativeCollection } from "./native";
 import type { AliasedCollection, ReadFrom } from "./read";
 import type { LiveOptions, LiveQuery } from "./live";
 import type { PaginationResult } from "./query";
 import type {
   PlainObject,
+  Actor,
   DistinctField,
   ExactWithSpec,
   GeoField,
@@ -111,19 +113,51 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { select: K[]; orderBy?: SortSpec<S> },
+    opts: {
+      select: K[];
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<Pick<Row<S>, K> | null>;
   get<const W extends WithSpec<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: ExactWithSpec<S, W>; orderBy?: SortSpec<S> },
+    opts: {
+      with: ExactWithSpec<S, W>;
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { orderBy?: SortSpec<S> },
+    opts?: {
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find<const W extends WithSpec<S>>(filter: Filter<S>, opts: { with: ExactWithSpec<S, W> }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
+  find<const W extends WithSpec<S>>(
+    filter: Filter<S>,
+    opts: {
+      with: ExactWithSpec<S, W>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
+  ): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find(
+    filter?: Filter<S>,
+    opts?: {
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
+  ): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
   update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
@@ -235,6 +269,27 @@ export type Collections<T extends Record<string, SchemaInput>> = {
   [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>;
 };
 
+type DbMethodName = keyof Object
+  | "__platform"
+  | "__proto__"
+  | "collection"
+  | "from"
+  | "live"
+  | "transaction";
+
+type DirectCollections<T extends Record<string, SchemaInput>> = {
+  [K in keyof T as K extends DbMethodName ? never : K]: Collection<UnwrapSchema<T[K]>, K & string, T>;
+};
+
+/** Collections available inside a transaction, including names that collide
+ * with transaction-view methods. */
+export type TransactionDb<T extends Record<string, SchemaInput>> = {
+  [K in keyof T as K extends "collection" | "from" ? never : K]: TxCollection<UnwrapSchema<T[K]>, T>;
+} & {
+  collection<K extends string & keyof T>(name: K): TxCollection<UnwrapSchema<T[K]>, T>;
+  from: ReadFrom<true>;
+};
+
 /**
  * The shape `installSchema` plants on `env.db` (the native handle) on
  * top of the per-collection wrappers. `transaction` is a thin
@@ -242,8 +297,9 @@ export type Collections<T extends Record<string, SchemaInput>> = {
  * `live` wraps the subscription primitives.
  */
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
+  collection<K extends string & keyof T>(name: K): NativeCollection;
   from: ReadFrom;
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> } & { from: ReadFrom<true> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  transaction: <R>(fn: (tx: TransactionDb<T>) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   /**
    * Reactive query layer. Runs `queryFn`, yields the initial result,
    * then re-runs and yields a fresh result on every change to any
@@ -274,4 +330,4 @@ export type DbExtensions<T extends Record<string, SchemaInput>> = {
  * planted on `env.db`); the type describes the union users observe
  * when they read off `env.db`.
  */
-export type Db<T extends Record<string, SchemaInput>> = Collections<T> & DbExtensions<T>;
+export type Db<T extends Record<string, SchemaInput>> = DirectCollections<T> & DbExtensions<T>;

@@ -13,6 +13,14 @@ use zeroship_data_orm::backend::VectorMetric;
 
 use zeroship_data_orm::backend::GeoPoint;
 
+use zeroship_data_orm::sql::{
+    statement::{
+        ResolvedPredicate, ReturnedColumn, SpatialNearParts, SpatialNearStatement, Statement,
+        StorageType, Table,
+    },
+    Ident, IdentRole,
+};
+
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
 
@@ -828,6 +836,123 @@ fn near_uses_an_unreadable_identity_without_returning_it() {
             assert_eq!(rows[0]["label"], "visible");
             assert!(rows[0].get("id").is_none());
             assert!(rows[0]["_distance_m"].as_f64().is_some());
+        });
+        host.reset();
+    })
+}
+
+#[test]
+fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
+    Host::test(|host| {
+        host.run(async {
+            let app = "near_projection_aliases";
+            let (backend, _dir) = fresh_backend(host);
+            backend.attach_app_file(app).await.unwrap();
+            backend
+                .execute_fixture(
+                    &format!(
+                        "CREATE TABLE \"{app}\".\"places\" (\
+                         id INTEGER PRIMARY KEY, \
+                         label TEXT NOT NULL, \
+                         location BLOB NOT NULL)"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let point = GeoPoint { lat: 1.0, lng: 2.0 };
+            backend
+                .execute_fixture(
+                    &format!(
+                        "INSERT INTO \"{app}\".\"places\" (id, label, location) \
+                         VALUES (7, 'visible', {})",
+                        point_to_hex_lit(point)
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+
+            let binding = DbBinding::cold_start(app);
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
+            let compile = |column: &str, alias: &str| {
+                let table = Table::aliased(
+                    binding.schema().clone(),
+                    Ident::parse_as("places", IdentRole::Collection).unwrap(),
+                    Ident::parse_as("source", IdentRole::Alias).unwrap(),
+                    [
+                        ("id", StorageType::Integer),
+                        ("label", StorageType::Text),
+                        ("location", StorageType::GeoPoint),
+                    ]
+                    .map(|(name, storage)| {
+                        (
+                            Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                            storage,
+                        )
+                    }),
+                )
+                .unwrap();
+                registration
+                    .compile(Statement::SpatialNear(
+                        SpatialNearStatement::new(SpatialNearParts {
+                            projection: vec![
+                                ReturnedColumn {
+                                    column: table.column(column).unwrap(),
+                                    alias: Some(Ident::parse_as(alias, IdentRole::Alias).unwrap()),
+                                },
+                                ReturnedColumn {
+                                    column: table.column("location").unwrap(),
+                                    alias: None,
+                                },
+                            ],
+                            identity: table.column("id").unwrap(),
+                            spatial: table.column("location").unwrap(),
+                            point: crate::value!({"lat":point.lat,"lng":point.lng}),
+                            radius_m: 1.0,
+                            predicate: ResolvedPredicate::Const(true),
+                            limit: 1,
+                            table,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap()
+            };
+
+            let label_as_id = backend
+                .spatial_near(
+                    None,
+                    zeroship_data_orm::search::SpatialSearch {
+                        binding: &binding,
+                        query: compile("label", "id"),
+                        column: "location",
+                        point,
+                        radius_m: 1.0,
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(label_as_id[0]["id"], "visible");
+            assert!(label_as_id[0].get("__zs_spatial_identity").is_none());
+
+            let id_as_key = backend
+                .spatial_near(
+                    None,
+                    zeroship_data_orm::search::SpatialSearch {
+                        binding: &binding,
+                        query: compile("id", "key"),
+                        column: "location",
+                        point,
+                        radius_m: 1.0,
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(id_as_key[0]["key"], 7);
+            assert!(id_as_key[0].get("id").is_none());
+            assert!(id_as_key[0].get("__zs_spatial_identity").is_none());
         });
         host.reset();
     })

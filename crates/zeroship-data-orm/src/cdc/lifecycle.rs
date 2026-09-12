@@ -10,10 +10,10 @@ use crate::error::DbError;
 
 #[derive(Debug)]
 enum RunningConsumer {
-    Postgres(RelayHandle),
-    /// SQLite installs its commit publisher with the backend session. It has
-    /// no logical slot or per-app task to retain.
-    Sqlite,
+    Relay(RelayHandle),
+    /// The backend publishes committed changes itself and owns no per-app
+    /// consumer task here.
+    Embedded,
 }
 
 #[derive(Debug)]
@@ -114,7 +114,7 @@ fn release(app_id: &str, generation: u64) {
         }
 
         match &app.state {
-            ConsumerState::Running(RunningConsumer::Postgres(handle)) => {
+            ConsumerState::Running(RunningConsumer::Relay(handle)) => {
                 shutdown = Some(handle.clone());
                 app.state = ConsumerState::Stopping {
                     waiters: Vec::new(),
@@ -128,7 +128,7 @@ fn release(app_id: &str, generation: u64) {
             ConsumerState::Stopping { .. } => {}
             ConsumerState::Idle
             | ConsumerState::Failed(_)
-            | ConsumerState::Running(RunningConsumer::Sqlite) => remove = true,
+            | ConsumerState::Running(RunningConsumer::Embedded) => remove = true,
         }
         if remove {
             if let Some(removed) = lifecycle.apps.remove(app_id) {
@@ -195,7 +195,7 @@ fn ready_action(app_id: &str) -> Result<ReadyAction, DbError> {
 }
 
 /// Wait for capture before taking the subscription's initial snapshot.
-/// PostgreSQL requires an explicitly composed relay client; SQLite captures locally.
+/// Backends that do not publish commits locally require a composed relay client.
 pub async fn ensure_ready(
     app_id: &str,
     backend: BackendHandle,
@@ -248,21 +248,14 @@ async fn start_consumer(
     relay: Option<RelayConfig>,
 ) -> Result<RunningConsumer, DbError> {
     let _suppression = super::broker::SuppressGuard::activate(app_id);
-    if backend.get::<crate::backend::PostgresBackend>().is_some() {
-        let relay = relay.ok_or_else(|| {
-            DbError::config(
-                "cdc_relay_missing",
-                "PostgreSQL subscriptions require the CDC relay",
-            )
-        })?;
-        Ok(RunningConsumer::Postgres(relay.spawn(app_id).await?))
-    } else if backend.get::<crate::backend::SqliteBackend>().is_some() {
-        // The SQLite session installs commit capture when it opens.
-        Ok(RunningConsumer::Sqlite)
+    if backend.publishes_committed_changes() {
+        Ok(RunningConsumer::Embedded)
+    } else if let Some(relay) = relay {
+        Ok(RunningConsumer::Relay(relay.spawn(app_id).await?))
     } else {
         Err(DbError::config(
-            "backend_unsupported",
-            "no CDC provider is registered for this backend",
+            "cdc_relay_missing",
+            "this database backend requires the CDC relay",
         ))
     }
 }
@@ -280,7 +273,7 @@ fn finish_start(
     {
         let mut lifecycle = manager();
         let Some(app) = lifecycle.apps.get_mut(app_id) else {
-            if let Ok(RunningConsumer::Postgres(handle)) = result {
+            if let Ok(RunningConsumer::Relay(handle)) = result {
                 handle.request_shutdown();
             }
             return Err(DbError::config(
@@ -289,7 +282,7 @@ fn finish_start(
             ));
         };
         if app.generation != generation {
-            if let Ok(RunningConsumer::Postgres(handle)) = result {
+            if let Ok(RunningConsumer::Relay(handle)) = result {
                 handle.request_shutdown();
             }
             return Err(DbError::config(
@@ -302,7 +295,7 @@ fn finish_start(
         }
 
         match result {
-            Ok(RunningConsumer::Postgres(handle)) => {
+            Ok(RunningConsumer::Relay(handle)) => {
                 monitor = Some(handle.clone());
                 if app.subscribers == 0 || app.force_stop {
                     shutdown = Some(handle);
@@ -314,10 +307,10 @@ fn finish_start(
                         "db subscription closed during CDC startup",
                     ));
                 } else {
-                    app.state = ConsumerState::Running(RunningConsumer::Postgres(handle));
+                    app.state = ConsumerState::Running(RunningConsumer::Relay(handle));
                 }
             }
-            Ok(RunningConsumer::Sqlite) => {
+            Ok(RunningConsumer::Embedded) => {
                 if app.subscribers == 0 || app.force_stop {
                     if let Some(removed) = lifecycle.apps.remove(app_id) {
                         shutdown_waiters = removed.shutdown_waiters;
@@ -327,7 +320,7 @@ fn finish_start(
                         "db subscription closed during CDC startup",
                     ));
                 } else {
-                    app.state = ConsumerState::Running(RunningConsumer::Sqlite);
+                    app.state = ConsumerState::Running(RunningConsumer::Embedded);
                 }
             }
             Err(error) => {
@@ -433,7 +426,7 @@ pub async fn shutdown_app(app_id: &str) {
         app.subscribers = 0;
         app.shutdown_waiters.push(sender);
         match &app.state {
-            ConsumerState::Running(RunningConsumer::Postgres(handle)) => {
+            ConsumerState::Running(RunningConsumer::Relay(handle)) => {
                 shutdown = Some(handle.clone());
                 app.state = ConsumerState::Stopping {
                     waiters: Vec::new(),
@@ -442,7 +435,7 @@ pub async fn shutdown_app(app_id: &str) {
             ConsumerState::Starting { .. } | ConsumerState::Stopping { .. } => {}
             ConsumerState::Idle
             | ConsumerState::Failed(_)
-            | ConsumerState::Running(RunningConsumer::Sqlite) => {
+            | ConsumerState::Running(RunningConsumer::Embedded) => {
                 if let Some(removed) = lifecycle.apps.remove(app_id) {
                     notify_now = removed.shutdown_waiters;
                 }

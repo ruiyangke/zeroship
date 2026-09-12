@@ -111,7 +111,7 @@ impl Event {
                 collection,
                 operation,
             } => {
-                if !valid_name(collection) || collection.starts_with("__") {
+                if !valid_name(collection) {
                     return Err(ProtocolError);
                 }
                 let operation = match operation {
@@ -137,7 +137,7 @@ impl Event {
             [4] => Ok(Self::Heartbeat),
             [2, op, name @ ..] => {
                 let collection = text(name)?;
-                if !valid_name(collection) || collection.starts_with("__") {
+                if !valid_name(collection) {
                     return Err(ProtocolError);
                 }
                 let operation = match op {
@@ -185,6 +185,10 @@ mod tests {
                 collection: "orders".into(),
                 operation,
             });
+            events.push(Event::Change {
+                collection: "__zeroship_private".into(),
+                operation,
+            });
         }
         for event in events {
             assert_eq!(Event::decode(&event.encode().unwrap()), Ok(event));
@@ -201,11 +205,7 @@ mod tests {
         ] {
             assert!(Event::decode(bytes).is_err());
         }
-        for name in [
-            "__zeroship_private",
-            "bad\0name",
-            &"x".repeat(MAX_NAME_BYTES + 1),
-        ] {
+        for name in ["bad\0name", &"x".repeat(MAX_NAME_BYTES + 1)] {
             let event = Event::Change {
                 collection: name.into(),
                 operation: Operation::Insert,

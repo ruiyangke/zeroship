@@ -54,9 +54,11 @@
 //! next apply. The inflight table is deliberately NOT immutable (the marker
 //! must be deletable on completion); only the journal of record is.
 //!
-//! The journal lives in a per-project **meta namespace** distinct from the
-//! project namespace, so a creator migration confined to its own namespace
-//! cannot touch its own history. Each backend's bootstrap is idempotent.
+//! Journal placement is backend-specific. PostgreSQL may colocate prefixed
+//! journal tables with creator tables, MySQL uses its configured meta schema,
+//! and SQLite uses an attached journal database. Platform apply acceptance uses
+//! its separate control-plane record rather than trusting a tenant-visible
+//! journal. Each backend's bootstrap is idempotent.
 
 use crate::executor::BackendError;
 

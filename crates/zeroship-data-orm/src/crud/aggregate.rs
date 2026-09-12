@@ -3,13 +3,13 @@
 use super::{predicate, read, resolved::ResolvedTable};
 use crate::{
     sql::{
+        AggregateFunc, CompareOp, Direction, Ident, IdentRole, NullOrder, RowLimit, SchemaName,
         mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
             ResolvedOperand, ResolvedOrder, ResolvedPredicate, ResolvedPredicateValue, SelectParts,
             SelectStatement, SelectedExpression, Statement, StorageType,
         },
-        AggregateFunc, CompareOp, Direction, Ident, IdentRole, NullOrder, RowLimit, SchemaName,
     },
     value::Value,
 };
@@ -238,6 +238,11 @@ fn grouped_projection(
             .as_deref()
             .map(|field| {
                 validate_value_field(field, schema, "aggregateable")?;
+                if !crate::sql::descriptors::supports_aggregate(&schema[field], function) {
+                    return Err(invalid(
+                        "aggregate: accumulator has no portable column type",
+                    ));
+                }
                 let input = table.inputs.get(field).ok_or_else(|| {
                     invalid(format!("aggregate field has no physical column: {field}"))
                 })?;

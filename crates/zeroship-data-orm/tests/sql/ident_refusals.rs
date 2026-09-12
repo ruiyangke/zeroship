@@ -16,7 +16,6 @@ use zeroship_data_orm::sql::{Ident, IdentError, IdentRole};
 const ALL_ROLES: &[IdentRole] = &[
     IdentRole::Namespace,
     IdentRole::Collection,
-    IdentRole::StoredCollection,
     IdentRole::Column,
     IdentRole::StoredColumn,
     IdentRole::Alias,
@@ -39,7 +38,6 @@ fn _all_roles_covers_the_enum(role: IdentRole) {
     match role {
         IdentRole::Namespace
         | IdentRole::Collection
-        | IdentRole::StoredCollection
         | IdentRole::Column
         | IdentRole::StoredColumn
         | IdentRole::Alias
@@ -135,19 +133,11 @@ fn the_length_fence_is_inclusive_at_63() {
     println!("ruled on 2 lengths");
 }
 
-/// TABLE half of the pair. The shared platform prefixes and the runtime copy of
-/// each shipping backend's catalog prefix are both checked before rendering.
+/// Table names are transparent inside the bound app schema. SQLite catalog
+/// relations remain unavailable because they live inside each attached schema.
 #[test]
 fn the_table_fence_holds() {
-    let refused = [
-        "pg_class",
-        "PG_CLASS",
-        "pg_",
-        "__zeroship_migrations",
-        "__ZEROSHIP_x",
-        "sqlite_master",
-        "sqlite_sequence",
-    ];
+    let refused = ["sqlite_master", "sqlite_sequence"];
     let mut ruled_on = 0_usize;
     for name in refused {
         let outcome = Ident::parse_as(name, IdentRole::Collection);
@@ -168,10 +158,15 @@ fn the_table_fence_holds() {
     // prefix list cannot cover.
     for name in [
         "page_views",
+        "pg_class",
+        "PG_CLASS",
+        "pg_",
         "zeroship_apps",
         "__zs_internal",
         "sqlited",
         "pgx",
+        "__zeroship_migrations",
+        "__ZEROSHIP_x",
         "__zero_migrate_journal",
         "__ZERO_MIGRATE_x",
     ] {
@@ -291,16 +286,8 @@ fn an_illegal_character_refusal_does_not_echo_the_name() {
     println!("ruled on 1 message");
 }
 
-/// The schema fence keeps the worker out of the platform's own namespace. The
-/// invariant this serves is that state a separate service writes and the worker
-/// only reads must not be nameable from a worker-built plan.
-///
-/// The witness is any `__zeroship`-prefixed name; the fence is
-/// `Reservation::Prefix`, so no particular spelling is load-bearing. Do not use
-/// the name of a platform system schema here - it reads as though that schema
-/// exists. The fence guards live objects either way: `__zeroship_` is the prefix
-/// of the migration journal, the unmask audit table and the workflow journal in
-/// every app schema.
+/// The schema fence applies to explicit namespace qualifiers. Prefixed
+/// collections inside the already-bound creator schema remain ordinary tables.
 #[test]
 fn the_namespace_fence_refuses_the_platform_schema() {
     let mut ruled_on = 0_usize;

@@ -16,6 +16,7 @@ mod identity;
 mod identity_contract;
 mod identity_visibility;
 mod insert_many;
+mod internal_tables;
 mod joins;
 mod json;
 mod lifecycle;

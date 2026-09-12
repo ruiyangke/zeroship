@@ -2179,8 +2179,9 @@ pub fn load_polyfills_and_modules(
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
     let app_id = crate::plugin::runtime_app_id(scope);
     for plugin in plugins {
+        let namespace = crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
         plugin
-            .bind_runtime_descriptor(scope, &app_id, runtime_descriptor.as_ref())
+            .bind_runtime_descriptor(scope, &app_id, namespace, runtime_descriptor.as_ref())
             .map_err(|error| {
                 format!(
                     "runtime: plugin '{}' rejected the runtime descriptor: {error}",

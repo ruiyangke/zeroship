@@ -92,8 +92,9 @@ project behind the scenes. A personal organization is an ordinary row with a
 transferring ownership clears the pointer, which *is* the conversion from
 personal to shared.
 
-Ids are typed and are what these methods take. `org_...`, `prj_...`, `ivt_...`,
-and a member's `user_id`, which is a UUID. A **slug is not an id**: the server
+Ids are typed and are what these methods take. Organizations use `org_...`,
+projects use `prj_...`, invitations use `ivt_...`, and users use `usr_...`.
+A **slug is not an id**: the server
 parses the typed id before it authorizes anything, so a slug in a path is a
 `400`, and a well-formed id for an organization you have no seat in is a `403`
 with nothing in it to tell the two apart. That is deliberate.

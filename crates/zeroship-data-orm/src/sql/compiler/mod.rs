@@ -16,6 +16,7 @@ pub(crate) use writer::{ParameterSlot, SqlWriter};
 
 pub(crate) const POSTGRES_BIND_LIMIT: usize = u16::MAX as usize;
 pub(crate) const SQLITE_BIND_LIMIT: usize = 32_766;
+pub(crate) const SQLITE_SPATIAL_IDENTITY_ALIAS: &str = "__zs_spatial_identity";
 
 pub(crate) fn enforce_support(
     implemented: SqlSupport,

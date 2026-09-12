@@ -161,7 +161,10 @@ mod tests {
         .unwrap();
 
         assert!(
-            request.query.sql().contains("\"source\".\"id\" AS \"id\""),
+            request
+                .query
+                .sql()
+                .contains("\"source\".\"id\" AS \"__zs_spatial_identity\""),
             "SQLite must fetch the hidden identity used to order equal distances: {}",
             request.query.sql()
         );

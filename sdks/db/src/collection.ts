@@ -171,15 +171,6 @@ export class Collection<
   private _resolveCollection:
     | ((name: string) => Collection<unknown> | undefined)
     | null;
-  /**
-   * Active-transaction depth. `db.transaction()` wraps `tx.x.*` calls
-   * with an increment/decrement so the loader is bypassed while a tx is
-   * live on this collection — see `tx-state.ts`. Mixing a
-   * batched read with `TX_CONN`-routed reads in the same microtask
-   * would otherwise blur the connection-routing boundary.
-   */
-  private _txDepth: number;
-
   declare readonly Id: Id<N, RowId<S>>;
   declare readonly RowInput: RowInput<S>;
 
@@ -202,7 +193,6 @@ export class Collection<
     this._native = native;
     this._nativeCol = null;
     this._idLoader = null;
-    this._txDepth = 0;
     this._resolveCollection = null;
 
     const strategy = options?.naming ?? naming.asIs;
@@ -242,11 +232,8 @@ export class Collection<
 
   /**
    * Resolve the Collection v8_class instance for this collection name.
-   * Cached on first call so subsequent CRUD ops are a single property
-   * read. The native runtime exposes `env.db.collection(name)` as a
-   * Db v8_method that returns a typed Collection wrapper; calling it
-   * twice with the same `name` returns the same JS object (identity is
-   * cached on the Db wrapper).
+   * Cached on first call so subsequent CRUD ops are a single property read.
+   * The native runtime caches the V8 wrapper by collection name.
    */
   private _nativeCollection(): NativeCollection {
     if (this._nativeCol) return this._nativeCol;
@@ -264,8 +251,12 @@ export class Collection<
     this._resolveCollection = fn;
   }
 
-  async _loadRelations(rows: PlainObject[], withSpec: WithSpec): Promise<void> {
-    return loadRelations(this._relations(), rows, withSpec);
+  async _loadRelations(
+    rows: PlainObject[],
+    withSpec: WithSpec,
+    transactionScoped = false,
+  ): Promise<void> {
+    return loadRelations(this._relations(), rows, withSpec, transactionScoped);
   }
 
   /** Wraps an operation in try/catch and maps it to Result. */
@@ -281,11 +272,8 @@ export class Collection<
     return toResultError(e);
   }
 
-  private async _loadById(
-    id: IdValue,
-    txDepthAtCall: number,
-  ): Promise<Row<S> | null> {
-    return loadByIdCollection(this._crud(), id, txDepthAtCall);
+  private async _loadById(id: IdValue): Promise<Row<S> | null> {
+    return loadByIdCollection(this._crud(), id);
   }
 
   async insert(row: RowInput<S>): Promise<Result<Row<S>>> {

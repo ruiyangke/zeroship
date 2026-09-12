@@ -166,6 +166,73 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     } as unknown as ZeroshipDb;
   }
 
+  test("transaction name lookup reaches collections that collide with db APIs", async () => {
+    const writes: Array<{ name: string; row: unknown }> = [];
+    const native = {
+      transaction(callback: (raw: unknown) => unknown) {
+        const rawTx = {
+          collection(name: string) {
+            return native.collection(name);
+          },
+        };
+        return Promise.resolve(callback(rawTx));
+      },
+      collection(name: string) {
+        return {
+          insert(row: unknown) {
+            writes.push({ name, row });
+            return Promise.resolve(row);
+          },
+          async find() { return []; },
+        };
+      },
+    } as unknown as ZeroshipDb;
+    const descriptor = {
+      version: 2,
+      collections: Object.fromEntries(
+        ["posts", "transaction", "collection", "from"].map(name => [
+          name,
+          {
+            fields: {
+              id: { type: "id", idPrefix: "row", required: true, primaryKey: true },
+              value: { type: "string", required: true },
+            },
+            options: { softDelete: false, versioning: false, strictness: "strict" },
+            indexes: [],
+          },
+        ]),
+      ),
+    };
+
+    assert.doesNotThrow(() => {
+      installSchema({} as never, native, { descriptor } as never);
+    });
+
+    const db = native as unknown as {
+      transaction<R>(callback: (tx: {
+        posts: {
+          insert(row: unknown): Promise<unknown>;
+        };
+        collection(name: string): {
+          insert(row: unknown): Promise<unknown>;
+        };
+      }) => Promise<R>): Promise<{ data: R | null; error: Error | null }>;
+    };
+    const result = await db.transaction(async tx => {
+      assert.equal(tx.posts, tx.collection("posts"));
+      const transactionTable = tx.collection("transaction");
+      assert.equal(transactionTable, tx.collection("transaction"));
+      await transactionTable.insert({ id: "row_1", value: "transaction" });
+      await tx.collection("collection").insert({ id: "row_2", value: "collection" });
+      await tx.collection("from").insert({ id: "row_3", value: "from" });
+      return "committed";
+    });
+
+    assert.equal(result.error, null);
+    assert.equal(result.data, "committed");
+    assert.deepEqual(writes.map(write => write.name), ["transaction", "collection", "from"]);
+  });
+
   test("sources collections FROM the descriptor, ignoring the declared t.* object", () => {
     const native = makeMockNative();
     // Descriptor: platform-generated wire FieldDefs (snake_case columns,

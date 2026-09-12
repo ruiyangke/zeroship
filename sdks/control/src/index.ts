@@ -652,8 +652,8 @@ export class ControlClient {
    * makes a revocation take effect immediately and with no invalidation signal
    * to miss.
    *
-   * Every id in these paths is a typed id (`org_...`, `prj_...`, `ivt_...`)
-   * except `user_id`, which is the user's UUID.
+   * Every id in these paths is typed: `org_...`, `prj_...`, `ivt_...`, or
+   * `usr_...` for `user_id`.
    */
   readonly organizations = {
     /** The organizations the caller holds a seat in. */

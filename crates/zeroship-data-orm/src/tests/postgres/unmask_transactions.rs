@@ -86,9 +86,8 @@ async fn fixture_with_schema(host: &Host, pool: &Rc<Pool>, url: &str, app: &str,
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
 
-    // The audit table BEFORE the role: `ensure_per_app_role` grants the runtime
-    // role append-only rights on it, and cannot grant on a table that is not
-    // there yet.
+    // Provision both tables before the role so the fixture exercises the same
+    // schema-wide data grants as production provisioning.
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
@@ -281,7 +280,7 @@ fn a_find_unmask_inside_a_transaction_reaches_the_row_that_transaction_inserted(
 /// transaction outlives that transaction's ROLLBACK.
 ///
 /// This is a DESIGN DECISION recorded as a test, not a defect report: an
-/// append-only record that an attempt happened SHOULD survive the rollback of
+/// independently committed record that an attempt happened SHOULD survive the rollback of
 /// the work it was attempted beside, because the attempt really happened. What
 /// the test pins is that the behaviour is deliberate and observable, so a later
 /// change that folds the audit write into the caller's transaction reddens here

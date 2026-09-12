@@ -12,8 +12,6 @@ pub mod __private {
 }
 
 pub mod app_derivation;
-pub mod worker_ring;
-pub mod workflow_coordination;
 pub mod app_id;
 pub mod auth;
 pub mod auth_provider;
@@ -33,8 +31,8 @@ pub mod oidc_verify;
 pub mod organization_id;
 pub mod pkce;
 pub mod preview_ports;
-pub mod project_id;
 pub mod project_data_key;
+pub mod project_id;
 pub mod readiness;
 pub mod replication_names;
 pub mod schema_name;
@@ -46,6 +44,10 @@ pub mod typed_id;
 pub mod types;
 pub mod usage_event;
 pub mod user_envelope;
+pub mod user_id;
+pub mod worker_ring;
+pub mod workflow_coordination;
 
 pub use superjson::Envelope;
 pub use types::*;
+pub use user_id::UserId;
