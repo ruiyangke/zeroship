@@ -4,6 +4,8 @@
 mod fixture;
 #[path = "platform_corpus/organization_authority.rs"]
 mod organization_authority;
+#[path = "platform_corpus/user_erasure.rs"]
+mod user_erasure;
 
 use serde::Deserialize;
 use serde_json::Value;
