@@ -16,6 +16,7 @@ import {
   Result,
   Row,
   type Actor,
+  type ExactWithSpec,
   type IdValue,
   type RowId,
   type SelectableField,
@@ -175,7 +176,7 @@ export class Query<
   private _skip: number | undefined;
   private _select: string[] | undefined;
   private _afterId: RowId<S> | undefined;
-  private _with: WithSpec | undefined;
+  private _with: WithSpec<S> | undefined;
   private _unmask: string[] | undefined;
   private _actor: Actor | undefined;
   private _unmaskReason: string | undefined;
@@ -259,9 +260,10 @@ export class Query<
    * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
    * `data[i].user` typechecks without a cast.
    */
-  with<W extends WithSpec>(spec: W): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  with(spec: WithSpec): Query<S, any, AllSchemas>;
-  with(spec: WithSpec): Query<S, any, AllSchemas> {
+  with<const W extends WithSpec<S>>(
+    spec: ExactWithSpec<S, W>,
+  ): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with(spec: WithSpec<S>): Query<S, any, AllSchemas> {
     // Reject early when the Query was constructed without a relation
     // loader (e.g. someone called `new Query(...)` directly outside
     // `Collection.find`). The old behaviour was a silent no-op — the
@@ -276,7 +278,7 @@ export class Query<
         { code: "QUERY_WITH_NO_LOADER" as const },
       );
     }
-    this._with = { ...(this._with ?? {}), ...spec };
+    this._with = { ...(this._with ?? {}), ...spec } as WithSpec<S>;
     return this as unknown as Query<S, any, AllSchemas>;
   }
 

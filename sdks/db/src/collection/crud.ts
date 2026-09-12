@@ -344,7 +344,7 @@ export function findCollection<
       : undefined,
     self._schema,
   );
-  if (opts?.with !== undefined) q.with(opts.with);
+  if (opts?.with !== undefined) q.with(opts.with as never);
   return q;
 }
 

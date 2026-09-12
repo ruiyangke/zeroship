@@ -50,6 +50,7 @@ import type { PaginationResult } from "./query";
 import type {
   PlainObject,
   DistinctField,
+  ExactWithSpec,
   GeoField,
   Result,
   Row,
@@ -112,16 +113,16 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
     idOrFilter: RowId<S> | Filter<S>,
     opts: { select: K[]; orderBy?: SortSpec<S> },
   ): Promise<Pick<Row<S>, K> | null>;
-  get<W extends WithSpec>(
+  get<const W extends WithSpec<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: W; orderBy?: SortSpec<S> },
+    opts: { with: ExactWithSpec<S, W>; orderBy?: SortSpec<S> },
   ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: RowId<S> | Filter<S>,
     opts?: { orderBy?: SortSpec<S> },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find<const W extends WithSpec<S>>(filter: Filter<S>, opts: { with: ExactWithSpec<S, W> }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
   update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
@@ -175,7 +176,7 @@ export type TxQuery<
     fields: Selection,
   ): TxQuery<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
   after(id: RowId<S>): TxQuery<S, P, AllSchemas>;
-  with<W extends WithSpec>(spec: W): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with<const W extends WithSpec<S>>(spec: ExactWithSpec<S, W>): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   paginate(opts: {
     cursor?: string | null;
     numItems: number;

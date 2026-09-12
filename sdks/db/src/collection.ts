@@ -19,6 +19,7 @@ import type { Query } from "./query";
 import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
 import type {
   Actor,
+  ExactWithSpec,
   Filter,
   GeoField,
   DistinctField,
@@ -299,9 +300,9 @@ export class Collection<
     idOrFilter: RowId<S> | Filter<S>,
     opts: { select: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
-  async get<W extends WithSpec>(
+  async get<const W extends WithSpec<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: W; orderBy?: SortSpec<S> } & ReadHints<S>,
+    opts: { with: ExactWithSpec<S, W>; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
     idOrFilter: RowId<S> | Filter<S>,
@@ -331,9 +332,9 @@ export class Collection<
     return existsCollection(this._crud(), filter);
   }
 
-  find<W extends WithSpec>(
+  find<const W extends WithSpec<S>>(
     filter: Filter<S>,
-    opts: { with: W } & ReadHints<S>,
+    opts: { with: ExactWithSpec<S, W> } & ReadHints<S>,
   ): Query<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
   find(
