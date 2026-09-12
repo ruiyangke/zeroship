@@ -257,8 +257,9 @@ startup. It may request `apps:deploy`, `apps:read`, `apps:write`,
 and `offline_access` asks for the refresh family without conferring any
 resource authority of its own. An approved OP device grant for this client
 produces a 15-minute access token with the configured control audience and a
-public `sub` equal to the platform principal UUID. Generic app clients continue
-to receive app-sector pairwise `pws_...` subjects.
+public `sub` equal to the canonical platform `UserId`: `usr_` followed by the
+fixed-width lowercase base36 UUIDv7 body. Generic app clients receive
+app-sector pairwise `pws_...` subjects instead.
 
 The refresh rotation mints through the same code path as the device
 redemption, so a rotated CLI token keeps that principal shape rather than
@@ -316,7 +317,7 @@ platform corpus in `db/migrations-ts/`, applied by the `zero-migrate` CLI
 
 | Table | Purpose |
 |---|---|
-| `zeroship.users` | Global user pool |
+| `zeroship.users` | Global user pool keyed by canonical `UserId` text |
 | `zeroship.federated_identities` | Google/GitHub identity links |
 | `zeroship.idp_sessions` | Auth-origin login sessions |
 | `zeroship.gateway_sessions` | Per-app session audit/revocation state |

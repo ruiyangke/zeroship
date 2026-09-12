@@ -1,6 +1,9 @@
 export type MaybePromise<T> = T | Promise<T>;
 export type ValueProvider<T> = T | (() => MaybePromise<T>);
 
+/** A canonical platform user id: `usr_` followed by the fixed-width lowercase base36 UUIDv7 body. */
+export type UserId = `usr_${string}`;
+
 export interface ControlClientOptions {
   /** Control-plane origin, for example `http://localhost:9090`. */
   baseUrl: string | URL;
@@ -151,7 +154,7 @@ export interface EgressRule {
   /** The exact DNS name, or the range in canonical CIDR form. */
   destination: string;
   port: number;
-  created_by: string;
+  created_by: UserId;
   created_at: string;
   note: string | null;
   /**
@@ -230,7 +233,7 @@ export interface SetEgressRuleResult {
 
 export interface AuditEntry {
   id: string;
-  actor: string;
+  actor_user_id: UserId | null;
   action: string;
   resource: string | null;
   source_ip: string | null;
@@ -306,7 +309,7 @@ export interface OrganizationRecord {
    * console can label the row, and so clearing it (which is what transferring
    * ownership does) is visible as the personal-to-shared conversion it is.
    */
-  personal_owner_id: string | null;
+  personal_owner_id: UserId | null;
   created_at: string;
   updated_at: string;
   /**
@@ -356,7 +359,7 @@ export interface ListOrganizationsResult {
  */
 export interface OrganizationMemberRecord {
   organization_id: string;
-  user_id: string;
+  user_id: UserId;
   email: string;
   name: string;
   role: string;
@@ -370,7 +373,7 @@ export interface ListOrganizationMembersResult {
 }
 
 export interface AddOrganizationMemberInput {
-  user_id: string;
+  user_id: UserId;
   role: string;
 }
 
@@ -383,7 +386,7 @@ export interface TransferOrganizationOwnershipInput {
    * The member who becomes owner. They must already hold a seat: transfer
    * re-roles an existing member, it does not admit a new one.
    */
-  user_id: string;
+  user_id: UserId;
 }
 
 /**
@@ -479,7 +482,7 @@ export interface UpdateProjectInput {
  */
 export interface ProjectMemberRecord {
   project_id: string;
-  user_id: string;
+  user_id: UserId;
   email: string;
   role: string;
   added_at: string;
@@ -490,7 +493,7 @@ export interface ListProjectMembersResult {
 }
 
 export interface AddProjectMemberInput {
-  user_id: string;
+  user_id: UserId;
   role: string;
 }
 
@@ -685,14 +688,14 @@ export class ControlClient {
       }),
     changeMemberRole: (
       organizationId: string,
-      userId: string,
+      userId: UserId,
       input: ChangeOrganizationRoleInput,
     ): Promise<OrganizationMemberRecord> =>
       this.request(
         `/api/organizations/${pathPart(organizationId)}/members/${pathPart(userId)}`,
         { method: "PATCH", body: input },
       ),
-    removeMember: (organizationId: string, userId: string): Promise<void> =>
+    removeMember: (organizationId: string, userId: UserId): Promise<void> =>
       this.request(
         `/api/organizations/${pathPart(organizationId)}/members/${pathPart(userId)}`,
         { method: "DELETE", parseAs: "void" },
@@ -843,14 +846,14 @@ export class ControlClient {
     /** Narrow or widen an existing project seat atomically. */
     changeMemberRole: (
       projectId: string,
-      userId: string,
+      userId: UserId,
       input: ChangeProjectRoleInput,
     ): Promise<ProjectMemberRecord> =>
       this.request(
         `/api/projects/${pathPart(projectId)}/members/${pathPart(userId)}`,
         { method: "PATCH", body: input },
       ),
-    removeMember: (projectId: string, userId: string): Promise<void> =>
+    removeMember: (projectId: string, userId: UserId): Promise<void> =>
       this.request(
         `/api/projects/${pathPart(projectId)}/members/${pathPart(userId)}`,
         { method: "DELETE", parseAs: "void" },
