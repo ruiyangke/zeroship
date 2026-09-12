@@ -14,6 +14,7 @@ mod generated_identity;
 mod identity;
 mod identity_contract;
 mod identity_visibility;
+mod insert_many;
 mod joins;
 mod json;
 mod lifecycle;

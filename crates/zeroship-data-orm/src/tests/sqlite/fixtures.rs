@@ -47,13 +47,19 @@ pub(super) fn compile_insert_many(
     schema: &crate::value::Value,
     documents: &crate::value::Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
-    crate::crud::insert::build_many(
+    let mut queries = crate::crud::insert::build_many(
         namespace,
         collection,
         schema,
         documents.clone(),
         &crate::sql::registration::SqlRegistration::sqlite(),
-    )
+    )?;
+    if queries.len() != 1 {
+        return Err(crate::sql::compile::QueryError::InvalidFilter(
+            "fixture expected one insert statement".into(),
+        ));
+    }
+    Ok(queries.remove(0))
 }
 
 #[allow(clippy::too_many_arguments)]
