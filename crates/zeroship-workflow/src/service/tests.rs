@@ -28,6 +28,7 @@ mod journal_models;
 mod orm;
 mod output_reads;
 mod output_writes;
+mod payload_models;
 mod payloads;
 mod policy;
 mod runner;

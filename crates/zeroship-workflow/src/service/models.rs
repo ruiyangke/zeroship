@@ -8,8 +8,10 @@ zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json"
 pub use journal::{
     __zeroship_workflow_app_state as app_state, __zeroship_workflow_broadcasts as broadcasts,
     __zeroship_workflow_deploys as deploys, __zeroship_workflow_generations as generations,
-    __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_requests as requests,
-    __zeroship_workflow_runs as runs, __zeroship_workflow_schedules as schedules,
+    __zeroship_workflow_occurrences as occurrences,
+    __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,
+    __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
+    __zeroship_workflow_schedules as schedules,
     __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_signals as signals,
     __zeroship_workflow_steps as steps, __zeroship_workflow_subscriptions as subscriptions,
     __zeroship_workflow_tasks as tasks, __zeroship_workflow_topics as topics,
@@ -165,6 +167,17 @@ pub struct ScheduleRecord {
     pub next_at: Option<i64>,
     pub anchor_at: i64,
     pub revision: i64,
+}
+
+#[derive(FromRow)]
+#[orm(entity = payloads)]
+pub struct PayloadRecord {
+    pub id: String,
+    pub hash: String,
+    pub size: i64,
+    pub content_type: Option<String>,
+    pub state: String,
+    pub expires_at: i64,
 }
 
 /// Compose the journal with the app's existing descriptors in one publication.
