@@ -7869,7 +7869,9 @@ name = "zeroship-cli"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "compio",
  "ed25519-dalek",
+ "futures",
  "hex",
  "jsonc-parser",
  "libc",
@@ -7877,9 +7879,12 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
+ "toml 0.8.23",
  "url",
  "uuid",
+ "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-data-v8",
@@ -7889,7 +7894,9 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-storage",
  "zeroship-storage-v8",
+ "zeroship-workflow",
  "zeroship-workflow-v8",
+ "zstd",
 ]
 
 [[package]]
@@ -8656,6 +8663,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-sql",
  "zeroship-storage",

@@ -2,6 +2,8 @@
 
 mod app;
 mod backend;
+mod bundle;
+pub use bundle::BundleExecutable;
 pub use backend::AppBackend;
 pub mod capability;
 mod control;

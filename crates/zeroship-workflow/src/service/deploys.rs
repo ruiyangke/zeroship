@@ -9,6 +9,34 @@ use crate::{validation, WorkflowServiceError};
 use zeroship_core::{app_id::AppId, typed_id};
 
 impl WorkflowService {
+    /// Resolve a retained deployment by the identity chosen by its host.
+    ///
+    /// # Errors
+    /// Rejects an unbound app and unavailable journal storage.
+    pub async fn deployment_by_hash(
+        &self,
+        app: &AppId,
+        hash: &str,
+    ) -> Result<Option<DeployRegistration>, WorkflowServiceError> {
+        let mut tx = self.begin().await?;
+        lock_app(&mut tx, app).await?;
+        let rows = tx
+            .query(
+                &format!(
+                    "SELECT manifest FROM {} WHERE app_id=$1 AND hash=$2",
+                    tx.table("deploys")
+                ),
+                &[app.as_str().into(), hash.into()],
+            )
+            .await?;
+        let registration = rows
+            .first()
+            .map(|row| decode(&row.text("manifest")?))
+            .transpose()?;
+        tx.commit().await?;
+        Ok(registration)
+    }
+
     /// Retain executable bytes before selecting a deployment for new work.
     /// The host serializes its desired-deployment updates. Failed uploads leave
     /// a staging record and cannot replace the currently active deployment.
