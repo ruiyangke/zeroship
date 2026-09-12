@@ -187,7 +187,7 @@ async fn find_on(
     opts: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts);
+    let plan = zeroship_data_orm::crud::plan_find(&binding, "people", &filter, &opts).unwrap();
     zeroship_data_orm::crud::run_find(binding, "people".to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)

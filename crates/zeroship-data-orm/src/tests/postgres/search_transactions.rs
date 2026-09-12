@@ -130,7 +130,8 @@ async fn find_on(
     filter: Value,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
-    let plan = zeroship_data_orm::crud::plan_find(&binding, collection, &filter, &value!({}));
+    let plan =
+        zeroship_data_orm::crud::plan_find(&binding, collection, &filter, &value!({})).unwrap();
     zeroship_data_orm::crud::run_find(binding, collection.to_string(), route, filter, plan)
         .await
         .map(|r| r.rows)

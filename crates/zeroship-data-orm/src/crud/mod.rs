@@ -176,17 +176,44 @@ pub fn aggregate_group_fields(pipeline: &Value) -> Vec<String> {
 // the Query terminal, which composes the existing `dispatch_find` with
 // `LIMIT 1` (or `LIMIT 2` for strict `.unique()`).
 
-/// Extract `opts.unmask` into a `Vec<String>`. Returns
-/// empty when the field is absent, null, or not an array of strings —
-/// malformed `unmask` shapes are tolerated as
-/// "no hint" rather than an error so a stale SDK build doesn't bring
-/// down the find path.
-fn parse_unmask_opt(opt: Option<&Value>) -> Vec<String> {
-    let Some(Value::Array(arr)) = opt else {
-        return Vec::new();
+fn invalid_read_option(message: impl Into<String>) -> DbError {
+    DbError::validation("invalid_read", message.into())
+}
+
+fn validate_dynamic_options(opts: &Value, operation: &str) -> Result<(), DbError> {
+    if opts.is_null() || opts.is_object() {
+        Ok(())
+    } else {
+        Err(invalid_read_option(format!(
+            "{operation} options must be an object"
+        )))
+    }
+}
+
+fn parse_include_deleted(opts: &Value) -> Result<bool, DbError> {
+    match opts.get("include_deleted") {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| invalid_read_option("include_deleted must be a boolean")),
+        None => Ok(false),
+    }
+}
+
+fn parse_unmask_opt(opt: Option<&Value>) -> Result<Vec<String>, DbError> {
+    let Some(value) = opt else {
+        return Ok(Vec::new());
     };
-    arr.iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
+    let Value::Array(entries) = value else {
+        return Err(invalid_read_option("unmask must be an array"));
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| invalid_read_option("unmask entries must be strings"))
+        })
         .collect()
 }
 
@@ -212,42 +239,72 @@ pub struct FindPlan {
 ///
 /// The read-set is thread-local query state, so it must be recorded before the
 /// returned future can be polled outside the dispatching handler.
-pub fn plan_find(binding: &DbBinding, collection: &str, filter: &Value, opts: &Value) -> FindPlan {
+pub fn plan_find(
+    binding: &DbBinding,
+    collection: &str,
+    filter: &Value,
+    opts: &Value,
+) -> Result<FindPlan, DbError> {
+    validate_dynamic_options(opts, "find")?;
+    let limit = match opts.get("limit") {
+        Some(value) => {
+            let value = value
+                .as_i64()
+                .ok_or_else(|| invalid_read_option("limit must be an integer"))?;
+            Some(
+                crate::sql::RowLimit::new(value)
+                    .map_err(|error| invalid_read_option(error.to_string()))?
+                    .get(),
+            )
+        }
+        None => Some(crate::sql::MAX_ROW_LIMIT),
+    };
+    let offset = match opts.get("offset") {
+        Some(value) => {
+            let value = value
+                .as_i64()
+                .ok_or_else(|| invalid_read_option("offset must be an integer"))?;
+            Some(
+                crate::sql::RowOffset::new(value)
+                    .map_err(|error| invalid_read_option(error.to_string()))?
+                    .get(),
+            )
+        }
+        None => None,
+    };
+    let include_deleted = parse_include_deleted(opts)?;
+    let unmask_reason = match opts.get("unmaskReason") {
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| invalid_read_option("unmaskReason must be a string"))?
+                .to_string(),
+        ),
+        None => None,
+    };
+    let unmask_columns = parse_unmask_opt(opts.get("unmask"))?;
+
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     record_read_set(binding, collection, filter);
 
-    // DB-2: public `find` normalises an omitted limit here before calling the
-    // builder. This does not protect internal builder callers; they must pass
-    // their own explicit bound. Callers paginate past this page via `offset`.
-    let limit = Some(
-        opts.get("limit")
-            .and_then(Value::as_i64)
-            .unwrap_or(crate::sql::MAX_ROW_LIMIT),
-    );
     // DB-3: strip an app-supplied reserved `auto` system actor — a find with
     // `{unmask, actor:{kind:"auto"}}` must not impersonate the platform.
     let unmask_sanitized = crate::protection::unmask::sanitize_app_actor(
         opts.get("actor").cloned().filter(|v| !v.is_null()),
     );
 
-    FindPlan {
+    Ok(FindPlan {
         limit,
-        offset: opts.get("offset").and_then(Value::as_i64),
+        offset,
         order_by: opts.get("orderBy").cloned(),
         select: opts.get("select").cloned(),
-        unmask_columns: parse_unmask_opt(opts.get("unmask")),
+        unmask_columns,
         unmask_actor: unmask_sanitized.actor,
         unmask_rejected_claim: unmask_sanitized.rejected_claim,
-        unmask_reason: opts
-            .get("unmaskReason")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        include_deleted: opts
-            .get("include_deleted")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-    }
+        unmask_reason,
+        include_deleted,
+    })
 }
 
 /// The DEFERRED half of `find`: no `scope`, no `v8::`, no `ResolveValue`.
@@ -1044,6 +1101,9 @@ pub fn plan_aggregate(
     pipeline: &Value,
     opts: &Value,
 ) -> Result<(crate::sql::compiler::CompiledQuery, Option<Vec<String>>), DbError> {
+    validate_dynamic_options(opts, "aggregate")?;
+    let include_deleted = parse_include_deleted(opts)?;
+
     // Record into the active query's read-set so the broker can
     // narrow events. If the first stage is `$match`, capture its filter;
     // otherwise record a coarse-grained entry (empty filter) — the
@@ -1058,10 +1118,6 @@ pub fn plan_aggregate(
         record_read_set(binding, collection, &captured_filter);
     }
 
-    let include_deleted = opts
-        .get("include_deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     // The descriptor entry is the aggregate builder's identifier allowlist.
@@ -1090,10 +1146,8 @@ pub fn plan_distinct(
     filter: Value,
     opts: &Value,
 ) -> Result<(crate::sql::compiler::CompiledQuery, bool), DbError> {
-    let include_deleted = opts
-        .get("include_deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    validate_dynamic_options(opts, "distinct")?;
+    let include_deleted = parse_include_deleted(opts)?;
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     // A DISTINCT over a masked column returns MASKS - the column with the
@@ -1127,14 +1181,13 @@ pub fn plan_count(
     filter: Value,
     opts: &Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
+    validate_dynamic_options(opts, "count")?;
+    let include_deleted = parse_include_deleted(opts)?;
+
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     record_read_set(binding, collection, &filter);
 
-    let include_deleted = opts
-        .get("include_deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let filter_soft_deleted = assignment_pass::should_filter_soft_deleted(include_deleted);
 
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {

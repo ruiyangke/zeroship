@@ -608,7 +608,7 @@ impl PreparedOperation {
                 )?))
             }
             Operation::Find { filter, options } => {
-                let plan = crud::plan_find(&binding, collection, &filter, &options);
+                let plan = crud::plan_find(&binding, collection, &filter, &options)?;
                 Plan::Find {
                     filter,
                     plan: Box::new(plan),
