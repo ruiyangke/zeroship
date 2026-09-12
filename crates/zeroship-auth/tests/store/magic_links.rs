@@ -11,7 +11,7 @@ async fn issue_then_redeem_happy_path() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let issued = magic_link::issue(&client, &email, "login")
+        let issued = magic_link::issue(&client, email, "login")
             .await
             .expect("issue");
         assert!(!issued.raw.is_empty(), "raw token must be non-empty");
@@ -45,7 +45,7 @@ async fn second_redeem_returns_none() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let issued = magic_link::issue(&client, &email, "login")
+        let issued = magic_link::issue(&client, email, "login")
             .await
             .expect("issue");
 
@@ -77,7 +77,7 @@ async fn pending_consume_can_be_cleared_and_retried_before_finalize() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let issued = magic_link::issue(&client, &email, "login")
+        let issued = magic_link::issue(&client, email, "login")
             .await
             .expect("issue");
 
@@ -188,7 +188,7 @@ async fn second_redeem_while_pending_returns_in_flight() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let issued = magic_link::issue(&client, &email, "login")
+        let issued = magic_link::issue(&client, email, "login")
             .await
             .expect("issue");
 
@@ -218,7 +218,7 @@ async fn stale_pending_redeem_burns_link_as_consumed() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let issued = magic_link::issue(&client, &email, "login")
+        let issued = magic_link::issue(&client, email, "login")
             .await
             .expect("issue");
 
@@ -289,7 +289,7 @@ async fn expired_token_returns_none() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let issued = magic_link::issue(&client, &email, "login")
+        let issued = magic_link::issue(&client, email, "login")
             .await
             .expect("issue");
 
@@ -317,10 +317,10 @@ async fn new_issue_supersedes_previous_unconsumed() {
         let client = database.connect_as_auth().await;
 
         let email = EMAIL;
-        let first = magic_link::issue(&client, &email, "login")
+        let first = magic_link::issue(&client, email, "login")
             .await
             .expect("issue 1");
-        let second = magic_link::issue(&client, &email, "login")
+        let second = magic_link::issue(&client, email, "login")
             .await
             .expect("issue 2");
 
@@ -350,13 +350,13 @@ async fn login_issue_does_not_supersede_reset_token() {
         // A reset token binds to the issuing user's immutable id (security finding
         // L4), so `issue` only writes a row when the email maps to a real user —
         // mirroring the production `/forgot` caller, which guards on `find_by_email`.
-        zeroship_auth::store::users::create(&client, &email, "Test", None)
+        zeroship_auth::store::users::create(&client, email, "Test", None)
             .await
             .expect("seed user");
-        let reset = password_reset::issue(&client, &email)
+        let reset = password_reset::issue(&client, email)
             .await
             .expect("issue reset token");
-        let login = magic_link::issue(&client, &email, "login")
+        let login = magic_link::issue(&client, email, "login")
             .await
             .expect("issue login token");
 

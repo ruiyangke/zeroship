@@ -22,6 +22,10 @@ struct State {
     consumed: bool,
 }
 
+#[allow(
+    clippy::future_not_send,
+    reason = "the fixture remains on its owning runtime"
+)]
 async fn state(client: &(impl GenericClient + ?Sized)) -> State {
     let row = client
         .query_one(
