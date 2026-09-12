@@ -301,25 +301,13 @@ describe("CRITICAL #3 — unindexed-query warning is strict for multi-key filter
   });
 });
 
-// ---------------------------------------------------------------------------
-// CRITICAL #4 — drain-before-begin: `_txDepth` must be bumped BEFORE
-// `await beginTransaction(...)` resolves. Otherwise a `get(id)` queued
-// in the window between drain and BEGIN sees txDepthAtCall === 0 and
-// routes through the loader onto the (now-tx-bound) connection.
-// ---------------------------------------------------------------------------
-
-describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", () => {
-  test("get(id) issued during a slow tx begin sees _txDepth > 0", async () => {
+describe("transaction bookkeeping follows async continuations", () => {
+  test("get(id) issued outside a pending transaction keeps pool routing", async () => {
     let beginTriggered: () => void = () => { /* set below */ };
     const beginGate = new Promise<void>((resolve) => { beginTriggered = resolve; });
     const events: string[] = [];
 
     const native = {
-      // P9 PR 3: native `transaction(callback)` orchestrator. The
-      // bootstrap wrapper bumps `_txDepth` synchronously before invoking
-      // this; we then stall (await the gate) BEFORE running the callback,
-      // modelling a slow BEGIN. A `get(id)` issued during the stall sees
-      // `_txDepth > 0` and bypasses the loader.
       async transaction(cb: (raw: unknown) => unknown) {
         events.push("begin:enter");
         await beginGate;
@@ -354,51 +342,33 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
       { native },
     );
 
-    // Open a tx that pauses inside the native transaction(fn) before the
-    // callback runs. The `_txDepth` bump happens (in the bootstrap
-    // wrapper) before that, so any get(id) issued before the begin
-    // resolves should see _txDepth > 0 and bypass the loader.
     const txPromise = db.transaction(async () => {
-      // Body runs after begin resolves.
       return { ok: true };
     });
 
-    // Wait for begin to be entered (we know `_txDepth` was bumped after
-    // the drain settled, one microtask earlier).
     await new Promise((r) => setTimeout(r, 5));
 
-    // Issue a get(id) WHILE begin is still pending. The pre-fix
-    // behaviour would route this through the loader (because
-    // `_txDepth` wasn't bumped yet). The post-fix behaviour bumps
-    // synchronously, so `_txDepth > 0` at the call boundary forces
-    // the single-row find path (formerly the findOne fallback).
     const getDuringBegin = db.users.get("usr_42");
 
-    // Release begin.
     beginTriggered();
     const [getRes, txRes] = await Promise.all([getDuringBegin, txPromise]);
 
     assert.equal(txRes.error, null);
     assert.equal(getRes.error, null);
-    // With the fix, this get goes through find with limit:1 (bypasses
-    // loader) because _txDepth was already > 0 at the call boundary.
     const batchedCalls = events.filter((e) => e.startsWith("findBatched:"));
     const singleCalls = events.filter((e) => e.startsWith("findSingle:"));
     assert.equal(
-      batchedCalls.length, 0,
-      `expected no loader-batched find, got events=${JSON.stringify(events)}`,
+      batchedCalls.length, 1,
+      `expected the sibling continuation to retain loader routing, got events=${JSON.stringify(events)}`,
     );
     assert.equal(
-      singleCalls.length, 1,
-      `expected one single-row find (loader bypass), got events=${JSON.stringify(events)}`,
+      singleCalls.length, 0,
+      `expected no transaction-only direct read, got events=${JSON.stringify(events)}`,
     );
   });
 
-  test("native transaction begin failure rolls back the _txDepth bump", async () => {
+  test("native transaction begin failure leaves shared collection state unchanged", async () => {
     const native = {
-      // P9 PR 3: native orchestrator rejects (begin failed) — the callback
-      // never runs. The bootstrap wrapper's `finally` must still decrement
-      // `_txDepth`.
       async transaction(_cb: (raw: unknown) => unknown) {
         throw Object.assign(new Error("db.transaction: BEGIN failed: boom"), {
           code: "BEGIN_FAILED",
@@ -424,10 +394,8 @@ describe("CRITICAL #4 — _txDepth bumped synchronously before begin resolves", 
       "begin failure must carry code=begin_failed",
     );
 
-    // The decrement must have happened — a subsequent get(id) sees
-    // _txDepth === 0 and routes through the loader normally.
-    const usersCol = (db as unknown as Record<string, unknown>).users as { _txDepth: number };
-    assert.equal(usersCol._txDepth, 0, "expected _txDepth to be 0 after begin failure");
+    const followUp = await db.users.get("usr_after_failure");
+    assert.equal(followUp.error, null);
   });
 });
 

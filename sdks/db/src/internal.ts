@@ -15,6 +15,7 @@
  * explicit at the import site.
  */
 export { Collection } from "./collection";
+export { TRANSACTION_READ } from "./collection/crud";
 export { captureNativeTransaction } from "./native";
 export type {
   NativeDb,
@@ -30,18 +31,15 @@ export type { LiveOptions, LiveQuery } from "./live";
 export { subscribe } from "./subscribe";
 export type { Subscription, SubscriptionEvent } from "./subscribe";
 export {
-  anyCollectionInTransaction,
   drainCollectionLoaders,
-  enterTransactionScope,
-  exitTransactionScope,
-  readTransactionDepth,
 } from "./tx-state";
 export type { TransactionStateCarrier } from "./tx-state";
 export { naming, SchemaBuilder, TypeBuilder, ok, err } from "./types";
-export { readFrom } from "./read";
+export { readFrom, scopeAliasedCollection } from "./read";
 export type { ReadFrom, AliasedCollection } from "./read";
 export type {
   NamingStrategy,
+  Actor,
   NamedIndexSpec,
   PlainObject,
   Result,

@@ -15,7 +15,6 @@ test("eager relations share a transaction connection without overlapping queries
     },
   };
   const collection = {
-    _txDepth: 1,
     _name: "posts",
     _schema: {
       author: { type: "string" as const, refTarget: "people" },
@@ -24,7 +23,7 @@ test("eager relations share a transaction connection without overlapping queries
     _resolveCollection: () => target,
   };
   const rows = [{ author: "person_a", reviewer: "person_a" }];
-  await loadRelations(collection, rows, { author: true, reviewer: true });
+  await loadRelations(collection, rows, { author: true, reviewer: true }, true);
   assert.deepEqual(rows, [{
     author: { id: "person_a", name: "Ada" },
     reviewer: { id: "person_a", name: "Ada" },

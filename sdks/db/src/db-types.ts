@@ -49,6 +49,7 @@ import type { LiveOptions, LiveQuery } from "./live";
 import type { PaginationResult } from "./query";
 import type {
   PlainObject,
+  Actor,
   DistinctField,
   ExactWithSpec,
   GeoField,
@@ -111,19 +112,51 @@ export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unkn
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { select: K[]; orderBy?: SortSpec<S> },
+    opts: {
+      select: K[];
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<Pick<Row<S>, K> | null>;
   get<const W extends WithSpec<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: ExactWithSpec<S, W>; orderBy?: SortSpec<S> },
+    opts: {
+      with: ExactWithSpec<S, W>;
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { orderBy?: SortSpec<S> },
+    opts?: {
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find<const W extends WithSpec<S>>(filter: Filter<S>, opts: { with: ExactWithSpec<S, W> }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
+  find<const W extends WithSpec<S>>(
+    filter: Filter<S>,
+    opts: {
+      with: ExactWithSpec<S, W>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
+  ): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find(
+    filter?: Filter<S>,
+    opts?: {
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
+  ): TxQuery<S, Row<S>, AllSchemas>;
   upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
   update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;

@@ -20,11 +20,11 @@
  */
 import {
   drainCollectionLoaders,
-  enterTransactionScope,
-  exitTransactionScope,
   captureNativeTransaction,
   Collection,
   readFrom,
+  scopeAliasedCollection,
+  TRANSACTION_READ,
   type ReadFrom,
   type AliasedCollection,
   type NativeDb,
@@ -57,9 +57,21 @@ import {
   type SortSpec,
   type WithSpec,
   type PlainObject,
+  type Actor,
   type FieldDef,
 } from "@zeroship/db/internal";
 export type { TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
+
+type AsyncLocalStorageLike<T> = {
+  getStore(): T | undefined;
+  run<R>(store: T, callback: () => R): R;
+};
+type AsyncLocalStorageConstructor = new <T>() => AsyncLocalStorageLike<T>;
+const asyncHooksSpecifier = "node:" + "async_hooks";
+const { AsyncLocalStorage } = await import(asyncHooksSpecifier) as {
+  AsyncLocalStorage: AsyncLocalStorageConstructor;
+};
+const transactionContext = new AsyncLocalStorage<boolean>();
 
 // ---------------------------------------------------------------------------
 // normalizeSchema + expandUnionToFlatColumns (moved from @zeroship/db/schema)
@@ -578,133 +590,193 @@ async function unwrap<T>(result: Result<T>): Promise<T> {
   return result.data as T;
 }
 
-function createTxCollection<S>(collection: Collection<S>): TxCollection<S> {
+type TxReadHints<S> = {
+  actor?: Actor;
+  unmask?: (string & keyof Row<S>)[];
+  unmaskReason?: string;
+};
+
+function transactionScopeExpired(): Error {
+  return Object.assign(new Error("transaction scope has expired"), {
+    code: "TRANSACTION_SCOPE_EXPIRED" as const,
+  });
+}
+
+function requireActiveTransaction(active: () => boolean): void {
+  if (!active()) throw transactionScopeExpired();
+}
+
+function createTxCollection<S>(
+  collection: Collection<S>,
+  active: () => boolean,
+): TxCollection<S> {
+  async function run<T>(work: () => Promise<Result<T>>): Promise<T> {
+    requireActiveTransaction(active);
+    return unwrap(await work());
+  }
+
   async function getImpl(
     idOrFilter: RowId<S> | Filter<S>,
-    opts?: { select?: (string & keyof Row<S>)[]; orderBy?: SortSpec<S> },
+    opts?: {
+      select?: (string & keyof Row<S>)[];
+      orderBy?: SortSpec<S>;
+    } & TxReadHints<S>,
   ): Promise<unknown> {
     const colAny = collection as unknown as {
       get(
         idOrFilter: RowId<S> | Filter<S>,
-        opts?: { select?: (string & keyof Row<S>)[]; orderBy?: SortSpec<S> },
+        opts?: {
+          select?: (string & keyof Row<S>)[];
+          orderBy?: SortSpec<S>;
+        } & TxReadHints<S> & { [TRANSACTION_READ]?: boolean },
       ): Promise<Result<Row<S> | null>>;
     };
-    return unwrap(await colAny.get(idOrFilter, opts));
+    return run(() => colAny.get(idOrFilter, {
+      ...opts,
+      [TRANSACTION_READ]: true,
+    }));
   }
 
   const tx: TxCollection<S> = {
-    as: alias => collection.as(alias),
+    as: alias => {
+      requireActiveTransaction(active);
+      return scopeAliasedCollection(collection.as(alias), active);
+    },
     async insert(row: RowInput<S>) {
-      return unwrap(await collection.insert(row));
+      return run(() => collection.insert(row));
     },
     async insertMany(rows: RowInput<S>[]) {
-      return unwrap(await collection.insertMany(rows));
+      return run(() => collection.insertMany(rows));
     },
     get: getImpl as TxCollection<S>["get"],
     async exists(filter: Filter<S>) {
-      return unwrap(await collection.exists(filter));
+      return run(() => collection.exists(filter));
     },
-    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec<S> }): TxQuery<S, Row<S>> => {
+    find: ((filter: Filter<S> = {} as Filter<S>, opts?: { with?: WithSpec<S> } & TxReadHints<S>): TxQuery<S, Row<S>> => {
+      requireActiveTransaction(active);
       const query = (opts?.with !== undefined
         ? (collection as unknown as {
-            find(f: Filter<S>, o: { with: WithSpec<S> }): Query<S, Row<S>>;
-          }).find(filter, { with: opts.with })
-        : collection.find(filter));
-      return createTxQuery<S>(query);
+            find(f: Filter<S>, o: { with: WithSpec<S> } & TxReadHints<S> & { [TRANSACTION_READ]?: boolean }): Query<S, Row<S>>;
+          }).find(filter, {
+            ...opts,
+            with: opts.with,
+            [TRANSACTION_READ]: true,
+          })
+        : (collection as unknown as {
+            find(f: Filter<S>, o?: TxReadHints<S> & { [TRANSACTION_READ]?: boolean }): Query<S, Row<S>>;
+          }).find(filter, {
+            ...opts,
+            [TRANSACTION_READ]: true,
+          }));
+      return createTxQuery<S>(query, active);
     }) as TxCollection<S>["find"],
     async upsert(row: RowInput<S>, options: UpsertOptions<S>) {
-      return unwrap(await collection.upsert(row, options));
+      return run(() => collection.upsert(row, options));
     },
     async update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>) {
-      return unwrap(await collection.update(idOrFilter, patch));
+      return run(() => collection.update(idOrFilter, patch));
     },
     async updateMany(filter: Filter<S>, patch: UpdateExpression<S>) {
-      return unwrap(await collection.updateMany(filter, patch));
+      return run(() => collection.updateMany(filter, patch));
     },
     async delete(idOrFilter: RowId<S> | Filter<S>) {
-      return unwrap(await collection.delete(idOrFilter));
+      return run(() => collection.delete(idOrFilter));
     },
     async deleteMany(filter: Filter<S>) {
-      return unwrap(await collection.deleteMany(filter));
+      return run(() => collection.deleteMany(filter));
     },
     async purge(idOrFilter: RowId<S> | Filter<S>) {
-      return unwrap(await collection.purge(idOrFilter));
+      return run(() => collection.purge(idOrFilter));
     },
     async purgeMany(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.purgeMany(filter));
+      return run(() => collection.purgeMany(filter));
     },
     async restore(idOrFilter: RowId<S> | Filter<S>) {
-      return unwrap(await collection.restore(idOrFilter));
+      return run(() => collection.restore(idOrFilter));
     },
     async restoreMany(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.restoreMany(filter));
+      return run(() => collection.restoreMany(filter));
     },
     async count(filter: Filter<S> = {} as Filter<S>) {
-      return unwrap(await collection.count(filter));
+      return run(() => collection.count(filter));
     },
     async distinct<K extends DistinctField<S> & keyof Row<S>>(
       field: K,
       filter: Filter<S> = {} as Filter<S>,
     ): Promise<Exclude<Row<S>[K], undefined>[]> {
-      return unwrap(await collection.distinct(field, filter));
+      return run(() => collection.distinct(field, filter));
     },
     async aggregate(pipeline: ZeroshipDbAggregateStage[]) {
-      return unwrap(await collection.aggregate(pipeline));
+      return run(() => collection.aggregate(pipeline));
     },
     async bulkUnmask(
       ...args: Parameters<Collection<S>["bulkUnmask"]>
     ) {
-      return unwrap(await collection.bulkUnmask(...args));
+      return run(() => collection.bulkUnmask(...args));
     },
     async search(
       ...args: Parameters<Collection<S>["search"]>
     ) {
-      return unwrap(await collection.search(...args));
+      return run(() => collection.search(...args));
     },
     async near(
       ...args: Parameters<Collection<S>["near"]>
     ) {
-      return unwrap(await collection.near(...args));
+      return run(() => collection.near(...args));
     },
   };
   return tx;
 }
 
-function createTxQuery<S>(query: Query<S, Row<S>>): TxQuery<S, Row<S>> {
+function createTxQuery<S>(
+  query: Query<S, Row<S>>,
+  active: () => boolean,
+): TxQuery<S, Row<S>> {
   function selectImpl(s: SelectInput<S>): unknown {
+    requireActiveTransaction(active);
     (query.select as (arg: unknown) => unknown)(s);
     return wrapped;
   }
   const wrapped: TxQuery<S, Row<S>> = {
-    sort(s: SortInput<S>) { query.sort(s); return wrapped; },
-    limit(n: number) { query.limit(n); return wrapped; },
-    skip(n: number) { query.skip(n); return wrapped; },
+    sort(s: SortInput<S>) { requireActiveTransaction(active); query.sort(s); return wrapped; },
+    limit(n: number) { requireActiveTransaction(active); query.limit(n); return wrapped; },
+    skip(n: number) { requireActiveTransaction(active); query.skip(n); return wrapped; },
     select: selectImpl as TxQuery<S, Row<S>>["select"],
-    after(id: RowId<S>) { query.after(id); return wrapped; },
+    after(id: RowId<S>) { requireActiveTransaction(active); query.after(id); return wrapped; },
     with: ((spec: WithSpec<S>) => {
+      requireActiveTransaction(active);
       (query as unknown as { with(s: WithSpec<S>): unknown }).with(spec);
       return wrapped;
     }) as TxQuery<S, Row<S>>["with"],
     async paginate(
       opts: Parameters<Query<S, Row<S>>["paginate"]>[0],
     ): Promise<PaginationResult<Row<S>>> {
+      requireActiveTransaction(active);
       return unwrap(await query.paginate(opts));
     },
     // **P9 PR 1** — Result→throw shims for the new terminals so the
     // tx-callback contract (throw, not return Result) stays uniform.
     async first(): Promise<Row<S> | null> {
+      requireActiveTransaction(active);
       return unwrap(await query.first());
     },
     async unique(): Promise<Row<S>> {
+      requireActiveTransaction(active);
       return unwrap(await query.unique());
     },
     async last(): Promise<Row<S> | null> {
+      requireActiveTransaction(active);
       return unwrap(await query.last());
     },
     then<TResult1 = Row<S>[], TResult2 = never>(
       resolve?: ((value: Row<S>[]) => TResult1 | PromiseLike<TResult1>) | null,
       reject?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
     ): Promise<TResult1 | TResult2> {
+      try {
+        requireActiveTransaction(active);
+      } catch (error) {
+        return (Promise.reject(error) as Promise<Row<S>[]>).then(resolve, reject);
+      }
       return query.then(
         (result: Result<Row<S>[]>) => {
           if (result.error) throw result.error;
@@ -897,17 +969,17 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
     })._setResolveCollection(resolveCollection);
   }
 
-  const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
-  for (const [name, col] of Object.entries(collections)) {
-    (txCollections as Record<string, unknown>)[name] =
-      createTxCollection(col as Collection<unknown>);
-  }
-
   function liveImpl<R>(
     queryFn: () => Promise<R[]> | { then(onFulfilled: (value: unknown) => unknown, onRejected?: (reason: unknown) => unknown): unknown },
     liveOptions?: LiveOptions,
   ): LiveQuery<R> {
-    return createLive<R>(collections as Record<string, unknown>, queryFn, liveOptions);
+    if (transactionContext.getStore() === true) {
+      throw Object.assign(
+        new Error("@zeroship/db: db.live cannot be called inside db.transaction"),
+        { code: "LIVE_IN_TRANSACTION" as const },
+      );
+    }
+    return createLive<R>(queryFn, liveOptions);
   }
 
   // **P9 PR 3** — transaction orchestration moved into Rust.
@@ -923,22 +995,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   // (`err.code`, plus `err.status` when the classification has an HTTP
   // remedy).
   //
-  // This wrapper keeps only the JS-side concerns that have no Rust
-  // counterpart:
-  //   1. **DataLoader drain** — the per-collection `IdLoader` microtask
-  //      queues are pure JS state; we flush them before opening the tx so
-  //      a batched `get(id)` issued just before `transaction(...)`
-  //      completes on the pool, not the tx connection.
-  //   2. **`_txDepth` bookkeeping** — bumped on every collection while the
-  //      tx is open so (a) the IdLoader's `LOADER_TX_RACE` guard rejects a
-  //      non-tx batched read that finds a tx opened mid-batch, and (b)
-  //      `live()` refuses with `LIVE_IN_TRANSACTION` when called inside a
-  //      tx body. (The Rust orchestrator owns *nesting depth*; this JS
-  //      counter is purely the "am I inside a tx on this collection"
-  //      signal those two JS-layer checks read.)
-  //   3. **`Result` wrapping** — `transaction(fn)` returns
-  //      `Promise<Result<R>>`; the native promise resolves/rejects, so we
-  //      adapt resolve → `ok`, reject → `err`.
+  // This wrapper drains pending JS loaders before BEGIN, scopes the
+  // creator-facing transaction handles to the callback, and maps the native
+  // promise to Result. AsyncLocalStorage keeps SDK-only guards local to the
+  // callback continuation while Rust owns connection routing and nesting.
   //
   // The `txCollections` (SDK collections wrapped `Result`→throw) route
   // through the tx connection automatically, since the native CRUD path
@@ -965,8 +1025,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
 
     const collectionList = Object.values(collections);
 
-    // 1. Drain the JS DataLoader queues (JS-only state; cannot move to
-    //    Rust). A drain failure aborts before any BEGIN runs.
+    // A drain failure aborts before BEGIN.
     try {
       await drainCollectionLoaders(collectionList);
     } catch (drainErr) {
@@ -982,13 +1041,8 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return err(wrapped);
     }
 
-    // 2. Mark every collection in-tx so the loader race-guard +
-    //    live-in-tx refusal see depth > 0 for the duration. Bumped
-    //    synchronously *before* the native call so an in-flight batched
-    //    read observes the tx the instant BEGIN opens.
-    const txScopedCollections = enterTransactionScope(collectionList);
     try {
-      // 3. Native orchestrator: begin → callback(txCollections) →
+      // Native orchestrator: begin → callback(txCollections) →
       //    commit/rollback. Resolves with the callback's result on
       //    commit; rejects with the typed error on rollback, setup denial,
       //    begin failure, commit indeterminacy, or depth exhaustion.
@@ -1002,8 +1056,15 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
         async (_rawTxView: unknown) => {
           let active = true;
           const from: ReadFrom<true> = source => readFrom(native, source, true, () => active);
-          try { return await fn({ ...txCollections, from }); }
-          finally { active = false; }
+          const txCollections = {} as { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> };
+          for (const [name, col] of Object.entries(collections)) {
+            (txCollections as Record<string, unknown>)[name] =
+              createTxCollection(col as Collection<unknown>, () => active);
+          }
+          return transactionContext.run(true, async () => {
+            try { return await fn({ ...txCollections, from }); }
+            finally { active = false; }
+          });
         },
         opts,
       )) as R;
@@ -1014,8 +1075,6 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       // fence) or is the creator's own thrown error verbatim. Surface it as
       // `result.error`.
       return err(txErr instanceof Error ? txErr : new Error(String(txErr)));
-    } finally {
-      exitTransactionScope(txScopedCollections);
     }
   }
 
