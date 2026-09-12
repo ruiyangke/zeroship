@@ -99,7 +99,7 @@ async fn list_returns_idp_and_gateway_sessions() {
         let idp = seed_idp_session(&client, user.id).await;
         let seed = database.connect().await;
         seed.execute(
-            "UPDATE zeroship.idp_sessions SET created_at = NOW() - INTERVAL '1 day' WHERE id = $1",
+            "UPDATE zeroship.idp_sessions SET auth_time = NOW() - INTERVAL '1 day' WHERE id = $1",
             &[&idp.id],
         )
         .await
@@ -176,7 +176,13 @@ async fn list_excludes_revoked_and_expired() {
 
         // An expired gateway session.
         let app_id = seed_app(database).await;
+        let live_gateway = seed_gateway_session(database, user.id, app_id, &email).await;
+        let revoked_gateway = seed_gateway_session(database, user.id, app_id, &email).await;
         let seed = database.connect().await;
+        seed.execute(
+            "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE id = $1",
+            &[&revoked_gateway],
+        ).await.expect("seed a revoked gateway audit row");
         seed
             .execute(
                 "INSERT INTO zeroship.gateway_sessions \
@@ -192,12 +198,11 @@ async fn list_excludes_revoked_and_expired() {
             .await
             .expect("list_by_user");
 
-        assert_eq!(
-            list.len(),
-            1,
-            "only the single live idp session should be listed, got {list:?}"
-        );
-        assert_eq!(list[0].id, live.id);
+        let mut actual: Vec<_> = list.iter().map(|row| row.id).collect();
+        actual.sort_unstable();
+        let mut expected = [live.id, live_gateway];
+        expected.sort_unstable();
+        assert_eq!(actual, expected, "only live sessions of either kind are listed");
 
     })
     .await;
