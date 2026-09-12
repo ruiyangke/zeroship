@@ -29,7 +29,7 @@ import { createPaymentsClient } from "@zeroship/payments";
 
 const payments = createPaymentsClient({
   baseUrl: "https://console.zeroship.ai", // control-plane origin
-  creatorId: "usr_…",                      // the creator this acts on
+  creatorId: "usr_0000000002e4nenowz3qmamtd", // canonical platform UserId
   auth: () => myBearerToken,               // PAT / session — same shape as @zeroship/control
 });
 
@@ -52,7 +52,9 @@ const { clientSecret, paymentIntentId, applicationFeeCents } =
 
 `createPaymentsClient` accepts every `@zeroship/control` `ControlClientOptions`
 field — `baseUrl`, `fetch`, `auth`, `cookie`, `headers`, `onSetCookie` — plus
-the required `creatorId`. It is a thin façade over `ControlClient`, so auth,
+the required `creatorId: UserId`. `UserId` is exported by `@zeroship/control`
+and has the canonical `usr_` plus fixed-width lowercase base36 UUIDv7 shape. It
+is a thin façade over `ControlClient`, so auth,
 cookie forwarding, JSON encoding, and error mapping are identical.
 
 ### Errors

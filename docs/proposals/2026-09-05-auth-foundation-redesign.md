@@ -329,9 +329,8 @@ different rows rather than sharing one enum by reflex.
 
 The table keeps its current name. A rename to `people` was considered and
 rejected: it is churn across the auth crate that binds nothing. The typed id
-does change - today the id defaults to a bare `uuidV4()` in
-`db/migrations-ts/20260702000300_auth_oauth_tables.ts`, in violation of the
-AGENTS.md typed_id invariant.
+is the canonical platform `UserId`: the platform corpus authors `usr_` typed-id
+text with no database default, and Rust mints the value before insertion.
 
 *Without it:* nothing. It is the only stored identity fact.
 
@@ -384,10 +383,10 @@ SAME migration will be REFUSED, because the lowering compares a freshly authored
 `text` against a live `text COLLATE "C"`. That is not a hazard being predicted
 here; it is why `db/migrations-ts/20260906000200_apps_project_ownership_key.ts`
 exists as its own file. Step 9 therefore adds and collates the column in one
-migration and adds the foreign key in a later one. A second mismatch to carry
-into the sketches: `zeroship.users.id` is still `uuid`, so `person_id` stays
-`uuid` while `project_id` is collated text - the two id domains do not match, by
-design.
+migration and adds the foreign key in a later one. The identity domain has also
+converged: `zeroship.users.id` and every `person_id` reference use canonical
+`UserId` text, while `project_id` uses its own typed-id prefix. The domains
+remain distinct by prefix and foreign-key target.
 
 *Without it:* subjects are either global, so apps correlate users across the
 platform, or per-app, so a project's apps cannot agree on a user.
