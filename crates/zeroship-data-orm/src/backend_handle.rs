@@ -139,7 +139,7 @@ pub async fn routed_spatial_near(
     column: &str,
     point: GeoPoint,
     radius_m: f64,
-    limit: Option<usize>,
+    limit: usize,
 ) -> Result<Vec<Value>, DbError> {
     read_on_route(route, async {
         let lane = if route.in_tx() {

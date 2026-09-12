@@ -612,7 +612,7 @@ fn postgis_extension_missing_reports_typed_error() {
                         column: "any",
                         point: GeoPoint { lat: 0.0, lng: 0.0 },
                         radius_m: 1000.0,
-                        limit: None,
+                        limit: 1,
                     },
                 )
                 .await
