@@ -1,3 +1,17 @@
+error[E0433]: failed to resolve: could not find `probe` in `transaction`
+ --> tests/sql/ui/raw_execution_is_private.rs:5:45
+  |
+5 |     let _ = zeroship_data_orm::transaction::probe::operation;
+  |                                             ^^^^^ could not find `probe` in `transaction`
+  |
+note: found an item that was configured out
+ --> src/transaction/mod.rs
+  |
+  | #[cfg(test)]
+  |       ---- the item is gated here
+  | pub mod probe;
+  |         ^^^^^
+
 error[E0603]: module `exec` is private
  --> tests/sql/ui/raw_execution_is_private.rs:2:32
   |
