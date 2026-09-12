@@ -1,153 +1,136 @@
 //! OIDC Back-Channel Logout OP emission tests.
 
-use crate::common;
+use crate::common::database::Database;
 
 use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::{connect, Client, NoTls};
+use compio_postgres::Client;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use ntex::web::{self, HttpResponse};
 use serde_json::{json, Value};
 use uuid::Uuid;
-use zeroship_auth::oidc::{
-    backchannel_logout, Issuer, LogoutTokenClaims, LOGOUT_TOKEN_TYP,
-};
+use zeroship_auth::oidc::{backchannel_logout, Issuer, LogoutTokenClaims, LOGOUT_TOKEN_TYP};
 use zeroship_auth::store::sessions as session_store;
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
-fn db_url() -> String {
-    crate::common::test_database_url()
-}
-
-async fn open_conn() -> Client {
-    let dsn = db_url();
-    let (client, connection) = connect(&dsn, NoTls).await.expect("connect test DB");
-    compio::runtime::spawn(async move {
-        if let Err(err) = connection.run().await {
-            eprintln!("[oidc_backchannel_logout_test] pg connection error: {err}");
-        }
-    })
-    .detach();
-    client
-}
-
 fn test_issuer() -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[19; 32]);
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
 #[ntex::test]
 async fn logout_emission_posts_signed_logout_token_with_sid() {
-    let db = open_conn().await;
-    let issuer = test_issuer();
-    common::publish_op_key_once(&issuer, &db)
+    Database::run(async |database| {
+        let seed = database.connect().await;
+        let db = database.connect_as_auth().await;
+        let issuer = test_issuer();
+        issuer
+            .publish_active_key(&db)
+            .await
+            .expect("publish active OP key");
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let rp_state = captured.clone();
+        let rp = web::test::server(move || {
+            let rp_state = rp_state.clone();
+            async move {
+                web::App::new()
+                    .state(rp_state)
+                    .service(web::resource("/bcl").route(web::post().to(capture_logout_token)))
+            }
+        })
+        .await;
+        let backchannel_logout_uri = rp.url("/bcl");
+
+        let user_id = seed_user(&seed).await;
+        let client_id = format!("oac_bcl_emit_{}", Uuid::new_v4().simple());
+        seed_oauth_client(&seed, &client_id, &backchannel_logout_uri).await;
+        let session = session_store::create(
+            &db,
+            &session_store::CreateSession {
+                user_id,
+                auth_method: "pwd",
+                amr: vec!["pwd".to_string()],
+                acr: None,
+                expected_credential_version: None,
+                idle_minutes: zeroship_auth::sessions::login::IDLE_MINUTES,
+                absolute_hours: zeroship_auth::sessions::login::ABSOLUTE_HOURS,
+            },
+        )
         .await
-        .expect("publish active OP key");
-    let captured = Arc::new(Mutex::new(Vec::<String>::new()));
-    let rp_state = captured.clone();
-    let rp = web::test::server(move || {
-        let rp_state = rp_state.clone();
-        async move {
-            web::App::new()
-                .state(rp_state)
-                .service(web::resource("/bcl").route(web::post().to(capture_logout_token)))
-        }
+        .expect("create OP session");
+        let sid = session.id.to_string();
+        // Record the pairwise subject the OP gives this client's user.
+        let sub = issuer.pairwise_subject(
+            &user_id.to_string(),
+            &format!("https://{client_id}.zeroship.localhost"),
+        );
+
+        backchannel_logout::record_rp_participation(
+            &db,
+            user_id,
+            &sid,
+            &client_id,
+            &sub,
+            Some(&backchannel_logout_uri),
+        )
+        .await
+        .expect("record RP participation");
+
+        let report = backchannel_logout::emit_for_session(&db, &issuer, session.id)
+            .await
+            .expect("emit BCL");
+        assert_eq!(report.attempted, 1);
+        assert_eq!(report.delivered, 1);
+        let token = {
+            let tokens = captured.lock().expect("captured lock");
+            assert_eq!(
+                tokens.len(),
+                1,
+                "RP receives the session's logout token once"
+            );
+            tokens[0].clone()
+        };
+
+        let header = decode_header(&token).expect("logout token header");
+        assert_eq!(header.alg, Algorithm::EdDSA);
+        assert_eq!(header.typ.as_deref(), Some(LOGOUT_TOKEN_TYP));
+        assert_eq!(header.kid.as_deref(), Some(issuer.kid()));
+
+        let jwk = issuer.public_jwk();
+        let decoding =
+            DecodingKey::from_ed_components(jwk["x"].as_str().expect("OP public JWK x component"))
+                .expect("ed decoding key");
+        let mut validation = Validation::new(Algorithm::EdDSA);
+        validation.set_issuer(&[issuer.issuer()]);
+        validation.set_audience(&[client_id.as_str()]);
+        let claims = decode::<LogoutTokenClaims>(&token, &decoding, &validation)
+            .expect("verify logout_token")
+            .claims;
+
+        assert_eq!(claims.iss, issuer.issuer());
+        assert_eq!(claims.aud, client_id);
+        assert_eq!(claims.sub.as_deref(), Some(sub.as_str()));
+        assert_eq!(claims.sid.as_deref(), Some(sid.as_str()));
+        assert!(claims.iat > 0);
+        assert!(claims.exp > claims.iat);
+        assert!(!claims.jti.is_empty());
+        assert_eq!(
+            claims.events,
+            std::collections::BTreeMap::from([(
+                zeroship_core::logout_token::BCL_EVENT.to_string(),
+                json!({})
+            )])
+        );
+
+        let raw = raw_claims(&token);
+        assert!(
+            raw.get("nonce").is_none(),
+            "logout_token MUST NOT contain nonce: {raw}"
+        );
     })
     .await;
-    let backchannel_logout_uri = rp.url("/bcl");
-
-    let user_id = seed_user(&db).await;
-    let client_id = format!("oac_bcl_emit_{}", Uuid::new_v4().simple());
-    seed_oauth_client(&db, &client_id, &backchannel_logout_uri).await;
-    let session = session_store::create(
-        &db,
-        &session_store::CreateSession {
-            user_id,
-            auth_method: "pwd",
-            amr: vec!["pwd".to_string()],
-            acr: None,
-            expected_credential_version: None,
-            idle_minutes: zeroship_auth::sessions::login::IDLE_MINUTES,
-            absolute_hours: zeroship_auth::sessions::login::ABSOLUTE_HOURS,
-        },
-    )
-    .await
-    .expect("create OP session");
-    let sid = session.id.to_string();
-    // The `sub` an RP participation row carries is the per-app pairwise subject
-    // the OP minted for this (user, client) - so derive it through the issuer
-    // rather than inventing one. `pws_` + a 32-char simple UUID is not even the
-    // minted shape (`is_pairwise_subject` requires exactly 20 base62 chars), so
-    // the old value could never have come off a real token.
-    let sub = issuer.pairwise_subject(
-        &user_id.to_string(),
-        &format!("https://{client_id}.zeroship.localhost"),
-    );
-
-    backchannel_logout::record_rp_participation(
-        &db,
-        user_id,
-        &sid,
-        &client_id,
-        &sub,
-        Some(&backchannel_logout_uri),
-    )
-    .await
-    .expect("record RP participation");
-
-    let report = backchannel_logout::emit_for_session(&db, &issuer, session.id)
-        .await
-        .expect("emit BCL");
-    assert_eq!(report.attempted, 1);
-    assert_eq!(report.delivered, 1);
-    let token = captured
-        .lock()
-        .expect("captured lock")
-        .first()
-        .cloned()
-        .expect("RP captured one logout_token");
-
-    let header = decode_header(&token).expect("logout token header");
-    assert_eq!(header.alg, Algorithm::EdDSA);
-    assert_eq!(header.typ.as_deref(), Some(LOGOUT_TOKEN_TYP));
-    assert_eq!(header.kid.as_deref(), Some(issuer.kid()));
-
-    let jwk = issuer.public_jwk();
-    let decoding = DecodingKey::from_ed_components(
-        jwk["x"].as_str().expect("OP public JWK x component"),
-    )
-    .expect("ed decoding key");
-    let mut validation = Validation::new(Algorithm::EdDSA);
-    validation.set_issuer(&[issuer.issuer()]);
-    validation.set_audience(&[client_id.as_str()]);
-    let claims = decode::<LogoutTokenClaims>(&token, &decoding, &validation)
-        .expect("verify logout_token")
-        .claims;
-
-    assert_eq!(claims.iss, issuer.issuer());
-    assert_eq!(claims.aud, client_id);
-    assert_eq!(claims.sub.as_deref(), Some(sub.as_str()));
-    assert_eq!(claims.sid.as_deref(), Some(sid.as_str()));
-    assert!(claims.iat > 0);
-    assert!(claims.exp > claims.iat);
-    assert!(!claims.jti.is_empty());
-    assert_eq!(
-        claims.events,
-        std::collections::BTreeMap::from([(
-            zeroship_core::logout_token::BCL_EVENT.to_string(),
-            json!({})
-        )])
-    );
-
-    let raw = raw_claims(&token);
-    assert!(
-        raw.get("nonce").is_none(),
-        "logout_token MUST NOT contain nonce: {raw}"
-    );
-
-    cleanup(&db, user_id, session.id, &client_id).await;
 }
 
 async fn capture_logout_token(
@@ -166,10 +149,7 @@ async fn capture_logout_token(
 }
 
 fn raw_claims(token: &str) -> Value {
-    let payload = token
-        .split('.')
-        .nth(1)
-        .expect("JWT payload segment");
+    let payload = token.split('.').nth(1).expect("JWT payload segment");
     let decoded = URL_SAFE_NO_PAD.decode(payload).expect("payload b64url");
     serde_json::from_slice(&decoded).expect("payload json")
 }
@@ -200,28 +180,4 @@ async fn seed_oauth_client(db: &Client, client_id: &str, backchannel_logout_uri:
     )
     .await
     .expect("seed oauth client");
-}
-
-async fn cleanup(db: &Client, user_id: Uuid, session_id: Uuid, client_id: &str) {
-    db.execute(
-        "DELETE FROM zeroship.oidc_session_clients WHERE idp_session_id = $1",
-        &[&session_id],
-    )
-    .await
-    .ok();
-    db.execute(
-        "DELETE FROM zeroship.idp_sessions WHERE id = $1",
-        &[&session_id],
-    )
-    .await
-    .ok();
-    db.execute(
-        "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
-        &[&client_id],
-    )
-    .await
-    .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
-        .await
-        .ok();
 }
