@@ -73,11 +73,11 @@ async fn retention_applies_each_event_class_window() {
         }
 
         // Exercise the production entry point and its dedicated connection.
-        audit_retention::tick(database.url())
+        audit_retention::tick(database.auth_url().as_str())
             .await
             .expect("retention tick");
         assert_eq!(retained_events(&client).await, expected);
-        audit_retention::tick(database.url())
+        audit_retention::tick(database.auth_url().as_str())
             .await
             .expect("repeat retention tick");
         assert_eq!(retained_events(&client).await, expected);
@@ -128,9 +128,24 @@ async fn failed_sweep_rolls_back_deletes_and_restores_tamper_protection() {
         let pii = seed_event(&client, "signup", 91).await;
         let debug = seed_event(&client, "mailer_send", 31).await;
         let retained = seed_event(&client, "login_success", 1).await;
+        // Sequence advances survive rollback, so they witness the successful
+        // earlier delete and the later injected refusal independently of the rows.
         admin.batch_execute(
-            "CREATE FUNCTION zeroship.fail_pii_retention() RETURNS trigger \
+            "CREATE SEQUENCE zeroship.observed_security_deletion; \
+             CREATE SEQUENCE zeroship.observed_pii_refusal; \
+             GRANT USAGE, SELECT ON SEQUENCE zeroship.observed_security_deletion, \
+               zeroship.observed_pii_refusal TO zeroship_auth; \
+             CREATE FUNCTION zeroship.observe_security_deletion() RETURNS trigger \
              LANGUAGE plpgsql AS $$ BEGIN \
+               PERFORM nextval('zeroship.observed_security_deletion'); \
+               RETURN OLD; \
+             END $$; \
+             CREATE TRIGGER observe_security_deletion AFTER DELETE ON zeroship.audit_events \
+             FOR EACH ROW WHEN (OLD.event_type = 'login_success') \
+             EXECUTE FUNCTION zeroship.observe_security_deletion(); \
+             CREATE FUNCTION zeroship.fail_pii_retention() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN \
+               PERFORM nextval('zeroship.observed_pii_refusal'); \
                RAISE EXCEPTION 'audit retention failure injection' USING ERRCODE = 'check_violation'; \
              END $$; \
              CREATE TRIGGER fail_pii_retention BEFORE DELETE ON zeroship.audit_events \
@@ -138,8 +153,15 @@ async fn failed_sweep_rolls_back_deletes_and_restores_tamper_protection() {
              EXECUTE FUNCTION zeroship.fail_pii_retention()"
         ).await.expect("inject a failure after the security sweep");
 
-        let error = audit_retention::sweep_once(&mut client).await.expect_err("injected failure");
-        assert!(error.to_string().contains("audit retention failure injection"), "{error}");
+        audit_retention::sweep_once(&mut client).await.expect_err("injected failure");
+        let security_deleted: bool = client
+            .query_one("SELECT is_called FROM zeroship.observed_security_deletion", &[])
+            .await.expect("observe deletion before rollback").get(0);
+        let pii_refused: bool = client
+            .query_one("SELECT is_called FROM zeroship.observed_pii_refusal", &[])
+            .await.expect("observe the injected failure").get(0);
+        assert!(security_deleted, "the security event was deleted before the failure");
+        assert!(pii_refused, "the sweep reached the injected PII refusal");
         assert_eq!(retained_events(&client).await, [security, pii, debug, retained]);
         assert_tamper_protection(&client, retained).await;
 
