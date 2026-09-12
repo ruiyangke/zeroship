@@ -13,11 +13,11 @@ async fn concurrent_owner_departures_preserve_the_last_owner() {
         .execute(
             "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
              VALUES ($1, $2, 'owner')",
-            &[&org.id, &second],
+            &[&org.id, &second.as_str()],
         )
         .await
         .unwrap();
-    org.seeded.push(second);
+    org.seeded.push(second.clone());
 
     let (mut blocker, connection) =
         compio_postgres::connect(&super::common::require_control_db(), compio_postgres::NoTls)
@@ -48,8 +48,8 @@ async fn concurrent_owner_departures_preserve_the_last_owner() {
                 },
                 async {
                     futures::join!(
-                        organizations::leave_organization(&fx.registry, org.owner, &org.id, None),
-                        organizations::leave_organization(&fx.registry, second, &org.id, None),
+                        organizations::leave_organization(&fx.registry, &org.owner, &org.id, None),
+                        organizations::leave_organization(&fx.registry, &second, &org.id, None),
                     )
                 },
             )
@@ -58,8 +58,8 @@ async fn concurrent_owner_departures_preserve_the_last_owner() {
     .await
     .expect("concurrent departures must finish after the fixture releases its lock");
     let owners = org.owner_count(&fx).await;
-    let first_role = org.role_of(&fx, org.owner).await;
-    let second_role = org.role_of(&fx, second).await;
+    let first_role = org.role_of(&fx, &org.owner).await;
+    let second_role = org.role_of(&fx, &second).await;
     org.cleanup(&fx).await;
     drop(blocker);
     compio::time::timeout(Duration::from_secs(10), driver)

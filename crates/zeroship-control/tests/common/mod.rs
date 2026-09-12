@@ -3,21 +3,22 @@
 pub mod authz_fixture;
 pub mod stripe_mock;
 
-use std::sync::OnceLock;
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::SigningKey;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::web::{self, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
 use zeroship_control::Registry;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
+use zeroship_core::UserId;
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const PLATFORM_KID: &str = "platform-control-test-kid";
@@ -230,7 +231,7 @@ pub fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
 /// control intersects with the principal's live `zeroship.principal_grants`
 /// rows, so a token minted here carries at most
 /// `PLATFORM_CLI_ISSUABLE_SCOPES` unless the test seeds grants of its own.
-pub fn platform_token(subject: Uuid, scope: &str) -> String {
+pub fn platform_token(subject: &UserId, scope: &str) -> String {
     platform_token_for_client(subject, scope, "zeroship-cli")
 }
 
@@ -241,14 +242,14 @@ pub fn platform_token(subject: Uuid, scope: &str) -> String {
 /// CLI's issuable set.
 pub const CONSOLE_CLIENT_ID: &str = "zeroship-console";
 
-pub fn platform_token_for_client(subject: Uuid, scope: &str, client_id: &str) -> String {
+pub fn platform_token_for_client(subject: &UserId, scope: &str, client_id: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let claims = json!({
         "iss": PLATFORM_ISSUER,
-        "sub": subject.to_string(),
+        "sub": subject.as_str(),
         "aud": "control.zeroship.ai",
         "exp": now + 3600,
         "iat": now,
@@ -263,11 +264,11 @@ pub fn platform_token_for_client(subject: Uuid, scope: &str, client_id: &str) ->
     encode(&header, &claims, &platform_encoding_key()).expect("platform token")
 }
 
-pub fn platform_bearer(subject: Uuid, scope: &str) -> String {
+pub fn platform_bearer(subject: &UserId, scope: &str) -> String {
     format!("Bearer {}", platform_token(subject, scope))
 }
 
-pub fn console_bearer(subject: Uuid, scope: &str) -> String {
+pub fn console_bearer(subject: &UserId, scope: &str) -> String {
     format!(
         "Bearer {}",
         platform_token_for_client(subject, scope, CONSOLE_CLIENT_ID)
@@ -349,10 +350,10 @@ pub async fn ensure_builtin_plans(registry: &Registry) {
 /// use this. It should build that shape explicitly, because the placement is
 /// then the thing under test.
 #[allow(dead_code)]
-pub async fn personal_project_for(registry: &Registry, owner: Uuid) -> String {
+pub async fn personal_project_for(registry: &Registry, owner: &UserId) -> String {
     zeroship_control::organizations::ensure_personal_project(registry, owner)
         .await
-        .unwrap_or_else(|err| panic!("provision personal project for {owner}: {err:?}"))
+        .unwrap_or_else(|err| panic!("provision personal project for {}: {err:?}", owner.as_str()))
         .as_str()
         .to_string()
 }
@@ -385,8 +386,8 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
 /// Every billing fixture in this crate starts here rather than at
 /// `zeroship.users`. That is the shape change, not a rename: the party an
 /// invoice, a payout, a Connect account and a `billing_notifications` claim key
-/// on is an organization, and a test that mints a user and passes its uuid as
-/// the subject would not fail loudly - the column is `text`, so the id would
+/// on is an organization, and a test that mints a user and passes its typed id
+/// as the subject would not fail loudly - the column is `text`, so the id would
 /// simply match no organization row and the FK would refuse it at write time
 /// with an error about the wrong thing.
 ///
@@ -483,14 +484,14 @@ pub async fn seed_app_in_organization(
 pub async fn seat_organization_member(
     pg: &compio_postgres::Client,
     organization_id: &str,
-    user: &Uuid,
+    user: &UserId,
     role: &str,
 ) {
     pg.execute(
         "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
          VALUES ($1, $2, $3) \
          ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        &[&organization_id, user, &role],
+        &[&organization_id, &user.as_str(), &role],
     )
     .await
     .expect("seat organization member");
@@ -534,7 +535,7 @@ pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> Strin
 pub async fn seat_app_organization_member(
     pg: &compio_postgres::Client,
     app: &Uuid,
-    user: &Uuid,
+    user: &UserId,
     role: &str,
 ) {
     let seated = pg
@@ -543,16 +544,18 @@ pub async fn seat_app_organization_member(
              SELECT p.organization_id, $2, $3 FROM zeroship.apps a \
                JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[app, user, &role],
+            &[app, &user.as_str(), &role],
         )
         .await
         .expect("seat organization member for fixture app");
     assert_eq!(
-        seated, 1,
-        "seating {user} as '{role}' on app {app} affected {seated} row(s). The \
+        seated,
+        1,
+        "seating {} as '{role}' on app {app} affected {seated} row(s). The \
          INSERT ... SELECT matched no app reaching an organization through \
          apps.project_id -> projects.organization_id, which is a SUCCESSFUL \
-         statement that seats nobody. Create the app before seating it."
+         statement that seats nobody. Create the app before seating it.",
+        user.as_str()
     );
 }
 

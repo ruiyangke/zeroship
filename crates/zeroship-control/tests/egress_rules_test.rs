@@ -47,7 +47,10 @@ fn db_url() -> String {
 
 fn tmpdir(label: &str) -> PathBuf {
     let mut path = std::env::temp_dir();
-    path.push(format!("zship-egress-rules-{label}-{}", Uuid::new_v4().simple()));
+    path.push(format!(
+        "zship-egress-rules-{label}-{}",
+        Uuid::new_v4().simple()
+    ));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
 }
@@ -164,7 +167,10 @@ async fn seed_plan_with_max_accept_rules(catalog: &PlanCatalog, max_grants: u32)
         archived: false,
         assignable_by_creator: false,
     };
-    catalog.upsert(&plan, Some(plan.archived)).await.expect("upsert plan")
+    catalog
+        .upsert(&plan, Some(plan.archived))
+        .await
+        .expect("upsert plan")
 }
 
 async fn count_rules(pg: &Client, app_id: Uuid) -> i64 {
@@ -186,7 +192,10 @@ async fn cleanup_app(pg: &Client, app_id: Uuid) {
         )
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.app_audit WHERE app_id = $1", &[&app_id])
+        .execute(
+            "DELETE FROM zeroship.app_audit WHERE app_id = $1",
+            &[&app_id],
+        )
         .await;
 }
 
@@ -261,7 +270,7 @@ async fn owner_can_write_list_and_delete_rules_of_both_forms() {
     );
     assert_eq!(
         body["rule"]["created_by"],
-        owner.user_id.to_string(),
+        owner.user_id.as_str(),
         "the creator is recorded as the author, not an operator"
     );
 
@@ -357,7 +366,7 @@ async fn a_creator_cannot_touch_another_creators_app() {
             port: 587,
             note: None,
         },
-        &owner.user_id.to_string(),
+        &owner.user_id,
     )
     .await
     .expect("owner seed rule");
@@ -450,21 +459,46 @@ async fn the_grammar_refuses_and_accepts_in_pairs() {
     let cases: [(&str, &str, StatusCode, &str); 8] = [
         // Wildcards are GONE: not narrowed, not catalog-checked, not
         // representable. The control is the same registrable domain, exact.
-        ("accept", "*.example.com", StatusCode::BAD_REQUEST, "wildcard"),
+        (
+            "accept",
+            "*.example.com",
+            StatusCode::BAD_REQUEST,
+            "wildcard",
+        ),
         ("accept", "api.example.com", StatusCode::OK, "exact name"),
         // The accept prefix floor, and its control one bit narrower.
-        ("accept", "10.0.0.0/8", StatusCode::BAD_REQUEST, "below the v4 floor"),
+        (
+            "accept",
+            "10.0.0.0/8",
+            StatusCode::BAD_REQUEST,
+            "below the v4 floor",
+        ),
         ("accept", "10.0.0.0/16", StatusCode::OK, "at the v4 floor"),
         // The floor is ACCEPT-only. The identical range as a REJECT is legal,
         // and so is the broadest range there is - refusing it would be
         // refusing the strictest rule in the grammar.
-        ("reject", "10.0.0.0/8", StatusCode::OK, "reject has no floor"),
+        (
+            "reject",
+            "10.0.0.0/8",
+            StatusCode::OK,
+            "reject has no floor",
+        ),
         ("reject", "0.0.0.0/0", StatusCode::OK, "reject everything"),
         // An IP literal is refused in favour of the range spelling, because
         // the two are decided in different phases and the reader must be able
         // to tell which. The control is that same address written as a /32.
-        ("accept", "203.0.113.4", StatusCode::BAD_REQUEST, "bare IP literal"),
-        ("accept", "203.0.113.4/32", StatusCode::OK, "the /32 spelling"),
+        (
+            "accept",
+            "203.0.113.4",
+            StatusCode::BAD_REQUEST,
+            "bare IP literal",
+        ),
+        (
+            "accept",
+            "203.0.113.4/32",
+            StatusCode::OK,
+            "the /32 spelling",
+        ),
     ];
 
     let mut written = 0;
@@ -550,7 +584,10 @@ async fn the_plan_cap_counts_accept_rules_and_not_reject_rules() {
         serde_json::json!({"verdict": "accept", "destination": "one.example.com", "port": 5432}),
     )
     .to_request();
-    assert_eq!(test::call_service(&app, first).await.status(), StatusCode::OK);
+    assert_eq!(
+        test::call_service(&app, first).await.status(),
+        StatusCode::OK
+    );
 
     let second = post(
         app_record.id,
@@ -669,9 +706,10 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
         serde_json::json!({"verdict": "reject", "destination": "203.0.113.0/24", "port": 443}),
     )
     .to_request();
-    let body: serde_json::Value =
-        serde_json::from_slice(&test::read_body(test::call_service(&app, range_reject).await).await)
-            .expect("reject json");
+    let body: serde_json::Value = serde_json::from_slice(
+        &test::read_body(test::call_service(&app, range_reject).await).await,
+    )
+    .expect("reject json");
     assert!(
         body["notice"].is_null(),
         "a range REJECT does not move the app into the resolving class"
@@ -709,9 +747,10 @@ async fn the_first_range_accept_rule_says_the_app_now_resolves_before_refusing()
         serde_json::json!({"verdict": "accept", "destination": "192.0.2.0/24", "port": 443}),
     )
     .to_request();
-    let body: serde_json::Value =
-        serde_json::from_slice(&test::read_body(test::call_service(&app, second_range).await).await)
-            .expect("second range json");
+    let body: serde_json::Value = serde_json::from_slice(
+        &test::read_body(test::call_service(&app, second_range).await).await,
+    )
+    .expect("second range json");
     assert!(
         body["notice"].is_null(),
         "the notice is a one-time statement about the app, not a label on range rules"
@@ -777,7 +816,10 @@ async fn a_dead_accept_reports_the_effective_verdict() {
         .iter()
         .find(|r| r["destination"] == "198.51.100.128/25" && r["port"] == 443)
         .expect("the covered accept rule is listed");
-    assert_eq!(dead["verdict"], "accept", "the row still says what was written");
+    assert_eq!(
+        dead["verdict"], "accept",
+        "the row still says what was written"
+    );
     assert_eq!(
         dead["effective_verdict"], "reject",
         "and the list says what it actually does"

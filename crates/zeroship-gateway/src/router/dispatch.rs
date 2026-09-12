@@ -32,9 +32,7 @@ use zeroship_core::service_identity::{endpoints, AuthError as ServiceAuthError};
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
-use super::auth::{
-    extract_session_cookie, jwt_subject_unverified, resolve_auth, AuthOutcome,
-};
+use super::auth::{extract_session_cookie, jwt_subject_unverified, resolve_auth, AuthOutcome};
 use super::cors::{build_preflight_response, inject_cors_response_headers};
 use super::helpers::resource_key_hash;
 use super::static_serve::serve_resource_tree_static;
@@ -69,7 +67,9 @@ pub fn extract_app_name(req: &HttpRequest, path_name: Option<&str>) -> Option<St
 
     // Ignore IP addresses (starts with digit or contains only digits and dots)
     if host.starts_with(|c: char| c.is_ascii_digit())
-        && host.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ':')
+        && host
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == ':')
     {
         return None;
     }
@@ -153,8 +153,9 @@ pub async fn workflow_advance_internal(
     let request: WorkflowStepRequest = match serde_json::from_slice(body.as_ref()) {
         Ok(request) => request,
         Err(e) => {
-            return HttpResponse::BadRequest()
-                .json(&serde_json::json!({"error": format!("invalid workflow dispatch request: {e}")}));
+            return HttpResponse::BadRequest().json(
+                &serde_json::json!({"error": format!("invalid workflow dispatch request: {e}")}),
+            );
         }
     };
     if request.run_id.is_empty() {
@@ -183,8 +184,9 @@ pub async fn workflow_advance_internal(
     let worker_body = match serde_json::to_vec(&request) {
         Ok(body) => body,
         Err(e) => {
-            return HttpResponse::InternalServerError()
-                .json(&serde_json::json!({"error": format!("encode worker workflow dispatch: {e}")}));
+            return HttpResponse::InternalServerError().json(
+                &serde_json::json!({"error": format!("encode worker workflow dispatch: {e}")}),
+            );
         }
     };
 
@@ -215,8 +217,9 @@ pub async fn workflow_advance_internal(
     let (_buffered, worker_bytes) = buffer_response_body(worker_response).await;
     match workflow_worker_advance_response(&worker_bytes) {
         Ok(response) => HttpResponse::Ok().json(&response),
-        Err(e) => HttpResponse::BadGateway()
-            .json(&serde_json::json!({"error": format!("invalid worker workflow advance ack: {e}")})),
+        Err(e) => HttpResponse::BadGateway().json(
+            &serde_json::json!({"error": format!("invalid worker workflow advance ack: {e}")}),
+        ),
     }
 }
 
@@ -334,8 +337,10 @@ fn single_worker_result_to_outcome(result: &Value) -> Result<Value, String> {
             if result.get("ordinal").is_some() && result.get("name").is_some() {
                 outcome["ordinal"] = serde_json::json!(required_i64(result, "ordinal")?);
                 outcome["name"] = serde_json::json!(required_str(result, "name")?);
-                outcome["nameOccurrence"] =
-                    serde_json::json!(result.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+                outcome["nameOccurrence"] = serde_json::json!(result
+                    .get("nameOccurrence")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0));
             }
             Ok(outcome)
         }
@@ -471,29 +476,37 @@ fn normalize_workflow_outcomes(
         // trailing entry. Compensation is a serial reverse-frontier outcome and is
         // trailing too.
         if kind != "StepCompleted" && kind != "Child" && idx != last {
-            return Err("workflow suspension or terminal outcome must be the trailing batch entry".to_string());
+            return Err(
+                "workflow suspension or terminal outcome must be the trailing batch entry"
+                    .to_string(),
+            );
         }
         match kind {
             "StepCompleted" => {
                 let step_kind = workflow_step_kind_or_run(outcome)?;
                 outcome["stepKind"] = step_kind;
-                outcome["compensable"] = serde_json::json!(
-                    outcome.get("compensable").and_then(Value::as_bool).unwrap_or(false)
-                );
-                outcome["compensationMaxAttempts"] = serde_json::json!(
-                    outcome.get("compensationMaxAttempts").and_then(Value::as_i64).unwrap_or(1)
-                );
+                outcome["compensable"] = serde_json::json!(outcome
+                    .get("compensable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false));
+                outcome["compensationMaxAttempts"] = serde_json::json!(outcome
+                    .get("compensationMaxAttempts")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1));
                 ensure_workflow_output(outcome);
             }
             "RunCompleted" => ensure_workflow_output(outcome),
             "ContinueAsNew" => ensure_continue_as_new_input(outcome),
             "RunFailed" => {
-                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
-                    let message = if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
-                        "workflow step failed"
-                    } else {
-                        "workflow run failed"
-                    };
+                if outcome.get("error").is_none()
+                    || outcome.get("error").is_some_and(Value::is_null)
+                {
+                    let message =
+                        if outcome.get("ordinal").is_some() && outcome.get("name").is_some() {
+                            "workflow step failed"
+                        } else {
+                            "workflow run failed"
+                        };
                     outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), message);
                 }
             }
@@ -504,7 +517,10 @@ fn normalize_workflow_outcomes(
             }
             "Wait" => {
                 let wake_at = normalize_workflow_wake_at(
-                    outcome.get("wakeAt").filter(|value| !value.is_null()).or_else(|| outcome.get("timeout")),
+                    outcome
+                        .get("wakeAt")
+                        .filter(|value| !value.is_null())
+                        .or_else(|| outcome.get("timeout")),
                 )
                 .ok_or_else(|| "invalid wait timeout".to_string())?;
                 outcome["wakeAt"] = wake_at;
@@ -540,16 +556,25 @@ fn normalize_workflow_outcomes(
             "CompensationCompleted" => {
                 let _ = required_i64(outcome, "ordinal")?;
                 let _ = required_str(outcome, "name")?;
-                outcome["nameOccurrence"] =
-                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
+                outcome["nameOccurrence"] = serde_json::json!(outcome
+                    .get("nameOccurrence")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0));
             }
             "CompensationFailed" => {
                 let _ = required_i64(outcome, "ordinal")?;
                 let _ = required_str(outcome, "name")?;
-                outcome["nameOccurrence"] =
-                    serde_json::json!(outcome.get("nameOccurrence").and_then(Value::as_i64).unwrap_or(0));
-                if outcome.get("error").is_none() || outcome.get("error").is_some_and(Value::is_null) {
-                    outcome["error"] = workflow_error_or_default(fallback_error.as_ref(), "workflow compensator failed");
+                outcome["nameOccurrence"] = serde_json::json!(outcome
+                    .get("nameOccurrence")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0));
+                if outcome.get("error").is_none()
+                    || outcome.get("error").is_some_and(Value::is_null)
+                {
+                    outcome["error"] = workflow_error_or_default(
+                        fallback_error.as_ref(),
+                        "workflow compensator failed",
+                    );
                 }
             }
             other => return Err(format!("unknown worker workflow outcome kind {other:?}")),
@@ -567,8 +592,14 @@ fn legacy_step_result_to_outcomes(result: &Value) -> Result<Vec<Value>, String> 
         .and_then(Value::as_array)
         .ok_or_else(|| "legacy StepResult missing checkpoints".to_string())?
     {
-        let kind = checkpoint.get("kind").and_then(Value::as_str).unwrap_or_default();
-        let state = checkpoint.get("state").and_then(Value::as_str).unwrap_or_default();
+        let kind = checkpoint
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let state = checkpoint
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         match (kind, state) {
             ("run" | "sideEffect", "completed") => {
                 let compensable = checkpoint
@@ -712,8 +743,7 @@ fn normalize_workflow_step_result(mut result: Value) -> Result<Value, String> {
         }
         if let Some(checkpoints) = result.get_mut("checkpoints").and_then(Value::as_array_mut) {
             for checkpoint in checkpoints {
-                let is_wait =
-                    checkpoint.get("kind").and_then(Value::as_str) == Some("wait_signal");
+                let is_wait = checkpoint.get("kind").and_then(Value::as_str) == Some("wait_signal");
                 let is_running = checkpoint.get("state").and_then(Value::as_str) == Some("running");
                 if is_wait && is_running {
                     checkpoint["wakeAt"] = wake_at.clone();
@@ -883,21 +913,14 @@ pub(crate) fn compute_bucket_id(
             }
             // Unauthenticated caller hitting a user-scoped rule: degrade to
             // the session cookie, then the IP — never share one empty bucket.
-            let cookie = req
-                .headers()
-                .get("cookie")
-                .and_then(|v| v.to_str().ok());
+            let cookie = req.headers().get("cookie").and_then(|v| v.to_str().ok());
             extract_session_cookie(cookie)
                 .map(|s| format!("sess:{s}"))
                 .unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::Session => {
-            let cookie = req
-                .headers()
-                .get("cookie")
-                .and_then(|v| v.to_str().ok());
-            extract_session_cookie(cookie)
-                .unwrap_or_else(|| client_ip(req, trust_proxy))
+            let cookie = req.headers().get("cookie").and_then(|v| v.to_str().ok());
+            extract_session_cookie(cookie).unwrap_or_else(|| client_ip(req, trust_proxy))
         }
         RateLimitPer::App => "app".to_string(),
     }
@@ -981,26 +1004,24 @@ pub(crate) fn is_websocket_upgrade(req: &HttpRequest) -> bool {
 ///      always hashes to the same bucket; reconnects vary).
 ///   4. Client IP (last-resort fallback for unauthenticated callers
 ///      hitting subscriptions on `publicly_accessible` resources).
-pub(crate) fn subscription_affinity_key(
-    req: &HttpRequest,
-    trust_proxy: bool,
-) -> String {
+pub(crate) fn subscription_affinity_key(req: &HttpRequest, trust_proxy: bool) -> String {
     // `"Bearer "` ONLY - see the note in `compute_bucket_id`. This function is
     // stricter-looking but weaker: it takes no `identity_verified`, so it reads
     // the header unconditionally. Accepting a scheme the gate never validated
     // would let an entirely UNAUTHENTICATED caller choose their own affinity
     // key and so steer their own CHWBL worker.
-    if let Some(auth) = req.headers().get("authorization").and_then(|v| v.to_str().ok()) {
+    if let Some(auth) = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+    {
         if let Some(rest) = auth.strip_prefix("Bearer ") {
             if let Some(sub) = jwt_subject_unverified(rest.trim()) {
                 return format!("sub:{sub}");
             }
         }
     }
-    let cookie = req
-        .headers()
-        .get("cookie")
-        .and_then(|v| v.to_str().ok());
+    let cookie = req.headers().get("cookie").and_then(|v| v.to_str().ok());
     if let Some(token) = extract_session_cookie(cookie) {
         return format!("sess:{token}");
     }
@@ -1171,8 +1192,7 @@ async fn handle_request(
         if let Some(resp) = rpc_predispatch_not_found(&dispatch_path) {
             return resp;
         }
-        return HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "no resource matched"}));
+        return HttpResponse::NotFound().json(&serde_json::json!({"error": "no resource matched"}));
     };
 
     execute_resource_tree(
@@ -1349,32 +1369,31 @@ async fn execute_resource_tree(
     //    a 302 → the platform OP; API clients see a 401 with a `WWW-Authenticate`
     //    challenge so they can prompt the user out-of-band.
     let request_id = Uuid::new_v4();
-    let user_header_from_gate =
-        match resolve_auth(
-            &req,
-            &state,
-            policy,
-            &request_id,
-            compiled_route.entry.oauth_client_id.as_deref(),
-            compiled_route.entry.sector_identifier.as_deref(),
-        )
-        .await
-        {
-            AuthOutcome::Allowed { user_header } => user_header,
-            AuthOutcome::Unauthenticated => {
-                return unauthenticated_response(
-                    &req,
-                    &state,
-                    compiled_route.entry.oauth_client_id.as_deref(),
-                );
-            }
-            AuthOutcome::ClientNotProvisioned => {
-                return client_not_provisioned_response();
-            }
-            AuthOutcome::InsufficientScope { required } => {
-                return insufficient_scope_response(&required);
-            }
-        };
+    let user_header_from_gate = match resolve_auth(
+        &req,
+        &state,
+        policy,
+        &request_id,
+        compiled_route.entry.oauth_client_id.as_deref(),
+        compiled_route.entry.sector_identifier.as_deref(),
+    )
+    .await
+    {
+        AuthOutcome::Allowed { user_header } => user_header,
+        AuthOutcome::Unauthenticated => {
+            return unauthenticated_response(
+                &req,
+                &state,
+                compiled_route.entry.oauth_client_id.as_deref(),
+            );
+        }
+        AuthOutcome::ClientNotProvisioned => {
+            return client_not_provisioned_response();
+        }
+        AuthOutcome::InsufficientScope { required } => {
+            return insufficient_scope_response(&required);
+        }
+    };
 
     // 4. CSRF origin guard. Mutations with a declared csrf_origins list
     //    require the request's `Origin` to match.
@@ -1385,8 +1404,10 @@ async fn execute_resource_tree(
     //    is exactly the hole the vite emitter closed by always writing
     //    `kind` (see `ProcedureKind` in crates/zeroship-bundle/src/rule.rs). `None`
     //    now only reaches here from a hand-authored raw-JS manifest.
-    if matches!(policy.kind, Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action))
-        || req.method() == ntex::http::Method::POST
+    if matches!(
+        policy.kind,
+        Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action)
+    ) || req.method() == ntex::http::Method::POST
         || req.method() == ntex::http::Method::PUT
         || req.method() == ntex::http::Method::PATCH
         || req.method() == ntex::http::Method::DELETE
@@ -1421,13 +1442,10 @@ async fn execute_resource_tree(
             state.config.trust_proxy,
             user_header_from_gate.is_some(),
         );
-        if let Err(resp) = state.per_rule_rate_limits.check(
-            app_id,
-            rule_idx,
-            rl.per,
-            &bucket_id,
-            rl,
-        ) {
+        if let Err(resp) = state
+            .per_rule_rate_limits
+            .check(app_id, rule_idx, rl.per, &bucket_id, rl)
+        {
             return resp;
         }
     }
@@ -1470,7 +1488,8 @@ async fn execute_resource_tree(
         .await
         {
             IdempotencyOutcome::ReturnNow(mut resp) => {
-                if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref()) {
+                if let (Some(cors), Some(origin)) = (policy.cors.as_ref(), origin_value.as_deref())
+                {
                     if !origin.is_empty() {
                         inject_cors_response_headers(resp.headers_mut(), cors, origin);
                     }
@@ -1555,8 +1574,8 @@ async fn execute_resource_tree(
             }
         }
         ResolvedAction::Redirect { to, status } => {
-            let st = ntex::http::StatusCode::from_u16(*status)
-                .unwrap_or(ntex::http::StatusCode::FOUND);
+            let st =
+                ntex::http::StatusCode::from_u16(*status).unwrap_or(ntex::http::StatusCode::FOUND);
             (
                 HttpResponse::build(st)
                     .header("location", to.clone())
@@ -2067,9 +2086,17 @@ pub(super) async fn handle_idempotency_pre_dispatch(
                 wall_start,
             ))
         }
-        Ok(idempotency::DedupeDecision::Proceed { entry_key, lock_key, body_hash, ttl_hours }) => {
-            IdempotencyOutcome::Proceed(InflightHandle { entry_key, lock_key, body_hash, ttl_hours })
-        }
+        Ok(idempotency::DedupeDecision::Proceed {
+            entry_key,
+            lock_key,
+            body_hash,
+            ttl_hours,
+        }) => IdempotencyOutcome::Proceed(InflightHandle {
+            entry_key,
+            lock_key,
+            body_hash,
+            ttl_hours,
+        }),
         Err(e) => {
             // Store error → log and fail closed. A degraded dedupe
             // backend must not silently let duplicate mutations
@@ -2103,15 +2130,13 @@ pub(super) async fn buffer_response_body(mut resp: HttpResponse) -> (HttpRespons
     use ntex::http::body::{Body, MessageBody};
     let mut body = resp.take_body();
     let mut buf: Vec<u8> = Vec::new();
-    std::future::poll_fn(|cx| {
-        loop {
-            match body.poll_next_chunk(cx) {
-                std::task::Poll::Ready(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
-                std::task::Poll::Ready(Some(Err(_))) | std::task::Poll::Ready(None) => {
-                    return std::task::Poll::Ready(());
-                }
-                std::task::Poll::Pending => return std::task::Poll::Pending,
+    std::future::poll_fn(|cx| loop {
+        match body.poll_next_chunk(cx) {
+            std::task::Poll::Ready(Some(Ok(chunk))) => buf.extend_from_slice(&chunk),
+            std::task::Poll::Ready(Some(Err(_))) | std::task::Poll::Ready(None) => {
+                return std::task::Poll::Ready(());
             }
+            std::task::Poll::Pending => return std::task::Poll::Pending,
         }
     })
     .await;
@@ -2375,8 +2400,7 @@ const RESERVED_HEADER_PREFIX: &str = "x-zs-";
 /// be forwarded into the worker dispatch envelope.
 fn is_reserved_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    lower.starts_with(RESERVED_HEADER_PREFIX)
-        || RESERVED_HEADER_EXACT.iter().any(|r| *r == lower)
+    lower.starts_with(RESERVED_HEADER_PREFIX) || RESERVED_HEADER_EXACT.iter().any(|r| *r == lower)
 }
 
 /// Collect inbound request headers as `[name, value]` pairs for the worker
@@ -2635,9 +2659,8 @@ fn client_not_provisioned_response() -> HttpResponse {
 ///   (and the `scope` string tells the client exactly which scopes to request).
 fn insufficient_scope_response(required: &[String]) -> HttpResponse {
     let scope_param = required.join(" ");
-    let challenge = format!(
-        "Bearer realm=\"zeroship\", error=\"insufficient_scope\", scope=\"{scope_param}\""
-    );
+    let challenge =
+        format!("Bearer realm=\"zeroship\", error=\"insufficient_scope\", scope=\"{scope_param}\"");
     HttpResponse::Forbidden()
         .header("www-authenticate", challenge.as_str())
         .json(&serde_json::json!({
@@ -2737,6 +2760,9 @@ async fn handle_auth_callback(
             return render_callback_error(oidc_callback_public_error(&e));
         }
     };
+    let Ok(global_user_id) = zeroship_core::UserId::parse(&claims.sub) else {
+        return render_callback_error("id_token sub is not a global user id");
+    };
 
     // 4. Create a per-origin session row. Check out a pooled connection
     //    for just this insert and release it on drop.
@@ -2760,7 +2786,7 @@ async fn handle_auth_callback(
     let session = match crate::sessions::create(
         &mut conn,
         &crate::sessions::NewSession {
-            user_id: &claims.sub,
+            user_id: &global_user_id,
             // `zeroship.gateway_sessions.app_id` is a UUID column bound
             // natively, so the route table's typed id is unwrapped for it.
             app_id: app_uuid.uuid(),
@@ -2792,18 +2818,15 @@ async fn handle_auth_callback(
 
     // 5. Mint the SIGNED `zeroship-sess+jwt` session cookie from the validated claims
     //    (the SAME mint path the SDK popup flow uses — one cookie shape, one
-    //    verifier). `claims.sub` is the global UUID; the helper derives the
+    //    verifier). `claims.sub` is the global user id; the helper derives the
     //    per-app `pws_` + relay alias before signing.
-    let Ok(global_user_id) = uuid::Uuid::parse_str(&claims.sub) else {
-        return render_callback_error("id_token sub is not a global user id");
-    };
     let amr = claims.amr.clone().unwrap_or_default();
     let session_cookie = match crate::auth_token::issue_interactive_session_cookie(
         &state,
         db_cfg,
         &client_id,
         sector_identifier.as_deref(),
-        global_user_id,
+        &global_user_id,
         claims.iat,
         claims.name.as_deref(),
         claims.picture.as_deref(),
@@ -2891,13 +2914,10 @@ fn start_oidc_redirect(req: &HttpRequest, state: &Arc<GateState>, client_id: &st
     let scheme = state.config.origin_scheme;
     let redirect_uri = format!("{scheme}://{host}/__zeroship/auth/callback");
 
-    let (auth_url, stash) = state
-        .oidc_rp
-        .build_authorize_redirect(
-            client_id,
-            &original_path,
-            &redirect_uri,
-        );
+    let (auth_url, stash) =
+        state
+            .oidc_rp
+            .build_authorize_redirect(client_id, &original_path, &redirect_uri);
 
     let mut builder = HttpResponse::Found();
     builder.header("location", auth_url);
@@ -2998,14 +3018,12 @@ mod tests {
     /// to inspect idempotency-replayed and error-envelope bodies.
     async fn collect_body(mut body: ResponseBody<Body>) -> Vec<u8> {
         let mut out = Vec::new();
-        std::future::poll_fn(|cx| {
-            loop {
-                match body.poll_next_chunk(cx) {
-                    std::task::Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
-                    std::task::Poll::Ready(Some(Err(e))) => panic!("body error: {e}"),
-                    std::task::Poll::Ready(None) => return std::task::Poll::Ready(()),
-                    std::task::Poll::Pending => return std::task::Poll::Pending,
-                }
+        std::future::poll_fn(|cx| loop {
+            match body.poll_next_chunk(cx) {
+                std::task::Poll::Ready(Some(Ok(chunk))) => out.extend_from_slice(&chunk),
+                std::task::Poll::Ready(Some(Err(e))) => panic!("body error: {e}"),
+                std::task::Poll::Ready(None) => return std::task::Poll::Ready(()),
+                std::task::Poll::Pending => return std::task::Poll::Pending,
             }
         })
         .await;
@@ -3094,14 +3112,13 @@ mod tests {
     /// this process, which is what these tests exercise. A replicated callee
     /// needs the Postgres store, and `crates/zeroship-control/tests/internal_service_auth_test.rs`
     /// is where that is measured against the real table.
-    fn control_credentialled_service_auth()
-    -> (Arc<zeroship_core::service_peers::ServiceAuth>, String) {
+    fn control_credentialled_service_auth(
+    ) -> (Arc<zeroship_core::service_peers::ServiceAuth>, String) {
         use zeroship_core::service_assertion::{
             InMemoryReplayStore, ServiceAssertionVerifier, ServiceSigningKey, ServiceTrustBundle,
         };
         use zeroship_core::service_peers::{
-            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
-            GATEWAY_SERVICE_NAME,
+            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME,
         };
 
         let gateway_issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
@@ -3121,19 +3138,16 @@ mod tests {
 
         let keyring = ServiceKeyring::from_parts(gateway_issuer.clone(), gateway_key, held)
             .expect("gateway keyring");
-        let verifier = ServiceAssertionVerifier::new(
-            trusted,
-            std::sync::Arc::new(InMemoryReplayStore::new()),
-        );
-        let control = ServiceKeyring::from_parts(
-            control_issuer,
-            control_key,
-            ServiceTrustBundle::new(),
-        )
-        .expect("control keyring");
+        let verifier =
+            ServiceAssertionVerifier::new(trusted, std::sync::Arc::new(InMemoryReplayStore::new()));
+        let control =
+            ServiceKeyring::from_parts(control_issuer, control_key, ServiceTrustBundle::new())
+                .expect("control keyring");
         let header = format!(
             "Bearer {}",
-            control.mint_for(&gateway_issuer).expect("mint for the gateway")
+            control
+                .mint_for(&gateway_issuer)
+                .expect("mint for the gateway")
         );
         (
             Arc::new(ServiceAuth::new(keyring, std::sync::Arc::new(verifier))),
@@ -3418,7 +3432,10 @@ mod tests {
         .expect("continue-as-new result");
 
         assert_eq!(result["outcomes"][0]["kind"], "ContinueAsNew");
-        assert_eq!(result["outcomes"][0]["input"], serde_json::json!({"generation": 1}));
+        assert_eq!(
+            result["outcomes"][0]["input"],
+            serde_json::json!({"generation": 1})
+        );
     }
 
     #[test]
@@ -3445,7 +3462,10 @@ mod tests {
         .expect("run failed result");
 
         assert_eq!(result["outcomes"][0]["kind"], "RunFailed");
-        assert_eq!(result["outcomes"][0]["error"]["type"], "NondeterministicError");
+        assert_eq!(
+            result["outcomes"][0]["error"]["type"],
+            "NondeterministicError"
+        );
         assert_eq!(
             result["outcomes"][0]["error"]["message"],
             "workflow journal mismatch at ordinal 0"
@@ -3837,7 +3857,10 @@ mod tests {
         let req = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=abc")
             .to_http_request();
-        assert_eq!(compute_bucket_id(&req, RateLimitPer::App, false, true), "app");
+        assert_eq!(
+            compute_bucket_id(&req, RateLimitPer::App, false, true),
+            "app"
+        );
     }
 
     #[test]
@@ -3859,12 +3882,22 @@ mod tests {
     fn forward_url_preserves_query_string() {
         // GET query-RPC: the base64url input MUST survive into the worker URL.
         assert_eq!(
-            forward_url("http", "app.localhost:8080", "__zeroship/v1/listTodos", Some("input=e30")),
+            forward_url(
+                "http",
+                "app.localhost:8080",
+                "__zeroship/v1/listTodos",
+                Some("input=e30")
+            ),
             "http://app.localhost:8080/__zeroship/v1/listTodos?input=e30",
         );
         // Arbitrary app query params (search/pagination) survive too.
         assert_eq!(
-            forward_url("https", "shop.zeroship.ai", "products", Some("q=shoes&page=2")),
+            forward_url(
+                "https",
+                "shop.zeroship.ai",
+                "products",
+                Some("q=shoes&page=2")
+            ),
             "https://shop.zeroship.ai/products?q=shoes&page=2",
         );
     }
@@ -3872,15 +3905,9 @@ mod tests {
     #[test]
     fn forward_url_omits_empty_or_absent_query() {
         // No query → no trailing '?'.
-        assert_eq!(
-            forward_url("http", "h", "p", None),
-            "http://h/p",
-        );
+        assert_eq!(forward_url("http", "h", "p", None), "http://h/p",);
         // Empty query (e.g. a bare trailing '?') is treated as absent.
-        assert_eq!(
-            forward_url("http", "h", "p", Some("")),
-            "http://h/p",
-        );
+        assert_eq!(forward_url("http", "h", "p", Some("")), "http://h/p",);
     }
 
     #[test]
@@ -4163,8 +4190,7 @@ mod tests {
     fn jwt_with_sub(sub: &str) -> String {
         use base64::Engine as _;
         let b64 = |v: &serde_json::Value| {
-            base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .encode(serde_json::to_vec(v).unwrap())
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(v).unwrap())
         };
         let header = b64(&serde_json::json!({ "alg": "none", "typ": "JWT" }));
         let payload = b64(&serde_json::json!({ "sub": sub }));
@@ -4176,7 +4202,10 @@ mod tests {
         // RateLimitPer::User buckets by the authenticated JWT `sub` — the
         // wire scope that round-trips the console's `per: "user"` rules.
         let req = ntex::web::test::TestRequest::default()
-            .header("authorization", format!("Bearer {}", jwt_with_sub("usr_alice")))
+            .header(
+                "authorization",
+                format!("Bearer {}", jwt_with_sub("usr_alice")),
+            )
             .to_http_request();
         let id = compute_bucket_id(&req, RateLimitPer::User, false, true);
         assert_eq!(id, "sub:usr_alice");
@@ -4248,7 +4277,10 @@ mod tests {
             .header("cookie", "__Host-zeroship_app_session=device-2")
             .to_http_request();
         let req_bob = ntex::web::test::TestRequest::default()
-            .header("authorization", format!("Bearer {}", jwt_with_sub("usr_bob")))
+            .header(
+                "authorization",
+                format!("Bearer {}", jwt_with_sub("usr_bob")),
+            )
             .to_http_request();
         let a1 = compute_bucket_id(&req_a1, RateLimitPer::User, false, true);
         let a2 = compute_bucket_id(&req_a2, RateLimitPer::User, false, true);
@@ -4370,13 +4402,20 @@ mod tests {
         // hit a fresh bucket and pass.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
         let app_id = typed_app_id(&uuid::Uuid::nil());
-        let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
+        let rl = RateLimit {
+            rps: Some(1),
+            rpm: None,
+            per: RateLimitPer::Ip,
+        };
         let req = ntex::web::test::TestRequest::default().to_http_request();
         let bucket_id = compute_bucket_id(&req, rl.per, false, true);
         assert!(reg.check(&app_id, 0, rl.per, &bucket_id, &rl).is_ok());
         // Second call with the same request → same bucket id → drained.
         let bucket_id2 = compute_bucket_id(&req, rl.per, false, true);
-        assert_eq!(bucket_id, bucket_id2, "bucket id is stable for same request");
+        assert_eq!(
+            bucket_id, bucket_id2,
+            "bucket id is stable for same request"
+        );
         let err = reg
             .check(&app_id, 0, rl.per, &bucket_id2, &rl)
             .expect_err("second call must 429 — bucket key matched");
@@ -4390,7 +4429,11 @@ mod tests {
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
         let app_id = typed_app_id(&uuid::Uuid::nil());
-        let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
+        let rl = RateLimit {
+            rps: Some(1),
+            rpm: None,
+            per: RateLimitPer::Session,
+        };
 
         let req_a = ntex::web::test::TestRequest::default()
             .header("cookie", "__Host-zeroship_app_session=user-a")
@@ -4489,7 +4532,11 @@ mod tests {
             "*".into(),
             ResourceEntry {
                 auth: Some(RequiredPrincipal::User),
-                rate_limit: Some(RateLimit { rpm: Some(600), rps: None, per: RateLimitPer::Ip }),
+                rate_limit: Some(RateLimit {
+                    rpm: Some(600),
+                    rps: None,
+                    per: RateLimitPer::Ip,
+                }),
                 ..Default::default()
             },
         );
@@ -4497,14 +4544,20 @@ mod tests {
             "rpc:expensive".into(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Mutation),
-                rate_limit: Some(RateLimit { rpm: Some(10), rps: None, per: RateLimitPer::Ip }),
+                rate_limit: Some(RateLimit {
+                    rpm: Some(10),
+                    rps: None,
+                    per: RateLimitPer::Ip,
+                }),
                 r#override: vec!["rate_limit".into()],
                 ..Default::default()
             },
         );
         let m = manifest_with_resources(resources);
         let c = CompiledManifest::compile(&m);
-        let p = c.lookup_resource("/__zeroship/v1/expensive").expect("matches");
+        let p = c
+            .lookup_resource("/__zeroship/v1/expensive")
+            .expect("matches");
         assert_eq!(
             p.rate_limit.as_ref().unwrap().rpm,
             Some(10),
@@ -4783,7 +4836,10 @@ mod tests {
                 let bytes = collect_body(body).await;
                 let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
                 assert_eq!(v["code"], "ALREADY_EXISTS");
-                assert_eq!(v["details"]["reason"], "idempotency_key_reused_with_different_input");
+                assert_eq!(
+                    v["details"]["reason"],
+                    "idempotency_key_reused_with_different_input"
+                );
             }
             IdempotencyOutcome::Proceed(_) => panic!("must reject"),
         }
@@ -4987,9 +5043,7 @@ mod tests {
     /// MAY land on different workers (the spread is the whole point).
     #[test]
     fn select_with_affinity_is_sticky_for_same_principal() {
-        let workers: Vec<String> = (0..16)
-            .map(|i| format!("http://worker-{i}:8080"))
-            .collect();
+        let workers: Vec<String> = (0..16).map(|i| format!("http://worker-{i}:8080")).collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
         let app = typed_app_id(&uuid::Uuid::nil());
 
@@ -5009,9 +5063,7 @@ mod tests {
     /// shift; same (app, principal) is the affinity contract.
     #[test]
     fn select_with_affinity_varies_with_principal() {
-        let workers: Vec<String> = (0..16)
-            .map(|i| format!("http://worker-{i}:8080"))
-            .collect();
+        let workers: Vec<String> = (0..16).map(|i| format!("http://worker-{i}:8080")).collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
         let app = typed_app_id(&uuid::Uuid::nil());
 
@@ -5022,7 +5074,11 @@ mod tests {
         }
         // 32 principals across 16 workers — should cover at least 4
         // distinct workers (very loose; the actual spread is uniform).
-        assert!(hits.len() >= 4, "affinity should distribute, hit count: {}", hits.len());
+        assert!(
+            hits.len() >= 4,
+            "affinity should distribute, hit count: {}",
+            hits.len()
+        );
     }
 
     /// Idempotency middleware should NOT apply to subscriptions even
@@ -5126,7 +5182,11 @@ mod tests {
         ] {
             assert_eq!(
                 extract_app_name(&req_with_host(host), None).as_deref(),
-                Some(if host.starts_with("AUTH") { "AUTH" } else { "auth" }),
+                Some(if host.starts_with("AUTH") {
+                    "AUTH"
+                } else {
+                    "auth"
+                }),
                 "{host} must resolve to an ordinary app name, not an internal upstream"
             );
         }
@@ -5150,7 +5210,10 @@ mod tests {
         // A request with no Host header resolves to no app at all, so it
         // cannot fall through to some default internal destination.
         assert_eq!(
-            extract_app_name(&ntex::web::test::TestRequest::default().to_http_request(), None),
+            extract_app_name(
+                &ntex::web::test::TestRequest::default().to_http_request(),
+                None
+            ),
             None
         );
     }
@@ -5275,7 +5338,9 @@ mod tests {
         // `redirect_uri` is the per-host callback path; origin_scheme=Http in
         // the test fixture selects the public scheme independently of cookies.
         assert!(
-            location.contains("redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zeroship%2Fauth%2Fcallback"),
+            location.contains(
+                "redirect_uri=http%3A%2F%2Fmyapp.zeroship.localhost%2F__zeroship%2Fauth%2Fcallback"
+            ),
             "redirect_uri must include the per-host callback path; got {location:?}"
         );
         // Stash cookie set.
@@ -5364,9 +5429,8 @@ mod tests {
 
     #[test]
     fn oidc_callback_token_exchange_error_is_generic() {
-        let err = oidc_rp::OidcRpError::TokenExchange(
-            "HTTP 500: op says postgres://internal".into(),
-        );
+        let err =
+            oidc_rp::OidcRpError::TokenExchange("HTTP 500: op says postgres://internal".into());
         assert_eq!(
             oidc_callback_public_error(&err),
             "sign-in could not be completed",
@@ -5391,7 +5455,9 @@ mod tests {
     // against the flipped registry (degrade tightening) — no shims.
     // -----------------------------------------------------------------------
 
-    fn spend_route(spend_state: zeroship_core::types::SpendState) -> zeroship_core::types::RouteEntry {
+    fn spend_route(
+        spend_state: zeroship_core::types::SpendState,
+    ) -> zeroship_core::types::RouteEntry {
         zeroship_core::types::RouteEntry {
             name: "spend-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
@@ -5754,7 +5820,10 @@ mod tests {
         // The stub blob store has no bytes, so the static arm emits a 404
         // JSON error body — gateway-owned egress all the same.
         let served = collect_body(resp.take_body()).await;
-        assert!(!served.is_empty(), "the gateway-owned 404 body is non-empty");
+        assert!(
+            !served.is_empty(),
+            "the gateway-owned 404 body is non-empty"
+        );
 
         let events = meter.drain();
         assert_eq!(
@@ -5898,7 +5967,10 @@ mod tests {
         // assertion below is about the DELIBERATE no-meter decision, not an
         // empty body.
         let body = collect_body(resp.take_body()).await;
-        assert!(!body.is_empty(), "the 413 envelope is a non-empty JSON body");
+        assert!(
+            !body.is_empty(),
+            "the 413 envelope is a non-empty JSON body"
+        );
 
         let events = meter.drain();
         // The gateway must record NOTHING for an error envelope: no
@@ -5976,7 +6048,9 @@ mod tests {
     /// no-op. A non-degraded control app at the same limit admits both.
     #[compio::test]
     async fn degraded_route_tightens_concurrency() {
-        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
+        use crate::enforce::{
+            acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR,
+        };
         use zeroship_core::types::SpendState;
 
         let cache = crate::sync::RouteCache::new();
@@ -6005,7 +6079,10 @@ mod tests {
 
         let g1 = acquire_concurrency(&concurrency, &degraded_key).expect("first admits");
         let r2 = acquire_concurrency(&concurrency, &degraded_key);
-        assert!(r2.is_err(), "degraded app's 2nd concurrent request must be rejected");
+        assert!(
+            r2.is_err(),
+            "degraded app's 2nd concurrent request must be rejected"
+        );
         if let Err(resp) = r2 {
             assert_eq!(resp.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
         }
@@ -6020,7 +6097,9 @@ mod tests {
     /// rebuilt. Proves recovery is instant.
     #[compio::test]
     async fn degrade_clears_immediately_on_recovery() {
-        use crate::enforce::{acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR};
+        use crate::enforce::{
+            acquire_concurrency, ConcurrencyRegistry, RateLimitRegistry, DEGRADE_FACTOR,
+        };
         use zeroship_core::types::SpendState;
 
         let cache = crate::sync::RouteCache::new();
@@ -6114,8 +6193,13 @@ mod tests {
         let state = build_idempotency_state();
         let app_id = Uuid::new_v4();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
-        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+        routes.insert(
+            app_id,
+            account_worker_route(AccountState::Suspended, SpendState::Allow),
+        );
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
 
         assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
     }
@@ -6129,8 +6213,13 @@ mod tests {
         let state = build_idempotency_state();
         let app_id = Uuid::new_v4();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, account_worker_route(AccountState::PastDue, SpendState::Allow));
-        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+        routes.insert(
+            app_id,
+            account_worker_route(AccountState::PastDue, SpendState::Allow),
+        );
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
 
         let resp = drive_ping(state.clone()).await;
         assert_ne!(
@@ -6148,8 +6237,13 @@ mod tests {
         let state = build_idempotency_state();
         let app_id = Uuid::new_v4();
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-        routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Allow));
-        state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+        routes.insert(
+            app_id,
+            account_worker_route(AccountState::Active, SpendState::Allow),
+        );
+        state
+            .routes
+            .update(routes, &state.rate_limiters, &state.concurrency);
 
         let resp = drive_ping(state.clone()).await;
         assert_ne!(
@@ -6173,8 +6267,13 @@ mod tests {
             let state = build_idempotency_state();
             let app_id = Uuid::new_v4();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Allow));
-            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            routes.insert(
+                app_id,
+                account_worker_route(AccountState::Suspended, SpendState::Allow),
+            );
+            state
+                .routes
+                .update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
 
@@ -6183,8 +6282,13 @@ mod tests {
             let state = build_idempotency_state();
             let app_id = Uuid::new_v4();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(app_id, account_worker_route(AccountState::Active, SpendState::Block));
-            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            routes.insert(
+                app_id,
+                account_worker_route(AccountState::Active, SpendState::Block),
+            );
+            state
+                .routes
+                .update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "SPEND_LIMIT").await;
         }
 
@@ -6194,8 +6298,13 @@ mod tests {
             let state = build_idempotency_state();
             let app_id = Uuid::new_v4();
             let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
-            routes.insert(app_id, account_worker_route(AccountState::Suspended, SpendState::Block));
-            state.routes.update(routes, &state.rate_limiters, &state.concurrency);
+            routes.insert(
+                app_id,
+                account_worker_route(AccountState::Suspended, SpendState::Block),
+            );
+            state
+                .routes
+                .update(routes, &state.rate_limiters, &state.concurrency);
             assert_402_code(drive_ping(state.clone()).await, "ACCOUNT_SUSPENDED").await;
         }
     }
@@ -6306,7 +6415,10 @@ mod tests {
             }
         });
 
-        MockWorker { url: format!("http://127.0.0.1:{port}"), served }
+        MockWorker {
+            url: format!("http://127.0.0.1:{port}"),
+            served,
+        }
     }
 
     /// A route with one `idempotent: true` mutation at wire-id
@@ -6435,7 +6547,12 @@ mod tests {
 
         // Request 1: the worker accepts and dies mid-request. The gateway
         // synthesizes its own 502.
-        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0001-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
+        let mut first = post_idempotent_mutation(
+            state.clone(),
+            "1a2b3c4d-0001-4111-8000-aaaabbbbcccc",
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             first.status(),
             ntex::http::StatusCode::BAD_GATEWAY,
@@ -6458,7 +6575,12 @@ mod tests {
         );
 
         // Request 2: same key, same body, worker healthy again.
-        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0001-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
+        let mut second = post_idempotent_mutation(
+            state.clone(),
+            "1a2b3c4d-0001-4111-8000-aaaabbbbcccc",
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -6490,12 +6612,22 @@ mod tests {
         let worker = spawn_mock_worker(false, 201);
         let state = idempotency_state_for(&worker);
 
-        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0002-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
+        let mut first = post_idempotent_mutation(
+            state.clone(),
+            "1a2b3c4d-0002-4111-8000-aaaabbbbcccc",
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0002-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
+        let mut second = post_idempotent_mutation(
+            state.clone(),
+            "1a2b3c4d-0002-4111-8000-aaaabbbbcccc",
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -6538,12 +6670,25 @@ mod tests {
         let worker = spawn_mock_worker(false, 500);
         let state = idempotency_state_for(&worker);
 
-        let mut first = post_idempotent_mutation(state.clone(), "1a2b3c4d-0003-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
-        assert_eq!(first.status(), ntex::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let mut first = post_idempotent_mutation(
+            state.clone(),
+            "1a2b3c4d-0003-4111-8000-aaaabbbbcccc",
+            b"{\"t\":1}",
+        )
+        .await;
+        assert_eq!(
+            first.status(),
+            ntex::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second = post_idempotent_mutation(state.clone(), "1a2b3c4d-0003-4111-8000-aaaabbbbcccc", b"{\"t\":1}").await;
+        let mut second = post_idempotent_mutation(
+            state.clone(),
+            "1a2b3c4d-0003-4111-8000-aaaabbbbcccc",
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             2,
@@ -6808,8 +6953,7 @@ mod tests {
         ));
         let issuer = crate::session_token::Issuer::new(&signing, TEST_SESSION_ISS.to_string())
             .expect("session issuer");
-        let state =
-            build_test_state_inner(vec![worker.url.clone()], 100, 100, 100, Some(verifier));
+        let state = build_test_state_inner(vec![worker.url.clone()], 100, 100, 100, Some(verifier));
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(
             Uuid::new_v4(),
@@ -6831,16 +6975,13 @@ mod tests {
         (state, issuer)
     }
 
-    /// Mint a signed session cookie for a distinct end user. `seed` picks
-    /// the global user id, so two different seeds are two different people
+    /// Mint a signed session cookie for a distinct end user. Each call mints
+    /// a fresh global user id, so separate calls represent different people
     /// with two different per-app `pws_…` subjects.
-    fn session_cookie_for(issuer: &crate::session_token::Issuer, seed: u128) -> String {
-        let global = Uuid::from_u128(seed).to_string();
-        let sub = zeroship_core::auth::derive_pairwise(
-            &[0u8; 32],
-            &global,
-            "https://idem-auth.test",
-        );
+    fn session_cookie_for(issuer: &crate::session_token::Issuer) -> String {
+        let global = zeroship_core::UserId::mint();
+        let sub =
+            zeroship_core::auth::derive_pairwise(&[0u8; 32], &global, "https://idem-auth.test");
         issuer
             .issue(&crate::session_token::SessionMint {
                 app: TEST_OAUTH_CLIENT,
@@ -6899,12 +7040,18 @@ mod tests {
 
         let worker = spawn_mock_worker(false, 201);
         let (state, issuer) = authenticated_idempotency_state(&worker);
-        let cookie_a = session_cookie_for(&issuer, 1);
-        let cookie_b = session_cookie_for(&issuer, 2);
+        let cookie_a = session_cookie_for(&issuer);
+        let cookie_b = session_cookie_for(&issuer);
         let shared_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
-        let mut first =
-            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
+        let mut first = post_authenticated_mutation(
+            state.clone(),
+            TEST_AUTH_HOST,
+            &cookie_a,
+            shared_key,
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             first.status(),
             ntex::http::StatusCode::CREATED,
@@ -6913,8 +7060,14 @@ mod tests {
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second =
-            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_b, shared_key, b"{\"t\":1}").await;
+        let mut second = post_authenticated_mutation(
+            state.clone(),
+            TEST_AUTH_HOST,
+            &cookie_b,
+            shared_key,
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             2,
@@ -6946,17 +7099,29 @@ mod tests {
 
         let worker = spawn_mock_worker(false, 201);
         let (state, issuer) = authenticated_idempotency_state(&worker);
-        let cookie_a = session_cookie_for(&issuer, 1);
+        let cookie_a = session_cookie_for(&issuer);
         let shared_key = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
 
-        let mut first =
-            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
+        let mut first = post_authenticated_mutation(
+            state.clone(),
+            TEST_AUTH_HOST,
+            &cookie_a,
+            shared_key,
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(first.status(), ntex::http::StatusCode::CREATED);
         assert_eq!(collect_body(first.take_body()).await, b"{\"id\":1}");
         assert_eq!(worker.served.load(Ordering::SeqCst), 1);
 
-        let mut second =
-            post_authenticated_mutation(state.clone(), TEST_AUTH_HOST, &cookie_a, shared_key, b"{\"t\":1}").await;
+        let mut second = post_authenticated_mutation(
+            state.clone(),
+            TEST_AUTH_HOST,
+            &cookie_a,
+            shared_key,
+            b"{\"t\":1}",
+        )
+        .await;
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             1,
@@ -6990,8 +7155,8 @@ mod tests {
 
         let worker = spawn_mock_worker(false, 201);
         let (state, issuer) = authenticated_idempotency_state(&worker);
-        let cookie_a = session_cookie_for(&issuer, 11);
-        let cookie_b = session_cookie_for(&issuer, 12);
+        let cookie_a = session_cookie_for(&issuer);
+        let cookie_b = session_cookie_for(&issuer);
         let shared_key = "018f9a1c-3d2b-7c4e-8f01-2a3b4c5d6e7f";
 
         let mut first = post_authenticated_mutation(

@@ -7,6 +7,7 @@
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_control::Registry;
+use zeroship_core::UserId;
 
 use crate::common;
 
@@ -65,7 +66,10 @@ async fn registry_core_tables_live_in_zeroship_schema() {
             .unwrap_or_else(|e| panic!("resolve namespace for {qualified}: {e}"));
         assert_eq!(rows.len(), 1, "{qualified} should exist");
         let schema: String = rows[0].get("schema");
-        assert_eq!(schema, "zeroship", "{qualified} should live in the zeroship schema");
+        assert_eq!(
+            schema, "zeroship",
+            "{qualified} should live in the zeroship schema"
+        );
     }
 
     // Teardown: `pg` holds this test's Postgres connection, and locals are
@@ -97,12 +101,12 @@ async fn create_app_neither_returns_nor_stores_an_app_level_key() {
     let registry = Registry::new(&url).await.expect("registry");
     let pg = pg(&url).await;
 
-    let owner_id = Uuid::new_v4();
+    let owner_id = UserId::mint();
     pg.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
         &[
-            &owner_id,
-            &format!("nokey-owner-{owner_id}@zeroship.test"),
+            &owner_id.as_str(),
+            &format!("nokey-owner-{}@zeroship.test", owner_id.as_str()),
             &"nokey-owner",
         ],
     )

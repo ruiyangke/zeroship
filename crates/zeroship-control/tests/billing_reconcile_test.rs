@@ -2312,7 +2312,7 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 /// This replaced a principal-equals-path test. That check was the right one
 /// while the billing subject WAS the caller - one human, one bill - and it is
 /// not expressible now: the path carries an `org_…` and the principal is a
-/// user uuid, so the two can never be equal and the old assertion would have
+/// canonical user id, so the two can never be equal and the old assertion would have
 /// been vacuously true in the deny direction.
 ///
 /// What must hold instead is BOTH directions of the seat: a principal seated at
