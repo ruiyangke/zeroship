@@ -13,9 +13,7 @@ mod cache;
 mod metrics;
 mod logs;
 mod policy;
-mod slot_reaper;
 
-use std::future::Future;
 use std::sync::{Arc, RwLock};
 use clap::Parser;
 use ntex::web;
@@ -28,7 +26,7 @@ use zeroship_core::config::{
 use zeroship_bundle::{
     build_blob_store, build_workflow_blob_store, BlobStore, StoreUrl, WorkflowBlobStore,
 };
-use zeroship_plugin_storage::StorageBackendConfig;
+use zeroship_storage::StorageBackendConfig;
 use zeroship_runtime::init::init_v8;
 
 use crate::sync::{SharedEnvs, SharedVersions};
@@ -47,38 +45,6 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// what would otherwise carry it; this binary never called it, so this is the
 /// same declaration moved to the one place that now needs it.
 const WORKER_LISTEN_BACKLOG: i32 = 1024;
-
-type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_data_core::error::DbError>>;
-
-async fn run_server_with_slot_reaper<S>(
-    server: S,
-    slot_reaper_task: Option<SlotReaperTask>,
-) -> std::io::Result<()>
-where
-    S: Future<Output = std::io::Result<()>>,
-{
-    use futures::FutureExt as _;
-
-    let Some(slot_reaper_task) = slot_reaper_task else {
-        return server.await;
-    };
-
-    let server = server.fuse();
-    let slot_reaper_task = slot_reaper_task.fuse();
-    futures::pin_mut!(server, slot_reaper_task);
-    futures::select! {
-        result = server => result,
-        outcome = slot_reaper_task => {
-            let message = match outcome {
-                Ok(Ok(())) => "abandoned-slot reaper stopped unexpectedly".to_string(),
-                Ok(Err(error)) => format!("abandoned-slot reaper failed: {error}"),
-                Err(_) => "abandoned-slot reaper panicked".to_string(),
-            };
-            tracing::error!(%message, "worker infrastructure task ended; stopping worker");
-            Err(std::io::Error::other(message))
-        }
-    }
-}
 
 /// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
@@ -136,16 +102,13 @@ fn enforce_worker_credentials(
     }
 }
 
-/// `true` iff the worker must REFUSE to start with this `DATABASE_URL` (SQLite-
-/// engine wiring design R3.4 fix 2). SQLite is the dev tier only; a multi-
-/// replica worker fed a `sqlite:`/`file:` DSN would run concurrent
-/// cross-process migrations on one file with a no-op project lock — a
-/// data-corruption class. Classification routes through the shared
-/// `zeroship_core::db_url::is_sqlite_url` so the grammar matches plugin-db's
-/// opener exactly. The authority is the worker's identity, not an env flag:
-/// SQLite is refused even if `ZEROSHIP_DEV=1` leaked into a prod worker.
+/// Workers accept PostgreSQL only. Absence is handled separately so an
+/// auth-only worker and a configuration dry run need no database connection.
 fn worker_rejects_db_url(db_url: &str) -> bool {
-    zeroship_core::db_url::is_sqlite_url(db_url)
+    let normalized = db_url.trim().to_ascii_lowercase();
+    !normalized.is_empty()
+        && !normalized.starts_with("postgres://")
+        && !normalized.starts_with("postgresql://")
 }
 
 /// Whether `bind_host` reaches only this machine.
@@ -203,9 +166,9 @@ pub struct WorkerConfig {
     pub control_url: String,
     pub control_key: String,
     pub db_url: Option<String>,
-    /// Redis URL for the app `env.kv` namespace. `None` ⇒ namespace absent.
-    /// Shared across worker nodes - see `WorkerSettings::kv_url`.
-    pub kv_url: Option<String>,
+    /// Process-owned KV store selected from runtime configuration.
+    /// `None` leaves the app KV namespace absent.
+    pub kv_store: Option<zeroship_kv::KvStore>,
     /// Object-store backend for the app `env.storage` namespace. `None` ⇒
     /// namespace absent. `LocalFs` (a shared volume across nodes) or `S3`
     /// (inherently shared) - see `WorkerSettings::storage_url`.
@@ -369,9 +332,9 @@ fn main() -> std::io::Result<()> {
         }
     };
     let blob_store_is_remote = store_url.is_remote();
-    // KV URL may embed credentials (`redis://user:pass@host`), so it is
-    // secret-classed like the DSNs and reaches the process the same way.
-    let kv_url = settings.kv_url.expose_str().to_owned();
+    // KV configuration may contain credentials, so it is secret-classed like
+    // the DSNs and reaches the process the same way.
+    let kv_config = settings.kv_config.expose_str().to_owned();
     // `env.storage` backend. Empty ⇒ namespace absent. A bare path/`file://`
     // is `LocalFs`; `s3://…` is the S3 backend. Validated now (parse only —
     // S3 credentials are resolved when the plugin is built per worker thread)
@@ -380,10 +343,7 @@ fn main() -> std::io::Result<()> {
     let storage_backend = if storage_raw.is_empty() {
         None
     } else {
-        // `file://` is config ergonomics for a local path; strip it so the
-        // parser sees a bare path. `s3://` falls through to the S3 leg.
-        let arg = storage_raw.strip_prefix("file://").unwrap_or(&storage_raw);
-        match StorageBackendConfig::parse(arg) {
+        match StorageBackendConfig::parse(&storage_raw) {
             Ok(c) => Some(c),
             Err(e) => {
                 eprintln!("worker: invalid --storage-url: {e}");
@@ -419,23 +379,13 @@ fn main() -> std::io::Result<()> {
         std::process::exit(1);
     }
 
-    // SQLite is the DEV TIER ONLY — refuse it on the worker (SQLite-engine
-    // wiring design R3.4 fix 2 / the re-keyed C1 guard). The worker is
-    // multi-replica BY IDENTITY: N replicas fed a `sqlite:`/`file:` DSN would
-    // each open their own SqliteBackend on a (possibly shared-volume) file with
-    // the engine's project-lock a no-op — concurrent cross-process apply with
-    // zero serialization (a data-corruption class). Prod is always
-    // `postgres://`; a SQLite DSN here is always a misconfig. The authority is
-    // the worker's IDENTITY, not an env flag — this refuses SQLite even if
-    // someone exported `ZEROSHIP_DEV=1` into a prod worker. We classify through
-    // the shared `zeroship_core::db_url::is_sqlite_url` (the same grammar
-    // plugin-db's `backend_for_url` opens with). Under `--check-config` a DSN
-    // supplied by a file the dry run deliberately did not read classifies as the
-    // empty string, which is not SQLite, so a dry run never false-positives.
+    // SQLite belongs to local `zeroship serve`. Require a PostgreSQL selector
+    // here rather than treating an invalid SQLite selector as another backend.
+    // A configuration dry run deliberately leaves secret files unread.
     if worker_rejects_db_url(&db_url) {
         tracing::error!(
-            "worker: refusing to start with a SQLite ZEROSHIP_WORKER_DATABASE_URL; SQLite is the dev tier \
-             only (single-process `zeroship serve`); a multi-replica worker MUST use a postgres:// DSN"
+            "worker: ZEROSHIP_WORKER_DATABASE_URL must select PostgreSQL; \
+             file-backed SQLite belongs to local `zeroship serve`"
         );
         std::process::exit(1);
     }
@@ -485,7 +435,7 @@ fn main() -> std::io::Result<()> {
         // (it may carry credentials) - presence only, like `db_configured`.
         report.field(
             "kv_configured",
-            CheckValue::Secret(settings.kv_url.is_configured()),
+            CheckValue::Secret(settings.kv_config.is_configured()),
         );
         report.field(
             "storage_configured",
@@ -590,13 +540,16 @@ fn main() -> std::io::Result<()> {
         "worker blob store configured"
     );
 
-    let kv_url_opt = if kv_url.is_empty() { None } else { Some(kv_url) };
+    let kv_store = zeroship_worker::config::open_kv_store(&kv_config).unwrap_or_else(|error| {
+        eprintln!("worker: KV backend init failed: {error}");
+        std::process::exit(1);
+    });
     // Resolve S3 credentials NOW (fail fast) for a remote storage backend, so
     // a misconfigured worker refuses to start rather than degrading the
     // namespace silently per thread.
     if let Some(cfg) = &storage_backend {
         if cfg.is_remote() {
-            if let Err(e) = zeroship_plugin_storage::build_backend(cfg) {
+            if let Err(e) = zeroship_storage::StorageStore::open(cfg) {
                 eprintln!("worker: --storage-url s3 backend init failed: {e}");
                 std::process::exit(1);
             }
@@ -608,7 +561,7 @@ fn main() -> std::io::Result<()> {
     // creator app). `auth` is always on; `db`/`kv`/`storage` track config.
     tracing::info!(
         db = !db_url.is_empty(),
-        kv = kv_url_opt.is_some(),
+        kv = kv_store.is_some(),
         storage = storage_backend.is_some(),
         storage_kind = storage_backend.as_ref().map_or("absent", StorageBackendConfig::kind),
         auth = true,
@@ -669,21 +622,6 @@ fn main() -> std::io::Result<()> {
     // call an app happens to make. That is not a new failure for this binary:
     // the slot reaper below already connects at boot and fails the process when
     // the database is unusable.
-    let db_service = match db_url_opt.as_deref() {
-        Some(url) => Some(
-            zeroship_plugin_db::service::DbService::new(
-                zeroship_plugin_db::service::DbServiceConfig {
-                    url: url.to_string(),
-                    worker_id: meter_source.clone(),
-                    meter: Some(Arc::clone(&meter)),
-                },
-            )
-            .map_err(|error| {
-                std::io::Error::other(format!("worker database URL is unusable: {error}"))
-            })?,
-        ),
-        None => None,
-    };
 
     // The producer's four `metering.*` declarations, already resolved. The
     // worker deliberately has no TOML overlay source (9b205f6ed, a credential
@@ -752,24 +690,6 @@ fn main() -> std::io::Result<()> {
         }
     }
 
-    // Acquire the process liveness lease before accepting traffic. The task is
-    // supervised with the HTTP server below: if its maintenance session or
-    // sweep fails, this process stops rather than continuing CDC after losing
-    // the lease that tells peer reapers it is live.
-    let slot_reaper_task = if let Some(db_url) = db_url_opt.as_deref() {
-        Some(
-            slot_reaper::start(db_url, &meter_source)
-                .await
-                .map_err(|error| {
-                    std::io::Error::other(format!(
-                        "abandoned-slot reaper could not acquire its worker lease: {error}"
-                    ))
-                })?,
-        )
-    } else {
-        None
-    };
-
     // ── THE PORT, THEN THE IDENTITY ──────────────────────────────────────
     //
     // The listener is created HERE, eagerly, and handed to ntex below instead
@@ -815,12 +735,44 @@ fn main() -> std::io::Result<()> {
         }
     };
 
+    let db_service = match db_url_opt.as_deref() {
+        Some(url) => Some(
+            zeroship_data_v8::service::DbService::new(
+                zeroship_data_v8::service::DbServiceConfig {
+                    project_keys: Default::default(),
+                    connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+                        .map_err(|error| std::io::Error::other(error.to_string()))?,
+                    cdc_relay: Some({
+                        let relay = zeroship_data_orm::cdc::relay::RelayConfig::new(
+                            settings.cdc_relay_url.get().clone(),
+                            Arc::clone(&service_auth),
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        let ca = settings.cdc_relay_ca_file.get();
+                        if ca.as_os_str().is_empty() {
+                            relay
+                        } else {
+                            relay.with_ca_file(ca)
+                                .map_err(|error| std::io::Error::other(error.to_string()))?
+                        }
+                    }),
+                    meter: Some(Arc::clone(&meter)),
+                },
+            )
+            .map_err(|error| {
+                std::io::Error::other(format!("worker database URL is unusable: {error}"))
+            })?,
+        ),
+        None => None,
+    };
+
+
     let config = Arc::new(WorkerConfig {
         service_auth,
         control_url,
         control_key,
         db_url: db_url_opt,
-        kv_url: kv_url_opt,
+        kv_store,
         storage_backend,
         max_isolates,
         max_pinned_isolates_per_app,
@@ -882,7 +834,7 @@ fn main() -> std::io::Result<()> {
                 control_url: config.control_url.clone(),
                 control_key: config.control_key.clone(),
                 db_service: db_service.clone(),
-                kv_url: config.kv_url.clone(),
+                kv_store: config.kv_store.clone(),
                 storage_backend: config.storage_backend.clone(),
                 // The ONE process-wide meter the usage-event outbox drains.
                 meter: Arc::clone(&meter),
@@ -929,7 +881,7 @@ fn main() -> std::io::Result<()> {
     // serving their current requests, and returns. Detached tasks
     // (fetch body readers, stream drainers) whose futures the pump is
     // polling get one last chance to run during the drain window.
-    let run_result = run_server_with_slot_reaper(server.run(), slot_reaper_task).await;
+    let run_result = server.run().await;
     tracing::info!("worker shutdown complete");
     run_result
         })
@@ -940,35 +892,6 @@ mod tests {
     use super::*;
     use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
 
-    #[test]
-    fn production_main_starts_and_supervises_one_process_wide_slot_reaper() {
-        let source = include_str!("main.rs");
-        let start_call = ["slot_reaper", "::start", "("].concat();
-        assert_eq!(
-            source.matches(&start_call).count(),
-            1,
-            "worker main must start exactly one operator-owned reaper"
-        );
-        assert_eq!(
-            source
-                .matches(
-                    &["run_server_with_slot_reaper", "(server.run(), slot_reaper_task)"].concat(),
-                )
-                .count(),
-            1,
-            "worker main must supervise the reaper beside the HTTP server"
-        );
-
-        let server_factory = source
-            .split_once("web::server(async move ||")
-            .expect("worker server factory")
-            .1;
-        assert!(
-            !server_factory.contains(&start_call),
-            "the reaper must not be multiplied by ntex worker threads"
-        );
-    }
-
     /// The socket exists BEFORE the enrolment that advertises it, and the
     /// serving identity is whatever that enrolment returned.
     ///
@@ -977,7 +900,7 @@ mod tests {
     /// row pointing at a port nothing listens on, and nothing reaps those rows.
     ///
     /// The markers are SPLIT so this test's own source does not match them -
-    /// the same trick the reaper test above uses, and for the same reason: a
+    /// because a
     /// self-matching marker makes the ordering assertion vacuously true.
     #[test]
     fn the_port_is_bound_before_the_enrolment_that_advertises_it() {
@@ -1011,23 +934,6 @@ mod tests {
         assert!(
             at(&enrol) < at(&poller),
             "the version poller must not run before this process has an identity"
-        );
-    }
-
-    #[compio::test]
-    async fn reaper_failure_stops_the_worker_server() {
-        let task = compio::runtime::spawn(async {
-            Err(zeroship_data_core::error::DbError::Internal {
-                message: "lost maintenance lease".to_string(),
-            })
-        });
-        let server = futures::future::pending::<std::io::Result<()>>();
-        let error = run_server_with_slot_reaper(server, Some(task))
-            .await
-            .expect_err("reaper failure must stop the worker");
-        assert!(
-            error.to_string().contains("lost maintenance lease"),
-            "creator-serving worker hid reaper failure: {error}"
         );
     }
 
@@ -1088,19 +994,10 @@ mod tests {
 
     /// `--workflow-advance-unsigned` must not be combined with a routable bind.
     ///
-    /// The flag turns POST `/internal/workflow/advance-unsigned` from a 403 into a
-    /// live endpoint that replays workflow state with NO signature or nonce check
-    /// (the handler says so: DW-05 left verification to a later task). The route is
-    /// registered unconditionally, so the flag is the only thing between an
-    /// unauthenticated caller and workflow replay.
-    ///
-    /// This mirrors the credential guard above: same hazard class -
-    /// unauthenticated mutation reachable over the network - so the same posture.
-    ///
-    /// Cost of the guard measured, not assumed: nothing under `deploy/` passes the
-    /// flag, and the one caller that does (`tests/e2e_durable_workflows.sh`) passes
-    /// no `--bind` at all, so it takes the `127.0.0.1` default and stays allowed.
-    /// Compose binds the worker to `0.0.0.0` but never sets this flag.
+    /// The workflow acceptance fixtures enable the replay endpoint on loopback.
+    /// It still requires the gateway's service assertion. The bind guard keeps
+    /// this extra dispatch path local even when a caller supplies the flag;
+    /// Compose never enables it.
     #[test]
     fn unsigned_advance_refused_on_a_routable_bind() {
         // The dangerous combination, in the three spellings a routable bind takes.
@@ -1142,13 +1039,24 @@ mod tests {
 
     #[test]
     fn worker_rejects_sqlite_database_url() {
-        // SQLite is the dev tier only — the worker hard-aborts (design R3.4
-        // fix 2). Every SQLite DSN shape the dev tier accepts must be refused.
+        // File-backed SQLite and ephemeral selectors are both refused.
         assert!(worker_rejects_db_url("sqlite:.zeroship/dev.sqlite"));
         assert!(worker_rejects_db_url("sqlite://./data/app.sqlite"));
         assert!(worker_rejects_db_url("file:./local.db"));
         assert!(worker_rejects_db_url(":memory:"));
         assert!(worker_rejects_db_url("/var/lib/zeroship/dev.sqlite"));
+    }
+
+    #[test]
+    fn worker_rejects_invalid_and_unsupported_database_selectors() {
+        for selector in [
+            "sqlite:",
+            "sqlite::memory:",
+            "file:db?mode=memory",
+            "mysql://localhost/db",
+        ] {
+            assert!(worker_rejects_db_url(selector), "{selector}");
+        }
     }
 
     #[test]
@@ -1310,17 +1218,17 @@ mod tests {
         // below can only be the secret leaking and never an unrelated field.
         const SENTINEL: &str = "k9x2m7q4v8b3n6z1p5t0w4y7r2j8h5d3";
         let file = SecretFile::new("debug", SENTINEL);
-        let settings = resolve(&["--kv-url-file", file.arg()]);
+        let settings = resolve(&["--kv-config-file", file.arg()]);
 
-        assert!(settings.kv_url.is_configured());
+        assert!(settings.kv_config.is_configured());
         assert_eq!(
-            settings.kv_url.expose_str(),
+            settings.kv_config.expose_str(),
             SENTINEL,
             "the boot path must still get the real material"
         );
 
         // The secret's OWN formatter: no value, no prefix of it, no length.
-        let field = format!("{:?}", settings.kv_url);
+        let field = format!("{:?}", settings.kv_config);
         for length in 4..=SENTINEL.len() {
             assert!(
                 !field.contains(&SENTINEL[..length]),
@@ -1359,7 +1267,7 @@ mod tests {
             .get_arguments()
             .filter_map(|arg| arg.get_long().map(str::to_owned))
             .collect::<Vec<_>>();
-        for secret in ["control-key", "database-url", "kv-url"] {
+        for secret in ["control-key", "database-url", "kv-config"] {
             assert!(
                 longs.iter().any(|long| long == &format!("{secret}-file")),
                 "{secret} must offer a -file path flag: {longs:?}"

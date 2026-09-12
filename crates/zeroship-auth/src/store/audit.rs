@@ -2,7 +2,7 @@
 
 use compio_postgres::GenericClient;
 use serde_json::Value;
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 

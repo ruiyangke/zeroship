@@ -334,7 +334,7 @@ pub async fn list_audit(
         Ok(rows) => web::HttpResponse::Ok().json(&serde_json::json!({
             "audit": rows.iter().map(|r| serde_json::json!({
                 "id": r.id.to_string(),
-                "actor_user_id": r.actor_user_id.as_ref().map(zeroship_core::user_id::UserId::as_str),
+                "actor_user_id": r.actor_user_id.as_ref().map(|id| id.as_str()),
                 "action": r.action,
                 "resource": r.resource,
                 "source_ip": r.source_ip,

@@ -225,8 +225,7 @@ impl Counts {
     }
 
     fn total_operations(&self) -> u64 {
-        self.pooled_queries
-            .get()
+        self.pooled_queries.get()
             .saturating_add(self.clean_connections.get())
             .saturating_add(self.bad_connections.get())
             .saturating_add(self.cancellations.get())
@@ -495,7 +494,7 @@ async fn query_worker(
 ) -> Result<(), String> {
     let mut iteration = 0_u64;
     while Instant::now() < deadline && !stop.get() {
-        let client = watched_db("acquire pooled query connection", pool.get()).await?;
+        let client = watched_db("acquire pooled query connection", pool.acquire()).await?;
         counts.pool_acquires.set(counts.pool_acquires.get() + 1);
 
         if iteration % LARGE_PAYLOAD_EVERY == LARGE_PAYLOAD_EVERY - 1 {
@@ -728,7 +727,7 @@ async fn cancellation_worker(
     deadline: Instant,
 ) -> Result<(), String> {
     while Instant::now() < deadline && !stop.get() {
-        let mut client = watched_db("acquire cancellation connection", pool.get()).await?;
+        let mut client = watched_db("acquire cancellation connection", pool.acquire()).await?;
         counts.pool_acquires.set(counts.pool_acquires.get() + 1);
 
         let result = compio::time::timeout(
@@ -1312,9 +1311,9 @@ async fn run(args: Args) -> Result<(), String> {
         ));
     }
 
-    let pool_connections_created = pool.metrics.connections_created.get();
-    let pool_evictions = pool.metrics.evictions.get();
-    let pool_timeouts = pool.metrics.timeouts.get();
+    let pool_connections_created = pool.metrics().connections_created.get();
+    let pool_evictions = pool.metrics().evictions.get();
+    let pool_timeouts = pool.metrics().timeouts.get();
     drop(pool);
     drop(observer);
     let drained = compio_postgres::drain_connections(SETTLE_WATCHDOG).await;

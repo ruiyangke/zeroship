@@ -214,7 +214,7 @@ fn control_authorization(keyring: &ServiceKeyring) -> Result<String, PreflightEr
 pub async fn erasure_preflight(
     control_url: &str,
     keyring: &ServiceKeyring,
-    principal: &zeroship_core::user_id::UserId,
+    principal: &zeroship_core::UserId,
 ) -> Result<ErasurePreflight, PreflightError> {
     let authorization = control_authorization(keyring)?;
     // The path segment carries the printed typed id, which is what
@@ -278,8 +278,7 @@ mod tests {
             .expect("trust the auth key");
         let keyring = ServiceKeyring::from_parts(auth, key, ServiceTrustBundle::new())
             .expect("build the auth keyring");
-        let verifier =
-            ServiceAssertionVerifier::new(trusted, Arc::new(InMemoryReplayStore::new()));
+        let verifier = ServiceAssertionVerifier::new(trusted, Arc::new(InMemoryReplayStore::new()));
 
         let runtime = compio::runtime::Runtime::new().expect("runtime");
         for (endpoint, granted) in [
@@ -330,18 +329,18 @@ mod tests {
             .expect("trust the auth key");
         let keyring = ServiceKeyring::from_parts(auth, key, ServiceTrustBundle::new())
             .expect("build the auth keyring");
-        let verifier =
-            ServiceAssertionVerifier::new(trusted, Arc::new(InMemoryReplayStore::new()));
+        let verifier = ServiceAssertionVerifier::new(trusted, Arc::new(InMemoryReplayStore::new()));
 
         let header = control_authorization(&keyring).expect("mint");
-        let verified = compio::runtime::Runtime::new()
-            .expect("runtime")
-            .block_on(verify_service_call(
-                &verifier,
-                Some(&header),
-                gateway.as_str(),
-                endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
-            ));
+        let verified =
+            compio::runtime::Runtime::new()
+                .expect("runtime")
+                .block_on(verify_service_call(
+                    &verifier,
+                    Some(&header),
+                    gateway.as_str(),
+                    endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+                ));
         assert!(
             verified.is_err(),
             "a control-audienced assertion must not open a gateway endpoint"

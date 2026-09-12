@@ -116,7 +116,7 @@ the zero-tokio compio stack**. Its *domain logic* is worth salvaging; its
 ```
 
 ### 1. Producer — `env.meter` + the worker meter (ISS-18, CT-B2)
-- Register **`MeterPlugin`** (`crates/plugin-meter`, new, mirroring plugin-kv) →
+- Register **`MeterPlugin`** (`crates/plugin-meter`, new, mirroring kv-v8) →
   `env.meter.increment(metric, n)` / counters, scoped per-`app_id` (the worker
   already knows the app). Native, small surface; the `@zeroship/*` packages wrap
   it. SDK-defined metrics + the platform auto-counters (requests/cpu/wall/egress/
@@ -859,7 +859,7 @@ server-side only; RLS fail-closed on app-keyed tables; least-priv grants.
 **Home: a new `crates/metering` crate.** Today the `Meter` + `flush` + the
 `v8_class` increment surface all live in `crates/plugin-meter`. Refactor A
 deletes the `env.meter` creator API but KEEPS the `Meter` and `flush` — and
-those must now be a dependency of `plugin-db`/`plugin-kv`/`plugin-storage`
+those must now be a dependency of `plugin-db`/`kv-v8`/`plugin-storage`
 (producers) AND the worker (owner + flusher). A *plugin* crate cannot be the
 shared home: `plugin-db` depending on `plugin-meter` (a sibling plugin) is a
 layering inversion, and `plugin-meter` as a namespace plugin ceases to exist
@@ -913,7 +913,7 @@ applied to platform primitives instead of user code).
 2. `create_plugins()` (`cache.rs:112`) is the SINGLE construction site for all
    plugins on an isolate. It already reads `METER.with(|m| m.borrow().clone())`
    to mint the (deleted) `MeterPlugin`. Refactor A re-points that `Arc<Meter>`:
-   it is passed into the **constructors** of `DbPlugin`, `KvPlugin`,
+   it is passed into the **constructors** of `DbPlugin`, `KvBinding`,
    `StoragePlugin` instead. The `MeterPlugin` push (`cache.rs:135-140`) is
    deleted.
 3. Each plugin's `build_instance(scope, app_id)` (runtime plugin trait,
@@ -929,17 +929,15 @@ applied to platform primitives instead of user code).
 
 **Per-plugin wiring (matching each plugin's existing shape):**
 
-- **plugin-kv** (`v8_class`-backed): `KvPlugin::with_backend(backend)` →
-  `KvPlugin::with_backend_and_meter(backend, Arc<Meter>)`. `build_instance`
-  (`lib.rs:78`) calls `mint_kv(scope, backend, meter, app_id)`; `mint_kv`
-  (`v8_class.rs:364`) stamps a `MeterHandle` field onto the `Kv` struct
-  (`v8_class.rs:46`, alongside `backend`/`app_id`). Each `dispatch_*` resolve
-  arm emits (see A2).
+- **kv-v8** (`v8_class`-backed): `KvBinding::new(store, Some(meter))` receives
+  the configured `KvStore` and process meter. `build_instance` issues an
+  app-scoped Rust handle and a `MeterHandle`; `mint_kv` places them on the V8
+  wrapper. Each successful `dispatch_*` operation emits usage (see A2).
 - **plugin-db** (`v8_class` + 27 flat callbacks): `DbPlugin::new(url)` →
   `DbPlugin::new(url, Arc<Meter>)`. `build_instance` (`lib.rs:272`) →
   `mint_db(scope, app_id, meter)`. The emit lives at the shared exec boundary
   (`exec.rs`, see A2), so the `MeterHandle` is most naturally placed in the
-  per-app `context` (`crates/zeroship-plugin-db/src/context.rs`, the thread-local the
+  per-app `context` (`crates/zeroship-data-v8/src/context.rs`, the thread-local the
   exec layer already uses for schema/tx-client lookups keyed by `app_id`) —
   registered once per app in `DbPlugin::register`/first-touch, read by
   `exec_query`/`exec_mutation`. This keeps the exec functions' signatures
@@ -1001,7 +999,7 @@ backend traits (out of scope; a metric with no weight is simply free).
   so `env` loses `meter` (one fewer `NativePlugin` in the vector; the
   `create_plugins_*` worker tests assert the surviving namespaces).
 - **`Cargo.toml`:** add `crates/metering` to the workspace; `worker`,
-  `plugin-db`, `plugin-kv`, `plugin-storage` depend on it; drop
+  `plugin-db`, `kv-v8`, `plugin-storage` depend on it; drop
   `plugin-meter` from the workspace + every dependent. `crates/cli` (the
   `zeroship serve` mirror of `create_plugins`) loses its `MeterPlugin` push too.
 

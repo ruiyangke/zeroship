@@ -2,7 +2,7 @@
 //! the data plane.
 //!
 //! These were relocated verbatim out of the original data-plane `backend`
-//! module (the `VectorMetric` / `EncryptionMode` / `GeoPoint` triple): they are
+//! module (the `VectorMetric` / `GeoPoint` types): they are
 //! pure *shape* descriptors - no DB round-trip, no crypto, no runtime -
 //! and the DDL builders in `crate::schema::query` consume them. The data plane's
 //! `backend` module re-exports them so existing `crate::backend::...`
@@ -55,34 +55,4 @@ pub struct GeoPoint {
     /// Longitude in degrees, range `[-180, 180]`. SDK validate
     /// rejects out-of-range values before the trait method is called.
     pub lng: f64,
-}
-
-/// Encryption mode - chooses nonce derivation + AAD shape.
-///
-/// Two modes, chosen per column at declare time.
-/// The on-wire blob layout is identical between modes (the synthetic
-/// vs random distinction is fully internal to the encrypt side); the
-/// caller has to track the mode to reconstruct the right AAD on
-/// decrypt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncryptionMode {
-    /// Per-row random nonce. AAD =
-    /// `(collection, column, row_pk_bytes)` - binds ciphertext to its
-    /// row position. The runtime mints typed_id PKs **SDK-side** before INSERT,
-    /// so `row_pk` is always available when `encrypt()` is called.
-    /// Single-phase INSERT - no chicken-and-egg vs Microsoft Always
-    /// Encrypted / MongoDB CSFLE. Defeats the ciphertext-oracle
-    /// attack on randomised columns. Default (fail-safe).
-    Randomised,
-
-    /// Synthetic nonce = HMAC-SHA256(k_siv, plaintext)[..12]. AAD =
-    /// `(collection, column)` only - `row_pk_bytes` intentionally
-    /// omitted because deterministic mode's defining property is
-    /// "same plaintext -> same ciphertext under (collection, column)",
-    /// which the B-tree-on-ciphertext equality index depends on.
-    /// Inherits the standard deterministic-mode leak (equality
-    /// across rows is observable to anyone with column read access).
-    /// The SDK filter pre-flight refuses range / regex / `LIKE`
-    /// queries on deterministic columns regardless.
-    Deterministic,
 }

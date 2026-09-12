@@ -487,13 +487,13 @@ fn from_parts_is_not_a_way_around_the_own_key_refusal() {
 
 /// The identifier a worker instance mints under, once it has enrolled.
 ///
-/// A `wkr_` typed id is base62 over a UUIDv7, and the literal here is one shaped
+/// A `wkr_` typed id is base36 over a UUIDv7, and the literal here is one shaped
 /// like the ones `worker_enrolment` returns. It is written out rather than
 /// generated so the multi-segment path this whole separation rests on is visible
 /// in the test that depends on it.
 fn worker_instance_issuer() -> ServiceIssuer {
     ServiceIssuer::parse(&format!(
-        "spiffe://zeroship.ai/{WORKER_SERVICE_NAME}/wkr_3Kd9QmZp2XvB"
+        "spiffe://zeroship.ai/{WORKER_SERVICE_NAME}/wkr_0000000000000000000000001"
     ))
     .expect("an instance path is a well-formed issuer identifier")
 }

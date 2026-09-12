@@ -3,7 +3,7 @@
 # sweep_db.sh - the decisions tests/sweep_test_databases.sh makes, separated
 # from the server it makes them against.
 #
-# THE LOGIC IS NOW IN RUST: crates/zeroship-testkit/src/sweep.rs, reached
+# THE LOGIC IS NOW IN RUST: xtask/src/platform_db/sweep.rs, reached
 # through `zs-testkit sweep`. This file is the shell BINDING - it keeps the
 # function names and the two variables the sweeper reads, so that script did
 # not change. The Rust module carries the design notes.
@@ -39,7 +39,7 @@
 # The database families the sweeper owns. Deliberately a short explicit list
 # rather than a `zeroship%` wildcard: `zeroship` itself is the dev platform
 # database on the shared cluster and carries real rows. The list lives in
-# crates/zeroship-testkit/src/sweep.rs; this is here so a shell caller can still
+# xtask/src/platform_db/sweep.rs; this is here so a shell caller can still
 # print it.
 ZS_SWEEP_FAMILIES=(zeroship_auth_test zeroship_billing_test)
 

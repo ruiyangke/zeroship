@@ -3,8 +3,9 @@
 //! This test is **self-contained**: it starts its own `MinIO` container, creates
 //! a bucket, exercises the full v1 client surface (put / get / head / list /
 //! delete plus a multipart round-trip with parts ≥ 5 `MiB`), and tears the
-//! container down. It **skips cleanly** when Docker is unavailable so CI / dev
-//! machines without Docker stay green.
+//! container down. It **REFUSES** when Docker is unavailable: a machine
+//! without Docker gets a named failure saying what to install, never a green
+//! that exercised no client at all.
 
 #![allow(clippy::future_not_send)]
 //!
@@ -14,143 +15,23 @@
 //! The container is path-style, plaintext HTTP on loopback (`dev_http=true`),
 //! which is the only mode `MinIO` is wired for here.
 
-use std::process::Command;
-use std::time::Duration;
 
 use bytes::Bytes;
 use compio_s3::client::{PutOptions, S3Client};
-use compio_s3::{S3Config, S3Credentials};
 
-mod common;
-
-const ACCESS_KEY: &str = "minioadmin";
-const SECRET_KEY: &str = "minioadmin";
-const CONTAINER: &str = "zs-compio-s3-minio-test";
-const PORT: u16 = 9111;
-const BUCKET: &str = "zs-test-bucket";
-
-/// Whether `docker` is on PATH and the daemon answers.
-fn docker_available() -> bool {
-    Command::new("docker")
-        .args(["info"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-/// Best-effort `docker rm -f` of any prior run.
-fn cleanup() {
-    let _ = Command::new("docker")
-        .args(["rm", "-f", CONTAINER])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-}
-
-/// Start `MinIO` and create the test bucket via the bundled `mc` client.
-/// Returns `true` on success.
-fn start_minio() -> bool {
-    cleanup();
-    let run = Command::new("docker")
-        .args([
-            "run",
-            "-d",
-            "--name",
-            CONTAINER,
-            "-p",
-            &format!("{PORT}:9000"),
-            "-e",
-            &format!("MINIO_ROOT_USER={ACCESS_KEY}"),
-            "-e",
-            &format!("MINIO_ROOT_PASSWORD={SECRET_KEY}"),
-            "minio/minio",
-            "server",
-            "/data",
-        ])
-        .status();
-    if !matches!(run, Ok(s) if s.success()) {
-        common::skip("skip: failed to start MinIO container");
-        return false;
-    }
-
-    // Wait for readiness, then create the bucket using `mc` inside the
-    // container (avoids needing the AWS CLI on the host).
-    for _ in 0..40 {
-        std::thread::sleep(Duration::from_millis(500));
-        let alias = Command::new("docker")
-            .args([
-                "exec",
-                CONTAINER,
-                "mc",
-                "alias",
-                "set",
-                "local",
-                "http://127.0.0.1:9000",
-                ACCESS_KEY,
-                SECRET_KEY,
-            ])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if matches!(alias, Ok(s) if s.success()) {
-            let mb = Command::new("docker")
-                .args([
-                    "exec",
-                    CONTAINER,
-                    "mc",
-                    "mb",
-                    "-p",
-                    &format!("local/{BUCKET}"),
-                ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            if matches!(mb, Ok(s) if s.success()) {
-                return true;
-            }
-        }
-    }
-    common::skip("skip: MinIO did not become ready / bucket create failed");
-    cleanup();
-    false
-}
-
-fn client() -> S3Client {
-    let url = format!(
-        "s3://{BUCKET}/it?provider=minio&endpoint=http://127.0.0.1:{PORT}&region=us-east-1&style=path&dev_http=true&checksum=none"
-    );
-    let cfg = S3Config::parse_url(&url).expect("parse minio url");
-    S3Client::new(cfg, S3Credentials::new(ACCESS_KEY, SECRET_KEY, None))
-}
+#[path = "../../../tests/fixtures/s3.rs"]
+mod s3_fixture;
 
 #[test]
 fn minio_full_surface_and_multipart() {
-    if !docker_available() {
-        common::skip("skip: docker unavailable");
-        return;
-    }
-    if !start_minio() {
-        return;
-    }
-
-    // The whole async body runs on a single compio thread; tear down the
-    // container at the end regardless of outcome.
-    let result = std::panic::catch_unwind(|| {
-        compio::runtime::Runtime::new()
-            .expect("compio runtime")
-            .block_on(run_smoke());
-    });
-
-    cleanup();
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
+    let minio = s3_fixture::Minio::start();
+    let client = S3Client::new(minio.config("smoke"), minio.credentials());
+    compio::runtime::Runtime::new()
+        .expect("compio runtime")
+        .block_on(run_smoke(client));
 }
 
-async fn run_smoke() {
-    let c = client();
+async fn run_smoke(c: S3Client) {
 
     // ---- single-object put / head / get / list / delete ----
     let key = "hello.txt";

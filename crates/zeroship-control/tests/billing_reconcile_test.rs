@@ -849,19 +849,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
     organization_id
 }
 
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Test Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
-}
-
 /// Seed a plan that charges 1 cent/request with no included CU. CU pricing:
 /// global weight `requests` = 1 CU/op × fx 10^12 pico-cents/CU (= 1 cent/CU).
 async fn make_plan(state: &AppState) -> String {
@@ -1720,7 +1707,7 @@ async fn setup_session_creates_customer_once() {
         let customer = match existing {
             Some(c) => c,
             None => {
-                let cus = client.create_customer("c@example.test", &organization.to_string()).await.unwrap();
+                let cus = client.create_customer("c@example.test", organization).await.unwrap();
                 fx.state.stripe_store.set_customer(organization, &cus).await.unwrap();
                 cus
             }
@@ -1847,7 +1834,7 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
         .into_iter()
         .find(|r| r.path == "/v1/invoices")
         .expect("invoice create fired");
-    let expected_key = billing_reconcile::invoice_idempotency_key(&organization, period);
+    let expected_key = billing_reconcile::invoice_idempotency_key(organization, period);
     assert_eq!(
         invoice_create.idempotency_key.as_deref(),
         Some(expected_key.as_str()),
@@ -1994,84 +1981,6 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
     .with_base_url(fx.state.stripe_base_url.clone())
 }
 
-/// A StripeApi decorator that forwards to the REAL `StripeClient` (so requests
-/// still hit the mock + get ledgered) but FAILS after the first invoice-item
-/// create — simulating a crash/timeout partway through posting a organization's
-/// items. The first item posts (and is ledgered by `bill_organization`); the second
-/// returns an error, aborting the drive before the invoice is finalized.
-struct FailAfterFirstItem {
-    inner: StripeClient,
-    items_seen: std::cell::Cell<usize>,
-}
-
-impl StripeApi for FailAfterFirstItem {
-    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_customer(email, organization_id).await
-    }
-    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_checkout_setup_session(c, ok, cancel).await
-    }
-    async fn create_invoice_item(
-        &self,
-        customer: &str,
-        amount_cents: u64,
-        currency: &str,
-        description: &str,
-        period: Period,
-        idempotency_key: &str,
-        lookup_key: &str,
-        metadata: &[(String, String)],
-    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        let n = self.items_seen.get();
-        self.items_seen.set(n + 1);
-        if n >= 1 {
-            // Second (and later) item: simulate the crash/timeout window.
-            return Err(zeroship_control::stripe_store::StripeError::Db(
-                "simulated crash after first item".to_string(),
-            ));
-        }
-        self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
-            .await
-    }
-    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.delete_invoice_item(item_id).await
-    }
-    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
-        self.inner.find_invoice_item_by_key(customer, lookup_key).await
-    }
-    async fn create_invoice(&self, customer: &str, organization_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_invoice(customer, organization_id, idempotency_key).await
-    }
-    async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.finalize_invoice(invoice_id).await
-    }
-    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
-    }
-    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
-        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
-    }
-    async fn create_connect_account(&self, email: &str, organization_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_account(email, organization_id, country).await
-    }
-    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_account_link(account_id, refresh_url, return_url).await
-    }
-    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
-        self.inner.retrieve_account(account_id).await
-    }
-    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
-    }
-    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
-    }
-    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
-        self.inner.invoice_settlement_ids(provider_invoice_id).await
-    }
-}
-
 /// CRIT-1: a partial post then crash, followed by a re-drive AFTER Stripe's
 /// Idempotency-Key window has expired (dedupe OFF). The per-app LEDGER — not
 /// Stripe's 24h key — must guarantee app A's invoice item is created EXACTLY
@@ -2147,82 +2056,6 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
 
     drop(fx);
     common::drain_pg().await;
-}
-
-/// C1 decorator: `create_invoice_item` POSTS to the real Stripe (mock) — so the
-/// item EXISTS on Stripe — but then returns an Err, simulating the process
-/// crashing AFTER the Stripe POST returns yet BEFORE the ledger row is confirmed
-/// (its `stripe_item_id` UPDATE commits). This is the EXACT crash window the old
-/// "ledger-after-call" ordering could not survive: Stripe has the item, the
-/// ledger does not.
-struct PostThenCrash {
-    inner: StripeClient,
-}
-
-impl StripeApi for PostThenCrash {
-    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_customer(email, organization_id).await
-    }
-    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_checkout_setup_session(c, ok, cancel).await
-    }
-    async fn create_invoice_item(
-        &self,
-        customer: &str,
-        amount_cents: u64,
-        currency: &str,
-        description: &str,
-        period: Period,
-        idempotency_key: &str,
-        lookup_key: &str,
-        metadata: &[(String, String)],
-    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        // Post for real (the item lands on Stripe)…
-        let _id = self
-            .inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
-            .await?;
-        // …then "crash" before bill_organization can confirm it in the ledger.
-        Err(zeroship_control::stripe_store::StripeError::Db(
-            "simulated crash after the Stripe POST returned, before ledger confirm".to_string(),
-        ))
-    }
-    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.delete_invoice_item(item_id).await
-    }
-    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
-        self.inner.find_invoice_item_by_key(customer, lookup_key).await
-    }
-    async fn create_invoice(&self, customer: &str, organization_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_invoice(customer, organization_id, idempotency_key).await
-    }
-    async fn finalize_invoice(&self, invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.finalize_invoice(invoice_id).await
-    }
-    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
-    }
-    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
-        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
-    }
-    async fn create_connect_account(&self, email: &str, organization_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_account(email, organization_id, country).await
-    }
-    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_account_link(account_id, refresh_url, return_url).await
-    }
-    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
-        self.inner.retrieve_account(account_id).await
-    }
-    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
-    }
-    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
-    }
-    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
-        self.inner.invoice_settlement_ids(provider_invoice_id).await
-    }
 }
 
 /// C1 (the tighter crash window): the item POSTS to Stripe, then the process
@@ -2359,77 +2192,6 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     common::drain_pg().await;
 }
 
-/// C2 decorator: `create_invoice` creates the draft for real (it lands on Stripe
-/// carrying the swept line items) but `finalize_invoice` returns an Err — the
-/// process crashes AFTER the draft is created/persisted but BEFORE finalize.
-struct CrashOnFinalize {
-    inner: StripeClient,
-}
-
-impl StripeApi for CrashOnFinalize {
-    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_customer(email, organization_id).await
-    }
-    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_checkout_setup_session(c, ok, cancel).await
-    }
-    async fn create_invoice_item(
-        &self,
-        customer: &str,
-        amount_cents: u64,
-        currency: &str,
-        description: &str,
-        period: Period,
-        idempotency_key: &str,
-        lookup_key: &str,
-        metadata: &[(String, String)],
-    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
-            .await
-    }
-    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.delete_invoice_item(item_id).await
-    }
-    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
-        self.inner.find_invoice_item_by_key(customer, lookup_key).await
-    }
-    async fn create_invoice(&self, customer: &str, organization_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        // Create the draft for real (it sweeps the pending items)…
-        self.inner.create_invoice(customer, organization_id, idempotency_key).await
-    }
-    async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        // …then crash before finalize.
-        Err(zeroship_control::stripe_store::StripeError::Db(
-            "simulated crash after draft create, before finalize".to_string(),
-        ))
-    }
-    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
-    }
-    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
-        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
-    }
-    async fn create_connect_account(&self, email: &str, organization_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_account(email, organization_id, country).await
-    }
-    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_account_link(account_id, refresh_url, return_url).await
-    }
-    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
-        self.inner.retrieve_account(account_id).await
-    }
-    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
-    }
-    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
-    }
-    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
-        self.inner.invoice_settlement_ids(provider_invoice_id).await
-    }
-}
-
 /// C2 (under-bill): create draft (sweeping the real items) → crash before
 /// finalize. A re-drive AFTER Stripe's 24h create-key window has expired (dedupe
 /// OFF) must FINALIZE the ORIGINAL draft (which carries the items) — NOT create a
@@ -2550,7 +2312,7 @@ fn billing_setup_route(cfg: &mut web::ServiceConfig) {
 /// This replaced a principal-equals-path test. That check was the right one
 /// while the billing subject WAS the caller - one human, one bill - and it is
 /// not expressible now: the path carries an `org_…` and the principal is a
-/// user uuid, so the two can never be equal and the old assertion would have
+/// canonical user id, so the two can never be equal and the old assertion would have
 /// been vacuously true in the deny direction.
 ///
 /// What must hold instead is BOTH directions of the seat: a principal seated at
@@ -2813,79 +2575,6 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
     common::drain_pg().await;
 }
 
-/// M2 decorator: `finalize_invoice` returns Stripe's `invoice_already_finalized`
-/// API error (a 4xx), simulating a re-drive of the crash window where Stripe
-/// finalized but our local UPDATE never committed. Everything else forwards to the
-/// real client (so items + draft land on the mock for real).
-struct FinalizeAlreadyFinalized {
-    inner: StripeClient,
-}
-
-impl StripeApi for FinalizeAlreadyFinalized {
-    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_customer(email, organization_id).await
-    }
-    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_checkout_setup_session(c, ok, cancel).await
-    }
-    async fn create_invoice_item(
-        &self,
-        customer: &str,
-        amount_cents: u64,
-        currency: &str,
-        description: &str,
-        period: Period,
-        idempotency_key: &str,
-        lookup_key: &str,
-        metadata: &[(String, String)],
-    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
-            .await
-    }
-    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.delete_invoice_item(item_id).await
-    }
-    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
-        self.inner.find_invoice_item_by_key(customer, lookup_key).await
-    }
-    async fn create_invoice(&self, customer: &str, organization_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_invoice(customer, organization_id, idempotency_key).await
-    }
-    async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        // Stripe rejects finalizing an already-finalized invoice with a 4xx whose
-        // machine-readable code is `invoice_already_finalized`.
-        Err(zeroship_control::stripe_store::StripeError::Api {
-            status: 400,
-            code: Some("invoice_already_finalized".to_string()),
-        })
-    }
-    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
-    }
-    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
-        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
-    }
-    async fn create_connect_account(&self, email: &str, organization_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_account(email, organization_id, country).await
-    }
-    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_account_link(account_id, refresh_url, return_url).await
-    }
-    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
-        self.inner.retrieve_account(account_id).await
-    }
-    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
-    }
-    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
-    }
-    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
-        self.inner.invoice_settlement_ids(provider_invoice_id).await
-    }
-}
-
 // ===========================================================================
 // M2 (re-finalize converges): a re-drive of the crash window where Stripe
 // finalized but our DB stayed draft. Stripe's `finalize_invoice` now returns
@@ -2951,75 +2640,6 @@ async fn refinalize_already_finalized_converges_locally() {
 
     drop(fx);
     common::drain_pg().await;
-}
-
-/// M1 decorator: `finalize_invoice` returns a FIXED provider invoice id, so the
-/// test can pre-seed a colliding `billing_provider_refs(provider,ref_kind,external_id)`
-/// row and force the finalize-ref INSERT to violate the UNIQUE constraint —
-/// exercising the failure window BETWEEN the finalize UPDATE and the ref INSERT.
-struct FinalizeReturnsFixedId {
-    inner: StripeClient,
-    fixed_id: String,
-}
-
-impl StripeApi for FinalizeReturnsFixedId {
-    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_customer(email, organization_id).await
-    }
-    async fn create_checkout_setup_session(&self, c: &str, ok: &str, cancel: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_checkout_setup_session(c, ok, cancel).await
-    }
-    async fn create_invoice_item(
-        &self,
-        customer: &str,
-        amount_cents: u64,
-        currency: &str,
-        description: &str,
-        period: Period,
-        idempotency_key: &str,
-        lookup_key: &str,
-        metadata: &[(String, String)],
-    ) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner
-            .create_invoice_item(customer, amount_cents, currency, description, period, idempotency_key, lookup_key, metadata)
-            .await
-    }
-    async fn delete_invoice_item(&self, item_id: &str) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.delete_invoice_item(item_id).await
-    }
-    async fn find_invoice_item_by_key(&self, customer: &str, lookup_key: &str) -> Result<Option<String>, zeroship_control::stripe_store::StripeError> {
-        self.inner.find_invoice_item_by_key(customer, lookup_key).await
-    }
-    async fn create_invoice(&self, customer: &str, organization_id: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_invoice(customer, organization_id, idempotency_key).await
-    }
-    async fn finalize_invoice(&self, _invoice_id: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        Ok(self.fixed_id.clone())
-    }
-    async fn create_meter_event(&self, event_name: &str, customer: &str, value: u64, identifier: &str, timestamp: i64) -> Result<(), zeroship_control::stripe_store::StripeError> {
-        self.inner.create_meter_event(event_name, customer, value, identifier, timestamp).await
-    }
-    async fn meter_event_summary(&self, meter_id: &str, customer: &str, start_time: i64, end_time: i64) -> Result<u64, zeroship_control::stripe_store::StripeError> {
-        self.inner.meter_event_summary(meter_id, customer, start_time, end_time).await
-    }
-    async fn create_connect_account(&self, email: &str, organization_id: &str, country: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_account(email, organization_id, country).await
-    }
-    async fn create_account_link(&self, account_id: &str, refresh_url: &str, return_url: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_account_link(account_id, refresh_url, return_url).await
-    }
-    async fn retrieve_account(&self, account_id: &str) -> Result<zeroship_control::stripe_client::ConnectAccount, zeroship_control::stripe_store::StripeError> {
-        self.inner.retrieve_account(account_id).await
-    }
-    async fn create_connect_payment_intent(&self, connected_account: &str, amount_cents: u64, currency: &str, application_fee_cents: u64, description: &str, idempotency_key: &str) -> Result<zeroship_control::stripe_client::ConnectPaymentIntent, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_connect_payment_intent(connected_account, amount_cents, currency, application_fee_cents, description, idempotency_key).await
-    }
-    async fn create_refund(&self, provider_invoice_id: &str, amount_cents: u64, currency: &str, idempotency_key: &str) -> Result<String, zeroship_control::stripe_store::StripeError> {
-        self.inner.create_refund(provider_invoice_id, amount_cents, currency, idempotency_key).await
-    }
-    async fn invoice_settlement_ids(&self, provider_invoice_id: &str) -> Result<(Option<String>, Option<String>), zeroship_control::stripe_store::StripeError> {
-        self.inner.invoice_settlement_ids(provider_invoice_id).await
-    }
 }
 
 // ===========================================================================

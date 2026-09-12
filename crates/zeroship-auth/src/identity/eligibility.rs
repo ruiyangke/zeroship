@@ -2,11 +2,11 @@
 
 use compio_postgres::Client;
 use thiserror::Error;
+use zeroship_core::UserId;
 
 use crate::error::AuthError;
 
-const ELIGIBILITY_SQL: &str =
-    "SELECT locked_until, disabled_at, anonymized_at, \
+const ELIGIBILITY_SQL: &str = "SELECT locked_until, disabled_at, anonymized_at, \
             deletion_requested_at, deletion_scheduled_for \
      FROM zeroship.users \
      WHERE id = $1";
@@ -26,10 +26,7 @@ pub enum LoginIneligible {
 impl LoginIneligible {
     #[must_use]
     pub const fn is_account_state(&self) -> bool {
-        matches!(
-            self,
-            Self::Locked | Self::Disabled | Self::NotFound
-        )
+        matches!(self, Self::Locked | Self::Disabled | Self::NotFound)
     }
 }
 
@@ -39,7 +36,7 @@ impl LoginIneligible {
 /// locked. Call this immediately before minting or extending login authority.
 pub async fn check_user_eligible(
     conn: &Client,
-    user_id: &zeroship_core::user_id::UserId,
+    user_id: &UserId,
 ) -> std::result::Result<(), LoginIneligible> {
     let rows = conn
         .query(ELIGIBILITY_SQL, &[&user_id.as_str()])
@@ -49,13 +46,11 @@ pub async fn check_user_eligible(
         return Err(LoginIneligible::NotFound);
     };
 
-    let disabled_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get("disabled_at").ok();
+    let disabled_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("disabled_at").ok();
     if disabled_at.is_some() {
         return Err(LoginIneligible::Disabled);
     }
-    let anonymized_at: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get("anonymized_at").ok();
+    let anonymized_at: Option<chrono::DateTime<chrono::Utc>> = row.try_get("anonymized_at").ok();
     let deletion_requested_at: Option<chrono::DateTime<chrono::Utc>> =
         row.try_get("deletion_requested_at").ok();
     let deletion_scheduled_for: Option<chrono::DateTime<chrono::Utc>> =
@@ -67,8 +62,7 @@ pub async fn check_user_eligible(
         return Err(LoginIneligible::Disabled);
     }
 
-    let locked_until: Option<chrono::DateTime<chrono::Utc>> =
-        row.try_get("locked_until").ok();
+    let locked_until: Option<chrono::DateTime<chrono::Utc>> = row.try_get("locked_until").ok();
     if locked_until.is_some_and(|t| t > chrono::Utc::now()) {
         return Err(LoginIneligible::Locked);
     }

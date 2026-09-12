@@ -142,7 +142,7 @@
 #      by `crate::query` at 22 - the module decision 4 routes ALL SQL through,
 #      never placed in the lattice". `crate::query` IS NOT A MODULE OF THIS
 #      CRATE. There is no query.rs and no query/ directory; lib.rs:94 says
-#      `pub use zeroship_schema::query;`, and lib.rs:150 does the same for
+#      `pub use zeroship_data_sql::compile;`, and lib.rs:150 does the same for
 #      `diff`. Both resolve to a DEPENDENCY crate, which is below every tier
 #      here by construction - cargo already forbids that cycle.
 #      The error was reading "the census has no arm for it" as "nobody has
@@ -186,8 +186,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # ---------------------------------------------------------------------------
 # THE TIERS SPAN TWO CRATES SINCE 2026-09-03, AND SO DOES THIS SCAN.
 # ---------------------------------------------------------------------------
-# `SRC` was a single path, `crates/zeroship-plugin-db/src`, and the ENGINE tier
-# left that tree for `crates/zeroship-data-engine/src` the day this changed.
+# `SRC` was a single path, `crates/zeroship-data-v8/src`, and the ENGINE tier
+# left that tree for `crates/zeroship-data-orm/src` the day this changed.
 # Left alone, the census would have scanned the ~15k lines that stayed and
 # printed exactly what a clean tree prints about the ~22k that went - the defect
 # class this file's own header is a catalogue of.
@@ -202,14 +202,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # before, plus the ones that moved.
 #
 # `crate::` still means "this tier's vocabulary" on both sides, because
-# `zeroship-data-engine/src/lib.rs` re-exports the same neutral modules
-# `zeroship-plugin-db/src/lib.rs` does (`query`, `diff`, `broker`, `read_set`,
+# `zeroship-data-orm/src/lib.rs` re-exports the same neutral modules
+# `zeroship-data-v8/src/lib.rs` does (`query`, `diff`, `broker`, `read_set`,
 # `encryption`, `budgets`, `lock_policy`), and the adapter re-exports the engine's
 # back. A path spelled `crate::crud::…` resolves to the same item from either
 # crate, which is exactly what makes the union scan sound.
 SRC_ROOTS=(
-  "$ROOT/crates/zeroship-plugin-db/src"
-  "$ROOT/crates/zeroship-data-engine/src"
+  "$ROOT/crates/zeroship-data-v8/src"
+  "$ROOT/crates/zeroship-data-orm/src"
 )
 for _root in "${SRC_ROOTS[@]}"; do
   [ -d "$_root" ] || { echo "no such tree: $_root" >&2; exit 1; }
@@ -236,7 +236,7 @@ src_path_exists() {
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
     # NO ARMS for ./backend/pg_*.rs, ./backend/postgres.rs, ./backend/sqlite/*,
     # ./encryption/*, ./lock_policy.rs, ./broker.rs or ./read_set.rs. Every one
@@ -249,7 +249,6 @@ tier_of_file() {
     # both, and `read_set` went first because the broker names `ReadSetEntry`.
     # NO ARMS for ./error.rs, ./binding.rs or ./budgets.rs either. Same reason,
     # earlier moves: all three are `zeroship-data-core`'s now.
-    ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # Settled by docs/proposals/2026-09-02-thread-context-ownership.md, whose
     # ownership table places `lanes` and `mask_policies` in data-engine,
     # `schemas` in data-core, and the pool/backend slots in the adapter -
@@ -260,13 +259,12 @@ tier_of_file() {
     ./context.rs|./service.rs|./op_error.rs)              echo ADAPTER ;;
     # BackendHandle and TxCanceller name BOTH vendors, so only a tier above both
     # may hold them; the crate-shape proposal puts them in data-engine.
-    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
-    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./assignments.rs|./metrics.rs) echo ENGINE ;;
     # `descriptor.rs` was CORE here and data-engine in the crate-shape proposal,
     # and the two disagreed for two days. SETTLED as ENGINE on 2026-09-03 by the
     # cut itself: the file left with the engine tier, and the argument that put
     # it at rank 0 - "named by two tiers, so below both" - does not survive
-    # measurement. It is 130 lines wrapping `zeroship_data_core::schema_cache`,
+    # measurement. It is 130 lines wrapping `zeroship_data_orm::schema_cache`,
     # 25 of its call sites are in `crud/`, and three are in the adapter, which is
     # ADAPTER -> ENGINE and legal. The rank-0 primitive it wraps is already in
     # data-core; this is the engine's accessor for it.
@@ -276,7 +274,7 @@ tier_of_file() {
     # true of ONE `#[cfg(test)]` assertion, which moved to `change_stream_pg.rs`
     # on 2026-09-03 - the fact it pins is about `PgChangeStream`, so it belongs
     # beside it. What is left is a prelude of re-exports from data-core, both
-    # vendor crates and zeroship-schema, plus this tier's own `BackendHandle`
+    # vendor crates and zeroship-data-orm::sql, plus this tier's own `BackendHandle`
     # and a test-only conformance marker: all at or below ENGINE. Issue #170
     # closes here.
     ./backend/mod.rs)                                    echo ENGINE ;;
@@ -285,7 +283,7 @@ tier_of_file() {
     #   auth/mod.rs - #156 asks whether auth/ is deleted outright
     #     (zero production callers, a live twin in migrate-server). Tiering code
     #     that may not exist would assert a placement for it. They travelled to
-    #     `zeroship-data-engine` with `auth/bootstrap.rs`, which needs the
+    #     `zeroship-data-orm` with `auth/bootstrap.rs`, which needs the
     #     `APP_ROLE_TEMPLATE` anchor `mod.rs` holds; that is a consequence of
     #     the move, not an answer to #156.
     #   test_support/mod.rs - test-only; it ships in no build.
@@ -301,9 +299,9 @@ tier_of_target() {
   case "$1" in
     # RESOLVE these, do not assert them. Each of these names was a module of THIS
     # crate when the arm was written and is now a re-export of a dependency crate
-    # (`backend/mod.rs`: `pub use zeroship_data_sqlite as sqlite`, `pub use
-    # zeroship_data_postgres::{PostgresBackend, pg_error, pg_row_json, postgres}`,
-    # `pub use zeroship_data_postgres::{pg_autocommit, pg_session_sql}`).
+    # (`backend/mod.rs`: `pub use zeroship_data_orm::backend::sqlite as sqlite`, `pub use
+    # zeroship_data_orm::backend::postgres::{PostgresBackend, pg_error, pg_row_json, postgres}`,
+    # `pub use zeroship_data_orm::backend::postgres::{pg_autocommit, pg_session_sql}`).
     #
     # THIS IS DEFECT 7 IN MIRROR IMAGE. Defect 7 was reading "the census has no arm
     # for it" as "nobody has placed it". This was an arm existing for something no
@@ -327,27 +325,23 @@ tier_of_target() {
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
     crud*|transaction*|exec*|backend_selection*|tx_route*|drop_namespace*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
-    # Same file-existence resolution as `backend::*` and `encryption*` above,
-    # and for the same reason: both left for `zeroship-data-core` on 2026-09-03
-    # and lib.rs now re-exports them (`pub use zeroship_data_core::broker;`,
-    # `pub use zeroship_data_core::read_set;`). Asserting ENGINE here would keep
-    # reporting `wal_consumer.rs -> crate::broker` as a CDC-to-ENGINE up-edge
-    # after cargo had already made it a plain dependency edge - which is the
-    # whole point of the move.
+    # The broker and read-set modules are private imports from the ORM's cdc
+    # module. Resolve their ownership by file existence so a dependency import
+    # is not mistaken for an internal edge back into the engine.
     broker*)
       if src_path_exists broker.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
     read_set*)
       if src_path_exists read_set.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
     # Same treatment: `src/encryption/` no longer exists; lib.rs re-exports
-    # `zeroship_data_core::encryption`. The ENCRYPT tier has zero files in this
+    # `zeroship_data_orm::encryption`. The ENCRYPT tier has zero files in this
     # crate - it is already extracted.
     encryption*)
       if src_path_exists encryption; then echo ENCRYPT; else echo EXTERNAL; fi ;;
     wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
     context*|service*|op_error*)                          echo ADAPTER ;;
-    tx_lanes*|backend_handle*|system_shape_charter*|metrics*) echo ENGINE ;;
+    tx_lanes*|backend_handle*|assignments*|metrics*) echo ENGINE ;;
     # Same file-existence resolution, and it earned it the same way: `cancel.rs`
-    # left with the ENGINE tier for `zeroship-data-engine`, and an arm asserting
+    # left with the ENGINE tier for `zeroship-data-orm`, and an arm asserting
     # a tier for a file this region no longer holds is the rot documented at the
     # top of this function.
     backend::cancel)
@@ -380,7 +374,7 @@ tier_of_target() {
       fi ;;
     *)
       # Not a known module. Before calling it unplaced, ask whether it is a
-      # RE-EXPORT of a dependency crate: `pub use zeroship_schema::query;` makes
+      # RE-EXPORT of a dependency crate: `pub use zeroship_data_sql::compile;` makes
       # `crate::query::quote_ident` resolve OUTSIDE this crate entirely, so it
       # is a dependency edge, not an intra-crate placement question at all.
       # Missing this is how 24 of 66 dropped references read as "modules nobody

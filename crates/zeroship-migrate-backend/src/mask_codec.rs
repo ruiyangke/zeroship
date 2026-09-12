@@ -16,7 +16,6 @@
 //! The `(MaskKind, Classification)` types this codec round-trips live in
 //! `crate::schema::diff` (the schema metadata types).
 
-use crate::descriptors::EncryptionMode;
 use crate::mask_meta::{Classification, EncryptionMeta, MaskKind, WrappedType};
 use crate::schema_error::MaskSentinelError;
 
@@ -29,11 +28,11 @@ use crate::schema_error::MaskSentinelError;
 /// a legacy writer" could inject that writer's prefix. Nothing ever injected
 /// one - `SentinelPrefix` occurred ten times in the whole tree, all inside its
 /// own defining file - and the reader that was supposed to be interoperated
-/// with (`zeroship-schema`'s copy of this codec, which the data plane uses to
+/// with (`zeroship-data-sql`'s copy of this codec, which the data plane uses to
 /// read the live catalog) simply spelled the sentinel differently and never
 /// learned this one.
 ///
-/// That is what the knob cost. `zeroship_data_engine::crud::protection_floor`
+/// That is what the knob cost. `zeroship_data_orm::protection::protection_floor`
 /// refuses a write whose descriptor dropped a protection the catalog still
 /// records; on every table THIS engine created it introspected, matched no
 /// sentinel, concluded nothing was protected, and permitted the downgrade. The
@@ -44,32 +43,6 @@ pub const ENC_SENTINEL_PREFIX: &str = "zero-migrate:enc:";
 
 /// The mask-sentinel prefix this engine persists. See [`ENC_SENTINEL_PREFIX`].
 pub const MASK_SENTINEL_PREFIX: &str = "zero-migrate:mask:";
-
-/// The canonical wire string for an [`EncryptionMode`] in a
-/// `zero-migrate:enc:` sentinel. `randomised` is the canonical spelling (the US
-/// `randomized` is normalised to it at emit time so the parser only needs the
-/// one form). Kept here next to the codec rather than on `EncryptionMode` so the
-/// descriptor enum stays a pure data type with no wire-format opinions.
-#[must_use]
-fn encryption_mode_as_sql(mode: EncryptionMode) -> &'static str {
-    match mode {
-        EncryptionMode::Randomised => "randomised",
-        EncryptionMode::Deterministic => "deterministic",
-    }
-}
-
-/// Parse a `zero-migrate:enc:` mode token. Accepts the canonical
-/// `randomised` plus the legacy US `randomized` spelling (the SDK historically
-/// emitted it; the emit path normalises to `randomised`, but a hand-written
-/// migration may carry either). `None` for any other token.
-#[must_use]
-fn encryption_mode_from_sql(s: &str) -> Option<EncryptionMode> {
-    match s {
-        "randomised" | "randomized" => Some(EncryptionMode::Randomised),
-        "deterministic" => Some(EncryptionMode::Deterministic),
-        _ => None,
-    }
-}
 
 /// The canonical wire string for a [`WrappedType`].
 #[must_use]
@@ -93,7 +66,7 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 }
 
 /// Build the canonical encryption-sentinel BODY for an
-/// [`EncryptionMeta`]: `zero-migrate:enc:<mode>:<keyId>:<wraps>`.
+/// [`EncryptionMeta`]: `zero-migrate:enc:<wraps>`.
 ///
 /// This is the COMMENT-body form (no surrounding `/* */`): on PG it is stored
 /// via `COMMENT ON COLUMN "<schema>"."<table>"."<col>" IS '<body>'` on the
@@ -102,32 +75,30 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 /// On SQLite the inline form (`query::encryption_sentinel_for_field`, which
 /// wraps this same `zero-migrate:enc:...` body in `/* */`) survives in `sqlite_master.sql`.
 ///
-/// The two emitters share the SAME `zero-migrate:enc:<mode>:<keyId>:<wraps>` body, so the
+/// The two emitters share the SAME `zero-migrate:enc:<wraps>` body, so the
 /// metadata a `generate`d migration carries is byte-identical to the one
 /// schema application writes - the verify-bricking guard. The parser side is
 /// [`parse_encryption_sentinel`].
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
     format!(
-        "{ENC_SENTINEL_PREFIX}{}:{}:{}",
-        encryption_mode_as_sql(meta.mode),
-        meta.key_id,
+        "{ENC_SENTINEL_PREFIX}{}",
         wrapped_type_as_sql(meta.wraps),
     )
 }
 
-/// Parse a `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel body back
+/// Parse a `zero-migrate:enc:<wraps>` sentinel body back
 /// into an [`EncryptionMeta`].
 ///
-/// Accepts either the bare comment body (`zero-migrate:enc:randomised:default:string`, the
+/// Accepts either the bare comment body (`zero-migrate:enc:string`, the
 /// PG `pg_description` form) or the inline-comment form wrapping it
-/// (`/* zero-migrate:enc:randomised:default:string */`, the SQLite `sqlite_master.sql`
+/// (`/* zero-migrate:enc:string */`, the SQLite `sqlite_master.sql`
 /// form) - the leading/trailing `/* */` and whitespace are stripped first, so
 /// both introspectors feed the SAME parser.
 ///
 /// Returns `Err(MaskSentinelError)` (the shared sentinel-error type) carrying an
 /// `enc_sentinel_malformed` discriminator for any parse failure - wrong prefix,
-/// wrong arity, unknown mode/wraps, empty keyId - so a hand-edited or
+/// unknown wraps or extra metadata - so a hand-edited or
 /// future-version sentinel produces a typed error rather than silently routing
 /// through a default codec (the fail-closed contract).
 pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinelError> {
@@ -144,36 +115,12 @@ pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinel
             "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX:?} prefix, got {s:?}"
         ))
     })?;
-    let parts: Vec<&str> = rest.split(':').collect();
-    if parts.len() != 3 {
-        return Err(MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX}<mode>:<keyId>:<wraps>, \
-             got {s:?}"
-        )));
-    }
-    let mode = encryption_mode_from_sql(parts[0]).ok_or_else(|| {
+    let wraps = wrapped_type_from_sql(rest).ok_or_else(|| {
         MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: unknown mode {:?} in {s:?}",
-            parts[0]
+            "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX}<wraps> with string, number, or bytes, got {s:?}"
         ))
     })?;
-    let key_id = parts[1];
-    if key_id.is_empty() {
-        return Err(MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: empty keyId in {s:?}"
-        )));
-    }
-    let wraps = wrapped_type_from_sql(parts[2]).ok_or_else(|| {
-        MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: unknown wraps {:?} in {s:?}",
-            parts[2]
-        ))
-    })?;
-    Ok(EncryptionMeta {
-        mode,
-        key_id: key_id.to_string(),
-        wraps,
-    })
+    Ok(EncryptionMeta { wraps })
 }
 
 /// Build the canonical mask-sentinel string for a
@@ -253,22 +200,21 @@ mod tests {
     /// Not a tautology over the constants: every OTHER assertion in this module
     /// spells the sentinel out, so renaming a constant alone would go red there
     /// too - but only here does the failure message say what the wire is. The
-    /// peer that must agree is `zeroship_schema::mask_codec`'s pair of the same
+    /// peer that must agree is `zeroship_data_sql::mask_codec`'s pair of the same
     /// names, which the data plane reads the live catalog with. Nothing in the
     /// type system relates them (their `MaskKind`/`Classification` types are
     /// separate), so the binding is behavioural, and it lives in the peer rather
     /// than here: `cross_codec_parity`, at the bottom of
-    /// `crates/zeroship-schema/src/mask_codec.rs`, builds with THIS emitter and
+    /// `crates/zeroship-data-sql/src/mask_codec.rs`, builds with THIS emitter and
     /// parses with that codec and vice versa, over both sentinel families and
     /// both backends' dispatch sites. It sits on that side because
-    /// `zeroship-schema` already carries the test-only `zeroship-migrate-core`
+    /// `zeroship-data-sql` already carries the test-only `zeroship-migrate-core`
     /// dev-dependency; this crate has no edge back and must not grow one.
     ///
-    /// **This doc named `zeroship-plugin-db`'s `mask_flip.rs` until
-    /// 2026-09-04.** That test does drive this emitter against a real catalog,
-    /// but it needs a live `PostgreSQL` and `--features test-helpers`, so it never
-    /// runs in `cargo test -p zeroship-migrate-backend` and could not have
-    /// caught the divergence this constant's doc describes.
+    /// **This doc named `zeroship-data-v8`'s `mask_flip.rs` until
+    /// 2026-09-04.** Those catalog tests now live in
+    /// `crates/zeroship-data-orm/src/tests/postgres/protection.rs` and run in
+    /// ordinary ORM tests. This crate's suite still needs its own sentinel guard.
     #[test]
     fn the_persisted_sentinel_prefixes_are_the_zero_migrate_brand() {
         assert_eq!(ENC_SENTINEL_PREFIX, "zero-migrate:enc:");
@@ -349,39 +295,27 @@ mod tests {
 
     // ----- encryption sentinel codec -----
 
-    fn enc(mode: EncryptionMode, key: &str, wraps: WrappedType) -> EncryptionMeta {
+    fn enc(wraps: WrappedType) -> EncryptionMeta {
         EncryptionMeta {
-            mode,
-            key_id: key.to_string(),
             wraps,
         }
     }
 
     #[test]
     fn build_encryption_sentinel_canonical_shape() {
-        let s = build_encryption_sentinel(&enc(
-            EncryptionMode::Randomised,
-            "default",
-            WrappedType::String,
-        ));
-        assert_eq!(s, "zero-migrate:enc:randomised:default:string");
-        let d = build_encryption_sentinel(&enc(
-            EncryptionMode::Deterministic,
-            "k7",
-            WrappedType::Number,
-        ));
-        assert_eq!(d, "zero-migrate:enc:deterministic:k7:number");
+        let s = build_encryption_sentinel(&enc(WrappedType::String));
+        assert_eq!(s, "zero-migrate:enc:string");
+        let d = build_encryption_sentinel(&enc(WrappedType::Number));
+        assert_eq!(d, "zero-migrate:enc:number");
     }
 
     #[test]
     fn encryption_sentinel_round_trips_every_combination() {
-        for mode in [EncryptionMode::Randomised, EncryptionMode::Deterministic] {
+        {
             for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
-                for key in ["default", "k7", "tenant_42_root"] {
-                    let meta = enc(mode, key, wraps);
+                    let meta = enc(wraps);
                     let s = build_encryption_sentinel(&meta);
                     assert_eq!(parse_encryption_sentinel(&s).unwrap(), meta);
-                }
             }
         }
     }
@@ -390,58 +324,30 @@ mod tests {
     fn parse_encryption_sentinel_accepts_inline_comment_form() {
         // The SQLite-surviving inline form parses to the same meta as the bare
         // PG comment body - both introspectors feed one parser.
-        let bare = parse_encryption_sentinel("zero-migrate:enc:randomised:default:string").unwrap();
-        let inline =
-            parse_encryption_sentinel("/* zero-migrate:enc:randomised:default:string */").unwrap();
+        let bare = parse_encryption_sentinel("zero-migrate:enc:string").unwrap();
+        let inline = parse_encryption_sentinel("/* zero-migrate:enc:string */").unwrap();
         assert_eq!(bare, inline);
-        assert_eq!(
-            bare,
-            enc(EncryptionMode::Randomised, "default", WrappedType::String)
-        );
-    }
-
-    #[test]
-    fn parse_encryption_sentinel_normalises_us_spelling() {
-        let m = parse_encryption_sentinel("zero-migrate:enc:randomized:default:string").unwrap();
-        assert_eq!(m.mode, EncryptionMode::Randomised);
+        assert_eq!(bare, enc(WrappedType::String));
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_missing_prefix() {
-        assert!(
-            parse_encryption_sentinel("randomised:default:string")
-                .unwrap_err()
-                .message()
-                .contains("enc_sentinel_malformed")
-        );
+        assert!(parse_encryption_sentinel("default:string")
+            .unwrap_err()
+            .message()
+            .contains("enc_sentinel_malformed"));
     }
 
     #[test]
     fn parse_encryption_sentinel_rejects_wrong_arity() {
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised:default")
+            parse_encryption_sentinel("zero-migrate:enc:default")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")
         );
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised:default:string:extra")
-                .unwrap_err()
-                .message()
-                .contains("enc_sentinel_malformed")
-        );
-    }
-
-    #[test]
-    fn parse_encryption_sentinel_rejects_unknown_mode_and_wraps() {
-        assert!(
-            parse_encryption_sentinel("zero-migrate:enc:rot13:default:string")
-                .unwrap_err()
-                .message()
-                .contains("enc_sentinel_malformed")
-        );
-        assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised:default:blob")
+            parse_encryption_sentinel("zero-migrate:enc:string:extra")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")
@@ -449,9 +355,25 @@ mod tests {
     }
 
     #[test]
-    fn parse_encryption_sentinel_rejects_empty_key_id() {
+    fn parse_encryption_sentinel_rejects_unknown_wraps() {
         assert!(
-            parse_encryption_sentinel("zero-migrate:enc:randomised::string")
+            parse_encryption_sentinel("zero-migrate:enc:json")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc:default:blob")
+                .unwrap_err()
+                .message()
+                .contains("enc_sentinel_malformed")
+        );
+    }
+
+    #[test]
+    fn parse_encryption_sentinel_rejects_extra_metadata() {
+        assert!(
+            parse_encryption_sentinel("zero-migrate:enc::string")
                 .unwrap_err()
                 .message()
                 .contains("enc_sentinel_malformed")

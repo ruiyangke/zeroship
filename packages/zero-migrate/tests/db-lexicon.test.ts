@@ -56,8 +56,8 @@ test("ONE lexicon: a pgvector field carries its dims through the shared ColType"
 });
 
 test("ONE lexicon: an encrypted column reduces to the recursive `encrypted` ColType arm", () => {
-  // db `t.encrypted({ wraps: t.number() })` → neutral { encrypted: { of: <inner> } }.
-  assert.deepEqual(colTypeFromDbField(dbT.encrypted({ wraps: dbT.number() })), {
+  // db `t.encrypted({ of: t.number() })` → neutral { encrypted: { of: <inner> } }.
+  assert.deepEqual(colTypeFromDbField(dbT.encrypted({ of: dbT.number() })), {
     encrypted: { of: "double" },
   });
   assert.deepEqual(colTypeFromDbField(dbT.encrypted()), { encrypted: { of: "text" } });

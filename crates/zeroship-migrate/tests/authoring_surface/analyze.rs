@@ -523,6 +523,7 @@ fn guard_cfg() -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject("proj_acme"),
         zeroship_migrate_postgres::DIALECT,
+        "proj_acme",
     )
 }
 
@@ -596,6 +597,7 @@ fn analyze_migration_attaches_advisories_to_a_generated_migration() {
         "app_acme",
         zeroship_migrate_postgres::DIALECT,
         support::no_inject("proj_acme"),
+        "proj_acme",
     )
     .wrap("drop_legacy", "DROP TABLE \"proj_acme\".\"legacy\"", None)
     .unwrap();

@@ -21,7 +21,7 @@
 //!
 //! # The prefix collision, and why it is not a foreign key
 //!
-//! `zeroship.sandboxes.project_id` carries a `^prj_[0-9A-Za-z]{20,40}$` CHECK.
+//! `zeroship.sandboxes.project_id` carries a `^prj_[0-9a-z]{25}$` CHECK.
 //! That column is NOT this entity: it holds a derived dedup key minted by the
 //! extracted `zeroship-sandbox` controller - usually an app id re-tagged into
 //! the `prj_` namespace - it has no foreign key to anything, and its only use is

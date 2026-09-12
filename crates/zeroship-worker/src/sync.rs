@@ -106,7 +106,7 @@ pub fn start_version_poller(
     shared: SharedVersions,
     envs: SharedEnvs,
     readiness: Arc<WorkerReadiness>,
-    db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
+    db_service: Option<Arc<zeroship_data_v8::service::DbService>>,
 ) {
     compio::runtime::spawn(async move {
         version_poll_loop(config, shared, envs, readiness, db_service).await;
@@ -131,7 +131,7 @@ async fn version_poll_loop(
     shared: SharedVersions,
     envs: SharedEnvs,
     readiness: Arc<WorkerReadiness>,
-    db_service: Option<Arc<zeroship_plugin_db::service::DbService>>,
+    db_service: Option<Arc<zeroship_data_v8::service::DbService>>,
 ) {
     let interval = std::time::Duration::from_secs(config.poll_interval_secs);
     let mut pending_cdc_deprovision = std::collections::HashSet::new();
@@ -154,11 +154,7 @@ async fn version_poll_loop(
                         }
                     }
                 }
-                // Deprovision through the service's operator-lifecycle handle.
-                // It reads the backend selection made once at composition and
-                // checks out this thread's operator pool, instead of re-parsing
-                // the URL and building a fresh two-connection pool for every
-                // deleted app the way the old free function did.
+                // Close local subscriptions after control removes an app.
                 if let Some(service) = db_service.as_deref() {
                     let pending: Vec<AppId> = pending_cdc_deprovision.iter().cloned().collect();
                     for app_id in pending {
@@ -178,31 +174,6 @@ async fn version_poll_loop(
                                 );
                             }
                         }
-                    }
-                    // Release the operator pool once nothing is left to
-                    // reconcile. It is the ONLY thing that removes the entry -
-                    // the map is a `thread_local!` with no eviction and its
-                    // connections sit at the pool's `min_idle`, so idle
-                    // reclamation never touches them. Without this the two
-                    // maintenance backends opened for the first deleted app
-                    // this process ever saw would stay open for the life of the
-                    // container, in every container, against whatever
-                    // `max_connections` the cluster is sized for.
-                    //
-                    // The trade, stated at its worst: deletions arriving one
-                    // per poll drain the set every time, so each one pays its
-                    // own pool - which IS the per-deletion cost the shared pool
-                    // was introduced to avoid. Two connects on a background
-                    // poller nobody waits on is the cheaper side of that trade
-                    // than two idle backends per container held forever, and
-                    // the sharing still applies where it was argued for: a
-                    // batch of deletions reconciled together.
-                    //
-                    // Inside the poll loop, on the poller's own compio runtime:
-                    // dropping a pool only asks its driver tasks to shut down,
-                    // so this has to run somewhere they can still be driven.
-                    if pending_cdc_deprovision.is_empty() {
-                        zeroship_plugin_db::service::close_operator_pools();
                     }
                 }
                 // GC SharedEnvs against the latest known-app set BEFORE
@@ -539,7 +510,20 @@ pub async fn fetch_app_env(
     service_auth: &zeroship_core::service_peers::ServiceAuth,
     app_id: &AppId,
 ) -> Result<String, String> {
-    let url = format!("{url_base}/internal/apps/{}/env", app_id.as_str());
+    // Resolve host material before publishing the environment or creating an
+    // isolate. Every thread uses the database service's shared source.
+    if let Some(keys) = crate::cache::project_keys() {
+        let app = app_id.to_string();
+        if !keys.is_bound(&app).map_err(|error| error.to_string())? {
+            let url = format!("{url_base}/internal/apps/{app_id}/data-key");
+            let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
+            let key = zeroship_core::project_data_key::ProjectDataKey::from_json(body)
+                .map_err(|_| "invalid control project key response".to_string())?;
+            keys.supply(&app, key.project_id.as_str(), *key.key())
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    let url = format!("{url_base}/internal/apps/{app_id}/env");
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
 }
 
@@ -988,7 +972,7 @@ mod tests {
                     control_url: "http://127.0.0.1:1".to_string(),
                     control_key: String::new(),
                     db_service: None,
-                    kv_url: None,
+                    kv_store: None,
                     storage_backend: None,
                     meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
                 },
@@ -1046,7 +1030,7 @@ mod tests {
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
-                kv_url: None,
+                kv_store: None,
                 storage_backend: None,
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,

@@ -22,12 +22,13 @@ fn confined() -> SqlGuard {
     SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("app1"),
         POSTGRES,
+        "app1",
     ))
 }
 
 #[test]
 fn explicit_confined_charter_fixture_composes() {
-    let cfg = GuardConfig::from_policy(support::confined_charter(), POSTGRES);
+    let cfg = GuardConfig::from_policy(support::confined_charter(), POSTGRES, "app");
     assert_eq!(
         cfg.schema_scope(),
         Some(SchemaScope::Single("app".to_string()))
@@ -44,7 +45,7 @@ fn explicit_confined_charter_fixture_composes() {
 /// policy-preservation half is unchanged and is what remains here.
 #[test]
 fn dialect_selection_preserves_the_composed_policy() {
-    let cfg = GuardConfig::from_policy(support::no_inject("app1"), POSTGRES);
+    let cfg = GuardConfig::from_policy(support::no_inject("app1"), POSTGRES, "app1");
 
     let postgres = cfg.clone().for_dialect(POSTGRES);
     assert_eq!(postgres.dialect(), &POSTGRES);
@@ -70,7 +71,11 @@ fn dialect_selection_preserves_the_composed_policy() {
 
 #[test]
 fn postgres_raw_guard_fails_closed_for_a_future_backend_id() {
-    let guard = SqlGuard::new(GuardConfig::from_policy(support::no_inject("app1"), DUCKDB));
+    let guard = SqlGuard::new(GuardConfig::from_policy(
+        support::no_inject("app1"),
+        DUCKDB,
+        "app1",
+    ));
 
     let err = guard
         .check("CREATE TABLE app1.widgets (id int)")
@@ -369,6 +374,7 @@ scope = "all"
     let g = SqlGuard::new(GuardConfig::from_policy(
         support::effective_policy_from_charter_toml(charter),
         POSTGRES,
+        "app1",
     ));
     for sql in [
         "DROP SCHEMA control CASCADE",

@@ -357,7 +357,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let mut conn = match pool.get().await {
+        let mut conn = match pool.acquire().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };
@@ -405,7 +405,7 @@ pub async fn signout(req: HttpRequest, body: Bytes, state: State<Arc<GateState>>
             Ok(p) => p,
             Err(e) => return db_error(e),
         };
-        let mut conn = match pool.get().await {
+        let mut conn = match pool.acquire().await {
             Ok(c) => c,
             Err(e) => return db_error(e),
         };

@@ -585,7 +585,7 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
             .await
             .expect("warm pool against scripted PostgreSQL peer");
 
-        let first = pool.get().await.expect("check out warm scripted session");
+        let first = pool.acquire().await.expect("check out warm scripted session");
         assert_eq!(first.process_id(), 201);
         let error = compio::time::timeout(Duration::from_secs(2), first.simple_query("SELECT 1"))
             .await
@@ -603,9 +603,9 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
             0,
             "timed-out session kept its pool slot"
         );
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.metrics().evictions.get(), 1);
 
-        let second = compio::time::timeout(Duration::from_secs(2), pool.get())
+        let second = compio::time::timeout(Duration::from_secs(2), pool.acquire())
             .await
             .expect("replacement checkout exceeded its watchdog")
             .expect("pool did not replace the timed-out session");
@@ -615,7 +615,7 @@ async fn a_timed_out_pool_entry_is_retired_before_return() {
             .await
             .expect("replacement session could not complete a normal query");
         assert!(!second.is_closed());
-        assert_eq!(pool.metrics.connections_created.get(), 2);
+        assert_eq!(pool.metrics().connections_created.get(), 2);
         drop(second);
 
         compio::time::timeout(Duration::from_secs(2), pool.close())
@@ -651,7 +651,7 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
             .await
             .expect("open pool against backpressure peer");
 
-        let first = pool.get().await.expect("check out scripted session");
+        let first = pool.acquire().await.expect("check out scripted session");
         let retained = first
             .simple_query_raw("SELECT repeat('x', 32768)")
             .await
@@ -667,7 +667,7 @@ async fn backpressure_cannot_hide_retirement_from_the_pool() {
         drop(first);
         assert_eq!(pool.idle_count(), 0, "poisoned session became idle");
         assert_eq!(pool.total_count(), 0, "poisoned session kept its slot");
-        assert_eq!(pool.metrics.evictions.get(), 1);
+        assert_eq!(pool.metrics().evictions.get(), 1);
 
         // WHY IT CLOSED. The loop above waits for `is_closed()`, which is "some
         // poisoning happened" rather than "the read deadline fired", so the

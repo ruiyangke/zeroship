@@ -79,30 +79,10 @@ describe("normalizeSchema — P7 typed-id prefix (id: t.id(prefix))", () => {
     assert.equal(out.title.type, "string");
   });
 
-  test("rejects id declared with a non-id type", () => {
-    assert.throws(
-      () => normalizeSchema({ id: t.string() }),
-      (err: unknown) => {
-        assert.equal(
-          (err as { code?: string }).code,
-          "RESERVED_SYSTEM_FIELD_NAME",
-        );
-        return true;
-      },
-    );
-  });
-
-  test("rejects another reserved system field name (version)", () => {
-    assert.throws(
-      () => normalizeSchema({ version: t.number() }),
-      (err: unknown) => {
-        assert.equal(
-          (err as { code?: string }).code,
-          "RESERVED_SYSTEM_FIELD_NAME",
-        );
-        return true;
-      },
-    );
+  test("familiar names retain their declared types", () => {
+    assert.deepEqual(normalizeSchema({ id: t.string(), version: t.number() }), {
+      id: {type:"string"}, version: {type:"number"},
+    });
   });
 });
 
@@ -186,6 +166,73 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     } as unknown as ZeroshipDb;
   }
 
+  test("transaction name lookup reaches collections that collide with db APIs", async () => {
+    const writes: Array<{ name: string; row: unknown }> = [];
+    const native = {
+      transaction(callback: (raw: unknown) => unknown) {
+        const rawTx = {
+          collection(name: string) {
+            return native.collection(name);
+          },
+        };
+        return Promise.resolve(callback(rawTx));
+      },
+      collection(name: string) {
+        return {
+          insert(row: unknown) {
+            writes.push({ name, row });
+            return Promise.resolve(row);
+          },
+          async find() { return []; },
+        };
+      },
+    } as unknown as ZeroshipDb;
+    const descriptor = {
+      version: 2,
+      collections: Object.fromEntries(
+        ["posts", "transaction", "collection", "from"].map(name => [
+          name,
+          {
+            fields: {
+              id: { type: "id", idPrefix: "row", required: true, primaryKey: true },
+              value: { type: "string", required: true },
+            },
+            options: { softDelete: false, versioning: false, strictness: "strict" },
+            indexes: [],
+          },
+        ]),
+      ),
+    };
+
+    assert.doesNotThrow(() => {
+      installSchema({} as never, native, { descriptor } as never);
+    });
+
+    const db = native as unknown as {
+      transaction<R>(callback: (tx: {
+        posts: {
+          insert(row: unknown): Promise<unknown>;
+        };
+        collection(name: string): {
+          insert(row: unknown): Promise<unknown>;
+        };
+      }) => Promise<R>): Promise<{ data: R | null; error: Error | null }>;
+    };
+    const result = await db.transaction(async tx => {
+      assert.equal(tx.posts, tx.collection("posts"));
+      const transactionTable = tx.collection("transaction");
+      assert.equal(transactionTable, tx.collection("transaction"));
+      await transactionTable.insert({ id: "row_1", value: "transaction" });
+      await tx.collection("collection").insert({ id: "row_2", value: "collection" });
+      await tx.collection("from").insert({ id: "row_3", value: "from" });
+      return "committed";
+    });
+
+    assert.equal(result.error, null);
+    assert.equal(result.data, "committed");
+    assert.deepEqual(writes.map(write => write.name), ["transaction", "collection", "from"]);
+  });
+
   test("sources collections FROM the descriptor, ignoring the declared t.* object", () => {
     const native = makeMockNative();
     // Descriptor: platform-generated wire FieldDefs (snake_case columns,
@@ -196,7 +243,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         posts: {
           fields: {
-            id: { type: "id", idPrefix: "post" },
+            id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
             title: { type: "string", required: true },
             created_at: { type: "date" },
           },
@@ -220,7 +267,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     );
   });
 
-  test("does not require runtime descriptor system fields in insert input", async () => {
+  test("does not require assigned descriptor fields in insert input", async () => {
     const inserted: unknown[] = [];
     const native = {
       transaction(cb: (raw: unknown) => unknown) { return cb(undefined); },
@@ -248,10 +295,10 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         hits: {
           fields: {
-            id: { type: "string", required: true },
-            created_at: { type: "date", required: true },
-            updated_at: { type: "date", required: true },
-            version: { type: "int", required: true },
+            id: { type: "string", required: true, primaryKey:true, assign:{by:"typedId", on:"insert"} },
+            created_at: { type: "date", required: true, assign:{by:"now", on:"insert"} },
+            updated_at: { type: "date", required: true, assign:{by:"now", on:"write"} },
+            version: { type: "int", required: true, assign:{by:"increment(1)", on:"write"} },
             path: { type: "string", required: true },
           },
           options: { softDelete: false, versioning: false, strictness: "strict" },
@@ -344,7 +391,9 @@ describe("installSchema — P4b migration-first descriptor source", () => {
       collections: {
         posts: {
           fields: {
-            id: { type: "id", idPrefix: "post" },
+            id: { type: "id", idPrefix: "post", required: true, primaryKey:true, assign:{by:"typedId", on:"insert"} },
+            revision: {type:"integer", concurrency:true, assign:{by:"increment(1)", on:"write"}},
+            removed: {type:"timestamp", softDelete:true, assign:{by:"now", on:"delete"}},
             title: { type: "string", required: true },
             status: { type: "string", required: true },
           },
@@ -375,11 +424,11 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     await handle.posts.delete("post_abc");
     assert.deepEqual(
       ops,
-      [{ name: "posts", op: "update" }],
-      "descriptor v2 softDelete must route delete through native update",
+      [{ name: "posts", op: "delete" }],
+      "delete dispatches the native lifecycle operation",
     );
 
-    const res = await handle.posts.update({ id: "post_abc", version: 1 }, { title: "x" });
+    const res = await handle.posts.update({ id: "post_abc", revision: 1 }, { title: "x" });
     assert.equal(res.error?.code, "OPTIMISTIC_CONCURRENCY");
   });
 
@@ -388,7 +437,7 @@ describe("installSchema — P4b migration-first descriptor source", () => {
     const native = makeOpRecordingNative(ops);
     const descriptor = {
       posts: {
-        id: { type: "id", idPrefix: "post" },
+        id: { type: "id", idPrefix: "post", required: true, primaryKey: true },
         title: { type: "string", required: true },
       },
     };

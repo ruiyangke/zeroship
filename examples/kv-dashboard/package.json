@@ -5,8 +5,12 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "smoke": "bash scripts/smoke.sh",
-    "typecheck": "tsc --noEmit"
+    "smoke": "vitest run --mode existing --project dashboard tests/rpc.test.ts",
+    "test:acceptance": "vitest run --project dashboard",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:unit": "vitest run --project unit",
+    "test:browser": "vitest run --mode existing --project dashboard tests/browser.test.ts"
   },
   "dependencies": {
     "@vitejs/plugin-react": "catalog:",
@@ -18,11 +22,18 @@
     "react-dom": "catalog:react18"
   },
   "devDependencies": {
+    "@types/node": "catalog:",
     "@types/react": "catalog:react18",
     "@types/react-dom": "catalog:react18",
     "@zeroship/types": "workspace:*",
+    "playwright": "1.58.2",
+    "selfsigned": "^5.5.0",
+    "smol-toml": "^1.8.0",
+    "tar": "^7.5.13",
+    "testcontainers": "^12.1.0",
     "typescript": "catalog:",
     "vite": "catalog:",
+    "vitest": "^4.1.7",
     "zeroship": "workspace:*"
   }
 }

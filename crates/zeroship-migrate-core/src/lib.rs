@@ -124,7 +124,7 @@ pub mod engine;
 // `zeroship_migrate::fault::...` path resolves unchanged.
 #[doc(hidden)]
 pub use zeroship_migrate_backend::fault;
-// The typed-id (base62/UUIDv7) machinery lives in the `zeroship-migrate-ir` leaf crate;
+// The typed-id (base36/UUIDv7) machinery lives in the `zeroship-migrate-ir` leaf crate;
 // re-export it under its historical `crate::id` path.
 pub use zeroship_migrate_ir::id;
 // The deploy-bundle migration-file record + content-addressed hash, vendored
@@ -354,13 +354,13 @@ pub use zeroship_migrate_policy::EffectivePolicy;
 // `--check` drift gate. Both sources route through the SAME renderer, so output is
 // byte-identical for equivalent schemas.
 //
-// `FieldStorage` and `AuxiliaryObject` ride on this line rather than staying reachable
-// only through `render::gen_types::`: they are what a consumer reads INSTEAD of
+// `FieldStorage` rides on this line rather than staying reachable
+// only through `render::gen_types::`: it is what a consumer reads INSTEAD of
 // formatting a physical column name, so the type it deserializes into belongs in the
 // one vocabulary an embedding host already names.
 pub use render::gen_types::{
     check_artifacts, diff_artifacts, render_artifacts, render_artifacts_from_descriptors,
-    render_schema_export, render_schema_export_from_descriptors, AuxiliaryObject, CheckDiff,
+    render_schema_export, render_schema_export_from_descriptors, CheckDiff,
     FieldStorage, GenTypesError, GeneratedArtifacts, SchemaExport, DEFAULT_PROJECT_SCHEMA,
     ENV_DTS_FILE, RUNTIME_DESCRIPTOR_FILE,
 };

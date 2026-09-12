@@ -260,7 +260,11 @@ async fn apply_ir(
         &zeroship_migrate_postgres::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(
+        policy.clone(),
+        zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
+    );
     let artifact = author
         .load_and_lower_guarded(
             &resolved_source,

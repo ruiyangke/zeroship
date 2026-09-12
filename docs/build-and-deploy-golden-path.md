@@ -104,8 +104,13 @@ REAL vite-built `.zship` (not a hand-packed fixture).
 It takes one argument, `--provision=deploy` (the default) or
 `--provision=dev-provision`, and it decides whether step 3 ships the artifact
 with the real `zeroship deploy` CLI or writes the registry row directly. The
-bypass arm announces itself with the repo's skip marker, so a run that did not
-exercise the deploy command cannot read like one that did. It does **not** read
+bypass arm announces itself where it happens and again in the run's summary
+line, which names whichever arm was taken; CI greps for the deploy arm's line,
+so a run that did not exercise the deploy command cannot read like one that did.
+(That announcement used to be spelled with a workspace-wide skip marker. The
+marker and the census that counted it are deleted, and asserting the COVERED
+arm's line is the stronger check anyway - it also fails on a truncated log and
+on no log at all.) It does **not** read
 `ZEROSHIP_TOKEN`: the deploy arm mints its own creator bearer against the
 harness's platform OP and passes it on `--token=`.
 

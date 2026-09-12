@@ -28,6 +28,7 @@ if [ -z "${E2E_ROOT:-}" ]; then
   E2E_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fi
 E2E_JOSE_JS="${E2E_JOSE_JS:-$E2E_ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js}"
+source "$E2E_ROOT/tests/lib/cdc_relay.sh"
 
 _e2e_strong_value() {
   local value="${1:-}"
@@ -341,13 +342,8 @@ ZS_PLATFORM_OWNER_APP="zeroship_platform"
 # no credential - which is the control that shows the rule is scoped to secrets
 # rather than to every config file.
 #
-# THE 0600 ARM USED TO CLAIM IT REPORTED `status: 35 applied, 0 pending`, and it
-# cannot have. On the day that was written the corpus imported `@zeroship/migrate`
-# and no Node applier could resolve it, so a run that got past this permission
-# check still died on migration file #1. Only the part this function is
-# responsible for - the mode check - was ever observed; the corpus half was
-# carried over from a path that no longer existed. What the corpus actually does
-# is measured by `tests/platform_migration_corpus_gate.sh`, which applies it.
+# This function checks config permissions. The corpus apply and its durable
+# results are verified separately by `cargo xtask test migrations`.
 #
 # WHERE THE FILE LIVES, AND WHO REMOVES IT. Both are in THIS function, so the
 # lifetime is one invocation and no caller has to remember a cleanup step:

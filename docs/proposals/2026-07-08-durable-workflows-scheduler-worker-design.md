@@ -1,9 +1,9 @@
 # Durable workflows — scheduler + fungible workers (register model)
 
-- **Status:** draft (uncommitted; lands with the implementing PR train)
+- **Status:** Superseded by the [workflow server design](2026-09-11-workflow-server.md). The register model below is historical context, not the implementation target.
 - **Date:** 2026-07-09
 - **Branch:** `design/durable-workflows`
-- **Consolidates & supersedes:** the single-tier draft and the engine-consolidation draft (retired here); supersedes the *architecture* of the shipped V1 (`2026-07-05-durable-workflows-design.md`), which remains the committed record and migrates to this target (§12, §14). **The single authoritative durable-workflows design.**
+- **Historical scope:** Consolidated the earlier scheduler and worker proposals and replaced the control-plane architecture described in `2026-07-05-durable-workflows-design.md`. This document's target has now also been superseded.
 
 ## 1. Problem
 

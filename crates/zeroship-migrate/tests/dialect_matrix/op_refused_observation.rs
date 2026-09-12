@@ -598,7 +598,7 @@ async fn apply_envelope<B: MigrationBackend>(
         OWNER,
         &registry(),
         live,
-        &GuardConfig::from_policy(policy.clone(), dialect.clone()),
+        &GuardConfig::from_policy(policy.clone(), dialect.clone(), &cfg.project_schema),
     ) {
         Ok(artifact) => artifact,
         Err(error) => return Ok(Err(error)),
@@ -1233,7 +1233,8 @@ fn the_two_postures_this_file_contrasts_are_different() {
             (Posture::Allow, DestructiveOps::Allow),
         ] {
             let policy = support::operator_charter_with_destructive_ops("probe", posture.grant());
-            let resolved = GuardConfig::from_policy(policy, dialect.clone()).destructive_ops();
+            let resolved =
+                GuardConfig::from_policy(policy, dialect.clone(), "probe").destructive_ops();
             assert_eq!(
                 resolved,
                 want,

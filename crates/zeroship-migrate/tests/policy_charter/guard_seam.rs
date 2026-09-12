@@ -40,6 +40,7 @@ fn pg_guard() -> Box<dyn MigrationGuard> {
         &GuardConfig::from_policy(
             support::no_inject_with_extensions("project_acme", &["pgcrypto", "uuid-ossp"]),
             zeroship_migrate_postgres::DIALECT,
+            "project_acme",
         ),
     )
 }
@@ -105,6 +106,7 @@ fn sqlite_descriptor_guard_passes_descriptor_create_table() {
         &GuardConfig::from_policy(
             support::no_inject("project_acme"),
             zeroship_migrate_sqlite::DIALECT,
+            "project_acme",
         ),
     );
     // Descriptor-generated DDL is trusted by construction (author-boundary line-1 +
@@ -134,6 +136,7 @@ fn sqlite_keyed_sqlguard_rejects_raw_sql_backstop() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject("project_acme"),
         zeroship_migrate_sqlite::DIALECT,
+        "project_acme",
     ));
     let err = guard
         .check("CREATE TABLE users (id INTEGER PRIMARY KEY)")
@@ -159,6 +162,7 @@ fn guard_for_pg_runs_the_deny_list() {
         &GuardConfig::from_policy(
             support::no_inject_with_extensions("project_acme", &["pgcrypto"]),
             zeroship_migrate_postgres::DIALECT,
+            "project_acme",
         ),
     );
     // The PG-selected guard denies the deny-list set …
@@ -181,6 +185,7 @@ fn guard_for_sqlite_trusts_descriptor_ddl() {
         &GuardConfig::from_policy(
             support::no_inject("project_acme"),
             zeroship_migrate_sqlite::DIALECT,
+            "project_acme",
         ),
     );
     let outcome = guard

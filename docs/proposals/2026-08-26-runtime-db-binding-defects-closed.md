@@ -136,7 +136,7 @@ values for one grep, each stated confidently, and the reason is that none of
 them said where the boundary was:
 
 ```
-crates/zeroship-schema/src/query.rs, measured 2026-08-28
+crates/zeroship-schema/src/query.rs, measured 2026-08-28 (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
   grep -c "RETURNING \*"                              34
   before `mod tests` at :6035                         20
   of those 20, on comment lines (`//` or ` *`)         8
@@ -329,7 +329,7 @@ from "read the secret" to "recover the secret", not to "safe".
 
 **Evidence:** `zeroship-schema/src/query.rs:5477-5484` (the read-path order
 builder), `:5487-5528` (the emitter using the raw key), `:5500`, `:5521`;
-`crates/zeroship-data-engine/src/crud/mask_pass.rs:150-152`
+`crates/zeroship-data-orm/src/protection/mask_pass.rs`
 
 **It compounds with L24.** The only gate on the order-by key is
 `validate_read_identifier` (`:5483`), which L24 establishes **fails open when
@@ -362,7 +362,7 @@ binary, and ungated production code calls into it.**
   `#[cfg(any(test, feature = "test-helpers"))]` (`auth/bootstrap.rs:94`).
 - `test-helpers` is a leaf feature that **no workspace member enables**:
   `zeroship-cli/Cargo.toml:20` and `zeroship-worker/Cargo.toml:20` both take
-  `zeroship-plugin-db = { workspace = true }` with no `features`.
+  `zeroship-data-v8 = { workspace = true }` with no `features`.
 - Nothing in `db/migrations-ts/` creates the schema either.
 - Yet `load_pg` (`crud/mask_policy.rs:278-300`) is **ungated** and issues
   `SELECT __zeroship_admin.get_mask_policy($1)::text`, reached from
@@ -379,14 +379,14 @@ So this is **not** a PII leak. It is a feature that is entirely non-functional
 on the production backend: a creator calling `env.db.unmaskField` on PG gets a
 SQL error about a missing function, forever.
 
-**Evidence:** `auth/bootstrap.rs:94`; `crates/zeroship-plugin-db/Cargo.toml:183`;
+**Evidence:** `auth/bootstrap.rs:94`; `crates/zeroship-data-v8/Cargo.toml`;
 `crates/zeroship-cli/Cargo.toml:20`; `crates/zeroship-worker/Cargo.toml:20`;
 `crud/mask_policy.rs:278-300`; `crud/unmask.rs:325-352`
 
 **Why no suite caught it: there is no PostgreSQL mask-policy test at all.**
 Every `dispatch_set_mask_policy` / `load_pg` / `persist_pg` exercise in the tree
-is in `crates/zeroship-plugin-db/tests/sqlite_integration.rs` (`:6656`, `:6740`, `:6829`, `:6845`,
-`:6896`, `:7686`, ...). `crates/zeroship-plugin-db/tests/integration.rs` - the
+is in `crates/zeroship-data-v8/tests/sqlite_integration.rs` (`:6656`, `:6740`, `:6829`, `:6845`,
+`:6896`, `:7686`, ...). `crates/zeroship-data-v8/tests/integration.rs` - the
 live-PG suite - has none.
 The feature is tested only on the backend where it works and untested on the
 backend that ships, so the arm is green and the product is broken.
@@ -498,7 +498,7 @@ PRE-EXISTING: attributed by control run, not by argument.**
 ```
 distributed live exercise failed: anchor readiness failed:
   status=500 body={"message":"internal error","name":"Error","request_id":"1"}
-panicked at crates/zeroship-plugin-db/tests/distributed_live.rs:796:41
+panicked at crates/zeroship-data-v8/tests/distributed_live.rs:41
 ```
 
 **Attribution, by control differing in ONE variable.** Suspected of being caused
@@ -530,7 +530,7 @@ is worth noting because it is the heuristic everyone reaches for first.
 because it only sees `{"message":"internal error"}`:
 
 ```
-ERROR zeroship_plugin_db::cdc_lifecycle: db CDC failed to start; refusing live subscription
+ERROR zeroship_data_v8::cdc_lifecycle: db CDC failed to start; refusing live subscription
   error=replication: publication __zs_pub_56971a71bc57dd61d565f1467c7f is missing for app ...
   error.code=Some("replication_publication_missing")
 ```
@@ -545,9 +545,9 @@ publication its own CDC path requires.**
 publication itself (`2a44ea8ef^:replication.rs:184`); after it,
 `ensure_worker_slot` treats the publication as a hard precondition
 (`replication.rs:175`) because ownership moved to `zeroship-migrated`. That
-commit updated `crates/zeroship-plugin-db/tests/integration.rs` (+98/-44, adding
+commit updated `crates/zeroship-data-v8/tests/integration.rs` (+98/-44, adding
 `c1_create_publication_for_tables`) and **did not touch
-`crates/zeroship-plugin-db/tests/distributed_live.rs`**. `git log -S "replication_publication_missing"`
+`crates/zeroship-data-v8/tests/distributed_live.rs`**. `git log -S "replication_publication_missing"`
 returns exactly one commit, and nothing since has touched it. **The target was
 silently red for eleven days.**
 
@@ -582,7 +582,7 @@ the same shape as the four gates found in August examining nothing and printing
 exactly what a clean tree prints - the difference is only that this one
 documented its blind spot.
 
-`tests/run_plugin_db_live_suite.sh` runs the target and caught it, which is why
+`tests/run_data_v8_live_suite.sh` runs the target and caught it, which is why (DELETED; current runner: `cargo xtask test data`.)
 the failure surfaced at all. **Fixed 2026-08-27**: `verify_impl.sh` now runs
 `distributed_live` as a twelfth arm with floor 0, expected red until this is
 fixed - the same treatment `missing_role` received while it was failing. A red
@@ -592,7 +592,7 @@ arm you can see beats a skipped arm you cannot.
 reasons at once** - this failure, and the 15 integration tests the deletion
 legitimately removed (measured: 98 passed, 1 failed). Decrementing the floor to
 match while L27 is unfixed would bury a live failure inside an accounting
-change, which is exactly what the ledger at `tests/run_plugin_db_live_suite.sh:92-142`
+change, which is exactly what the ledger at `tests/run_data_v8_live_suite.sh` (DELETED; current runner: `cargo xtask test data`.)
 exists to prevent. **The floor must not move until L27 is resolved.**
 
 ### L6 (CLOSED 2026-08-27) - `__zeroship_admin` has no production provisioner
@@ -707,8 +707,8 @@ Argument and acceptance arm: SC-4.
 ("fix(db): remove full-text search") and its merge `93bc20126` ("Merge branch
 'feat/db-delete-fts'") are both ancestors of HEAD, and
 `to_tsvector|plainto_tsquery|websearch_to_tsquery|tsquery` now occurs **0
-times** across `crates/zeroship-schema/src/` and
-`crates/zeroship-plugin-db/src/`. The removal is complete in the data plane,
+times** across `crates/zeroship-schema/src/` and (DELETED; runtime compilation now lives in `crates/zeroship-data-orm/src/sql/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
+`crates/zeroship-data-v8/src/`. The removal is complete in the data plane,
 not merely landed on a side branch.
 
 Note the commit hashes below (`b3fa01659`, `4ee6b70dd`, `49e579293`) are the
@@ -819,7 +819,7 @@ worker dying. A reaper existed but was reachable **only from tenant JS** via
 failure was delegated to the tenant, who has no reason to run it.
 
 **What shipped instead.** `fix(db): reap crashed worker replication slots`
-added `crates/zeroship-plugin-db/src/slot_reaper.rs` (+593) and `crates/zeroship-worker/src/slot_reaper.rs`
+added `crates/zeroship-data-v8/src/slot_reaper.rs` (+593) and `crates/zeroship-worker/src/slot_reaper.rs`
 (+54), wired at `worker/src/main.rs:641`, and **deleted** the tenant surface -
 196 lines out of `replication.rs`, 89 out of `v8_classes/replication.rs`, and
 the `internal.d.ts` declaration. `drop_abandoned_slots` now appears **zero**
@@ -843,7 +843,7 @@ The shipped design is stronger than "call the reaper from the operator side":
   serving with cleanup silently stopped.
 
 **Evidence:** `worker/src/main.rs:15,48-66,639-641,714`;
-`crates/zeroship-worker/src/slot_reaper.rs:1-40`; `crates/zeroship-plugin-db/src/slot_reaper.rs:278-452`;
+`crates/zeroship-worker/src/slot_reaper.rs:1-40`; `crates/zeroship-data-v8/src/slot_reaper.rs`;
 `grep -rn "dropAbandoned\|drop_abandoned" crates/ sdks/` returns nothing
 
 **How this entry went stale, which is the reusable part.** It asserted "verified
@@ -1058,7 +1058,7 @@ that can even notice a deploy change, and it notices it against a value L10
 shows is wrong.
 
 **What the fix does, and what it deliberately leaves.** A new `DbBinding`
-(`crates/zeroship-data-core/src/binding.rs`) captures `ZEROSHIP_DEPLOY_ID` from
+(`crates/zeroship-data-orm/src/binding.rs`) captures `ZEROSHIP_DEPLOY_ID` from
 the **active runtime's own environment** at `mint_db`, is stored immutably on the
 `Db` and every `Collection` it mints, and is threaded through each asynchronous
 CRUD continuation. The token is therefore never recovered from process-global

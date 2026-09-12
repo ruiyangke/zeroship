@@ -2,73 +2,17 @@
 name = "zeroship-data-cdc-server"
 version = "0.1.0"
 edition = "2021"
-description = "The CDC relay service: the separate process that holds REPLICATION so the worker does not. A binary nothing links; its contracts live in zeroship-cdc-wire and zeroship-data-core, and its error handling is internal because no consumer shares it."
+description = "Separate CDC relay service with its own configuration and process boundary."
 
-# ---------------------------------------------------------------------------
-# WHAT THIS MANIFEST IS FOR.
-# ---------------------------------------------------------------------------
-#
-# THIS CRATE IS A BINARY THAT NOTHING LINKS. That is the whole design, and it is
-# what dissolves the shared-vocabulary question
-# `docs/proposals/2026-08-31-data-crate-shape.md` left open: a process with no
-# consumer has nobody to agree with, so its error handling is internal by
-# construction and it writes its own classifier rather than sharing
-# `zeroship-data-postgres`'s.
-#
-# THE RULE IS NOT LITERALLY "NO CRATE MAY DEPEND ON IT", because that collides
-# with a live test. `crates/zeroship-config-contract/src/metadata.rs`'s
-# `validate_target_classifications` requires every workspace bin target to carry
-# a `[[package.metadata.zeroship-config.targets]]` class, and
-# `crates/zeroship-config-contract/tests/real_registry.rs`'s
-# `every_platform_target_declares_its_configuration` then requires exact equality
-# between the `platform` set cargo metadata reports and the binaries whose
-# generated registry that tool LINKS. A shipped service classified anything else
-# would have an unaudited configuration surface, which is the vacuity that test
-# exists to prevent. So the enforceable property is:
-#
-#   No SHIPPED binary's normal-dependency closure may contain
-#   `zeroship-data-cdc-server`. `zeroship-config-contract` - itself
-#   `class = "test-dev-tool"`, "Non-shipped configuration contract checker" -
-#   is the single named exception.
-#
-# `tests/data_crate_closure_gate.sh` arm 3 enforces exactly that, by inverting
-# `cargo tree -i` rather than by reading source.
-#
-# `cargo tree -e normal` CANNOT SEE DEV-DEPENDENCIES, so a dev-dependency on this
-# crate is the invisible way that rule gets breached. `zeroship-migrate-server`,
-# this crate's declared peer, already carries five of them (data-engine, worker,
-# data-postgres, control, plugin-db). Do not add one here or there.
-#
-# ABSENT ON PURPOSE, each for its own reason:
-#
-#   zeroship-plugin-db     The adapter runs creator code. The relay exists so
-#   zeroship-data-engine   that process stops holding REPLICATION; linking its
-#                          data plane into the relay's closure is the thing the
-#                          binary shape prevents.
-#   zeroship-data-core     PERMITTED by the operator's rule 4, and still unused.
-#                          Measured at 8672dd355, `cargo tree -p
-#                          zeroship-data-core -e normal` reaches `cyper` 3 times
-#                          and `tokio` 2 times through `zeroship-core`. It is a
-#                          permission, not a recommendation, and it is NOT a
-#                          licence to route the worker/relay wire contract there
-#                          - `crates/zeroship-cdc-wire/Cargo.toml` refuses
-#                          `zeroship-core` by name for exactly that closure.
-#   zeroship-cdc-wire      The wire contract this service will speak. It is not
-#                          named yet because nothing here encodes a frame; an
-#                          unused edge is not wiring. It is the FIRST dependency
-#                          to add when the decode loop lands.
-#   compio-postgres        No replication stream is opened yet. See src/lib.rs
-#                          for what blocks it.
-#
-# [[test]] required-features: NOT DECLARED, unlike the peer's `live-db-tests`
-# gate. This crate has no integration target at all, and a `[[test]]` naming a
-# file that does not exist fails to build. The feature comes back with the first
-# test that needs a database.
+# No shipped binary links this service. The configuration contract checker is
+# the permitted development consumer; data_crate_closure_gate.sh enforces it.
+# The relay does not link the ORM or V8 adapter. Database tests, when added,
+# belong to ordinary cargo test and must fail when their database is unavailable.
 
 [[package.metadata.zeroship-config.targets]]
 target = "zeroship-data-cdc-server"
 class = "platform"
-reason = "Deployed long-running CDC relay in the server configuration scope, in scope while its current binary fails closed."
+reason = "Deployed long-running CDC relay in the server configuration scope, with a dedicated database login and TLS listener."
 
 [[bin]]
 name = "zeroship-data-cdc-server"
@@ -80,12 +24,25 @@ path = "src/main.rs"
 clap = { workspace = true, features = ["derive", "env"] }
 # The runtime `main` runs on. Zero tokio: `#[compio::main]`, io_uring.
 compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["tls"] }
+zeroship-data-cdc-wire = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+compio-ws = { workspace = true }
+compio-tls = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 # `zeroship_config`, the bootstrap/overlay resolver, `CheckConfigReport`, and the
 # tracing subscriber every platform service installs the same way.
 zeroship-core = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+# Exercise the public ORM client against the separate relay executable.
+zeroship-data-orm = { workspace = true }
+rcgen = "0.14"
+tempfile = { workspace = true }
+url = { workspace = true }
 # The overlay-precedence test in `src/config.rs` builds a `toml::Value` by hand
 # so the flag-over-overlay order is asserted without a file on disk. DEV only -
 # the resolver itself takes an already-parsed value, so the shipped closure does

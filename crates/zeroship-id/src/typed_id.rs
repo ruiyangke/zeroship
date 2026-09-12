@@ -77,7 +77,7 @@ pub fn uuid_to_base36(uuid: &uuid::Uuid) -> String {
 }
 
 /// Encode an arbitrary byte slice as a base36 string by treating it as a
-/// big-endian integer and repeatedly dividing by 62.
+/// big-endian integer and repeatedly dividing by 36.
 ///
 /// Unlike [`uuid_to_base36`] (fixed 25-char width for a 128-bit UUID), this
 /// handles inputs of any length, so it can encode an HMAC tag. The output
@@ -89,7 +89,7 @@ pub fn base36_encode_bytes(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    // Big-endian byte-array long division by 62, collecting remainders.
+    // Big-endian byte-array long division by 36, collecting remainders.
     let mut digits = bytes.to_vec();
     let mut out = Vec::new();
     // Strip leading zero bytes only after the loop preserves value; we loop

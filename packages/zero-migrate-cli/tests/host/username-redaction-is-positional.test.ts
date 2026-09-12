@@ -149,7 +149,7 @@ export default {
 const ROLE = TABLE;
 const ROLE_PASSWORD = "Zm0nlyForThisTest";
 
-test("a username matching a word in the diagnostic does not eat that word", async (ctx) => {
+test("a username matching a word in the diagnostic does not eat that word", async () => {
   requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
   const pg = await import("pg");
   const admin = new pg.Client({ connectionString: pgUrl() });
@@ -168,8 +168,18 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
       );
       roleCreated = true;
     } catch (error) {
-      ctx.skip(`cannot create the probe role: ${(error as Error).message}`);
-      return;
+      // A role this test cannot create is a database it cannot run against, and
+      // the two likeliest causes are a DSN without CREATEROLE and the stale role
+      // the `finally` below exists to clear. Both used to `ctx.skip` here, which
+      // reported the same exit code as a run that had exercised the redactor -
+      // so the arm could stop running and nothing would say so.
+      throw new Error(
+        `cannot create the probe role "${ROLE}" on ${PG_URL_ENV}, so this test has ` +
+          `no server to provoke the diagnostic on: ${(error as Error).message}\n` +
+          `Point ${PG_URL_ENV} at a PostgreSQL whose user may CREATE ROLE, and drop ` +
+          `any "${ROLE}" a killed run left behind: DROP OWNED BY "${ROLE}" CASCADE; ` +
+          `DROP ROLE "${ROLE}";`,
+      );
     }
     await admin.query(`CREATE SCHEMA "${namespace}"`);
 
@@ -230,8 +240,8 @@ test("a username matching a word in the diagnostic does not eat that word", asyn
     if (roleCreated) {
       // The role owns whatever the deploy created, and PostgreSQL refuses to drop
       // a role while anything depends on it. Without this the NEXT run finds a
-      // stale role, fails to recreate it, and SKIPS -- which is how this test
-      // would quietly stop running.
+      // stale role and fails to recreate it -- which now FAILS that run, naming
+      // the role and the statements that clear it, rather than passing silently.
       await admin.query(`DROP OWNED BY "${ROLE}" CASCADE`).catch(() => {});
       await admin.query(`DROP ROLE IF EXISTS "${ROLE}"`).catch(() => {});
     }

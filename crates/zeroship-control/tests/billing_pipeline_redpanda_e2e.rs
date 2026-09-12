@@ -11,8 +11,11 @@
 //! spend evaluator work together against a real broker + real Postgres, rather
 //! than each in isolation with a fake stream.
 //!
-//! Gated on `REDPANDA_BROKERS` (host runner brings up the compose `redpanda`
-//! service); self-skips when unset, exactly like `redpanda_roundtrip`.
+//! `REDPANDA_BROKERS` names the broker. With it unset this REFUSES and names
+//! the compose service that provides one; it used to skip, which cargo counts
+//! as a pass, so the only end-to-end proof that the producer, the durable
+//! stream and the spend evaluator agree reported green on every machine
+//! without a broker.
 
 use std::sync::Arc;
 
@@ -144,8 +147,14 @@ fn redpanda_config(brokers: &str, topic: &str, group: &str) -> StreamConfig {
 #[compio::test]
 async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
     let Some(brokers) = zeroship_core::test_env_os!("REDPANDA_BROKERS") else {
-        zeroship_test_support::skip("skip: REDPANDA_BROKERS unset — real-broker e2e");
-        return;
+        common::refuse_missing_backend(
+            "a Redpanda broker",
+            "REDPANDA_BROKERS is unset, so there is no broker to publish to",
+            "Bring the broker up and point the test at it:\n\
+             \x20     docker compose -f deploy/compose/docker-compose.yml up -d redpanda\n\
+             \x20     REDPANDA_BROKERS=127.0.0.1:19092 cargo test -p zeroship-control \\\n\
+             \x20       --test main billing_pipeline_redpanda_e2e::",
+        );
     };
     let brokers = brokers.to_string_lossy().to_string();
 

@@ -113,11 +113,9 @@ const KEY: &str = "id";
 /// The rows the observation inserts, and simultaneously the value a bytewise column
 /// must give back.
 ///
-/// Four ids in a consumer's shape - a prefix plus base62 - listed in CREATION order,
-/// which for base62 of a monotonic UUIDv7 is BYTE order. The suffixes vary only in
-/// the case runs `A`, `Z`, `a`, `z`, whose byte values ascend
-/// (0x41 < 0x5A < 0x61 < 0x7A). A locale-aware collation interleaves those runs; a
-/// bytewise one does not.
+/// Mixed-case sentinel keys in byte order. They are deliberately outside the
+/// lowercase typed-id alphabet so the observation distinguishes bytewise
+/// collation from locale collation.
 ///
 /// Deliberately the same four ids `injected_column_collation.rs` uses and the same
 /// four the proposal's own worked example names
@@ -241,7 +239,7 @@ async fn apply_envelope<B: MigrationBackend>(
         OWNER,
         &registry(),
         live,
-        &GuardConfig::from_policy(policy.clone(), dialect.clone()),
+        &GuardConfig::from_policy(policy.clone(), dialect.clone(), &cfg.project_schema),
     )
     .map_err(|error| format!("{tag}: guarded lower: {error:?}"))?;
     MigrationEngine::new(zeroship_migrate::shipping_vendors())

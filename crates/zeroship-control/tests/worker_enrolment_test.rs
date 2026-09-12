@@ -519,7 +519,6 @@ async fn only_the_worker_may_enrol_an_instance() {
     // so what an in-process request can reach is exactly this arm.
     assert_eq!(status(fixture.worker_header()).await, StatusCode::FORBIDDEN);
 
-    drop(status);
     drop(app);
     drop(fixture);
     common::drain_pg().await;
@@ -553,7 +552,7 @@ async fn a_real_loopback_connection_is_refused_as_outside_the_envelope() {
     })
     .await;
 
-    let mut response = server
+    let response = server
         .post("/internal/workers/enrol")
         .header("authorization", fixture.worker_header())
         .send_json(&json!({
@@ -605,7 +604,7 @@ async fn a_real_loopback_connection_is_admitted_when_the_envelope_declares_it() 
     })
     .await;
 
-    let mut response = server
+    let response = server
         .post("/internal/workers/enrol")
         .header("authorization", fixture.worker_header())
         .send_json(&json!({

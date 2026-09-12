@@ -1,29 +1,25 @@
 //! P5a-2 gateway-brokered login OP tests.
 
 use crate::common;
+use common::{auth_server::AuthServer, database::Database};
 
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use compio_postgres::{connect, Client, NoTls};
+use compio_postgres::Client;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use ntex::web;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
-use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::metadata::jwks_document;
 use zeroship_auth::oidc::{
     AccessTokenClaims, BrokerSecrets, IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
-use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 
-use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
+use common::{location, pkce_challenge_s256, pkce_verifier};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
@@ -53,42 +49,29 @@ impl ClientKind {
 }
 
 struct Fixture {
-    srv: ntex::web::test::TestServer,
-    auth_base: String,
-    db: Arc<Client>,
+    server: AuthServer,
+    db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: AppId,
-    user_id: UserId,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
     session_cookie: String,
 }
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot(kind: ClientKind, previous: Option<&[u8]>) -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[oidc_brokered_login_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
-        let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(err) = pg_connection.run().await {
-                eprintln!("[oidc_brokered_login_test] pg connection error: {err}");
-            }
-        })
-        .detach();
-        let db = Arc::new(pg_client);
+    async fn boot(database: &Database, kind: ClientKind, previous: Option<&[u8]>) -> Self {
+        let db = database.connect().await;
 
-        let broker_secrets =
-            BrokerSecrets::new(BROKER_CURRENT.to_vec(), previous.map(|bytes| bytes.to_vec()))
-                .expect("broker secrets");
+        let broker_secrets = BrokerSecrets::new(
+            BROKER_CURRENT.to_vec(),
+            previous.map(|bytes| bytes.to_vec()),
+        )
+        .expect("broker secrets");
         let issuer = Arc::new(test_issuer().with_broker_secrets(broker_secrets));
-        common::publish_op_key_once(&issuer, &db)
-            .await
-            .expect("publish active OP key");
 
-        let user_id = UserId::mint();
-        let app_id = AppId::mint();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_prefix = if kind.is_brokered() {
             "oac_p5a"
         } else {
@@ -101,7 +84,7 @@ impl Fixture {
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id: &user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -118,185 +101,144 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        // Refresh-token issuance (offline_access) needs the HMAC + idempotency
-        // keys - brokered clients keep the refresh anchor, so the fixture must
-        // be configured for the MED-2 refresh path. `test_auth_config` sets
-        // them from `zeroship_test_support::session_key_files`; this fixture
-        // used to write a second pair of its own and overwrite them with
-        // material of the same shape, and that second copy is how the control
-        // plane's fixture came to have no keyring at all.
-        let cfg = Arc::new(test_auth_config(&db_url));
-        let cfg_state = cfg.clone();
-        let db_state = db.clone();
-        let issuer_state = issuer.clone();
-        let refresh_pool_state =
-            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-        let srv = web::test::server(move || {
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            let issuer_state = issuer_state.clone();
-            let refresh_pool_state = refresh_pool_state.clone();
-            async move {
-                web::App::new()
-                    .state(cfg_state)
-                    .state(db_state)
-                    .state(issuer_state)
-                    .state(refresh_pool_state)
-                    .middleware(SecurityHeaders::default())
-                    .configure(server::configure(false, false))
-            }
-        })
-        .await;
+        let server = AuthServer::with_issuer(database, issuer.clone()).await;
 
-        Some(Self {
-            auth_base: srv.url("").trim_end_matches('/').to_string(),
-            srv,
+        Self {
+            server,
             db,
             issuer,
             client_id,
             app_id,
-            user_id,
+            user_id: user_id.clone(),
             session_cookie,
-        })
-    }
-
-    async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, &self.user_id, &self.app_id, &self.client_id).await;
-        drop(self.srv);
+        }
     }
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_code_exchange_without_broker_secret_is_invalid_client() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
 
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
-    let missing = token_request(&fx, &code, REDIRECT_URI, &verifier, None)
-        .await
-        .expect("missing-secret token response");
-    assert_invalid_client_without_tokens(missing).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
+        let missing = token_request(&fx, &code, REDIRECT_URI, &verifier, None)
+            .await
+            .expect("missing-secret token response");
+        assert_invalid_client_without_tokens(missing).await;
 
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
-    let wrong = token_request(&fx, &code, REDIRECT_URI, &verifier, Some("wrong-secret"))
-        .await
-        .expect("wrong-secret token response");
-    assert_invalid_client_without_tokens(wrong).await;
-
-    fx.cleanup().await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
+        let wrong = token_request(&fx, &code, REDIRECT_URI, &verifier, Some("wrong-secret"))
+            .await
+            .expect("wrong-secret token response");
+        assert_invalid_client_without_tokens(wrong).await;
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
-async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_and_pairwise_access() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
-    let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
+async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_and_pairwise_access()
+{
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
+        let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
 
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&secret))
-        .await
-        .expect("token response");
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<IdTokenClaims>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
-    assert_eq!(id.sub, fx.user_id.as_str().to_string());
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&secret))
+            .await
+            .expect("token response");
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<IdTokenClaims>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
+        assert_eq!(id.sub, fx.user_id.as_str());
 
-    let access = verify_with_jwks::<AccessTokenClaims>(
-        &jwks,
-        &token.access_token,
-        fx.issuer.issuer(),
-        &format!("app:{}", fx.app_id.as_str()),
-        ACCESS_TOKEN_TYP,
-    )
-    .expect("verify access token");
-    assert_eq!(
-        access.sub,
-        fx.issuer.pairwise_subject(&fx.user_id, SECTOR)
-    );
-    assert_ne!(id.sub, access.sub);
-
-    fx.cleanup().await;
+        let access = verify_with_jwks::<AccessTokenClaims>(
+            &jwks,
+            &token.access_token,
+            fx.issuer.issuer(),
+            &format!("app:{}", fx.app_id.as_str()),
+            ACCESS_TOKEN_TYP,
+        )
+        .expect("verify access token");
+        assert_eq!(access.sub, fx.issuer.pairwise_subject(&fx.user_id, SECTOR));
+        assert_ne!(id.sub, access.sub);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_rotation_previous_master_secret_still_accepted() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, Some(BROKER_PREVIOUS)).await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
-    let previous_secret =
-        zeroship_core::auth::derive_broker_secret(BROKER_PREVIOUS, &fx.client_id);
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Brokered, Some(BROKER_PREVIOUS)).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
+        let previous_secret =
+            zeroship_core::auth::derive_broker_secret(BROKER_PREVIOUS, &fx.client_id);
 
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&previous_secret))
-        .await
-        .expect("previous broker secret accepted");
-    assert!(!token.id_token.is_empty());
-    assert!(!token.access_token.is_empty());
-
-    fx.cleanup().await;
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&previous_secret))
+            .await
+            .expect("previous broker secret accepted");
+        assert!(!token.id_token.is_empty());
+        assert!(!token.access_token.is_empty());
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
-    let Some(fx) = Fixture::boot(ClientKind::NonBrokered, None).await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::NonBrokered, None).await;
+        let verifier = pkce_verifier();
+        let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
 
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, None)
-        .await
-        .expect("non-brokered token response");
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<IdTokenClaims>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
-    assert_eq!(
-        id.sub,
-        fx.issuer.pairwise_subject(&fx.user_id, SECTOR)
-    );
-
-    fx.cleanup().await;
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier, None)
+            .await
+            .expect("non-brokered token response");
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<IdTokenClaims>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
+        assert_eq!(id.sub, fx.issuer.pairwise_subject(&fx.user_id, SECTOR));
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_client_still_enforces_exact_redirect_match() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
-    let verifier = pkce_verifier();
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
+        let verifier = pkce_verifier();
 
-    let resp = send_authorize(&fx, UNREGISTERED_REDIRECT_URI, &verifier)
-        .await
-        .expect("authorize response");
-    assert_eq!(resp.status().as_u16(), 400);
-    let body = resp.json::<Value>().await.expect("oauth error json");
-    assert_eq!(body["error"], "invalid_request");
-    assert!(body["code"].is_null(), "authorize error must not return a code");
-
-    fx.cleanup().await;
+        let resp = send_authorize(&fx, UNREGISTERED_REDIRECT_URI, &verifier)
+            .await
+            .expect("authorize response");
+        assert_eq!(resp.status().as_u16(), 400);
+        let body = resp.json::<Value>().await.expect("oauth error json");
+        assert_eq!(body["error"], "invalid_request");
+        assert!(
+            body["code"].is_null(),
+            "authorize error must not return a code"
+        );
+    })
+    .await;
 }
 
 // MED-2: a brokered client authenticates the REFRESH grant by derive-and-compare
@@ -305,55 +247,56 @@ async fn brokered_client_still_enforces_exact_redirect_match() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_refresh_grant_requires_broker_secret() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
+    Database::run(async |database| {
+        let fx = Fixture::boot(database, ClientKind::Brokered, None).await;
+        let verifier = pkce_verifier();
+        let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
 
-    // Mint a refresh token via the brokered authz_code flow (offline_access + secret).
-    let resp = send_authorize_scoped(&fx, REDIRECT_URI, &verifier, "openid offline_access")
-        .await
-        .expect("authorize response");
-    assert_eq!(resp.status().as_u16(), 303, "authorize status");
-    let code = query_param(&location(&resp), "code").expect("code in redirect");
-    let tokens = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&secret))
-        .await
-        .expect("token response");
-    let refresh_token = tokens
-        .refresh_token
-        .expect("brokered client with offline_access issues a refresh token");
+        // Mint a refresh token via the brokered authz_code flow (offline_access + secret).
+        let resp = send_authorize_scoped(&fx, REDIRECT_URI, &verifier, "openid offline_access")
+            .await
+            .expect("authorize response");
+        assert_eq!(resp.status().as_u16(), 303, "authorize status");
+        let code = query_param(&location(&resp), "code").expect("code in redirect");
+        let tokens = exchange_code(&fx, &code, REDIRECT_URI, &verifier, Some(&secret))
+            .await
+            .expect("token response");
+        let refresh_token = tokens
+            .refresh_token
+            .expect("brokered client with offline_access issues a refresh token");
 
-    // WITHOUT the broker secret → invalid_client (the pinned MED-2 failure).
-    let no_secret = refresh_request(&fx, &refresh_token, None)
-        .await
-        .expect("refresh without secret");
-    assert_eq!(no_secret.status().as_u16(), 401);
-    assert_eq!(
-        no_secret.json::<Value>().await.expect("json")["error"],
-        "invalid_client",
-        "brokered refresh without the broker secret must be invalid_client"
-    );
+        // WITHOUT the broker secret → invalid_client (the pinned MED-2 failure).
+        let no_secret = refresh_request(&fx, &refresh_token, None)
+            .await
+            .expect("refresh without secret");
+        assert_eq!(no_secret.status().as_u16(), 401);
+        assert_eq!(
+            no_secret.json::<Value>().await.expect("json")["error"],
+            "invalid_client",
+            "brokered refresh without the broker secret must be invalid_client"
+        );
 
-    // WITH the derived broker secret → rotates successfully (proves the
-    // brokered-first derive-and-compare path is wired for refresh).
-    let ok = refresh_request(&fx, &refresh_token, Some(&secret))
-        .await
-        .expect("refresh with secret");
-    assert_eq!(
-        ok.status().as_u16(),
-        200,
-        "brokered refresh WITH the broker secret must succeed"
-    );
-    // The refresh grant returns access + refresh + scope (no id_token), so parse
-    // as a generic value rather than the authz_code TokenResponse shape.
-    let rotated = ok.json::<Value>().await.expect("refresh json");
-    assert!(
-        rotated["access_token"].as_str().is_some_and(|t| !t.is_empty()),
-        "brokered refresh must return a new access token: {rotated}"
-    );
-
-    fx.cleanup().await;
+        // WITH the derived broker secret → rotates successfully (proves the
+        // brokered-first derive-and-compare path is wired for refresh).
+        let ok = refresh_request(&fx, &refresh_token, Some(&secret))
+            .await
+            .expect("refresh with secret");
+        assert_eq!(
+            ok.status().as_u16(),
+            200,
+            "brokered refresh WITH the broker secret must succeed"
+        );
+        // The refresh grant returns access + refresh + scope (no id_token), so parse
+        // as a generic value rather than the authz_code TokenResponse shape.
+        let rotated = ok.json::<Value>().await.expect("refresh json");
+        assert!(
+            rotated["access_token"]
+                .as_str()
+                .is_some_and(|t| !t.is_empty()),
+            "brokered refresh must return a new access token: {rotated}"
+        );
+    })
+    .await;
 }
 
 #[allow(clippy::future_not_send)]
@@ -368,7 +311,10 @@ async fn refresh_request(
         .append_pair("refresh_token", refresh_token)
         .finish();
     let mut req = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");
@@ -381,19 +327,15 @@ async fn refresh_request(
     req.body(body).send().await
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
-}
-
 fn test_issuer() -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
     Issuer::from_signing_key(&signing, [13u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
 async fn seed_user_client(
     db: &Client,
-    user_id: &UserId,
-    app_id: &AppId,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
     kind: ClientKind,
@@ -421,11 +363,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[
-            &app_id.as_str(),
-            &app_name,
-            &project_id
-        ],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -471,35 +409,6 @@ async fn seed_user_client(
     .expect("seed oauth grant");
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.oauth_grants WHERE client_id = $1", &[&client_id])
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id.as_str()],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.oauth_clients WHERE client_id = $1", &[&client_id])
-        .await;
-    let _ = db.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()]).await;
-    let _ = db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()]).await;
-}
-
 async fn authorize_code(fx: &Fixture, redirect_uri: &str, verifier: &str) -> String {
     let resp = send_authorize(fx, redirect_uri, verifier)
         .await
@@ -536,7 +445,10 @@ async fn send_authorize_scoped(
         .append_pair("code_challenge_method", "S256")
         .finish();
     cyper::Client::new()
-        .request(http::Method::GET, format!("{}/oauth2/authorize?{query}", fx.auth_base))
+        .request(
+            http::Method::GET,
+            format!("{}/oauth2/authorize?{query}", fx.server.auth_base),
+        )
         .expect("build GET /authorize")
         .header("cookie", fx.session_cookie.clone())
         .expect("cookie")
@@ -573,7 +485,10 @@ async fn token_request(
         .append_pair("code_verifier", verifier)
         .finish();
     let mut req = cyper::Client::new()
-        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type");
@@ -598,13 +513,16 @@ async fn assert_invalid_client_without_tokens(resp: cyper::Response) {
 }
 
 fn query_param(raw_url: &str, name: &str) -> Option<String> {
-    url::Url::parse(raw_url).ok()?.query_pairs().find_map(|(key, value)| {
-        if key == name {
-            Some(value.into_owned())
-        } else {
-            None
-        }
-    })
+    url::Url::parse(raw_url)
+        .ok()?
+        .query_pairs()
+        .find_map(|(key, value)| {
+            if key == name {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })
 }
 
 fn verify_with_jwks<T: DeserializeOwned>(
@@ -629,7 +547,9 @@ fn verify_with_jwks<T: DeserializeOwned>(
         .iter()
         .find(|jwk| jwk["kid"].as_str() == Some(kid.as_str()))
         .ok_or_else(|| format!("kid {kid} not found"))?;
-    let x = jwk["x"].as_str().ok_or_else(|| "jwk x missing".to_string())?;
+    let x = jwk["x"]
+        .as_str()
+        .ok_or_else(|| "jwk x missing".to_string())?;
     let decoding_key =
         DecodingKey::from_ed_components(x).map_err(|err| format!("ed key: {err}"))?;
     let mut validation = Validation::new(Algorithm::EdDSA);

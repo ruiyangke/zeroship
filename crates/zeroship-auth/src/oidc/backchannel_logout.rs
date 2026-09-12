@@ -9,8 +9,7 @@ use std::time::Duration;
 use compio_postgres::{Client, GenericClient};
 use http::Method;
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::error::{AuthError, Result};
 use crate::oidc::{Issuer, LogoutTokenMint};
@@ -138,7 +137,7 @@ pub async fn emit_for_app_session(
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RP for app: {e}")))?;
 
-    let subject = user_id.as_str().to_string();
+    let subject = user_id.as_str().to_owned();
     let rps: Vec<RelyingPartySession> = rows
         .iter()
         .filter_map(|row| {
@@ -176,7 +175,10 @@ pub async fn emit_for_user(
     emit_to_rps(db, issuer, rps).await
 }
 
-async fn load_rps_for_session(db: &Client, idp_session_id: Uuid) -> Result<Vec<RelyingPartySession>> {
+async fn load_rps_for_session(
+    db: &Client,
+    idp_session_id: Uuid,
+) -> Result<Vec<RelyingPartySession>> {
     let rows = db
         .query(
             "SELECT osc.client_id, osc.sid, osc.sub, oc.backchannel_logout_uri \
@@ -188,10 +190,7 @@ async fn load_rps_for_session(db: &Client, idp_session_id: Uuid) -> Result<Vec<R
         )
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RPs for session: {e}")))?;
-    Ok(rows
-        .iter()
-        .filter_map(row_to_rp)
-        .collect())
+    Ok(rows.iter().filter_map(row_to_rp).collect())
 }
 
 async fn load_rps_for_user(db: &Client, user_id: &UserId) -> Result<Vec<RelyingPartySession>> {
@@ -206,10 +205,7 @@ async fn load_rps_for_user(db: &Client, user_id: &UserId) -> Result<Vec<RelyingP
         )
         .await
         .map_err(|e| AuthError::Db(format!("load BCL RPs for user: {e}")))?;
-    Ok(rows
-        .iter()
-        .filter_map(row_to_rp)
-        .collect())
+    Ok(rows.iter().filter_map(row_to_rp).collect())
 }
 
 fn row_to_rp(row: &compio_postgres::Row) -> Option<RelyingPartySession> {

@@ -44,7 +44,7 @@ use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use compio_postgres::GenericClient;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -180,7 +180,7 @@ pub async fn redeem(
     rows.first()
         .map(|row| {
             Ok(CancelledDeletion {
-                user_id: crate::entity_ids::user_id(row, "id")?,
+                user_id: crate::user_id::from_row(row, "id", "deletion cancel redeem")?,
                 email: row.get("email"),
             })
         })

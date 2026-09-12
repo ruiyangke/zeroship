@@ -506,7 +506,7 @@ pub fn string_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
     }
 }
 
-/// Render the `COMMENT ON COLUMN ... 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
+/// Render the `COMMENT ON COLUMN ... 'zero-migrate:enc:<wraps>'`
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
@@ -553,7 +553,7 @@ pub fn build_encryption_sentinel_comments(
 /// no validator accepts is what makes it unreachable from creator code on
 /// surfaces nobody has written yet.
 ///
-/// Byte-identical to `zeroship_schema::query::RAW_COLUMN_PREFIX`; see
+/// Byte-identical to `zeroship_data_sql::compile::RAW_COLUMN_PREFIX`; see
 /// [`raw_column_name`] for what holds it there.
 pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 
@@ -574,20 +574,20 @@ pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 /// the same cap, but its only reader is an emitter with no `src` call site
 /// (measured 2026-09-04), so an accepted declaration is accepted HERE. The two
 /// are pinned to each other, and this literal `63` to the tightest identifier
-/// budget the shipping vendors declare, by `zeroship_schema::query`'s
+/// budget the shipping vendors declare, by `zeroship_data_sql::compile`'s
 /// `raw_column_parity`.
 pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 
 /// The physical column that holds `field`'s REAL value.
 ///
 /// Total, and deliberately a plain concatenation: it is byte-identical to
-/// `zeroship_schema::query::raw_column_name` - this one names the column the
+/// `zeroship_data_sql::compile::raw_column_name` - this one names the column the
 /// migration engine CREATES, that one names the column the data plane READS and
 /// WRITES.
 ///
 /// # What holds the two spellings together
 ///
-/// `zeroship_schema::query`'s `raw_column_parity` module. It compares this
+/// `zeroship_data_sql::compile`'s `raw_column_parity` module. It compares this
 /// function, [`RAW_COLUMN_PREFIX`] and [`MAX_MASKED_FIELD_NAME_BYTES`] against
 /// the data plane's declarations over a corpus, and crosses both DECLARATION
 /// paths so a side that keeps an equal constant while no longer consulting it is
@@ -711,7 +711,7 @@ pub fn build_mask_sentinel_comments(
     out
 }
 
-/// The bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
+/// The bare `zero-migrate:enc:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
 /// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: `encryption_sentinel_for_field` wraps it in `/* */` for the inline
@@ -720,31 +720,18 @@ pub fn build_mask_sentinel_comments(
 /// parser is [`crate::mask_codec::parse_encryption_sentinel`].
 #[must_use]
 pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<String> {
-    let enc = def.get("encrypted").and_then(|v| v.as_object())?;
-    let mode = enc
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("randomised");
-    // Normalise legacy `"randomized"` (US spelling) to the canonical
-    // `randomised` so the introspector parser (which accepts both but the
-    // emit side normalises to one) round-trips cleanly.
-    let mode_norm = if mode == "randomized" {
-        "randomised"
-    } else {
-        mode
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true) {
+        return None;
+    }
+    let wraps = match def.get("type").and_then(serde_json::Value::as_str)? {
+        "string" => crate::mask_meta::WrappedType::String,
+        "number" => crate::mask_meta::WrappedType::Number,
+        "bytes" => crate::mask_meta::WrappedType::Bytes,
+        _ => return None,
     };
-    let key_id = enc
-        .get("keyId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
-    let wraps = enc
-        .get("wraps")
-        .and_then(|v| v.as_str())
-        .unwrap_or("string");
-    Some(format!(
-        "{}{mode_norm}:{key_id}:{wraps}",
-        crate::mask_codec::ENC_SENTINEL_PREFIX
-    ))
+    Some(crate::mask_codec::build_encryption_sentinel(&crate::mask_meta::EncryptionMeta {
+        wraps,
+    }))
 }
 
 /// The portable `caseSensitive` intent a field def carries, in the shape

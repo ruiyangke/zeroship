@@ -23,12 +23,15 @@ export interface RuntimeFieldDef {
   unique?: boolean;
   min?: number;
   max?: number;
+  precision?: number;
+  scale?: number;
   enum?: unknown[];
   mask?: { kind?: string; classification?: string };
   default?: unknown;
-  encrypted?: { mode?: string; keyId?: string; wraps?: string };
+  encrypted?: boolean;
   idPrefix?: string;
   refTarget?: string;
+  refColumn?: string;
   onDelete?: string;
   onUpdate?: string;
   deferrable?: boolean;
@@ -65,22 +68,6 @@ export interface RuntimeDescriptor {
 }
 
 /**
- * The 7 platform-injected system columns. They live in `schema.runtime.json`
- * (the runtime installs them), but they are elided from the `env.db.ts` literal
- * because `@zeroship/db` already infers them onto every row - re-declaring them
- * would let a hand edit disagree with the platform.
- */
-const SYSTEM_FIELDS: ReadonlySet<string> = new Set([
-  "id",
-  "created_at",
-  "updated_at",
-  "created_by",
-  "updated_by",
-  "version",
-  "deleted_at",
-]);
-
-/**
  * The banner both schema sources carry. It names the toolchain, not a source,
  * so the two artifacts read identically to a creator.
  */
@@ -97,15 +84,8 @@ export const GENERATED_ENV_DB_BANNER =
   "// `InferSchema`/`Row`/`Collections`/`Db`/`Id<>`/`MaskedValue<>` inference\n" +
   "// chain a declared schema would.\n" +
   "//\n" +
-  "// That equivalence is about TYPES, not about DDL, and the difference is not\n" +
-  "// cosmetic: feeding this file back in as a declared schema would NOT\n" +
-  "// reproduce the columns the migrations built. `int`, `integer`, `bigInt`,\n" +
-  "// `number` and `float` all render as `t.number()`, because `@zeroship/db`\n" +
-  "// has no integer builder — so an `int` column that the migration created as\n" +
-  "// INTEGER would come back as DOUBLE PRECISION.\n" +
-  "//\n" +
-  "// Read `t.number()` here as \"some numeric column\", not as the column's\n" +
-  "// type. The schema source above remains the ground truth for DDL.\n";
+  "// This module reconstructs runtime types. Fixed-precision numeric facets are\n" +
+  "// preserved, while the migration source remains the authority for DDL.\n";
 
 /**
  * Render the generated `env.db.ts` from a parsed v2 runtime descriptor.
@@ -126,7 +106,6 @@ export function renderGeneratedEnvDb(descriptor: RuntimeDescriptor): string {
 
     body += `  ${jsKey(collection)}: ${needsBuilder ? "defineSchema({" : "{"}\n`;
     for (const [column, def] of Object.entries(coll.fields ?? {})) {
-      if (SYSTEM_FIELDS.has(column)) continue;
       body += `    ${jsKey(column)}: ${renderBuilderChain(def)},\n`;
     }
     body += needsBuilder ? `  })${renderCollectionChains(options, indexes)}` : "  }";
@@ -179,11 +158,11 @@ function renderCollectionChains(options: RuntimeOptions, indexes: RuntimeIndex[]
  */
 function renderBuilderChain(def: RuntimeFieldDef): string {
   if (def === null || typeof def !== "object") return "t.json()";
-  const hasEncrypted = def.encrypted !== undefined;
+  const hasEncrypted = def.encrypted === true;
 
   let chain: string;
   if (hasEncrypted) {
-    chain = renderEncryptedBase(def.encrypted);
+    chain = renderEncryptedBase(def);
   } else if (typeof def.refTarget === "string" && def.refTarget.length > 0) {
     // A relation is identified by its relation METADATA, not by the `type`
     // token, which describes storage. This mirrors the same decision already
@@ -214,25 +193,15 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
       case "string":
         chain = "t.string()";
         break;
-      // Every op.* numeric token collapses onto `t.number()`, because
-      // `@zeroship/db`'s `TypeName` has no integer member at all.
-      //
-      // This WIDENS, and the widening is not free - it is recorded here rather
-      // than hidden because the renderer is where the information is lost.
-      // `t.int()` lands as INTEGER in Postgres while typing as `number`, and
-      // the SDK's `number` validation accepts any finite value, so
-      // `create({ points: 1.5 })` passes tsc, passes validation, and is
-      // assignment-cast to 2 on insert. `t.bigInt()` is worse: BIGINT exceeds
-      // the JS safe-integer range, so above 2^53 the value a creator writes and
-      // the value stored can differ with nothing anywhere objecting.
-      //
-      // Closing that needs an integer-aware type in `@zeroship/db`, which is a
-      // public SDK surface change and not this renderer's call to make. Until
-      // then, do not read `t.number()` here as "the column is a float".
+      // Preserve the wide integer contract in generated SDK declarations.
+      case "bigInt":
+        chain = "t.bigInt()";
+        break;
       case "int":
       case "integer":
-      case "bigInt":
       case "number":
+        chain = renderNumberBase(def);
+        break;
       case "float":
         chain = "t.number()";
         break;
@@ -300,40 +269,25 @@ function renderBuilderChain(def: RuntimeFieldDef): string {
   }
   if (def.default !== undefined) chain += `.default(${renderDefaultValue(def.default)})`;
 
+  if (def.primaryKey === true) chain += ".primaryKey()";
+  if (def.assign !== undefined) chain += `.assigned(${JSON.stringify(def.assign)})`;
   return chain;
 }
 
-/**
- * `t.encrypted({ mode?, keyId?, wraps? })`.
- *
- * The kernel-default triple (`randomised` / `default` / `string`) is what a bare
- * `t.encrypted()` stamps, so it collapses back to the bare form: the two
- * spellings produce the same `TypeBuilder`, and the full facet is preserved in
- * `schema.runtime.json` regardless. Only a non-default facet renders opts.
- */
-function renderEncryptedBase(enc: RuntimeFieldDef["encrypted"]): string {
-  if (enc === null || typeof enc !== "object") return "t.encrypted()";
-  const mode = typeof enc.mode === "string" ? enc.mode : undefined;
-  const keyId = typeof enc.keyId === "string" ? enc.keyId : undefined;
-  const wraps = typeof enc.wraps === "string" ? enc.wraps : undefined;
-  if (
-    (mode === undefined || mode === "randomised") &&
-    (keyId === undefined || keyId === "default") &&
-    (wraps === undefined || wraps === "string")
-  ) {
-    return "t.encrypted()";
+/** Render the logical plaintext type; the host owns project-key selection. */
+function renderEncryptedBase(def: RuntimeFieldDef): string {
+  switch (def.type) {
+    case "string": return "t.encrypted()";
+    case "number": return `t.encrypted({ of: ${renderNumberBase(def)} })`;
+    case "bytes": return "t.encrypted({ of: t.bytes() })";
+    default: throw new Error(`Unsupported encrypted field type: ${def.type}`);
   }
-  const opts: string[] = [];
-  if (mode !== undefined) opts.push(`mode: ${jsStr(mode)}`);
-  if (keyId !== undefined) opts.push(`keyId: ${jsStr(keyId)}`);
-  if (wraps !== undefined) {
-    // `wraps` is a TypeBuilder argument in the SDK, reconstructed from the
-    // inner-type token.
-    const wrapsBuilder =
-      wraps === "number" ? "t.number()" : wraps === "bytes" ? "t.bytes()" : "t.string()";
-    opts.push(`wraps: ${wrapsBuilder}`);
-  }
-  return opts.length === 0 ? "t.encrypted()" : `t.encrypted({ ${opts.join(", ")} })`;
+}
+
+function renderNumberBase(def: RuntimeFieldDef): string {
+  if (typeof def.precision !== "number") return "t.number()";
+  const scale = typeof def.scale === "number" ? def.scale : 0;
+  return `t.numeric({ precision: ${renderNumber(def.precision)}, scale: ${renderNumber(scale)} })`;
 }
 
 /** `t.id(prefix?)` - the typed-id base, threading the recovered `idPrefix`. */
@@ -341,10 +295,11 @@ function renderIdBase(def: RuntimeFieldDef): string {
   return typeof def.idPrefix === "string" ? `t.id(${jsStr(def.idPrefix)})` : "t.id()";
 }
 
-/** `t.ref(target, { onDelete?, onUpdate?, deferrable? })` - the FK base. */
+/** Preserve the reference target and its constraint options. */
 function renderRefBase(def: RuntimeFieldDef): string {
   const target = typeof def.refTarget === "string" ? def.refTarget : "";
   const opts: string[] = [];
+  if (typeof def.refColumn === "string") opts.push(`column: ${jsStr(def.refColumn)}`);
   if (typeof def.onDelete === "string") opts.push(`onDelete: ${jsStr(def.onDelete)}`);
   if (typeof def.onUpdate === "string") opts.push(`onUpdate: ${jsStr(def.onUpdate)}`);
   if (typeof def.deferrable === "boolean") opts.push(`deferrable: ${def.deferrable}`);

@@ -1,32 +1,28 @@
 //! P3 closed-world `/authorize` + `/token` auth-code + PKCE tests.
 
 use crate::common;
+use common::{auth_server::AuthServer, database::Database};
 
 use std::sync::Arc;
 
-use compio_postgres::{connect, Client, NoTls};
+use compio_postgres::Client;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use ntex::web;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
-use zeroship_auth::headers::SecurityHeaders;
+use zeroship_auth::identity::deletion_cancel;
 use zeroship_auth::oidc::issuer::oidc_at_hash;
 use zeroship_auth::oidc::metadata::jwks_document;
 use zeroship_auth::oidc::{
     AccessTokenClaims, IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
-use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
-use zeroship_auth::identity::deletion_cancel;
 use zeroship_auth::store::users;
 
-use common::{dedicated_test_db, location, pkce_challenge_s256, pkce_verifier, test_auth_config};
+use common::{location, pkce_challenge_s256, pkce_verifier};
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/cb";
@@ -48,13 +44,12 @@ struct SeededUserProfile {
 }
 
 struct Fixture {
-    srv: ntex::web::test::TestServer,
-    auth_base: String,
-    db: Arc<Client>,
+    server: AuthServer,
+    db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: AppId,
-    user_id: UserId,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
     user_email: String,
     user_name: String,
     user_avatar_url: String,
@@ -64,32 +59,17 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        Self::boot_with_email_verified(true).await
+    async fn boot(database: &Database) -> Self {
+        Self::boot_with_email_verified(database, true).await
     }
 
     #[allow(clippy::future_not_send)]
-    async fn boot_with_email_verified(email_verified: bool) -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[op_authorization_code_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
-        let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
-        compio::runtime::spawn(async move {
-            if let Err(err) = pg_connection.run().await {
-                eprintln!("[op_authorization_code_test] pg connection error: {err}");
-            }
-        })
-        .detach();
-        let db = Arc::new(pg_client);
-
+    async fn boot_with_email_verified(database: &Database, email_verified: bool) -> Self {
+        let db = database.connect().await;
         let issuer = Arc::new(test_issuer());
-        common::publish_op_key_once(&issuer, &db)
-            .await
-            .expect("publish active OP key");
 
-        let user_id = UserId::mint();
-        let app_id = AppId::mint();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_id = format!("oac_p3_{}", Uuid::new_v4().simple());
         let app_name = format!("p3-auth-code-{}", Uuid::new_v4().simple());
         let user_profile =
@@ -97,7 +77,7 @@ impl Fixture {
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id: &user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -114,403 +94,364 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        let cfg = Arc::new(test_auth_config(&db_url));
-        let cfg_state = cfg.clone();
-        let db_state = db.clone();
-        let issuer_state = issuer.clone();
-        let refresh_pool_state =
-            zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
-        let srv = web::test::server(move || {
-            let cfg_state = cfg_state.clone();
-            let db_state = db_state.clone();
-            let issuer_state = issuer_state.clone();
-            let refresh_pool_state = refresh_pool_state.clone();
-            async move {
-                web::App::new()
-                    .state(cfg_state)
-                    .state(db_state)
-                    .state(issuer_state)
-                    .state(refresh_pool_state)
-                    .middleware(SecurityHeaders::default())
-                    .configure(server::configure(false, false))
-            }
-        })
-        .await;
+        let server = AuthServer::with_issuer(database, issuer.clone()).await;
 
-        Some(Self {
-            auth_base: srv.url("").trim_end_matches('/').to_string(),
-            srv,
+        Self {
+            server,
             db,
             issuer,
             client_id,
             app_id,
-            user_id,
+            user_id: user_id.clone(),
             user_email: user_profile.email,
             user_name: user_profile.name,
             user_avatar_url: user_profile.avatar_url,
             session_id: session.id,
             session_cookie,
-        })
-    }
-
-    async fn cleanup(self) {
-        cleanup_seeded_rows(&self.db, &self.user_id, &self.app_id, &self.client_id).await;
-        drop(self.srv);
+        }
     }
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
-        .await
-        .expect("authorize response");
-    assert_eq!(authorize.status().as_u16(), 303, "authorize must use 303");
-    assert_eq!(
-        authorize
-            .headers()
-            .get("referrer-policy")
-            .and_then(|value| value.to_str().ok()),
-        Some("no-referrer")
-    );
-    let loc = location(&authorize);
-    let code = query_param(&loc, "code").expect("code in redirect");
-    assert_eq!(query_param(&loc, "state").as_deref(), Some("state-123"));
-    assert_eq!(query_param(&loc, "iss").as_deref(), Some(fx.issuer.issuer()));
+        let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
+            .await
+            .expect("authorize response");
+        assert_eq!(authorize.status().as_u16(), 303, "authorize must use 303");
+        assert_eq!(
+            authorize
+                .headers()
+                .get("referrer-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-referrer")
+        );
+        let loc = location(&authorize);
+        let code = query_param(&loc, "code").expect("code in redirect");
+        assert_eq!(query_param(&loc, "state").as_deref(), Some("state-123"));
+        assert_eq!(
+            query_param(&loc, "iss").as_deref(),
+            Some(fx.issuer.issuer())
+        );
 
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
-        .await
-        .expect("token response");
-    assert_eq!(token.token_type, "Bearer");
-    assert!(token.expires_in > 0);
-    assert!(token.scope.contains("openid"));
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("token response");
+        assert_eq!(token.token_type, "Bearer");
+        assert!(token.expires_in > 0);
+        assert!(token.scope.contains("openid"));
 
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let access = verify_with_jwks::<AccessTokenClaims>(
-        &jwks,
-        &token.access_token,
-        fx.issuer.issuer(),
-        &format!("app:{}", fx.app_id.as_str()),
-        ACCESS_TOKEN_TYP,
-    )
-    .expect("verify access token");
-    assert_eq!(access.client_id, fx.client_id);
-    assert_eq!(
-        access.sub,
-        fx.issuer.pairwise_subject(&fx.user_id, SECTOR)
-    );
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let access = verify_with_jwks::<AccessTokenClaims>(
+            &jwks,
+            &token.access_token,
+            fx.issuer.issuer(),
+            &format!("app:{}", fx.app_id.as_str()),
+            ACCESS_TOKEN_TYP,
+        )
+        .expect("verify access token");
+        assert_eq!(access.client_id, fx.client_id);
+        assert_eq!(access.sub, fx.issuer.pairwise_subject(&fx.user_id, SECTOR));
 
-    let id = verify_with_jwks::<IdTokenClaims>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
-    assert_eq!(id.sub, access.sub);
-    assert_eq!(id.sid, fx.session_id.to_string());
-    assert_eq!(id.nonce, nonce);
-    assert_eq!(id.at_hash, oidc_at_hash(&token.access_token));
+        let id = verify_with_jwks::<IdTokenClaims>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
+        assert_eq!(id.sub, access.sub);
+        assert_eq!(id.sid, fx.session_id.to_string());
+        assert_eq!(id.nonce, nonce);
+        assert_eq!(id.at_hash, oidc_at_hash(&token.access_token));
 
-    let replay = token_request(&fx, &code, REDIRECT_URI, &verifier)
-        .await
-        .expect("second token response");
-    assert_eq!(replay.status().as_u16(), 400, "code must be one-use");
-    assert_error(replay, "invalid_grant").await;
-
-    fx.cleanup().await;
+        let replay = token_request(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("second token response");
+        assert_eq!(replay.status().as_u16(), 400, "code must be one-use");
+        assert_error(replay, "invalid_grant").await;
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    let authorize = send_authorize_with_scope(
-        &fx,
-        REDIRECT_URI,
-        &verifier,
-        Some(&nonce),
-        "openid email profile",
-    )
-    .await
-    .expect("authorize response");
-    assert_eq!(authorize.status().as_u16(), 303);
-    let code = query_param(&location(&authorize), "code").expect("code in redirect");
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+        let authorize = send_authorize_with_scope(
+            &fx,
+            REDIRECT_URI,
+            &verifier,
+            Some(&nonce),
+            "openid email profile",
+        )
         .await
-        .expect("token response");
+        .expect("authorize response");
+        assert_eq!(authorize.status().as_u16(), 303);
+        let code = query_param(&location(&authorize), "code").expect("code in redirect");
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("token response");
 
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<Value>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
-    assert_eq!(id["email"].as_str(), Some(fx.user_email.as_str()));
-    assert_eq!(id["email_verified"].as_bool(), Some(true));
-    assert_eq!(id["name"].as_str(), Some(fx.user_name.as_str()));
-    assert_eq!(id["picture"].as_str(), Some(fx.user_avatar_url.as_str()));
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<Value>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
+        assert_eq!(id["email"].as_str(), Some(fx.user_email.as_str()));
+        assert_eq!(id["email_verified"].as_bool(), Some(true));
+        assert_eq!(id["name"].as_str(), Some(fx.user_name.as_str()));
+        assert_eq!(id["picture"].as_str(), Some(fx.user_avatar_url.as_str()));
 
-    let access = verify_with_jwks::<Value>(
-        &jwks,
-        &token.access_token,
-        fx.issuer.issuer(),
-        &format!("app:{}", fx.app_id.as_str()),
-        ACCESS_TOKEN_TYP,
-    )
-    .expect("verify access token");
-    assert_identity_claims_absent(&access);
-
-    fx.cleanup().await;
+        let access = verify_with_jwks::<Value>(
+            &jwks,
+            &token.access_token,
+            fx.issuer.issuer(),
+            &format!("app:{}", fx.app_id.as_str()),
+            ACCESS_TOKEN_TYP,
+        )
+        .expect("verify access token");
+        assert_identity_claims_absent(&access);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    let authorize = send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid")
-        .await
-        .expect("authorize response");
-    assert_eq!(authorize.status().as_u16(), 303);
-    let code = query_param(&location(&authorize), "code").expect("code in redirect");
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
-        .await
-        .expect("token response");
-    assert_eq!(token.scope, "openid");
+        let authorize =
+            send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid")
+                .await
+                .expect("authorize response");
+        assert_eq!(authorize.status().as_u16(), 303);
+        let code = query_param(&location(&authorize), "code").expect("code in redirect");
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("token response");
+        assert_eq!(token.scope, "openid");
 
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<Value>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
-    assert_identity_claims_absent(&id);
-
-    fx.cleanup().await;
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<Value>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
+        assert_identity_claims_absent(&id);
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_email_verified_false_for_unverified_user() {
-    let Some(fx) = Fixture::boot_with_email_verified(false).await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot_with_email_verified(database, false).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    let authorize =
-        send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid email")
+        let authorize =
+            send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid email")
+                .await
+                .expect("authorize response");
+        assert_eq!(authorize.status().as_u16(), 303);
+        let code = query_param(&location(&authorize), "code").expect("code in redirect");
+        let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
             .await
-            .expect("authorize response");
-    assert_eq!(authorize.status().as_u16(), 303);
-    let code = query_param(&location(&authorize), "code").expect("code in redirect");
-    let token = exchange_code(&fx, &code, REDIRECT_URI, &verifier)
-        .await
-        .expect("token response");
+            .expect("token response");
 
-    let jwks = jwks_document(&fx.db).await.expect("jwks");
-    let id = verify_with_jwks::<Value>(
-        &jwks,
-        &token.id_token,
-        fx.issuer.issuer(),
-        &fx.client_id,
-        ID_TOKEN_TYP,
-    )
-    .expect("verify id token");
-    assert_eq!(id["email"].as_str(), Some(fx.user_email.as_str()));
-    assert_eq!(id["email_verified"].as_bool(), Some(false));
-    assert!(!id.as_object().expect("claims object").contains_key("name"));
-    assert!(!id.as_object().expect("claims object").contains_key("picture"));
-
-    fx.cleanup().await;
+        let jwks = jwks_document(&fx.db).await.expect("jwks");
+        let id = verify_with_jwks::<Value>(
+            &jwks,
+            &token.id_token,
+            fx.issuer.issuer(),
+            &fx.client_id,
+            ID_TOKEN_TYP,
+        )
+        .expect("verify id token");
+        assert_eq!(id["email"].as_str(), Some(fx.user_email.as_str()));
+        assert_eq!(id["email_verified"].as_bool(), Some(false));
+        assert!(!id.as_object().expect("claims object").contains_key("name"));
+        assert!(!id
+            .as_object()
+            .expect("claims object")
+            .contains_key("picture"));
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    let missing = send_authorize_without_pkce(&fx, REDIRECT_URI, Some(&nonce))
-        .await
-        .expect("missing pkce authorize response");
-    assert_authorize_error_redirect(&missing, &fx, "invalid_request");
+        let missing = send_authorize_without_pkce(&fx, REDIRECT_URI, Some(&nonce))
+            .await
+            .expect("missing pkce authorize response");
+        assert_authorize_error_redirect(&missing, &fx, "invalid_request");
 
-    let plain = send_authorize_with_method(&fx, REDIRECT_URI, &verifier, "plain", Some(&nonce))
-        .await
-        .expect("plain authorize response");
-    assert_authorize_error_redirect(&plain, &fx, "invalid_request");
+        let plain = send_authorize_with_method(&fx, REDIRECT_URI, &verifier, "plain", Some(&nonce))
+            .await
+            .expect("plain authorize response");
+        assert_authorize_error_redirect(&plain, &fx, "invalid_request");
 
-    let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
-        .await
-        .expect("valid authorize");
-    let code = query_param(&location(&authorize), "code").expect("code");
-    let wrong = pkce_verifier();
-    let token = token_request(&fx, &code, REDIRECT_URI, &wrong)
-        .await
-        .expect("wrong verifier token response");
-    assert_eq!(token.status().as_u16(), 400);
-    assert_error(token, "invalid_grant").await;
-
-    fx.cleanup().await;
+        let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
+            .await
+            .expect("valid authorize");
+        let code = query_param(&location(&authorize), "code").expect("code");
+        let wrong = pkce_verifier();
+        let token = token_request(&fx, &code, REDIRECT_URI, &wrong)
+            .await
+            .expect("wrong verifier token response");
+        assert_eq!(token.status().as_u16(), 400);
+        assert_error(token, "invalid_grant").await;
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn interactive_authorize_errors_after_redirect_validation_redirect_to_rp_with_iss() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    let invalid_scope =
-        send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid unknown")
+        let invalid_scope =
+            send_authorize_with_scope(&fx, REDIRECT_URI, &verifier, Some(&nonce), "openid unknown")
+                .await
+                .expect("invalid-scope authorize response");
+        assert_authorize_error_redirect(&invalid_scope, &fx, "invalid_scope");
+
+        let missing_pkce = send_authorize_without_pkce(&fx, REDIRECT_URI, Some(&nonce))
             .await
-            .expect("invalid-scope authorize response");
-    assert_authorize_error_redirect(&invalid_scope, &fx, "invalid_scope");
-
-    let missing_pkce = send_authorize_without_pkce(&fx, REDIRECT_URI, Some(&nonce))
-        .await
-        .expect("missing-pkce authorize response");
-    assert_authorize_error_redirect(&missing_pkce, &fx, "invalid_request");
-
-    fx.cleanup().await;
+            .expect("missing-pkce authorize response");
+        assert_authorize_error_redirect(&missing_pkce, &fx, "invalid_request");
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn redirect_uri_must_exact_match_registered_value() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
-    for bad_redirect in [
-        "http://127.0.0.1:9999/cb/extra",
-        "http://127.0.0.1:9999/c",
-        "http://127.0.0.1:9999/cb?next=/extra",
-    ] {
-        let resp = send_authorize(&fx, bad_redirect, &verifier, Some(&nonce), None)
-            .await
-            .expect("redirect mismatch response");
-        assert_eq!(resp.status().as_u16(), 400, "{bad_redirect}");
-        assert!(
-            resp.headers().get("location").is_none(),
-            "redirect mismatch must not redirect"
-        );
-        assert_error(resp, "invalid_request").await;
-    }
-
-    fx.cleanup().await;
+        for bad_redirect in [
+            "http://127.0.0.1:9999/cb/extra",
+            "http://127.0.0.1:9999/c",
+            "http://127.0.0.1:9999/cb?next=/extra",
+        ] {
+            let resp = send_authorize(&fx, bad_redirect, &verifier, Some(&nonce), None)
+                .await
+                .expect("redirect mismatch response");
+            assert_eq!(resp.status().as_u16(), 400, "{bad_redirect}");
+            assert!(
+                resp.headers().get("location").is_none(),
+                "redirect mismatch must not redirect"
+            );
+            assert_error(resp, "invalid_request").await;
+        }
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn expired_authorization_code_is_rejected() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
-    let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
-        .await
-        .expect("authorize response");
-    let code = query_param(&location(&authorize), "code").expect("code");
-    expire_code(&fx.db, &code).await;
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
+        let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
+            .await
+            .expect("authorize response");
+        let code = query_param(&location(&authorize), "code").expect("code");
+        expire_code(&fx.db, &code).await;
 
-    let token = token_request(&fx, &code, REDIRECT_URI, &verifier)
-        .await
-        .expect("expired token response");
-    assert_eq!(token.status().as_u16(), 400);
-    assert_error(token, "invalid_grant").await;
-
-    fx.cleanup().await;
+        let token = token_request(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("expired token response");
+        assert_eq!(token.status().as_u16(), 400);
+        assert_error(token, "invalid_grant").await;
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
-    let verifier = pkce_verifier();
-    let nonce = format!("nc-{}", Uuid::new_v4().simple());
-    let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
-        .await
-        .expect("authorize response");
-    let code = query_param(&location(&authorize), "code").expect("code");
-
-    let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
-    let deletion_request = users::request_deletion(&mut deletion, &fx.user_id, 30)
-        .await
-        .expect("request account deletion")
-        .expect("authorization code owner exists");
-    // The undo is the mailed single-use token, redeemed through the real
-    // primitive. There is no by-id cancel to call.
-    assert!(
-        deletion_cancel::redeem(fx.db.as_ref(), &deletion_request.cancel_token)
+    Database::run(async |database| {
+        let fx = Fixture::boot(database).await;
+        let verifier = pkce_verifier();
+        let nonce = format!("nc-{}", Uuid::new_v4().simple());
+        let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
             .await
-            .expect("cancel account deletion")
-            .is_some(),
-        "deletion request must be cancellable"
-    );
+            .expect("authorize response");
+        let code = query_param(&location(&authorize), "code").expect("code");
 
-    let token = token_request(&fx, &code, REDIRECT_URI, &verifier)
-        .await
-        .expect("token response after credential bump");
-    let status = token.status().as_u16();
-    let body = token
-        .json::<Value>()
-        .await
-        .expect("token rejection json");
+        let mut deletion = database.connect_as_auth().await;
+        let deletion_request = users::request_deletion(&mut deletion, &fx.user_id, 30)
+            .await
+            .expect("request account deletion")
+            .expect("authorization code owner exists");
+        // The undo is the mailed single-use token, redeemed through the real
+        // primitive. There is no by-id cancel to call.
+        assert!(
+            deletion_cancel::redeem(fx.server.pg.as_ref(), &deletion_request.cancel_token)
+                .await
+                .expect("cancel account deletion")
+                .is_some(),
+            "deletion request must be cancellable"
+        );
 
-    fx.cleanup().await;
+        let token = token_request(&fx, &code, REDIRECT_URI, &verifier)
+            .await
+            .expect("token response after credential bump");
+        let status = token.status().as_u16();
+        let body = token.json::<Value>().await.expect("token rejection json");
 
-    assert_eq!(status, 400);
-    assert_eq!(body["error"], "invalid_grant");
-}
-
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+        assert_eq!(status, 400);
+        assert_eq!(body["error"], "invalid_grant");
+    })
+    .await;
 }
 
 fn test_issuer() -> Issuer {
-    let signing = common::op_signing_key();
+    let signing = ed25519_dalek::SigningKey::from_bytes(&[14; 32]);
     Issuer::from_signing_key(&signing, [9u8; 32], ISSUER.to_string()).expect("issuer")
 }
 
 async fn seed_user_client(
     db: &Client,
-    user_id: &UserId,
-    app_id: &AppId,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
     email_verified: bool,
@@ -521,7 +462,13 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, avatar_url) \
          VALUES ($1, $2::citext, CASE WHEN $3 THEN NOW() ELSE NULL END, $4, $5)",
-        &[&user_id.as_str(), &email, &email_verified, &name, &avatar_url],
+        &[
+            &user_id.as_str(),
+            &email,
+            &email_verified,
+            &name,
+            &avatar_url,
+        ],
     )
     .await
     .expect("seed user");
@@ -540,11 +487,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[
-            &app_id.as_str(),
-            &app_name,
-            &project_id
-        ],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -594,51 +537,6 @@ async fn seed_user_client(
     }
 }
 
-async fn cleanup_seeded_rows(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_authorization_codes WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_grants WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.app_user_identities WHERE app_client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id.as_str()],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.app_oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute(
-            "DELETE FROM zeroship.oauth_clients WHERE client_id = $1",
-            &[&client_id],
-        )
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
-        .await;
-    let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
-        .await;
-}
-
 #[allow(clippy::future_not_send)]
 async fn send_authorize(
     fx: &Fixture,
@@ -669,8 +567,7 @@ async fn send_authorize_with_scope(
     nonce: Option<&str>,
     scope: &str,
 ) -> Result<cyper::Response, cyper::Error> {
-    send_authorize_with_scope_and_method(fx, redirect_uri, verifier, "S256", nonce, scope)
-        .await
+    send_authorize_with_scope_and_method(fx, redirect_uri, verifier, "S256", nonce, scope).await
 }
 
 #[allow(clippy::future_not_send)]
@@ -713,7 +610,11 @@ async fn send_authorize_with_scope_and_method(
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    let url = format!("{}/oauth2/authorize?{}", fx.auth_base, serializer.finish());
+    let url = format!(
+        "{}/oauth2/authorize?{}",
+        fx.server.auth_base,
+        serializer.finish()
+    );
     cyper::Client::new()
         .request(http::Method::GET, url)
         .expect("build GET /authorize")
@@ -740,7 +641,11 @@ async fn send_authorize_without_pkce(
     if let Some(nonce) = nonce {
         serializer.append_pair("nonce", nonce);
     }
-    let url = format!("{}/oauth2/authorize?{}", fx.auth_base, serializer.finish());
+    let url = format!(
+        "{}/oauth2/authorize?{}",
+        fx.server.auth_base,
+        serializer.finish()
+    );
     cyper::Client::new()
         .request(http::Method::GET, url)
         .expect("build GET /authorize without pkce")
@@ -777,7 +682,10 @@ async fn token_request(
         .append_pair("code_verifier", verifier)
         .finish();
     cyper::Client::new()
-        .request(http::Method::POST, format!("{}/oauth2/token", fx.auth_base))
+        .request(
+            http::Method::POST,
+            format!("{}/oauth2/token", fx.server.auth_base),
+        )
         .expect("build POST /token")
         .header("content-type", "application/x-www-form-urlencoded")
         .expect("content-type")
@@ -799,13 +707,16 @@ async fn expire_code(db: &Client, code: &str) {
 }
 
 fn query_param(raw_url: &str, name: &str) -> Option<String> {
-    url::Url::parse(raw_url).ok()?.query_pairs().find_map(|(key, value)| {
-        if key == name {
-            Some(value.into_owned())
-        } else {
-            None
-        }
-    })
+    url::Url::parse(raw_url)
+        .ok()?
+        .query_pairs()
+        .find_map(|(key, value)| {
+            if key == name {
+                Some(value.into_owned())
+            } else {
+                None
+            }
+        })
 }
 
 fn code_hash(code: &str) -> Vec<u8> {
@@ -821,7 +732,11 @@ async fn assert_error(resp: cyper::Response, expected: &str) {
 }
 
 fn assert_authorize_error_redirect(resp: &cyper::Response, fx: &Fixture, expected: &str) {
-    assert_eq!(resp.status().as_u16(), 303, "authorize error must redirect to RP");
+    assert_eq!(
+        resp.status().as_u16(),
+        303,
+        "authorize error must redirect to RP"
+    );
     assert!(
         resp.headers().get("location").is_some(),
         "authorize error redirect must carry Location"
@@ -833,7 +748,10 @@ fn assert_authorize_error_redirect(resp: &cyper::Response, fx: &Fixture, expecte
     );
     assert_eq!(query_param(&loc, "error").as_deref(), Some(expected));
     assert_eq!(query_param(&loc, "state").as_deref(), Some("state-123"));
-    assert_eq!(query_param(&loc, "iss").as_deref(), Some(fx.issuer.issuer()));
+    assert_eq!(
+        query_param(&loc, "iss").as_deref(),
+        Some(fx.issuer.issuer())
+    );
 }
 
 fn assert_identity_claims_absent(claims: &Value) {

@@ -89,11 +89,11 @@ only by code with no production caller.
 
 | Object | Verdict | Deciding code |
 | --- | --- | --- |
-| `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/zeroship-plugin-db/src/drop_namespace.rs:161` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
+| `"<uuid>"` - the creator's tables, holding END USERS' rows | **survives** | `crates/zeroship-data-v8/src/drop_namespace.rs` is the only production-shaped `DROP SCHEMA`, and the module is `#![allow(dead_code)]` with test-only callers |
 | `"<uuid>_migrations"` - the migration engine journal | **survives** | named by nothing; created at `third_party/zero-migrate/crates/zeroship-migrate/src/conn.rs:188` |
 | `"app_<uuid>"` - the workflow journal's 5 `__zeroship_workflow_*` tables | **survives** | named by nothing; `crates/zeroship-control/src/cron/workflow_engine.rs:306-311` states it outright |
-| role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/zeroship-data-engine/src/auth/bootstrap.rs:1671`) has exactly one caller, the dead `drop_namespace` |
-| `env.kv` keys | **survives** | scoped `{<app_id>}:<key>` (`crates/zeroship-plugin-kv/src/backend/mod.rs:150`); the `KvBackend` trait has per-key ops only, no namespace drop |
+| role `app_<uuid>_role`, its template membership, grants and default privileges | **survives** | `drop_per_app_role` (`crates/zeroship-data-orm/src/auth/bootstrap.rs`) has exactly one caller, the dead `drop_namespace` |
+| `env.kv` keys | **survives** | scoped `{<app_id>}:<key>` (`crates/zeroship-kv/src/backend/mod.rs:150`); the `KvBackend` trait has per-key ops only, no namespace drop |
 | `env.storage` objects | **survives** | prefix `<app_id>/<bucket>/<key>` (`crates/zeroship-plugin-storage/src/backend/s3.rs:143`, `local.rs:104`); `crates/zeroship-plugin-storage/src/limits.rs:145`: "there is no runtime teardown hook to sweep them" |
 | deploy blobs under `blobs/` | **survives permanently** | the `BlobStore` trait (`crates/zeroship-bundle/src/blob.rs:57-163`) has no `delete_blob` and no `list_blobs`. They are structurally unreclaimable, deleted app or not |
 | `zeroship.workflow_scheduler_timers` / `_inflight` rows | **survives** | `app_id uuid NOT NULL` with **no FK** (`db/migrations-ts/20260811000100_workflow_scheduler_store.ts:44-66`) |
@@ -121,11 +121,11 @@ them stay forever.
 Note the second row of the dead-code column. `drop_namespace` is the only
 teardown that exists, and **it drops one of the three schemas**: step 4 is
 `DROP SCHEMA IF EXISTS {schema} CASCADE` where `schema = quote_ident(app_id)`
-(`crates/zeroship-plugin-db/src/drop_namespace.rs:160-161`), the bare uuid. Wiring it as
+(`crates/zeroship-data-v8/src/drop_namespace.rs`), the bare uuid. Wiring it as
 written would still leave `"<uuid>_migrations"` and `"app_<uuid>"` behind. This
 matters for section 7: "just call the existing teardown" is not a fix.
 
-`crates/zeroship-plugin-db/src/drop_namespace.rs:44-55` says so itself:
+`crates/zeroship-data-v8/src/drop_namespace.rs` says so itself:
 
 > Until the control plane wires the call (cross-worker fan-out + lock), the
 > orchestrator surface is unused in a default build

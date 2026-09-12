@@ -47,6 +47,7 @@ pub const FIELD_ENUMS: &[(&str, &[&str])] = &[
 /// Named rather than merely absent so the gate can assert the list is the exact
 /// complete schema `default` set -- an omission here would read as "no default
 /// exists" instead of a deliberate resolution rule.
+#[cfg(test)]
 pub const SCHEMA_DEFAULTED_FIELDS: &[&str] = &["build.mode", "build.dist", "build.output", "migrations.dir", "migrations.out", "secrets"];
 
 /// Optional defaults explicitly safe for a present file's resolved view.

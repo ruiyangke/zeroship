@@ -18,35 +18,13 @@
 //! vendor rather than a vendor's spelling, and stays in the engine by the boundary
 //! rule `zeroship_migrate::render::backends` states at length.
 
-use crate::descriptors::EncryptionMode;
-
-/// Encryption metadata attached to a `ColumnInfo` when
-/// the SDK declares the column with `t.encrypted({ mode, keyId, wraps })`.
-///
-/// Populated by schema introspection:
-/// - **PG**: from `<meta>.encrypted_columns` rows written alongside the table
-///   create by whichever orchestrator drives this kernel. In appbase that is
-///   the platform migration service; runtime data-plane code only consumes
-///   those rows.
-/// - **SQLite**: from a sentinel CHECK comment
-///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
-///   `sqlite_master.sql` (same regex-on-DDL pattern used for
-///   vector dims; a sidecar `__zero_migrate_schema_meta` would be the upgrade path
-///   and does not exist).
+/// Plaintext type retained by the physical catalog for encrypted storage.
+/// PostgreSQL records the encryption sentinel in a column comment; SQLite
+/// retains its inline comment in `sqlite_master.sql`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptionMeta {
-    /// Encryption mode declared by the SDK.
-    /// `Randomised` (default, fail-safe) or `Deterministic` (enables
-    /// B-tree equality lookups; carries the standard deterministic
-    /// leak). See `EncryptionMode`.
-    pub mode: EncryptionMode,
-    /// Key id selecting the per-platform root from
-    /// a per-key env var (`COLUMN_KEY_<KEYID>`) / a `<admin>.column_keys` table.
-    /// Defaults to `"default"` when the SDK caller omits the field.
-    pub key_id: String,
-    /// Wrapped primitive type. The DDL emitter uses `BYTEA`/`BLOB`
-    /// regardless; `wraps` survives so validation walks the right
-    /// type-checker before the encrypt pass swaps bytes in.
+    /// The logical primitive hidden by the physical binary SQL type. Runtime
+    /// codecs use the installed field descriptor's `type`.
     pub wraps: WrappedType,
 }
 
@@ -160,7 +138,7 @@ impl MaskKind {
     /// default kind.
     ///
     /// Accepts both the canonical camelCase form the SDK emits and the
-    /// kebab-case form `crud::mask_pass::parse_mask_kind` historically
+    /// kebab-case form `protection::mask_pass::parse_mask_kind` historically
     /// accepted (`date-year`/`date-decade`).
     #[must_use]
     pub fn from_sql(s: &str) -> Option<Self> {
@@ -210,7 +188,7 @@ pub enum Classification {
 
 impl Classification {
     /// Canonical SDK-wire string. Lower-snake to match
-    /// `VALID_CLASSIFICATIONS` in `crate::crud::mask_policy`.
+    /// `VALID_CLASSIFICATIONS` in `crate::protection::mask_policy`.
     #[must_use]
     pub fn as_sql(self) -> &'static str {
         match self {

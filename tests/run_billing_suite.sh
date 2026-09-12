@@ -3,30 +3,9 @@
 # run_billing_suite.sh - the CI runner for every zeroship-control /
 # zeroship-migrate-server test that needs a live, migrated PostgreSQL.
 #
-# WHAT THIS SCRIPT GATES
-# ----------------------
-# `cargo test --workspace` provisions no database, so any target that dials one
-# either fails there or (worse) skips and reports a pass. Those targets carry
-# `required-features = ["live-db-tests"]` in crates/zeroship-control/Cargo.toml and
-# crates/zeroship-migrate-server/Cargo.toml, which removes them from the default build. This
-# script is what runs them, against a database it creates and migrates itself.
-#
-# NO NAME LIST. Earlier revisions enumerated the binaries here by hand, which
-# meant the set that RAN was maintained separately from the set that was GATED,
-# and the two drifted: the list held the billing binaries only, so roughly
-# fifteen non-billing control suites (deploy, oauth, device, token, admin,
-# bootstrap, workflow, ...) were gated out of `cargo test --workspace` and
-# picked up by nothing. The invocation below is by construction instead:
-#
-#     cargo test -p zeroship-control --features live-db-tests
-#
-# builds and runs EVERY target in the crate whose `required-features` are
-# satisfied - the gated ones plus the handful that were never gated. Adding a
-# `[[test]]` block with the feature is therefore sufficient to be covered here;
-# there is nothing to remember to update, and nothing that can fall out of step.
-# The crate's LIB target is built with the feature too, so the in-crate
-# `#[cfg(all(test, feature = "live-db-tests"))]` modules (cron::spend_recompute,
-# http_util) run in the same invocation.
+# Database tests run in ordinary cargo test. This runner creates and migrates
+# their database, then runs each package without a target list or feature flag.
+# Missing infrastructure or failing tests must fail the run.
 #
 # SERIALISATION (the original constraint, unchanged)
 # --------------------------------------------------
@@ -91,9 +70,6 @@ cd "$ROOT"
 # Distinguishes a real failure from a run that could not happen. See the library
 # header; `tests/lib_measurement_integrity_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/measurement_integrity.sh"
-# Counts the tests that announced they did nothing, so "ALL GROUPS PASSED"
-# cannot hide one; `tests/lib_skip_census_selftest.sh` covers both directions.
-. "$ROOT/tests/lib/skip_census.sh"
 # Names the database per run. This script drops its database WITH (FORCE) at
 # the top, which terminates every other backend on it first - so a fixed name
 # means a second run of this script, or of the auth suite pointed at the same
@@ -101,28 +77,8 @@ cd "$ROOT"
 # product defects. `tests/lib_scratch_db_selftest.sh` covers both directions.
 . "$ROOT/tests/lib/scratch_db.sh"
 
-# Skips this gate TOLERATES. Everything else fails it, the same way
-# run_auth_suite.sh has always worked. The census treats an empty allowlist as
-# matching NOTHING, never as matching everything, which is the one way this
-# could fail open - so each entry has to be added deliberately.
-#
-# MEASURED 2026-08-18 on a full green run (748 passed, 0 failed): exactly six
-# tests announce, and both reasons below account for all six.
-#
-#   ZEROSHIP_DW_E2E   five tests in durable_workflows_keystone_e2e. They are the
-#                     durable-workflows end-to-end spine and belong to a
-#                     DIFFERENT gate - tests/e2e_durable_workflows.sh sets the
-#                     variable and runs them. Running them here would run them
-#                     twice, not once more.
-#   REDPANDA_BROKERS  one test, the real-broker half of the billing pipeline.
-#                     This script runs it when the variable is set (CI sets it,
-#                     see the redpanda block below); locally it needs a broker
-#                     this script does not stand up.
-#
-# NEITHER IS POSTGRES OR REDIS. That is the line: the two backends the operator
-# decision names are provisioned before the run and a skip announcing either one
-# fails this gate. Do not add an entry here for a database.
-BILLING_SKIP_ALLOWLIST="ZEROSHIP_DW_E2E|REDPANDA_BROKERS"
+# Workflow acceptance owns its database and service fleet through Testcontainers.
+# It also has a dedicated runner: `cargo xtask test workflow`.
 
 # The server's coordinates come from the generated overlay, not from four
 # `${PG_x:-...}` lines here and four identical ones in run_auth_suite.sh. See
@@ -149,36 +105,9 @@ if [ -z "$PSQL" ]; then
 fi
 
 DSN="postgresql://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${TEST_DB}"
-# ONE name for one database. This exported CONTROL_TEST_DB, AUTH_DB_URL and
-# MIGRATE_SERVER_TEST_DB, because the control suite was not consistent about which it
-# read - billing and registry targets took CONTROL_TEST_DB, the auth-adjacent
-# handlers took AUTH_DB_URL, and zeroship-migrate-server took MIGRATE_SERVER_TEST_DB.
-# Exporting all three was how one cargo invocation covered all of them, and it
-# is also why adding a target meant guessing which name it had picked.
-#
-# They now read the overlay through zeroship_core::config::test_database_url_opt,
-# whose override tier is PG_TEST_URL. The scratch database name is per run and
-# cannot live in the shared file, which is exactly what that tier is for.
+# Every PostgreSQL fixture, including workflow database cloning, reads this
+# shared override. It points at the migrated database owned by this run.
 export PG_TEST_URL="$DSN"
-
-# ONE BRIDGE REMAINS, and it is temporary and load-bearing.
-#
-# crates/zeroship-control/tests/workflow_engine_test.rs still reads CONTROL_TEST_DB. It
-# was the single file left unconverted, because another worktree is editing it
-# and converting it here would have produced a conflict rather than a change.
-#
-# Dropping the export without converting the file is NOT harmless, and this
-# gate is what proved it: with only PG_TEST_URL exported, that binary's 93 tests
-# announced "skip: CONTROL_TEST_DB not set" and the skip census failed the run.
-# 0 failed, 751 passed, and 93 tests that had silently stopped executing - which
-# is precisely the failure mode this whole change exists to remove, reproduced
-# by the change itself.
-#
-# So the name is exported until that file lands. DELETE THIS EXPORT in the same
-# commit that converts workflow_engine_test.rs to
-# zeroship_core::config::test_database_url_opt; the skip census will tell you
-# immediately if you delete it too early.
-export CONTROL_TEST_DB="$DSN"
 
 run_psql() { PGPASSWORD="$PG_PASS" "$PSQL" -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" "$@"; }
 
@@ -223,15 +152,7 @@ else
   echo "==> SKIP_DB_RECREATE set; reusing ${TEST_DB}"
 fi
 
-# Default to ONE test thread per binary. The old name list ran only the billing
-# binaries, which carry their own intra-binary mutexes and tolerate the default
-# thread pool. The set now includes `workflow_engine_test` and
-# `workflow_instance_api_test`, which do not: they drive advisory-locked engine
-# ticks and assert on claim counts, so under the default pool sibling tests steal
-# each other's claims and ten of forty cases fail nondeterministically.
-# `tests/e2e_durable_workflows.sh` has always run those two with
-# `--test-threads=1` for the same reason. Determinism is worth the wall clock
-# here; override TEST_THREADS to trade it back.
+# Serialize this suite’s tests against its shared billing fixture.
 THREAD_ARG=(--test-threads "${TEST_THREADS:-1}")
 
 # Capture every group's output so the run can be COUNTED, not just exit-checked.
@@ -302,17 +223,17 @@ fail=0
 declare -a failed=()
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-control live-database suite (--features live-db-tests)"
-if run_group cargo test -p zeroship-control --features live-db-tests --no-fail-fast \
+echo "==> zeroship-control live-database suite"
+if run_group cargo test -p zeroship-control --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
-  failed+=("zeroship-control::live-db-tests")
+  failed+=("zeroship-control::database")
 fi
 
 echo "------------------------------------------------------------------"
-echo "==> zeroship-migrate-server live-database suite (--features live-db-tests)"
+echo "==> zeroship-migrate-server live-database suite"
 # This package holds the service's own targets AND the two live-PG session proofs
 # `smoke_apply_pg` / `author_and_apply_pg`. The invocation below names no targets,
 # so a target added to the package is covered here the moment it is added.
@@ -327,12 +248,12 @@ echo "==> zeroship-migrate-server live-database suite (--features live-db-tests)
 #   set   -> "test result: ok. 2 passed ... finished in 0.34s", no skip line
 # The result lines are IDENTICAL. Only the clock and the announcement differ,
 # which is exactly why being named in a script is not evidence of coverage.
-if run_group cargo test -p zeroship-migrate-server --features live-db-tests --no-fail-fast \
+if run_group cargo test -p zeroship-migrate-server --no-fail-fast \
      -- "${THREAD_ARG[@]}"; then
   :
 else
   fail=1
-  failed+=("zeroship-migrate-server::live-db-tests")
+  failed+=("zeroship-migrate-server::database")
 fi
 
 echo "------------------------------------------------------------------"
@@ -351,61 +272,44 @@ fi
 # memory transport (a real rewind cold-start seek bug once shipped precisely
 # because this path had no CI). The control-side half
 # (`billing_pipeline_redpanda_e2e`) is an ungated target and therefore already
-# ran in the control invocation above, self-skipping unless REDPANDA_BROKERS is
-# set. Only the zeroship-stream half needs naming here.
-if [ -n "${REDPANDA_BROKERS:-}" ]; then
-  echo "------------------------------------------------------------------"
-  echo "==> real-broker: zeroship-stream::redpanda_roundtrip (REDPANDA_BROKERS=$REDPANDA_BROKERS)"
-  if run_group cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
-    fail=1; failed+=("zeroship-stream::redpanda_roundtrip")
-  fi
-else
-  echo "------------------------------------------------------------------"
-  echo "==> SKIP real-broker tests: REDPANDA_BROKERS unset (set it + run a redpanda broker to gate the real stream path)"
+# ran in the control invocation above, where it REFUSES without a broker. Only
+# the zeroship-stream half needs naming here.
+#
+# IT IS NAMED UNCONDITIONALLY, and the `if [ -n "${REDPANDA_BROKERS:-}" ]` that
+# stood here is gone with the rest of the skip apparatus. That branch printed
+# "==> SKIP real-broker tests" and ran nothing, which is the same escape hatch
+# the tests themselves lost, one level up - and it was already contradicted by
+# the control-side half three groups above, which had turned the same missing
+# broker into a failure. A run without a broker was therefore red either way;
+# the branch only decided whether the stream half was ALSO measured. Both halves
+# now name the broker as missing, which is what the header above promises.
+echo "------------------------------------------------------------------"
+echo "==> real-broker: zeroship-stream::redpanda_roundtrip (REDPANDA_BROKERS=${REDPANDA_BROKERS:-unset})"
+if run_group cargo test -p zeroship-stream --test redpanda_roundtrip -- "${THREAD_ARG[@]}"; then :; else
+  fail=1; failed+=("zeroship-stream::redpanda_roundtrip")
 fi
 
 echo "=================================================================="
-# A test that returned early because its backend was absent still counts as
-# PASSED, so it is inside the ${passed} total below and inside "ALL GROUPS
-# PASSED". The per-group ran-count above cannot see it either: that check catches
-# a filter matching nothing (`running 0 tests`), and a skipping test genuinely
-# runs - it just does not test anything. Only the announcement distinguishes
-# them, so count it and print it next to the tally.
+# THE SKIP CENSUS THAT STOOD HERE IS GONE. The problem it solved is worth
+# stating, because the fix moved rather than disappeared: a test that returned
+# early because its backend was absent still counted as PASSED, so it sat inside
+# the ${passed} total below and inside "ALL GROUPS PASSED", and the per-group
+# ran-count above could not see it either - that check catches a filter matching
+# nothing (`running 0 tests`), while a skipping test genuinely runs and simply
+# tests nothing.
 #
-# FAILED, NOT MERELY REPORTED. This was `|| true` with a comment saying the
-# report becomes a gate "once that decision is made" and offering
-# ZEROSHIP_REQUIRE_LIVE_BACKENDS=1 as the alternative. The decision is made and
-# that flag is deleted: Postgres and Redis are required, this script provisions
-# a database and fails at the top if no server answers, and the two remaining
-# tolerated absences are named in BILLING_SKIP_ALLOWLIST above with the gate
-# that does cover them.
+# The census distinguished them by counting an announcement. That worked only
+# for tests that announced, and only when somebody ran the suite script rather
+# than cargo directly. Backend guards now REFUSE instead: the test fails, naming
+# what was missing and the command that provisions it, so `run_group` reports it
+# like any other failure and there is nothing left for a census to add.
 #
-# The auth gate has worked this way throughout, and the asymmetry was the whole
-# problem: the same announcement failed one suite and was printed by the other,
-# so which of two gates you ran decided whether a missing backend counted.
-#
-# Status 2 is a REFUSAL, not a skip count: the log is missing or empty, so the
-# suite above it very likely never ran and there is no census to read. Reported
-# separately because the two demand opposite responses, and because the blank
-# ZS_SKIP_COUNT a refusal leaves behind would otherwise print as
-# "FAIL:  test(s) skipped".
-census_rc=0
-zs_skip_census "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" || census_rc=$?
-if [ "$census_rc" -eq "$ZS_SKIP_REFUSED_STATUS" ]; then
-  echo "FAIL: the skip census refused ${SUITE_LOG}, so this run proved nothing about skips." >&2
-  fail=1
-  failed+=("skip-census-refused")
-  billing_skips="refused"
-elif [ "$census_rc" -ne 0 ]; then
-  echo "FAIL: ${ZS_SKIP_COUNT} test(s) skipped that this gate does not tolerate." >&2
-  echo "A skipped billing test is a silent pass. Offending lines:" >&2
-  zs_skip_lines "$SUITE_LOG" "$BILLING_SKIP_ALLOWLIST" | sort -u | head -20 >&2
-  fail=1
-  failed+=("skip-census")
-  billing_skips="$ZS_SKIP_COUNT"
-else
-  billing_skips="$ZS_SKIP_COUNT"
-fi
+# The history that motivated the census stays worth knowing. This check was once
+# `|| true`, with a comment saying it would become a gate "once that decision is
+# made" and offering ZEROSHIP_REQUIRE_LIVE_BACKENDS=1 as the alternative - so
+# the same announcement failed the auth suite and was merely printed by this
+# one, and which of two gates you happened to run decided whether a missing
+# backend counted. Asymmetries like that are what a single hard failure removes.
 
 if [ "$fail" -ne 0 ]; then
   echo "LIVE-DATABASE SUITE FAILED: ${failed[*]}" >&2
@@ -473,13 +377,12 @@ if [ "$passed" -lt "$BILLING_MIN_PASSED" ]; then
 fi
 
 # Printed on SUCCESS, not only inside a failure message: a count nobody sees
-# until the gate has already failed cannot warn anyone. The skip count rides in
-# the same line for the same reason - "ALL GROUPS PASSED (713 tests)" is exactly
-# the sentence that made a skipping test invisible, so the qualifier belongs
-# where that sentence is read, not 40 lines earlier in the scrollback.
+# until the gate has already failed cannot warn anyone. The floor rides in the
+# same line for that reason - "ALL GROUPS PASSED (713 tests)" on its own is the
+# sentence that let a suite shrink unnoticed, so the qualifier belongs where
+# that sentence is read, not 40 lines earlier in the scrollback.
 #
-# BOTH numbers, not one. `billing_skips` is the count this gate does NOT
-# tolerate, and with the allowlist populated it reads 0 on a healthy run - so
-# printing it alone would say "0 skipped" on a run where six tests announced,
-# which is the sentence this whole census exists to stop being printed.
-echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED}, ${billing_skips} unexpected skips, ${ZS_SKIP_TOLERATED} allowlisted)"
+# The two skip counts that used to ride here are gone with the census. Reporting
+# "0 unexpected skips" now would measure an empty set and print it as a finding:
+# nothing in the workspace skips, so the number cannot be anything else.
+echo "LIVE-DATABASE SUITE: ALL GROUPS PASSED (${passed} tests, floor ${BILLING_MIN_PASSED})"

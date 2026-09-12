@@ -72,7 +72,7 @@ export function _maybeWarnUnindexedFilter(
     (k) => !k.startsWith("$") && k in schema,
   );
   if (keys.length === 0) return;
-  if (keys.length === 1 && keys[0] === "id") return;
+  if (keys.length === 1 && schema[keys[0]]?.primaryKey === true) return;
 
   if (_filterCoveredByIndex(keys, schema, declaredIndexes)) return;
 

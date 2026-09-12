@@ -25,7 +25,6 @@ zeroship-core = { workspace = true }
 # runtime. `polling` keeps it runnable in sandboxes that block io_uring, the
 # same split the `auth` and `core` crates use.
 compio = { workspace = true, features = ["polling"] }
-zeroship-test-support = { workspace = true }
 
 [lints]
 workspace = true

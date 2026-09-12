@@ -100,45 +100,6 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 # what a clean tree prints.
 refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 
-# --------------------------------------------------------------------
-# SOURCE-SCRAPING GUARDS: THE FLOOR
-# --------------------------------------------------------------------
-#
-# Two preflight guards read a Rust source file with `sed` and rule on what
-# comes back. Both spent the whole of the crates/<name> -> crates/zeroship-<name>
-# reorg pointed at a path that no longer existed, and NEITHER of the hand-written
-# "read ZERO names ... refusing" arms below them could say so, for a reason worth
-# stating because it is not the obvious one:
-#
-#   `set -euo pipefail` is on (line 72). `X="$(sed ... missing | grep -oE ...)"`
-#   aborts the SCRIPT at the assignment -- sed exits 2, and `grep -oE` exits 1
-#   on no-match even when the file is fine. The `[ -n "$X" ] || refuse` on the
-#   NEXT line is unreachable in both failure modes. Measured 2026-08-28: the
-#   real roll died with a bare `sed: can't read crates/control/src/
-#   reserved_names.rs` and none of the diagnosis those refusals were written to
-#   give. A guard whose refusal cannot be reached is not a guard.
-#
-# So the enumeration is done HERE, once, in a form that can rule:
-#
-#   1. the source file's absence is its OWN refusal, naming the file, before
-#      any pipeline runs;
-#   2. the extraction is allowed to come back empty instead of killing the
-#      script, so the count exists to be judged;
-#   3. the count is compared against a FLOOR, and the floor is the thing that
-#      separates "clean" from "did not look".
-#
-# This is `tests/lib/gate_arms.sh`'s contract, on the roll instead of in CI:
-# every arm declares the number of items THAT ARM RULED ON and a floor that
-# number must clear. A floor is not a target -- set it well under today's count,
-# far enough that ordinary editing does not reach it, close enough that a
-# collapse does.
-#
-# The emitted line is deliberately `zsroll-arm`, NOT the `zsgate-arm` that
-# tests/lib/gate_arms.sh emits: tests/gate_arm_census.sh consumes that name, and
-# a deploy transcript must not be scrapeable as a CI gate's census.
-#
-# scrape_floor <arm-id> <source-file> <floor> <extractor-fn> -- prints the
-# extracted items on stdout, refuses on an absent file or a short count.
 scrape_floor() {
   local arm="$1" src="$2" floor="$3" fn="$4" out n
 

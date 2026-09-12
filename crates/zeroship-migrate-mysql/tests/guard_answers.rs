@@ -153,6 +153,7 @@ fn the_registry_factory_yields_a_guard_that_gives_these_same_answers() {
     let cfg = zeroship_migrate_backend::guard::GuardConfig::from_policy(
         zeroship_migrate_policy::EffectivePolicy::deny_all(&registry),
         DIALECT,
+        "app",
     );
     let guard = zeroship_migrate_mysql::guard::guard(&cfg);
 

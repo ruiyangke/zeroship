@@ -34,9 +34,12 @@ Builder sandbox (NOT in this repo)
 | Runtime | `crates/runtime` | V8 embedder, Web APIs, RPC/HTTP bridge, async pump, native plugin host |
 | Bundle | `crates/bundle` | `.zship` manifest types, blob store trait, ingest path, legacy bundle store types |
 | Core | `crates/core` | Shared wire types, auth helpers, typed IDs, observability helpers |
-| DB plugin | `crates/plugin-db` | `env.db.*` |
-| KV plugin | `crates/plugin-kv` | `env.kv.*` |
-| Storage plugin | `crates/plugin-storage` | `env.storage.*` |
+| DB ORM | `crates/zeroship-data-orm` | Backend-independent Rust API, SQL compilation, transactions, and database adapters |
+| DB V8 adapter | `crates/zeroship-data-v8` | `env.db.*` |
+| KV storage | `crates/zeroship-kv` | Backend contract and Redis/redb implementations |
+| KV V8 binding | `crates/zeroship-kv-v8` | `env.kv.*` |
+| Object storage | `crates/zeroship-storage` | Scoped Rust operations, LocalFs and S3 backends |
+| Storage V8 binding | `crates/zeroship-storage-v8` | `env.storage.*` |
 
 The sandbox/preview backend used to be a crate here. It is not: it was extracted
 to the standalone `zeroship-sandbox` project and is not built by this repo. The

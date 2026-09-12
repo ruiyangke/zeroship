@@ -1,142 +1,34 @@
-# The `schema.runtime.json` FieldDef corpus for step 4 consumer 3 of
-# docs/proposals/single-fold-and-effects.md section G. Owned by
-# crates/zeroship-migrate/tests/gen_types_field_defs_from_the_fold.rs.
+# Field descriptors, whole artifacts, and SQLite rebuild DDL from the recorded
+# migration fixtures and lifecycle carriers. Owned by
+# crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs.
 #
-# PROVENANCE, because a golden's worth is entirely its provenance.
+# The baseline was captured from the separate FieldDef walker before the fold
+# replaced it. Constraint lifecycle corrections are checked against the catalog
+# oracle; the live SQLite sibling checks rebuilds against stored rows and PRAGMAs.
 #
-# CAPTURED from the OLD path - `render_artifacts` driven by the retired `FieldDef`
-# walker - by a separate, since-deleted binary, BEFORE the consumer was switched.
-# Then 41 lines were REMOVED and 34 ADDED by hand. Every one of those 75 lines
-# belongs to one of EIGHT carrier streams, and every one is a place where the
-# deleted walker described a database the catalog does not have:
+# Whole-artifact hashes cover bytes outside the field reduction. The field rows
+# identify descriptor changes, and sqlite_create rows pin the DDL consumer.
+# Current expectations include the published @zeroship/migrate import, bytewise
+# reference-column collation, and vector storage on the base column.
 #
-#   carrier:unique_constraint_dropped            `unique: true` outlived its dropped constraint
-#   carrier:unique_constraint_kept               the same, with the un-dropped one as control
-#   carrier:unique_column_facet_survives_a_drop  the same, with the COLUMN facet as control
-#   carrier:check_bound_dropped                  `min`/`max` outlived their dropped CHECK
-#   carrier:check_membership_dropped             `enum` outlived its dropped CHECK
-#   carrier:check_column_dropped_and_readded     a re-added column inherited the bound
-#   carrier:fk_column_dropped_and_readded        a re-added column inherited `onDelete`
-#   carrier:attached_partition_dropped           a dropped partition stayed in the map
-#
-# NOT ONE line of the 27 RECORDED FIXTURES moved, and no other carrier moved. That is
-# the behaviour-preservation result, and it is the reason the edits are auditable: the
-# streams that changed are exactly the streams written to make the change visible.
-#
-# ---------------------------------------------------------------------------------
-# SECOND EDIT, and the first that DOES move a recorded fixture. Six lines: the three
-# `fluent_scalars|*|field|ledger|seq` rows gained `"precision":38,"scale":0`, and the
-# three `runtime.json` shas moved with them.
-#
-# `ledger.seq` is `t.numeric({ precision: 38, scale: 0 })` - `ColType::Decimal` - and
-# this golden had been recording it as a bare `{"type":"number"}`, indistinguishable
-# from a `t.number()` float. That was not a golden defect; it was this corpus faithfully
-# recording a lossy carrier. `col_type_to_token` spells `Decimal` and `Double` alike as
-# `number`, so the SQLite emitter answered `REAL` for both and a 12-step rebuild
-# re-declared the column REAL and copied its rows through a binary double.
-# `tests/fold_live/sqlite_decimal_rebuild_live.rs` measures that against a real
-# database: 12345678901234.5678 came back 12345678901234.6.
-#
-# So this edit is a DELIBERATE contract change, not a re-bless: the wire `FieldDef`
-# gained two keys so the carrier can say "decimal", and these six lines are the whole
-# blast radius across 27 fixtures, 23 carriers and 3 dialects. A reader auditing it
-# should check exactly that - that `seq` is the only column that moved, and that it
-# moved by gaining its authored precision rather than by changing its token.
-#
-# The 7-line net (-41 +34) is `attached_partition_dropped` alone: the relation `p1` is
-# gone from the map, taking its two `field` rows on three dialects and its one
-# `sqlite_create` row with it. Every other edit replaces a line with its successor.
-#
-# WHICH SIDE IS RIGHT is not decided by this file. For the first seven carriers it is
-# decided by `fold_ops`, the structural catalog oracle the live PostgreSQL, SQLite and
-# MySQL suites run against real servers, which has removed the constraint at the point
-# the two answers differ. For the eighth it was decided by a live PostgreSQL in
-# consumer 2's tests/env_db_ts_matches_the_server_pg.rs.
-#
-# THE SQLITE `sqlite_create` ROWS are the DDL leg: the `CREATE TABLE` the 12-step table
-# rebuild renders from this map, through the same emitter and the same arguments
-# render/declarative.rs passes. Exactly ONE of them moved, and
-# tests/sqlite_rebuild_field_defs_live.rs measures - against a real SQLite database -
-# that no stream carrying any of these five differences can be deployed there at all.
-#
-# THIRD EDIT. Removing dialectal fallbacks deliberately changes the two non-Postgres
-# outcomes for the postgres-only `dialectal_ops` fixture. SQLite and MySQL now record
-# one refusal apiece instead of artifacts for the prefix before the wrapper; an absent
-# exact target leg is not permission to silently discard the operation.
-#
-# FOURTH EDIT, AND IT REVERSES THE THIRD. An `Op::Dialectal` whose `legs` map has no key
-# for the render target now CONTRIBUTES NOTHING instead of refusing. `Expr::Dialectal`
-# still refuses, and that asymmetry is deliberate. The two refusal lines the third edit
-# installed are gone: -2 lines, +21, all on `fixture:dialectal_ops` under Sqlite and
-# Mysql.
-#
-# The 20 `sha`/`field` rows are byte-identical to the Postgres rows above them with the
-# dialect token swapped, `sha|runtime.json` INCLUDED (731b2f05… on all three dialects —
-# the postgres-only leg declares an index, and no index reaches the `FieldDef` map). The
-# `sha|env.db.ts` CONTROL is a5ce483e… on Sqlite and Mysql against 0e86a8cb… on
-# Postgres, which is the absent `docs_embedding_hnsw_idx` in the OTHER artifact.
-#
-# THE 21ST ROW IS A REFUSAL THAT CHANGED ITS REASON RATHER THAN GOING AWAY, and it is
-# the one line in this edit that a diff summary would mis-read as a no-op:
-#
-#   BEFORE  fixture:dialectal_ops|Sqlite|refused|gen-types: fold the declared ops into a
-#           schema failed: fold: unsupported op: dialectal op has no leg for target
-#           dialect
-#   AFTER   fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system
-#           field name: Field name 'id' is reserved by the active table-injection
-#           policy. …
-#
-# The stream no longer stops at the fold, so it reaches the SQLite 12-step rebuild's
-# `CREATE TABLE`, and the confined charter that owns the recorded fixtures injects `id`.
-# That is not new behaviour: `ddl_create`, `fluent_scalars`, `p2a_facets` and
-# `runtime_options` each already carry the identical `sqlite_create_refused` row for the
-# identical reason, so `dialectal_ops` is the fifth confined fixture to record it and
-# the first four are the control that says the reason is the charter, not the fold.
-#
-# FIFTH EDIT. `RuntimeSchemaDescriptorV1` became V2: every wire `FieldDef` gained the
-# four read-surface flags `readable`/`filterable`/`sortable`/`projectable` and a
-# `storage` block naming the physical column(s) the field occupies
-# (crates/zeroship-migrate-core/src/render/gen_types.rs:320-360). The descriptor now
-# CARRIES the second column's name instead of eight consumers deriving it with
-# `format!("{col}_masked")`, so this is a contract change, not a re-bless.
-#
-# 407 of 582 rows rewritten; the row count did not move. The delta is fully classified:
-#
-#   90 of 90  `sha|runtime.json`   moved - every rendered stream embeds the new keys
-#    0 of 90  `sha|env.db.ts`      moved - the CONTROL: V2 must not reach the authoring
-#                                  artifact, and it did not
-#  317 of 317 `field|` rows        moved
-#    0        `refused|`, `sqlite_create|`, `sqlite_create_refused|` rows moved - the
-#                                  DDL leg is untouched, which is the containment claim
-#
-# Every one of the 317 differs from its recorded twin by EXACTLY the five keys, appended
-# in that order after the keys it already had, with no other byte changed and no row
-# dropped or invented (0 dropped, 0 unmatched, 0 anomalies). 311 of the 317 `storage`
-# blocks carry `valueColumn` alone; the other 6 also carry `auxiliary`, and they are the
-# three vector columns (`dialectal_ops.docs.embedding`, `p2a_facets.posts.embedding`,
-# `p2a_facets.posts.secondary_embedding`) on Sqlite and Mysql only - Postgres declares
-# `Capability::NonBtreeIndexMethod` and indexes a vector in place, so it owns no shadow
-# relation (gen_types.rs:255-282). NO row carries `rawColumn`: this corpus declares no
-# masked or encrypted field, so the two-column arm is pinned by
-# crates/zeroship-migrate-core/src/render/gen_types/physical_storage.rs, not here.
-#
-# There is deliberately NO re-bless environment variable, matching
-# tests/op_fixture_goldens.rs and both predecessors.
+# Update only rows explained by a contract change. There is no automatic re-bless
+# switch; the comparison and its coverage floors must continue to run unchanged.
+# Key roles and lifecycle assignments come from declarations; FK targets are explicit.
 fixture:alter_primary_key|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:alter_primary_key|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
-fixture:comments_indexes|Postgres|sha|runtime.json|e8e628130c92c065782880e3f8183ed4decd4e1063e85b17a627cd33f0f44384
-fixture:comments_indexes|Postgres|sha|env.db.ts|db42bb14431b5afa26bab972df8bc194b507ead38d934eeed46207fbdcdb29c9
-fixture:comments_indexes|Postgres|field|users|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:comments_indexes|Postgres|field|users|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:comments_indexes|Postgres|field|users|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:comments_indexes|Postgres|field|users|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:comments_indexes|Postgres|field|users|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:comments_indexes|Postgres|field|users|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:comments_indexes|Postgres|field|users|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:comments_indexes|Postgres|sha|env.db.ts|5b9d8455f50760ea9eb789e50557607bea9cabaa3ec4f4455c069b30a0b728a9
 fixture:comments_indexes|Postgres|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 fixture:comments_indexes|Postgres|field|users|active|{"type":"boolean","required":true,"default":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"active"}}
 fixture:comments_indexes|Postgres|field|users|status|{"type":"string","enum":["active","disabled"],"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
+fixture:comments_indexes|Postgres|field|users|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:comments_indexes|Postgres|field|users|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:comments_indexes|Postgres|field|users|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:comments_indexes|Postgres|field|users|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:comments_indexes|Postgres|field|users|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:comments_indexes|Postgres|field|users|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:comments_indexes|Postgres|field|users|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:comments_indexes|Postgres|sha|runtime.json|3781c23b6a9cd2b7299ccf3f372e443dec63dff48bd41fff311af973f6314fde
 fixture:comments_indexes|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
 fixture:comments_indexes|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: render error: IrAuthor::lower does not yet compile op "validated createIndex expression elements reached lower on a target whose catalog fold declares no expression index" (DDL ops only)
 fixture:constraint_not_valid|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `line_items` does not exist
@@ -148,275 +40,275 @@ fixture:ddl_addcol_constraints|Mysql|refused|gen-types: fold the declared ops in
 fixture:ddl_alter|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_alter|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_alter|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
-fixture:ddl_create|Postgres|sha|runtime.json|5723da5ed75fe91cd13db8c27c79b58ea1ca53848eda0f664ba36c9d4b4a2152
-fixture:ddl_create|Postgres|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
-fixture:ddl_create|Postgres|field|orders|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:ddl_create|Postgres|field|orders|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:ddl_create|Postgres|field|orders|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:ddl_create|Postgres|field|orders|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:ddl_create|Postgres|field|orders|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:ddl_create|Postgres|field|orders|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:ddl_create|Postgres|field|orders|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:ddl_create|Postgres|sha|env.db.ts|eac486d6cbd11a5785fe7e7ecc61c2669dd4d2763a70d7212023e3f8a43c19bf
 fixture:ddl_create|Postgres|field|orders|total|{"type":"int","required":true,"default":0,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"total"}}
 fixture:ddl_create|Postgres|field|orders|note|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"note"}}
 fixture:ddl_create|Postgres|field|orders|status|{"type":"string","required":true,"default":"new","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
-fixture:ddl_create|Sqlite|sha|runtime.json|5723da5ed75fe91cd13db8c27c79b58ea1ca53848eda0f664ba36c9d4b4a2152
-fixture:ddl_create|Sqlite|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
-fixture:ddl_create|Sqlite|field|orders|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:ddl_create|Sqlite|field|orders|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:ddl_create|Sqlite|field|orders|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:ddl_create|Sqlite|field|orders|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:ddl_create|Sqlite|field|orders|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:ddl_create|Sqlite|field|orders|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:ddl_create|Sqlite|field|orders|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:ddl_create|Postgres|field|orders|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:ddl_create|Postgres|field|orders|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:ddl_create|Postgres|field|orders|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:ddl_create|Postgres|field|orders|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:ddl_create|Postgres|field|orders|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:ddl_create|Postgres|field|orders|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:ddl_create|Postgres|field|orders|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:ddl_create|Postgres|sha|runtime.json|9b04562e6425d8ce3b7c4ace8bd8dc4ef9012a68c6140f335ab23bacfd38c35b
+fixture:ddl_create|Sqlite|sha|env.db.ts|eac486d6cbd11a5785fe7e7ecc61c2669dd4d2763a70d7212023e3f8a43c19bf
 fixture:ddl_create|Sqlite|field|orders|total|{"type":"int","required":true,"default":0,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"total"}}
 fixture:ddl_create|Sqlite|field|orders|note|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"note"}}
 fixture:ddl_create|Sqlite|field|orders|status|{"type":"string","required":true,"default":"new","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
-fixture:ddl_create|Sqlite|sqlite_create_refused|orders|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:ddl_create|Mysql|sha|runtime.json|5723da5ed75fe91cd13db8c27c79b58ea1ca53848eda0f664ba36c9d4b4a2152
-fixture:ddl_create|Mysql|sha|env.db.ts|1d94733e9824b8049b0369e392abce301a3045a3b9c4e622421c95f978b34243
-fixture:ddl_create|Mysql|field|orders|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:ddl_create|Mysql|field|orders|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:ddl_create|Mysql|field|orders|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:ddl_create|Mysql|field|orders|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:ddl_create|Mysql|field|orders|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:ddl_create|Mysql|field|orders|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:ddl_create|Mysql|field|orders|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:ddl_create|Sqlite|field|orders|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:ddl_create|Sqlite|field|orders|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:ddl_create|Sqlite|field|orders|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:ddl_create|Sqlite|field|orders|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:ddl_create|Sqlite|field|orders|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:ddl_create|Sqlite|field|orders|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:ddl_create|Sqlite|field|orders|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:ddl_create|Sqlite|sha|runtime.json|9b04562e6425d8ce3b7c4ace8bd8dc4ef9012a68c6140f335ab23bacfd38c35b
+fixture:ddl_create|Sqlite|sqlite_create_refused|orders|injected column collision: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:ddl_create|Mysql|sha|env.db.ts|eac486d6cbd11a5785fe7e7ecc61c2669dd4d2763a70d7212023e3f8a43c19bf
 fixture:ddl_create|Mysql|field|orders|total|{"type":"int","required":true,"default":0,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"total"}}
 fixture:ddl_create|Mysql|field|orders|note|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"note"}}
 fixture:ddl_create|Mysql|field|orders|status|{"type":"string","required":true,"default":"new","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
+fixture:ddl_create|Mysql|field|orders|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:ddl_create|Mysql|field|orders|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:ddl_create|Mysql|field|orders|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:ddl_create|Mysql|field|orders|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:ddl_create|Mysql|field|orders|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:ddl_create|Mysql|field|orders|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:ddl_create|Mysql|field|orders|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:ddl_create|Mysql|sha|runtime.json|9b04562e6425d8ce3b7c4ace8bd8dc4ef9012a68c6140f335ab23bacfd38c35b
 fixture:ddl_drop|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_drop|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_drop|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `orders` does not exist
 fixture:ddl_rename_table|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
 fixture:ddl_rename_table|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
 fixture:ddl_rename_table|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `accounts` does not exist
-fixture:dialectal_ops|Postgres|sha|runtime.json|46bd761f1ab6088f3dbe0bb478fa4f61648e00a3afdef05812f5c4b5e837ee7c
-fixture:dialectal_ops|Postgres|sha|env.db.ts|0e86a8cb73947cd55e4c22a4d52cf7f19d0c757e3ecae3f7dde690fa210df141
-fixture:dialectal_ops|Postgres|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:dialectal_ops|Postgres|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:dialectal_ops|Postgres|field|docs|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:dialectal_ops|Postgres|field|docs|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:dialectal_ops|Postgres|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:dialectal_ops|Postgres|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:dialectal_ops|Postgres|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:dialectal_ops|Postgres|sha|env.db.ts|0711151bff472f69657de5b9d020084c3ff96d84b9827f57610cb90f72437329
 fixture:dialectal_ops|Postgres|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
-fixture:dialectal_ops|Sqlite|sha|runtime.json|f0cb16a255550ddccf1b3303116d9eb3c14f884fc3f0a7e0844c53d00e520ed3
-fixture:dialectal_ops|Sqlite|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Sqlite|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:dialectal_ops|Sqlite|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:dialectal_ops|Sqlite|field|docs|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:dialectal_ops|Sqlite|field|docs|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:dialectal_ops|Sqlite|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:dialectal_ops|Sqlite|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:dialectal_ops|Sqlite|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
-fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"docs__vec_embedding","joinOn":"rowid","triggers":["docs__vec_embedding_ai","docs__vec_embedding_ad","docs__vec_embedding_au"]}]}}
-fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:dialectal_ops|Mysql|sha|runtime.json|f0cb16a255550ddccf1b3303116d9eb3c14f884fc3f0a7e0844c53d00e520ed3
-fixture:dialectal_ops|Mysql|sha|env.db.ts|a5ce483ecc6079bc4c0ae56a34095838edd39f5866006075b4905b0b4e4084ef
-fixture:dialectal_ops|Mysql|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:dialectal_ops|Mysql|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:dialectal_ops|Mysql|field|docs|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:dialectal_ops|Mysql|field|docs|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:dialectal_ops|Mysql|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:dialectal_ops|Mysql|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:dialectal_ops|Mysql|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
-fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"docs__vec_embedding","joinOn":"rowid","triggers":["docs__vec_embedding_ai","docs__vec_embedding_ad","docs__vec_embedding_au"]}]}}
+fixture:dialectal_ops|Postgres|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:dialectal_ops|Postgres|field|docs|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:dialectal_ops|Postgres|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:dialectal_ops|Postgres|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:dialectal_ops|Postgres|field|docs|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:dialectal_ops|Postgres|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:dialectal_ops|Postgres|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:dialectal_ops|Postgres|sha|runtime.json|a269fc1bfce045e398a1ed1ffe026428858949996f337a0e87b5d202b2040d9f
+fixture:dialectal_ops|Sqlite|sha|env.db.ts|4526e2b65c0dc5c74dcf19ffffc2114815b759b60873e32c01bc267f3b2a8159
+fixture:dialectal_ops|Sqlite|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
+fixture:dialectal_ops|Sqlite|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:dialectal_ops|Sqlite|field|docs|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:dialectal_ops|Sqlite|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:dialectal_ops|Sqlite|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:dialectal_ops|Sqlite|field|docs|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:dialectal_ops|Sqlite|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:dialectal_ops|Sqlite|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:dialectal_ops|Sqlite|sha|runtime.json|a269fc1bfce045e398a1ed1ffe026428858949996f337a0e87b5d202b2040d9f
+fixture:dialectal_ops|Sqlite|sqlite_create_refused|docs|injected column collision: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:dialectal_ops|Mysql|sha|env.db.ts|4526e2b65c0dc5c74dcf19ffffc2114815b759b60873e32c01bc267f3b2a8159
+fixture:dialectal_ops|Mysql|field|docs|embedding|{"type":"vector","vectorDims":3,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
+fixture:dialectal_ops|Mysql|field|docs|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:dialectal_ops|Mysql|field|docs|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:dialectal_ops|Mysql|field|docs|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:dialectal_ops|Mysql|field|docs|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:dialectal_ops|Mysql|field|docs|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:dialectal_ops|Mysql|field|docs|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:dialectal_ops|Mysql|field|docs|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:dialectal_ops|Mysql|sha|runtime.json|a269fc1bfce045e398a1ed1ffe026428858949996f337a0e87b5d202b2040d9f
 fixture:dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:dml_upsert|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:dml_upsert|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml_upsert|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:dml_upsert|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:dml_upsert|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml_upsert|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:dml_upsert|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:dml_upsert|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:dml_upsert|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:edge_scalars|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:edge_scalars|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:edge_scalars|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:edge_scalars|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:edge_scalars|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:edge_scalars|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:edge_scalars|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:edge_scalars|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:enums_domains|Postgres|sha|runtime.json|94f642513b030d558c659387ff6d6aedbc3ac2b183e4d8fdc6cc4a4e82ec0427
-fixture:enums_domains|Postgres|sha|env.db.ts|aa0cd5220074c5a9b8a98cb0e882770c031515300b957c8306cdd408b45499d3
-fixture:enums_domains|Postgres|field|pg_expr_checks|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:enums_domains|Postgres|field|pg_expr_checks|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:enums_domains|Postgres|field|pg_expr_checks|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:enums_domains|Postgres|field|pg_expr_checks|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:enums_domains|Postgres|field|pg_expr_checks|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:enums_domains|Postgres|field|pg_expr_checks|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:enums_domains|Postgres|field|pg_expr_checks|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:edge_scalars|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
+fixture:enums_domains|Postgres|sha|env.db.ts|ccfaf465ccb9ea24e10118b072e52d2f0c0c3016511ac6da537d719cf741ae61
 fixture:enums_domains|Postgres|field|pg_expr_checks|status|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
 fixture:enums_domains|Postgres|field|pg_expr_checks|name|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"name"}}
 fixture:enums_domains|Postgres|field|pg_expr_checks|data|{"type":"json","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"data"}}
-fixture:enums_domains|Postgres|field|subscriptions|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:enums_domains|Postgres|field|subscriptions|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:enums_domains|Postgres|field|subscriptions|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:enums_domains|Postgres|field|subscriptions|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:enums_domains|Postgres|field|subscriptions|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:enums_domains|Postgres|field|subscriptions|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:enums_domains|Postgres|field|subscriptions|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
 fixture:enums_domains|Postgres|field|subscriptions|tier|{"type":"string","required":true,"enum":["free","pro"],"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"tier"}}
 fixture:enums_domains|Postgres|field|subscriptions|period|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"period"}}
+fixture:enums_domains|Postgres|field|pg_expr_checks|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:enums_domains|Postgres|field|pg_expr_checks|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:enums_domains|Postgres|field|pg_expr_checks|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:enums_domains|Postgres|field|pg_expr_checks|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:enums_domains|Postgres|field|pg_expr_checks|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:enums_domains|Postgres|field|pg_expr_checks|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:enums_domains|Postgres|field|pg_expr_checks|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:enums_domains|Postgres|field|subscriptions|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:enums_domains|Postgres|sha|runtime.json|d5bb201b20d9f2086331f0ae614e22429fa05ebe107ad8a2cbe0e519cc8ba11b
 fixture:enums_domains|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:enums_domains|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_ddl|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `accounts_legacy_chk` does not exist on `accounts`
 fixture:fluent_ddl|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level UNIQUE on SQLite (the SQLite CREATE renders from the descriptor; a table-level UNIQUE is not threaded into the emitter)
 fixture:fluent_ddl|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:fluent_dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:fluent_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_dml|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:fluent_dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:fluent_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_dml|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:fluent_dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:fluent_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:fluent_scalars|Postgres|sha|runtime.json|e5667f2763508b88d355ace4cb190da0b55cf53cad461cce6b3e08d15bcdab85
-fixture:fluent_scalars|Postgres|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Postgres|field|ledger|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:fluent_scalars|Postgres|field|ledger|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:fluent_scalars|Postgres|field|ledger|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:fluent_scalars|Postgres|field|ledger|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:fluent_scalars|Postgres|field|ledger|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:fluent_scalars|Postgres|field|ledger|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:fluent_scalars|Postgres|field|ledger|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:fluent_dml|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
+fixture:fluent_scalars|Postgres|sha|env.db.ts|e3bfed5718c974f25551883a3ca5492c879dd25ee244603d212f4c463fbe92c9
 fixture:fluent_scalars|Postgres|field|ledger|seq|{"type":"number","precision":38,"scale":0,"required":true,"default":"9007199254740993","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"seq"}}
 fixture:fluent_scalars|Postgres|field|ledger|salt|{"type":"bytes","default":"AQID/w==","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"salt"}}
-fixture:fluent_scalars|Sqlite|sha|runtime.json|e5667f2763508b88d355ace4cb190da0b55cf53cad461cce6b3e08d15bcdab85
-fixture:fluent_scalars|Sqlite|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Sqlite|field|ledger|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:fluent_scalars|Sqlite|field|ledger|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:fluent_scalars|Sqlite|field|ledger|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:fluent_scalars|Sqlite|field|ledger|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:fluent_scalars|Sqlite|field|ledger|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:fluent_scalars|Sqlite|field|ledger|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:fluent_scalars|Sqlite|field|ledger|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:fluent_scalars|Postgres|field|ledger|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:fluent_scalars|Postgres|field|ledger|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:fluent_scalars|Postgres|field|ledger|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:fluent_scalars|Postgres|field|ledger|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:fluent_scalars|Postgres|field|ledger|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:fluent_scalars|Postgres|field|ledger|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:fluent_scalars|Postgres|field|ledger|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:fluent_scalars|Postgres|sha|runtime.json|5d2ce4aa6dfcd86d21877ef281ecb9f7704945d3e4c1c65eddfc406a33030286
+fixture:fluent_scalars|Sqlite|sha|env.db.ts|e3bfed5718c974f25551883a3ca5492c879dd25ee244603d212f4c463fbe92c9
 fixture:fluent_scalars|Sqlite|field|ledger|seq|{"type":"number","precision":38,"scale":0,"required":true,"default":"9007199254740993","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"seq"}}
 fixture:fluent_scalars|Sqlite|field|ledger|salt|{"type":"bytes","default":"AQID/w==","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"salt"}}
-fixture:fluent_scalars|Sqlite|sqlite_create_refused|ledger|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:fluent_scalars|Mysql|sha|runtime.json|e5667f2763508b88d355ace4cb190da0b55cf53cad461cce6b3e08d15bcdab85
-fixture:fluent_scalars|Mysql|sha|env.db.ts|67a5508ffd185bf168beab43b56d94de375f6b07b3943dfabc7b0fe6c013e5e7
-fixture:fluent_scalars|Mysql|field|ledger|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:fluent_scalars|Mysql|field|ledger|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:fluent_scalars|Mysql|field|ledger|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:fluent_scalars|Mysql|field|ledger|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:fluent_scalars|Mysql|field|ledger|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:fluent_scalars|Mysql|field|ledger|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:fluent_scalars|Mysql|field|ledger|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:fluent_scalars|Sqlite|field|ledger|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:fluent_scalars|Sqlite|field|ledger|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:fluent_scalars|Sqlite|field|ledger|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:fluent_scalars|Sqlite|field|ledger|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:fluent_scalars|Sqlite|field|ledger|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:fluent_scalars|Sqlite|field|ledger|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:fluent_scalars|Sqlite|field|ledger|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:fluent_scalars|Sqlite|sha|runtime.json|5d2ce4aa6dfcd86d21877ef281ecb9f7704945d3e4c1c65eddfc406a33030286
+fixture:fluent_scalars|Sqlite|sqlite_create_refused|ledger|injected column collision: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:fluent_scalars|Mysql|sha|env.db.ts|e3bfed5718c974f25551883a3ca5492c879dd25ee244603d212f4c463fbe92c9
 fixture:fluent_scalars|Mysql|field|ledger|seq|{"type":"number","precision":38,"scale":0,"required":true,"default":"9007199254740993","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"seq"}}
 fixture:fluent_scalars|Mysql|field|ledger|salt|{"type":"bytes","default":"AQID/w==","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"salt"}}
+fixture:fluent_scalars|Mysql|field|ledger|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:fluent_scalars|Mysql|field|ledger|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:fluent_scalars|Mysql|field|ledger|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:fluent_scalars|Mysql|field|ledger|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:fluent_scalars|Mysql|field|ledger|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:fluent_scalars|Mysql|field|ledger|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:fluent_scalars|Mysql|field|ledger|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:fluent_scalars|Mysql|sha|runtime.json|5d2ce4aa6dfcd86d21877ef281ecb9f7704945d3e4c1c65eddfc406a33030286
 fixture:fluent_scalars_dml|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:fluent_scalars_dml|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_scalars_dml|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:fluent_scalars_dml|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:fluent_scalars_dml|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_scalars_dml|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:fluent_scalars_dml|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:fluent_scalars_dml|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:fluent_scalars_dml|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:grouped_views|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:grouped_views|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:grouped_views|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:grouped_views|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:grouped_views|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:grouped_views|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:grouped_views|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:grouped_views|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
-fixture:in_list_scalars|Postgres|sha|runtime.json|18b22d10ed55e0324691b6bd56e55b172e1d9451f8e709e7847cab9861227a4b
-fixture:in_list_scalars|Postgres|sha|env.db.ts|e969f871c55023e71668517269f75c24b63a6ff26255893e985663cd122f344a
-fixture:in_list_scalars|Postgres|field|scalar_membership|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:in_list_scalars|Postgres|field|scalar_membership|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:in_list_scalars|Postgres|field|scalar_membership|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:in_list_scalars|Postgres|field|scalar_membership|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:in_list_scalars|Postgres|field|scalar_membership|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:in_list_scalars|Postgres|field|scalar_membership|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:in_list_scalars|Postgres|field|scalar_membership|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:grouped_views|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
+fixture:in_list_scalars|Postgres|sha|env.db.ts|310bf4cabc7116401c56d8ade0f809db336b4c4799785f0d2390f9e1b751eeaa
 fixture:in_list_scalars|Postgres|field|scalar_membership|http_status|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"http_status"}}
 fixture:in_list_scalars|Postgres|field|scalar_membership|enabled|{"type":"boolean","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"enabled"}}
+fixture:in_list_scalars|Postgres|field|scalar_membership|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:in_list_scalars|Postgres|field|scalar_membership|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:in_list_scalars|Postgres|field|scalar_membership|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:in_list_scalars|Postgres|field|scalar_membership|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:in_list_scalars|Postgres|field|scalar_membership|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:in_list_scalars|Postgres|field|scalar_membership|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:in_list_scalars|Postgres|field|scalar_membership|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:in_list_scalars|Postgres|sha|runtime.json|cb0017715db852e0f00bd4782ba23c5026f392e156faf19f1916a2843bb77ee9
 fixture:in_list_scalars|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
 fixture:in_list_scalars|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: createTable table-level CHECK is PostgreSQL-only
-fixture:p2a_facets|Postgres|sha|runtime.json|00ddc916e29275c788cb0bd39226138f35ec82f16d2a3d22a90d9a346a26cf66
-fixture:p2a_facets|Postgres|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
-fixture:p2a_facets|Postgres|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:p2a_facets|Postgres|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:p2a_facets|Postgres|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:p2a_facets|Postgres|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:p2a_facets|Postgres|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:p2a_facets|Postgres|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:p2a_facets|Postgres|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:p2a_facets|Postgres|sha|env.db.ts|c098482ee7a72e27f7226d9c4d219aff8954e2dd6791342d1f17b095507c403f
 fixture:p2a_facets|Postgres|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
 fixture:p2a_facets|Postgres|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
 fixture:p2a_facets|Postgres|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding"}}
-fixture:p2a_facets|Sqlite|sha|runtime.json|6bbe95514a5e60fd779beda29057d35b2fc279fe061bc3f8c270e0fbcdb0a215
-fixture:p2a_facets|Sqlite|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
-fixture:p2a_facets|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:p2a_facets|Sqlite|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:p2a_facets|Sqlite|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:p2a_facets|Sqlite|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:p2a_facets|Sqlite|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:p2a_facets|Sqlite|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:p2a_facets|Sqlite|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:p2a_facets|Postgres|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:p2a_facets|Postgres|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:p2a_facets|Postgres|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:p2a_facets|Postgres|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:p2a_facets|Postgres|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:p2a_facets|Postgres|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:p2a_facets|Postgres|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:p2a_facets|Postgres|sha|runtime.json|34e6d279018198baf7db770c2524336f81cf232f53bea6d2fee39dad84b06157
+fixture:p2a_facets|Sqlite|sha|env.db.ts|c098482ee7a72e27f7226d9c4d219aff8954e2dd6791342d1f17b095507c403f
 fixture:p2a_facets|Sqlite|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
-fixture:p2a_facets|Sqlite|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_embedding","joinOn":"rowid","triggers":["posts__vec_embedding_ai","posts__vec_embedding_ad","posts__vec_embedding_au"]}]}}
-fixture:p2a_facets|Sqlite|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_secondary_embedding","joinOn":"rowid","triggers":["posts__vec_secondary_embedding_ai","posts__vec_secondary_embedding_ad","posts__vec_secondary_embedding_au"]}]}}
-fixture:p2a_facets|Sqlite|sqlite_create_refused|posts|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:p2a_facets|Mysql|sha|runtime.json|6bbe95514a5e60fd779beda29057d35b2fc279fe061bc3f8c270e0fbcdb0a215
-fixture:p2a_facets|Mysql|sha|env.db.ts|7323fc56b70e3502d57fdf81357dd91ad82011f009953a9a1dfad895bc3d8647
-fixture:p2a_facets|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:p2a_facets|Mysql|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:p2a_facets|Mysql|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:p2a_facets|Mysql|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:p2a_facets|Mysql|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:p2a_facets|Mysql|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:p2a_facets|Mysql|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:p2a_facets|Sqlite|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
+fixture:p2a_facets|Sqlite|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding"}}
+fixture:p2a_facets|Sqlite|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:p2a_facets|Sqlite|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:p2a_facets|Sqlite|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:p2a_facets|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:p2a_facets|Sqlite|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:p2a_facets|Sqlite|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:p2a_facets|Sqlite|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:p2a_facets|Sqlite|sha|runtime.json|34e6d279018198baf7db770c2524336f81cf232f53bea6d2fee39dad84b06157
+fixture:p2a_facets|Sqlite|sqlite_create_refused|posts|injected column collision: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:p2a_facets|Mysql|sha|env.db.ts|c098482ee7a72e27f7226d9c4d219aff8954e2dd6791342d1f17b095507c403f
 fixture:p2a_facets|Mysql|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
-fixture:p2a_facets|Mysql|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_embedding","joinOn":"rowid","triggers":["posts__vec_embedding_ai","posts__vec_embedding_ad","posts__vec_embedding_au"]}]}}
-fixture:p2a_facets|Mysql|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding","auxiliary":[{"kind":"shadowTable","name":"posts__vec_secondary_embedding","joinOn":"rowid","triggers":["posts__vec_secondary_embedding_ai","posts__vec_secondary_embedding_ad","posts__vec_secondary_embedding_au"]}]}}
+fixture:p2a_facets|Mysql|field|posts|embedding|{"type":"vector","vectorDims":1536,"vectorMetric":"cosine","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"embedding"}}
+fixture:p2a_facets|Mysql|field|posts|secondary_embedding|{"type":"vector","vectorDims":768,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"secondary_embedding"}}
+fixture:p2a_facets|Mysql|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:p2a_facets|Mysql|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:p2a_facets|Mysql|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false}
+fixture:p2a_facets|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:p2a_facets|Mysql|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:p2a_facets|Mysql|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:p2a_facets|Mysql|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:p2a_facets|Mysql|sha|runtime.json|34e6d279018198baf7db770c2524336f81cf232f53bea6d2fee39dad84b06157
 fixture:partition|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:partition|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events_2026_05` does not exist
 fixture:pg_aggregates|Postgres|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:pg_aggregates|Postgres|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:pg_aggregates|Postgres|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:pg_aggregates|Sqlite|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:pg_aggregates|Sqlite|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:pg_aggregates|Sqlite|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:pg_aggregates|Mysql|sha|runtime.json|02fde4bafc1d28049ed4d9512bacaf1ba4e7227ac95dd593317af4d431313303
-fixture:pg_aggregates|Mysql|sha|env.db.ts|fc1ee08c12a48d34c16022ac48da4a8bc9a73cb8c430caf3fb2015f90ac041c9
+fixture:pg_aggregates|Mysql|sha|env.db.ts|02dd7a312a734e35d90f1e7616fdc029d84173f6c3c83e06d618a418c6350ed2
 fixture:pg_vendor|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
 fixture:pg_vendor|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
 fixture:pg_vendor|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: table `events` does not exist
-fixture:runtime_options|Postgres|sha|runtime.json|2671cd4d141615f162e8a36d31b7ba47c21b28f5e928d58f84db7cfe83c50f63
-fixture:runtime_options|Postgres|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
-fixture:runtime_options|Postgres|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:runtime_options|Postgres|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:runtime_options|Postgres|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:runtime_options|Postgres|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:runtime_options|Postgres|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:runtime_options|Postgres|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:runtime_options|Postgres|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:runtime_options|Postgres|sha|env.db.ts|98c248d407bea7eedb7936f77e1613bffcfe864bca2077e8bc8906d1ff4ac207
 fixture:runtime_options|Postgres|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
 fixture:runtime_options|Postgres|field|posts|author_id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"author_id"}}
 fixture:runtime_options|Postgres|field|posts|status|{"type":"string","required":true,"default":"draft","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
-fixture:runtime_options|Sqlite|sha|runtime.json|2671cd4d141615f162e8a36d31b7ba47c21b28f5e928d58f84db7cfe83c50f63
-fixture:runtime_options|Sqlite|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
-fixture:runtime_options|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:runtime_options|Sqlite|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:runtime_options|Sqlite|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:runtime_options|Sqlite|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:runtime_options|Sqlite|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:runtime_options|Sqlite|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:runtime_options|Sqlite|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:runtime_options|Postgres|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:runtime_options|Postgres|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:runtime_options|Postgres|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false,"softDelete":true}
+fixture:runtime_options|Postgres|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:runtime_options|Postgres|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:runtime_options|Postgres|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:runtime_options|Postgres|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:runtime_options|Postgres|sha|runtime.json|b2d6cabf02db242aeb6ee7d7a13588265c8666967c2b8e3b0bde4cf3ac65f5df
+fixture:runtime_options|Sqlite|sha|env.db.ts|98c248d407bea7eedb7936f77e1613bffcfe864bca2077e8bc8906d1ff4ac207
 fixture:runtime_options|Sqlite|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
 fixture:runtime_options|Sqlite|field|posts|author_id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"author_id"}}
 fixture:runtime_options|Sqlite|field|posts|status|{"type":"string","required":true,"default":"draft","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
-fixture:runtime_options|Sqlite|sqlite_create_refused|posts|reserved system field name: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
-fixture:runtime_options|Mysql|sha|runtime.json|2671cd4d141615f162e8a36d31b7ba47c21b28f5e928d58f84db7cfe83c50f63
-fixture:runtime_options|Mysql|sha|env.db.ts|4e1944efa2458d90045b0a14cc407982dac0007738868d805da75088f55707a4
-fixture:runtime_options|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-fixture:runtime_options|Mysql|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"}}
-fixture:runtime_options|Mysql|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"}}
-fixture:runtime_options|Mysql|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"}}
-fixture:runtime_options|Mysql|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"}}
-fixture:runtime_options|Mysql|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"}}
-fixture:runtime_options|Mysql|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"}}
+fixture:runtime_options|Sqlite|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:runtime_options|Sqlite|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:runtime_options|Sqlite|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false,"softDelete":true}
+fixture:runtime_options|Sqlite|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:runtime_options|Sqlite|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:runtime_options|Sqlite|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:runtime_options|Sqlite|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:runtime_options|Sqlite|sha|runtime.json|b2d6cabf02db242aeb6ee7d7a13588265c8666967c2b8e3b0bde4cf3ac65f5df
+fixture:runtime_options|Sqlite|sqlite_create_refused|posts|injected column collision: Field name 'id' is reserved by the active table-injection policy. Injected fields (id, created_at, updated_at, created_by, updated_by, version, deleted_at) are managed by the platform and cannot be overridden.
+fixture:runtime_options|Mysql|sha|env.db.ts|98c248d407bea7eedb7936f77e1613bffcfe864bca2077e8bc8906d1ff4ac207
 fixture:runtime_options|Mysql|field|posts|title|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"title"}}
 fixture:runtime_options|Mysql|field|posts|author_id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"author_id"}}
 fixture:runtime_options|Mysql|field|posts|status|{"type":"string","required":true,"default":"draft","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
+fixture:runtime_options|Mysql|field|posts|created_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_at"},"assign":{"by":"now","on":"insert"},"writable":false}
+fixture:runtime_options|Mysql|field|posts|created_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"created_by"},"assign":{"by":"actor","on":"insert"},"writable":false}
+fixture:runtime_options|Mysql|field|posts|deleted_at|{"type":"date","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"deleted_at"},"assign":{"by":"now","on":"delete"},"writable":false,"softDelete":true}
+fixture:runtime_options|Mysql|field|posts|id|{"type":"string","maxLength":255,"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true,"assign":{"by":"typedId","on":"insert"},"writable":false}
+fixture:runtime_options|Mysql|field|posts|updated_at|{"type":"date","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_at"},"assign":{"by":"now","on":"write"},"writable":false}
+fixture:runtime_options|Mysql|field|posts|updated_by|{"type":"string","maxLength":255,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"updated_by"},"assign":{"by":"actor","on":"write"},"writable":false}
+fixture:runtime_options|Mysql|field|posts|version|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"version"},"assign":{"by":"increment(1)","on":"write"},"writable":false}
+fixture:runtime_options|Mysql|sha|runtime.json|b2d6cabf02db242aeb6ee7d7a13588265c8666967c2b8e3b0bde4cf3ac65f5df
 fixture:sequences_exclusion|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
 fixture:sequences_exclusion|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
 fixture:sequences_exclusion|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: sequence `old_invoice_seq` does not exist
@@ -426,272 +318,272 @@ fixture:synchronize_identity|Mysql|refused|gen-types: fold the declared ops into
 fixture:views|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: view `old_users` does not exist
 fixture:views|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: view `old_users` does not exist
 fixture:views|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: view `old_users` does not exist
-carrier:unique_constraint_dropped|Postgres|sha|runtime.json|e276ea6633c0f34c18a5b09994d1b40c60c989d5dc43f1149e4d27d3d4528bc0
-carrier:unique_constraint_dropped|Postgres|sha|env.db.ts|9c33d863de48b31f6a32c32512bcfa52b6d97fc27bd7f307c9af18e4185be79c
-carrier:unique_constraint_dropped|Postgres|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_dropped|Postgres|sha|env.db.ts|76e516de0a24f4dc3c4107b85872e9a35021fd823ac05d731afb6194ed01c585
 carrier:unique_constraint_dropped|Postgres|field|users|email|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
-carrier:unique_constraint_dropped|Sqlite|sha|runtime.json|e276ea6633c0f34c18a5b09994d1b40c60c989d5dc43f1149e4d27d3d4528bc0
-carrier:unique_constraint_dropped|Sqlite|sha|env.db.ts|9c33d863de48b31f6a32c32512bcfa52b6d97fc27bd7f307c9af18e4185be79c
-carrier:unique_constraint_dropped|Sqlite|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_dropped|Postgres|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_constraint_dropped|Postgres|sha|runtime.json|b3882324804923e2c5f65eb51b48e133d173f1418b85301c0c9faeca03330270
+carrier:unique_constraint_dropped|Sqlite|sha|env.db.ts|76e516de0a24f4dc3c4107b85872e9a35021fd823ac05d731afb6194ed01c585
 carrier:unique_constraint_dropped|Sqlite|field|users|email|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_constraint_dropped|Sqlite|sqlite_create|users|CREATE TABLE IF NOT EXISTS "users" ( "id" TEXT NOT NULL, "email" TEXT NOT NULL )
-carrier:unique_constraint_dropped|Mysql|sha|runtime.json|e276ea6633c0f34c18a5b09994d1b40c60c989d5dc43f1149e4d27d3d4528bc0
-carrier:unique_constraint_dropped|Mysql|sha|env.db.ts|9c33d863de48b31f6a32c32512bcfa52b6d97fc27bd7f307c9af18e4185be79c
-carrier:unique_constraint_dropped|Mysql|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_dropped|Sqlite|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_constraint_dropped|Sqlite|sha|runtime.json|b3882324804923e2c5f65eb51b48e133d173f1418b85301c0c9faeca03330270
+carrier:unique_constraint_dropped|Mysql|sha|env.db.ts|76e516de0a24f4dc3c4107b85872e9a35021fd823ac05d731afb6194ed01c585
 carrier:unique_constraint_dropped|Mysql|field|users|email|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
-carrier:unique_constraint_kept|Postgres|sha|runtime.json|8ca451db9d0ea66d4a51875516c1f577835879076002dd0b455981fa84d43f75
-carrier:unique_constraint_kept|Postgres|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_kept|Postgres|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_dropped|Mysql|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_constraint_dropped|Mysql|sha|runtime.json|b3882324804923e2c5f65eb51b48e133d173f1418b85301c0c9faeca03330270
+carrier:unique_constraint_kept|Postgres|sha|env.db.ts|c50eb771414c01426dcf576246c94fa8f8aaf590dc7cf3ed27f39eb6dcd40714
 carrier:unique_constraint_kept|Postgres|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_constraint_kept|Postgres|field|users|handle|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"handle"}}
-carrier:unique_constraint_kept|Sqlite|sha|runtime.json|8ca451db9d0ea66d4a51875516c1f577835879076002dd0b455981fa84d43f75
-carrier:unique_constraint_kept|Sqlite|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_kept|Sqlite|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_kept|Postgres|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_constraint_kept|Postgres|sha|runtime.json|50e4755d1cb6d5dbe1047d58ef93ff4fb0d1c4e1a3dcf6e15a67550dab60e021
+carrier:unique_constraint_kept|Sqlite|sha|env.db.ts|c50eb771414c01426dcf576246c94fa8f8aaf590dc7cf3ed27f39eb6dcd40714
 carrier:unique_constraint_kept|Sqlite|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_constraint_kept|Sqlite|field|users|handle|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"handle"}}
 carrier:unique_constraint_kept|Sqlite|sqlite_create|users|CREATE TABLE IF NOT EXISTS "users" ( "id" TEXT NOT NULL, "email" TEXT NOT NULL, "handle" TEXT NOT NULL )
-carrier:unique_constraint_kept|Mysql|sha|runtime.json|8ca451db9d0ea66d4a51875516c1f577835879076002dd0b455981fa84d43f75
-carrier:unique_constraint_kept|Mysql|sha|env.db.ts|d22dabc4855ee2e73ae00a14381de79e579243ffa2a9d77ab017d245a2e21a4a
-carrier:unique_constraint_kept|Mysql|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_kept|Sqlite|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_constraint_kept|Sqlite|sha|runtime.json|50e4755d1cb6d5dbe1047d58ef93ff4fb0d1c4e1a3dcf6e15a67550dab60e021
+carrier:unique_constraint_kept|Mysql|sha|env.db.ts|c50eb771414c01426dcf576246c94fa8f8aaf590dc7cf3ed27f39eb6dcd40714
 carrier:unique_constraint_kept|Mysql|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_constraint_kept|Mysql|field|users|handle|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"handle"}}
-carrier:unique_column_facet_survives_a_drop|Postgres|sha|runtime.json|d2d3ab055e1885ca0c71d38d5ebea93867c6a1810dd8e708a75a89d61e36d0bd
-carrier:unique_column_facet_survives_a_drop|Postgres|sha|env.db.ts|035c0869ef16ed9a08959dc041a6e28cbf63d3d7fd73a65de0adc2df17f0527c
-carrier:unique_column_facet_survives_a_drop|Postgres|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_constraint_kept|Mysql|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_constraint_kept|Mysql|sha|runtime.json|50e4755d1cb6d5dbe1047d58ef93ff4fb0d1c4e1a3dcf6e15a67550dab60e021
+carrier:unique_column_facet_survives_a_drop|Postgres|sha|env.db.ts|8c12478eea81f219fa353b4b296744a8935e3cc4710366f63a70999867dbdf57
 carrier:unique_column_facet_survives_a_drop|Postgres|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_column_facet_survives_a_drop|Postgres|field|users|handle|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"handle"}}
-carrier:unique_column_facet_survives_a_drop|Sqlite|sha|runtime.json|d2d3ab055e1885ca0c71d38d5ebea93867c6a1810dd8e708a75a89d61e36d0bd
-carrier:unique_column_facet_survives_a_drop|Sqlite|sha|env.db.ts|035c0869ef16ed9a08959dc041a6e28cbf63d3d7fd73a65de0adc2df17f0527c
-carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_column_facet_survives_a_drop|Postgres|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_column_facet_survives_a_drop|Postgres|sha|runtime.json|5eadaa17710af774ca1be9439ef614bf2544e20596e0fe664edab08f80e787a9
+carrier:unique_column_facet_survives_a_drop|Sqlite|sha|env.db.ts|8c12478eea81f219fa353b4b296744a8935e3cc4710366f63a70999867dbdf57
 carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|handle|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"handle"}}
 carrier:unique_column_facet_survives_a_drop|Sqlite|sqlite_create|users|CREATE TABLE IF NOT EXISTS "users" ( "id" TEXT NOT NULL, "email" TEXT NOT NULL, "handle" TEXT NOT NULL )
-carrier:unique_column_facet_survives_a_drop|Mysql|sha|runtime.json|d2d3ab055e1885ca0c71d38d5ebea93867c6a1810dd8e708a75a89d61e36d0bd
-carrier:unique_column_facet_survives_a_drop|Mysql|sha|env.db.ts|035c0869ef16ed9a08959dc041a6e28cbf63d3d7fd73a65de0adc2df17f0527c
-carrier:unique_column_facet_survives_a_drop|Mysql|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_column_facet_survives_a_drop|Sqlite|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_column_facet_survives_a_drop|Sqlite|sha|runtime.json|5eadaa17710af774ca1be9439ef614bf2544e20596e0fe664edab08f80e787a9
+carrier:unique_column_facet_survives_a_drop|Mysql|sha|env.db.ts|8c12478eea81f219fa353b4b296744a8935e3cc4710366f63a70999867dbdf57
 carrier:unique_column_facet_survives_a_drop|Mysql|field|users|email|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"email"}}
 carrier:unique_column_facet_survives_a_drop|Mysql|field|users|handle|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"handle"}}
-carrier:check_bound_dropped|Postgres|sha|runtime.json|23a8b813a3fbce58595f0dbf26dd993e5d698b0d4d0ecedd837bba369e5e9042
-carrier:check_bound_dropped|Postgres|sha|env.db.ts|4b29603197beb0e5ab491526d6636185985c70d8f3701ccd5a8207e54b4905d5
-carrier:check_bound_dropped|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:unique_column_facet_survives_a_drop|Mysql|field|users|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:unique_column_facet_survives_a_drop|Mysql|sha|runtime.json|5eadaa17710af774ca1be9439ef614bf2544e20596e0fe664edab08f80e787a9
+carrier:check_bound_dropped|Postgres|sha|env.db.ts|3ae42bccefd3731cf7c9bffc67f15af68988cca2ee82044265aad63383c2613e
 carrier:check_bound_dropped|Postgres|field|scores|score|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"score"}}
+carrier:check_bound_dropped|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:check_bound_dropped|Postgres|sha|runtime.json|dd2d53144685765b054843ff3c84392f6218624735ba62cafa7c7e70cc03f32a
 carrier:check_bound_dropped|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
 carrier:check_bound_dropped|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
-carrier:check_bound_kept|Postgres|sha|runtime.json|2300722afd1aa9fb96a22580a8fc009cb7c9e1864c64fe2a3507384d1285a375
-carrier:check_bound_kept|Postgres|sha|env.db.ts|4b951ba9c8eab83673e6cde2ba91ec7cdc7fff749049f86273d6707864948e68
-carrier:check_bound_kept|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:check_bound_kept|Postgres|sha|env.db.ts|e49815d5c245b869f15581af04033d10869fd54e6dc2162519671cef49178912
 carrier:check_bound_kept|Postgres|field|scores|score|{"type":"int","min":1.0,"max":9.0,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"score"}}
+carrier:check_bound_kept|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:check_bound_kept|Postgres|sha|runtime.json|035435bf5e1156f87308fe30a3fd261f5ddd00dffd6522f895996dca224e8adc
 carrier:check_bound_kept|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
 carrier:check_bound_kept|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
-carrier:check_membership_dropped|Postgres|sha|runtime.json|e20f326c2aab9c3f8e1a38c10ad528681b5dfc768a76e7d9023635b0ba89f472
-carrier:check_membership_dropped|Postgres|sha|env.db.ts|1b6b43b89f6ec2200eb71988ca9926baa7dde4df722bca4313effbbd17d419fa
-carrier:check_membership_dropped|Postgres|field|issues|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:check_membership_dropped|Postgres|sha|env.db.ts|18c2547469b0a76131a8bb9c9333e4cbc28fb2cf6efe178620622cda6c1a00ab
 carrier:check_membership_dropped|Postgres|field|issues|status|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"status"}}
+carrier:check_membership_dropped|Postgres|field|issues|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:check_membership_dropped|Postgres|sha|runtime.json|360335710688136972a7c1ee198816346c4e7b121d86bc91edb958d8ad725878
 carrier:check_membership_dropped|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
 carrier:check_membership_dropped|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
-carrier:named_fk_policy_dropped|Postgres|sha|runtime.json|f948c89dc288a6ac36b64fa6bc298d78744fad02f6afcaab7e48b3e71d49f3f5
-carrier:named_fk_policy_dropped|Postgres|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
-carrier:named_fk_policy_dropped|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:named_fk_policy_dropped|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:named_fk_policy_dropped|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"accounts","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:named_fk_policy_dropped|Sqlite|sha|runtime.json|f948c89dc288a6ac36b64fa6bc298d78744fad02f6afcaab7e48b3e71d49f3f5
-carrier:named_fk_policy_dropped|Sqlite|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
-carrier:named_fk_policy_dropped|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:named_fk_policy_dropped|Postgres|sha|env.db.ts|0d952a450087c1a4cdd180a3c4ace966fe93920478cebd92d307d6536241ce8f
+carrier:named_fk_policy_dropped|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_fk_policy_dropped|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_fk_policy_dropped|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"accounts","refColumn":"id","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:named_fk_policy_dropped|Postgres|sha|runtime.json|64c05970befcd099be205f618b7577dac2009eac595957f5bed3c3547bd66ead
+carrier:named_fk_policy_dropped|Sqlite|sha|env.db.ts|0d952a450087c1a4cdd180a3c4ace966fe93920478cebd92d307d6536241ce8f
 carrier:named_fk_policy_dropped|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL )
-carrier:named_fk_policy_dropped|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:named_fk_policy_dropped|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"accounts","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:named_fk_policy_dropped|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" (id) )
-carrier:named_fk_policy_dropped|Mysql|sha|runtime.json|f948c89dc288a6ac36b64fa6bc298d78744fad02f6afcaab7e48b3e71d49f3f5
-carrier:named_fk_policy_dropped|Mysql|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
-carrier:named_fk_policy_dropped|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:named_fk_policy_dropped|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:named_fk_policy_dropped|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"accounts","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:named_fk_policy_dropped|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_fk_policy_dropped|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_fk_policy_dropped|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"accounts","refColumn":"id","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:named_fk_policy_dropped|Sqlite|sha|runtime.json|64c05970befcd099be205f618b7577dac2009eac595957f5bed3c3547bd66ead
+carrier:named_fk_policy_dropped|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT COLLATE BINARY, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" ("id") )
+carrier:named_fk_policy_dropped|Mysql|sha|env.db.ts|0d952a450087c1a4cdd180a3c4ace966fe93920478cebd92d307d6536241ce8f
+carrier:named_fk_policy_dropped|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_fk_policy_dropped|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_fk_policy_dropped|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"accounts","refColumn":"id","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:named_fk_policy_dropped|Mysql|sha|runtime.json|64c05970befcd099be205f618b7577dac2009eac595957f5bed3c3547bd66ead
 carrier:unnamed_fk_policy_dropped_by_derived_name|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
 carrier:unnamed_fk_policy_dropped_by_derived_name|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
 carrier:unnamed_fk_policy_dropped_by_derived_name|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
 carrier:unnamed_fk_policy_kept|Postgres|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
 carrier:unnamed_fk_policy_kept|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
 carrier:unnamed_fk_policy_kept|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: constraint `orders_owner_id_fkey` already exists on `orders`
-carrier:fk_column_dropped_and_readded|Postgres|sha|runtime.json|f948c89dc288a6ac36b64fa6bc298d78744fad02f6afcaab7e48b3e71d49f3f5
-carrier:fk_column_dropped_and_readded|Postgres|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
-carrier:fk_column_dropped_and_readded|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:fk_column_dropped_and_readded|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:fk_column_dropped_and_readded|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"accounts","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:fk_column_dropped_and_readded|Sqlite|sha|runtime.json|f948c89dc288a6ac36b64fa6bc298d78744fad02f6afcaab7e48b3e71d49f3f5
-carrier:fk_column_dropped_and_readded|Sqlite|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
-carrier:fk_column_dropped_and_readded|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:fk_column_dropped_and_readded|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:fk_column_dropped_and_readded|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:fk_column_dropped_and_readded|Postgres|field|orders|owner_id|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:fk_column_dropped_and_readded|Postgres|sha|env.db.ts|00857dd835a34182eebfcd9703ce3608bc81b2eba7d25ba84c12e6269916cc49
+carrier:fk_column_dropped_and_readded|Postgres|sha|runtime.json|88f50c7bfa8c8750a5325eaac521ad0eb4a1d5a9e7f284b3d921240910967f84
 carrier:fk_column_dropped_and_readded|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL )
-carrier:fk_column_dropped_and_readded|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:fk_column_dropped_and_readded|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"accounts","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:fk_column_dropped_and_readded|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" (id) )
-carrier:fk_column_dropped_and_readded|Mysql|sha|runtime.json|f948c89dc288a6ac36b64fa6bc298d78744fad02f6afcaab7e48b3e71d49f3f5
-carrier:fk_column_dropped_and_readded|Mysql|sha|env.db.ts|c1d0a5709b12cdd5205932ed561b290105953dd78455302613c0a828559f0760
-carrier:fk_column_dropped_and_readded|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:fk_column_dropped_and_readded|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:fk_column_dropped_and_readded|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"accounts","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:check_column_dropped_and_readded|Postgres|sha|runtime.json|23a8b813a3fbce58595f0dbf26dd993e5d698b0d4d0ecedd837bba369e5e9042
-carrier:check_column_dropped_and_readded|Postgres|sha|env.db.ts|4b29603197beb0e5ab491526d6636185985c70d8f3701ccd5a8207e54b4905d5
-carrier:check_column_dropped_and_readded|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:fk_column_dropped_and_readded|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:fk_column_dropped_and_readded|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:fk_column_dropped_and_readded|Sqlite|field|orders|owner_id|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:fk_column_dropped_and_readded|Sqlite|sha|env.db.ts|00857dd835a34182eebfcd9703ce3608bc81b2eba7d25ba84c12e6269916cc49
+carrier:fk_column_dropped_and_readded|Sqlite|sha|runtime.json|88f50c7bfa8c8750a5325eaac521ad0eb4a1d5a9e7f284b3d921240910967f84
+carrier:fk_column_dropped_and_readded|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT )
+carrier:fk_column_dropped_and_readded|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:fk_column_dropped_and_readded|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:fk_column_dropped_and_readded|Mysql|field|orders|owner_id|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:fk_column_dropped_and_readded|Mysql|sha|env.db.ts|00857dd835a34182eebfcd9703ce3608bc81b2eba7d25ba84c12e6269916cc49
+carrier:fk_column_dropped_and_readded|Mysql|sha|runtime.json|88f50c7bfa8c8750a5325eaac521ad0eb4a1d5a9e7f284b3d921240910967f84
+carrier:check_column_dropped_and_readded|Postgres|sha|env.db.ts|3ae42bccefd3731cf7c9bffc67f15af68988cca2ee82044265aad63383c2613e
 carrier:check_column_dropped_and_readded|Postgres|field|scores|score|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"score"}}
+carrier:check_column_dropped_and_readded|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:check_column_dropped_and_readded|Postgres|sha|runtime.json|dd2d53144685765b054843ff3c84392f6218624735ba62cafa7c7e70cc03f32a
 carrier:check_column_dropped_and_readded|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
 carrier:check_column_dropped_and_readded|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
-carrier:check_column_renamed|Postgres|sha|runtime.json|7d092ddc1ae25651944d0dcccfe6eb62447e95dae35c38f2910a8633127662c9
-carrier:check_column_renamed|Postgres|sha|env.db.ts|a5942790c40ceff8b1b83ecf38dd4a5bfb2cd52b8f2c98813047e948da3ab5b3
-carrier:check_column_renamed|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:check_column_renamed|Postgres|sha|env.db.ts|6a4796b033a99df9f8d5e0a082a13ef3cc4aa9fce09eb67ede2c8ef00968254b
 carrier:check_column_renamed|Postgres|field|scores|points|{"type":"int","min":1.0,"max":9.0,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"points"}}
+carrier:check_column_renamed|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:check_column_renamed|Postgres|sha|runtime.json|bfcc0f464eba0be1fcb166c7cacda4410b590808d24c385df85f06b36f3a1803
 carrier:check_column_renamed|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
 carrier:check_column_renamed|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
-carrier:table_dropped_with_its_constraints|Postgres|sha|runtime.json|23a8b813a3fbce58595f0dbf26dd993e5d698b0d4d0ecedd837bba369e5e9042
-carrier:table_dropped_with_its_constraints|Postgres|sha|env.db.ts|4b29603197beb0e5ab491526d6636185985c70d8f3701ccd5a8207e54b4905d5
-carrier:table_dropped_with_its_constraints|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:table_dropped_with_its_constraints|Postgres|sha|env.db.ts|3ae42bccefd3731cf7c9bffc67f15af68988cca2ee82044265aad63383c2613e
 carrier:table_dropped_with_its_constraints|Postgres|field|scores|score|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"score"}}
+carrier:table_dropped_with_its_constraints|Postgres|field|scores|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_dropped_with_its_constraints|Postgres|sha|runtime.json|dd2d53144685765b054843ff3c84392f6218624735ba62cafa7c7e70cc03f32a
 carrier:table_dropped_with_its_constraints|Sqlite|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
 carrier:table_dropped_with_its_constraints|Mysql|refused|gen-types: fold the declared ops into a schema failed: fold: unsupported op: addConstraint(check) is PostgreSQL-only
-carrier:column_level_reference_policy|Postgres|sha|runtime.json|bf8c5950c236f1017c38479900c38206a7f77e2f4640c4489a8504f7b2b0344b
-carrier:column_level_reference_policy|Postgres|sha|env.db.ts|c52300ac189bd28f5c1c8b3d13392ee1dfe6831db550bb428d201ed9f693d291
-carrier:column_level_reference_policy|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:column_level_reference_policy|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:column_level_reference_policy|Postgres|sha|env.db.ts|2fcf60d831e10e69bbf357e00b534de72df40fe09a1cbaa3e282bd230950f611
 carrier:column_level_reference_policy|Postgres|field|orders|owner_id|{"type":"string","refTarget":"accounts","refColumn":"id","onDelete":"cascade","onUpdate":"restrict","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:column_level_reference_policy|Sqlite|sha|runtime.json|bf8c5950c236f1017c38479900c38206a7f77e2f4640c4489a8504f7b2b0344b
-carrier:column_level_reference_policy|Sqlite|sha|env.db.ts|c52300ac189bd28f5c1c8b3d13392ee1dfe6831db550bb428d201ed9f693d291
-carrier:column_level_reference_policy|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:column_level_reference_policy|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:column_level_reference_policy|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:column_level_reference_policy|Postgres|sha|runtime.json|7f0370578f3c215ddec84905adfb451ffd005dcd1190c710b4fef0d62b01e4a6
+carrier:column_level_reference_policy|Sqlite|sha|env.db.ts|2fcf60d831e10e69bbf357e00b534de72df40fe09a1cbaa3e282bd230950f611
 carrier:column_level_reference_policy|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL )
-carrier:column_level_reference_policy|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
 carrier:column_level_reference_policy|Sqlite|field|orders|owner_id|{"type":"string","refTarget":"accounts","refColumn":"id","onDelete":"cascade","onUpdate":"restrict","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:column_level_reference_policy|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" (id) ON DELETE CASCADE ON UPDATE RESTRICT )
-carrier:column_level_reference_policy|Mysql|sha|runtime.json|bf8c5950c236f1017c38479900c38206a7f77e2f4640c4489a8504f7b2b0344b
-carrier:column_level_reference_policy|Mysql|sha|env.db.ts|c52300ac189bd28f5c1c8b3d13392ee1dfe6831db550bb428d201ed9f693d291
-carrier:column_level_reference_policy|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:column_level_reference_policy|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:column_level_reference_policy|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:column_level_reference_policy|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:column_level_reference_policy|Sqlite|sha|runtime.json|7f0370578f3c215ddec84905adfb451ffd005dcd1190c710b4fef0d62b01e4a6
+carrier:column_level_reference_policy|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "accounts" ("id") ON DELETE CASCADE ON UPDATE RESTRICT )
+carrier:column_level_reference_policy|Mysql|sha|env.db.ts|2fcf60d831e10e69bbf357e00b534de72df40fe09a1cbaa3e282bd230950f611
 carrier:column_level_reference_policy|Mysql|field|orders|owner_id|{"type":"string","refTarget":"accounts","refColumn":"id","onDelete":"cascade","onUpdate":"restrict","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:retype_across_parameterised_types|Postgres|sha|runtime.json|8957e294d4ac05f7d961f65f4c3df58d3e649ffc99b4e4b27b668ca5487911d3
-carrier:retype_across_parameterised_types|Postgres|sha|env.db.ts|a656996fc7ce7fa9a89efcae9577ff5cfd000c576ed45cf5c2b3e6d9571de9d2
-carrier:retype_across_parameterised_types|Postgres|field|shapes|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:column_level_reference_policy|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:column_level_reference_policy|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:column_level_reference_policy|Mysql|sha|runtime.json|7f0370578f3c215ddec84905adfb451ffd005dcd1190c710b4fef0d62b01e4a6
+carrier:retype_across_parameterised_types|Postgres|sha|env.db.ts|f21faa78cba3744cb756e33e65c5ff044637794e224019e4047c7f26869a82f8
 carrier:retype_across_parameterised_types|Postgres|field|shapes|narrow|{"type":"string","maxLength":40,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"narrow"}}
 carrier:retype_across_parameterised_types|Postgres|field|shapes|fixed|{"type":"char","charLen":8,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"fixed"}}
-carrier:retype_across_parameterised_types|Sqlite|sha|runtime.json|8957e294d4ac05f7d961f65f4c3df58d3e649ffc99b4e4b27b668ca5487911d3
-carrier:retype_across_parameterised_types|Sqlite|sha|env.db.ts|a656996fc7ce7fa9a89efcae9577ff5cfd000c576ed45cf5c2b3e6d9571de9d2
-carrier:retype_across_parameterised_types|Sqlite|field|shapes|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:retype_across_parameterised_types|Postgres|field|shapes|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:retype_across_parameterised_types|Postgres|sha|runtime.json|a44eef2f077f3f8d0b057374c96b99ff29581576de14b63e22a31dd365e5fab6
+carrier:retype_across_parameterised_types|Sqlite|sha|env.db.ts|f21faa78cba3744cb756e33e65c5ff044637794e224019e4047c7f26869a82f8
 carrier:retype_across_parameterised_types|Sqlite|field|shapes|narrow|{"type":"string","maxLength":40,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"narrow"}}
 carrier:retype_across_parameterised_types|Sqlite|field|shapes|fixed|{"type":"char","charLen":8,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"fixed"}}
 carrier:retype_across_parameterised_types|Sqlite|sqlite_create|shapes|CREATE TABLE IF NOT EXISTS "shapes" ( "id" TEXT NOT NULL, "narrow" TEXT, "fixed" TEXT )
-carrier:retype_across_parameterised_types|Mysql|sha|runtime.json|8957e294d4ac05f7d961f65f4c3df58d3e649ffc99b4e4b27b668ca5487911d3
-carrier:retype_across_parameterised_types|Mysql|sha|env.db.ts|a656996fc7ce7fa9a89efcae9577ff5cfd000c576ed45cf5c2b3e6d9571de9d2
-carrier:retype_across_parameterised_types|Mysql|field|shapes|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:retype_across_parameterised_types|Sqlite|field|shapes|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:retype_across_parameterised_types|Sqlite|sha|runtime.json|a44eef2f077f3f8d0b057374c96b99ff29581576de14b63e22a31dd365e5fab6
+carrier:retype_across_parameterised_types|Mysql|sha|env.db.ts|f21faa78cba3744cb756e33e65c5ff044637794e224019e4047c7f26869a82f8
 carrier:retype_across_parameterised_types|Mysql|field|shapes|narrow|{"type":"string","maxLength":40,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"narrow"}}
 carrier:retype_across_parameterised_types|Mysql|field|shapes|fixed|{"type":"char","charLen":8,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"fixed"}}
-carrier:nullability_and_default_both_ways|Postgres|sha|runtime.json|2b3fe073b3e218454d90c24ea5e2395813d5afff59a2bc7ecd30f5535132bfb5
-carrier:nullability_and_default_both_ways|Postgres|sha|env.db.ts|d453155916a5e28814b480aca6fedf76ee5a044661a26487ae106d0c9abebdbc
-carrier:nullability_and_default_both_ways|Postgres|field|prefs|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:retype_across_parameterised_types|Mysql|field|shapes|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:retype_across_parameterised_types|Mysql|sha|runtime.json|a44eef2f077f3f8d0b057374c96b99ff29581576de14b63e22a31dd365e5fab6
+carrier:nullability_and_default_both_ways|Postgres|sha|env.db.ts|0659296204099416d61fa02c2d67ad797b300d635ab48ca8bb04b27d9dcd058a
 carrier:nullability_and_default_both_ways|Postgres|field|prefs|theme|{"type":"string","default":"dark","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"theme"}}
 carrier:nullability_and_default_both_ways|Postgres|field|prefs|count|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"count"}}
-carrier:nullability_and_default_both_ways|Sqlite|sha|runtime.json|2b3fe073b3e218454d90c24ea5e2395813d5afff59a2bc7ecd30f5535132bfb5
-carrier:nullability_and_default_both_ways|Sqlite|sha|env.db.ts|d453155916a5e28814b480aca6fedf76ee5a044661a26487ae106d0c9abebdbc
-carrier:nullability_and_default_both_ways|Sqlite|field|prefs|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:nullability_and_default_both_ways|Postgres|field|prefs|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:nullability_and_default_both_ways|Postgres|sha|runtime.json|d3732eb11c64b8d59fd5ce8ef008eaac3599ea5b9e26dbe34d98305e02063470
+carrier:nullability_and_default_both_ways|Sqlite|sha|env.db.ts|0659296204099416d61fa02c2d67ad797b300d635ab48ca8bb04b27d9dcd058a
 carrier:nullability_and_default_both_ways|Sqlite|field|prefs|theme|{"type":"string","default":"dark","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"theme"}}
 carrier:nullability_and_default_both_ways|Sqlite|field|prefs|count|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"count"}}
 carrier:nullability_and_default_both_ways|Sqlite|sqlite_create|prefs|CREATE TABLE IF NOT EXISTS "prefs" ( "id" TEXT NOT NULL, "theme" TEXT DEFAULT 'dark', "count" INTEGER )
-carrier:nullability_and_default_both_ways|Mysql|sha|runtime.json|2b3fe073b3e218454d90c24ea5e2395813d5afff59a2bc7ecd30f5535132bfb5
-carrier:nullability_and_default_both_ways|Mysql|sha|env.db.ts|d453155916a5e28814b480aca6fedf76ee5a044661a26487ae106d0c9abebdbc
-carrier:nullability_and_default_both_ways|Mysql|field|prefs|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:nullability_and_default_both_ways|Sqlite|field|prefs|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:nullability_and_default_both_ways|Sqlite|sha|runtime.json|d3732eb11c64b8d59fd5ce8ef008eaac3599ea5b9e26dbe34d98305e02063470
+carrier:nullability_and_default_both_ways|Mysql|sha|env.db.ts|0659296204099416d61fa02c2d67ad797b300d635ab48ca8bb04b27d9dcd058a
 carrier:nullability_and_default_both_ways|Mysql|field|prefs|theme|{"type":"string","default":"dark","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"theme"}}
 carrier:nullability_and_default_both_ways|Mysql|field|prefs|count|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"count"}}
-carrier:named_enum_and_domain_columns|Postgres|sha|runtime.json|5cba5d6fa59cd00c17794ed7af150c07fa98d80e8fff9a89c4f9a0ecd3485068
-carrier:named_enum_and_domain_columns|Postgres|sha|env.db.ts|5bb8df6d34dbe97170424fb27c0d20b334933002f25f0b4c2c84dfc4168bcac2
-carrier:named_enum_and_domain_columns|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:nullability_and_default_both_ways|Mysql|field|prefs|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:nullability_and_default_both_ways|Mysql|sha|runtime.json|d3732eb11c64b8d59fd5ce8ef008eaac3599ea5b9e26dbe34d98305e02063470
+carrier:named_enum_and_domain_columns|Postgres|sha|env.db.ts|690c2de665b374f71da51a98edc7e386ed9d376186f81500d593b89e09b97418
 carrier:named_enum_and_domain_columns|Postgres|field|accounts|plan|{"type":"string","enum":["free","paid"],"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"plan"}}
 carrier:named_enum_and_domain_columns|Postgres|field|accounts|credit|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"credit"}}
-carrier:named_enum_and_domain_columns|Sqlite|sha|runtime.json|5cba5d6fa59cd00c17794ed7af150c07fa98d80e8fff9a89c4f9a0ecd3485068
-carrier:named_enum_and_domain_columns|Sqlite|sha|env.db.ts|5bb8df6d34dbe97170424fb27c0d20b334933002f25f0b4c2c84dfc4168bcac2
-carrier:named_enum_and_domain_columns|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:named_enum_and_domain_columns|Postgres|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_enum_and_domain_columns|Postgres|sha|runtime.json|4bba6d101dd9fcd84c1102186e5caaaf9153582e277fe19fada34a2c00c39194
+carrier:named_enum_and_domain_columns|Sqlite|sha|env.db.ts|690c2de665b374f71da51a98edc7e386ed9d376186f81500d593b89e09b97418
 carrier:named_enum_and_domain_columns|Sqlite|field|accounts|plan|{"type":"string","enum":["free","paid"],"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"plan"}}
 carrier:named_enum_and_domain_columns|Sqlite|field|accounts|credit|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"credit"}}
 carrier:named_enum_and_domain_columns|Sqlite|sqlite_create|accounts|CREATE TABLE IF NOT EXISTS "accounts" ( "id" TEXT NOT NULL, "plan" TEXT CHECK ("plan" IN ('free', 'paid')), "credit" INTEGER )
-carrier:named_enum_and_domain_columns|Mysql|sha|runtime.json|5cba5d6fa59cd00c17794ed7af150c07fa98d80e8fff9a89c4f9a0ecd3485068
-carrier:named_enum_and_domain_columns|Mysql|sha|env.db.ts|5bb8df6d34dbe97170424fb27c0d20b334933002f25f0b4c2c84dfc4168bcac2
-carrier:named_enum_and_domain_columns|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:named_enum_and_domain_columns|Sqlite|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_enum_and_domain_columns|Sqlite|sha|runtime.json|4bba6d101dd9fcd84c1102186e5caaaf9153582e277fe19fada34a2c00c39194
+carrier:named_enum_and_domain_columns|Mysql|sha|env.db.ts|690c2de665b374f71da51a98edc7e386ed9d376186f81500d593b89e09b97418
 carrier:named_enum_and_domain_columns|Mysql|field|accounts|plan|{"type":"string","enum":["free","paid"],"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"plan"}}
 carrier:named_enum_and_domain_columns|Mysql|field|accounts|credit|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"credit"}}
-carrier:table_renamed_with_a_ref_column|Postgres|sha|runtime.json|f566323edc355b13358a4d07b68180e08f5f53b51095287e52a3d5f58dcd1f37
-carrier:table_renamed_with_a_ref_column|Postgres|sha|env.db.ts|3651f4283deee14a3ac37c1be073e77ddc8c2b60644aa742efed26d79b444f56
-carrier:table_renamed_with_a_ref_column|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:table_renamed_with_a_ref_column|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"tenants","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:table_renamed_with_a_ref_column|Postgres|field|tenants|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:table_renamed_with_a_ref_column|Sqlite|sha|runtime.json|f566323edc355b13358a4d07b68180e08f5f53b51095287e52a3d5f58dcd1f37
-carrier:table_renamed_with_a_ref_column|Sqlite|sha|env.db.ts|3651f4283deee14a3ac37c1be073e77ddc8c2b60644aa742efed26d79b444f56
-carrier:table_renamed_with_a_ref_column|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:table_renamed_with_a_ref_column|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"tenants","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:table_renamed_with_a_ref_column|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "tenants" (id) )
-carrier:table_renamed_with_a_ref_column|Sqlite|field|tenants|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:named_enum_and_domain_columns|Mysql|field|accounts|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:named_enum_and_domain_columns|Mysql|sha|runtime.json|4bba6d101dd9fcd84c1102186e5caaaf9153582e277fe19fada34a2c00c39194
+carrier:table_renamed_with_a_ref_column|Postgres|sha|env.db.ts|42a60e7dbaf8b533741316cde5d8a912eec6d3e71741cc5e32098c25754940fe
+carrier:table_renamed_with_a_ref_column|Postgres|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_renamed_with_a_ref_column|Postgres|field|orders|owner_id|{"type":"ref","refTarget":"tenants","refColumn":"id","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:table_renamed_with_a_ref_column|Postgres|field|tenants|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_renamed_with_a_ref_column|Postgres|sha|runtime.json|eb184b4191505c3d92ce4638fdb2fce88590fef1507e3c0fad3289ae49b2cea9
+carrier:table_renamed_with_a_ref_column|Sqlite|sha|env.db.ts|42a60e7dbaf8b533741316cde5d8a912eec6d3e71741cc5e32098c25754940fe
 carrier:table_renamed_with_a_ref_column|Sqlite|sqlite_create|tenants|CREATE TABLE IF NOT EXISTS "tenants" ( "id" TEXT NOT NULL )
-carrier:table_renamed_with_a_ref_column|Mysql|sha|runtime.json|f566323edc355b13358a4d07b68180e08f5f53b51095287e52a3d5f58dcd1f37
-carrier:table_renamed_with_a_ref_column|Mysql|sha|env.db.ts|3651f4283deee14a3ac37c1be073e77ddc8c2b60644aa742efed26d79b444f56
-carrier:table_renamed_with_a_ref_column|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:table_renamed_with_a_ref_column|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"tenants","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
-carrier:table_renamed_with_a_ref_column|Mysql|field|tenants|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:generated_column_follows_a_rename|Postgres|sha|runtime.json|b1b0eb2bb241f21797692f2f22ab17932aaada8c7851cf05b45eba06ae47e8f9
-carrier:generated_column_follows_a_rename|Postgres|sha|env.db.ts|b9c3f781964bcf1519fb096131cd885c634a791d1ba221c102ae22014cd48ba2
-carrier:generated_column_follows_a_rename|Postgres|field|line_items|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:table_renamed_with_a_ref_column|Sqlite|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_renamed_with_a_ref_column|Sqlite|field|orders|owner_id|{"type":"ref","refTarget":"tenants","refColumn":"id","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:table_renamed_with_a_ref_column|Sqlite|field|tenants|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_renamed_with_a_ref_column|Sqlite|sha|runtime.json|eb184b4191505c3d92ce4638fdb2fce88590fef1507e3c0fad3289ae49b2cea9
+carrier:table_renamed_with_a_ref_column|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" TEXT NOT NULL, "owner_id" TEXT COLLATE BINARY, CONSTRAINT "orders_owner_id_fkey" FOREIGN KEY ("owner_id") REFERENCES "tenants" ("id") )
+carrier:table_renamed_with_a_ref_column|Mysql|sha|env.db.ts|42a60e7dbaf8b533741316cde5d8a912eec6d3e71741cc5e32098c25754940fe
+carrier:table_renamed_with_a_ref_column|Mysql|field|orders|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_renamed_with_a_ref_column|Mysql|field|orders|owner_id|{"type":"ref","refTarget":"tenants","refColumn":"id","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"owner_id"}}
+carrier:table_renamed_with_a_ref_column|Mysql|field|tenants|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:table_renamed_with_a_ref_column|Mysql|sha|runtime.json|eb184b4191505c3d92ce4638fdb2fce88590fef1507e3c0fad3289ae49b2cea9
+carrier:generated_column_follows_a_rename|Postgres|sha|env.db.ts|4109c1136e7f8f447a577eb34dfe3509921a2e9516a5d4a145c34852c4d4327b
 carrier:generated_column_follows_a_rename|Postgres|field|line_items|qty|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"qty"}}
 carrier:generated_column_follows_a_rename|Postgres|field|line_items|total_cents|{"type":"int","generated":{"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},"rhs":{"node":"literal","value":100}},"stored":true},"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"total_cents"}}
-carrier:generated_column_follows_a_rename|Sqlite|sha|runtime.json|b1b0eb2bb241f21797692f2f22ab17932aaada8c7851cf05b45eba06ae47e8f9
-carrier:generated_column_follows_a_rename|Sqlite|sha|env.db.ts|b9c3f781964bcf1519fb096131cd885c634a791d1ba221c102ae22014cd48ba2
-carrier:generated_column_follows_a_rename|Sqlite|field|line_items|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:generated_column_follows_a_rename|Postgres|field|line_items|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:generated_column_follows_a_rename|Postgres|sha|runtime.json|bf0512679e0fde73fe654dce30d79e7643a72ee1e086b87c213cce1bbc734231
+carrier:generated_column_follows_a_rename|Sqlite|sha|env.db.ts|4109c1136e7f8f447a577eb34dfe3509921a2e9516a5d4a145c34852c4d4327b
 carrier:generated_column_follows_a_rename|Sqlite|field|line_items|qty|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"qty"}}
 carrier:generated_column_follows_a_rename|Sqlite|field|line_items|total_cents|{"type":"int","generated":{"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},"rhs":{"node":"literal","value":100}},"stored":true},"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"total_cents"}}
 carrier:generated_column_follows_a_rename|Sqlite|sqlite_create|line_items|CREATE TABLE IF NOT EXISTS "line_items" ( "id" TEXT NOT NULL, "qty" INTEGER, "total_cents" INTEGER )
-carrier:generated_column_follows_a_rename|Mysql|sha|runtime.json|b1b0eb2bb241f21797692f2f22ab17932aaada8c7851cf05b45eba06ae47e8f9
-carrier:generated_column_follows_a_rename|Mysql|sha|env.db.ts|b9c3f781964bcf1519fb096131cd885c634a791d1ba221c102ae22014cd48ba2
-carrier:generated_column_follows_a_rename|Mysql|field|line_items|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:generated_column_follows_a_rename|Sqlite|field|line_items|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:generated_column_follows_a_rename|Sqlite|sha|runtime.json|bf0512679e0fde73fe654dce30d79e7643a72ee1e086b87c213cce1bbc734231
+carrier:generated_column_follows_a_rename|Mysql|sha|env.db.ts|4109c1136e7f8f447a577eb34dfe3509921a2e9516a5d4a145c34852c4d4327b
 carrier:generated_column_follows_a_rename|Mysql|field|line_items|qty|{"type":"int","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"qty"}}
 carrier:generated_column_follows_a_rename|Mysql|field|line_items|total_cents|{"type":"int","generated":{"expr":{"node":"binOp","op":"mul","lhs":{"node":"colRef","name":"qty"},"rhs":{"node":"literal","value":100}},"stored":true},"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"total_cents"}}
-carrier:identity_kept|Postgres|sha|runtime.json|1f39232e700e15e943de1f12afaef5b73cc785260c3df4a1a1e772959858e03b
-carrier:identity_kept|Postgres|sha|env.db.ts|f9de952517d5eeb1abc87d7e66977047de159a7cbe8c23bc79a6240bc2f4008f
-carrier:identity_kept|Postgres|field|orders|id|{"type":"int","identity":{"always":false},"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:generated_column_follows_a_rename|Mysql|field|line_items|id|{"type":"string","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:generated_column_follows_a_rename|Mysql|sha|runtime.json|bf0512679e0fde73fe654dce30d79e7643a72ee1e086b87c213cce1bbc734231
+carrier:identity_kept|Postgres|sha|env.db.ts|ce796308f734590f37a4b4951656227d9196b7dbd47576b5311f1b8598cc35c6
 carrier:identity_kept|Postgres|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"}}
-carrier:identity_kept|Sqlite|sha|runtime.json|1f39232e700e15e943de1f12afaef5b73cc785260c3df4a1a1e772959858e03b
-carrier:identity_kept|Sqlite|sha|env.db.ts|f9de952517d5eeb1abc87d7e66977047de159a7cbe8c23bc79a6240bc2f4008f
-carrier:identity_kept|Sqlite|field|orders|id|{"type":"int","identity":{"always":false},"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:identity_kept|Postgres|field|orders|id|{"type":"int","identity":{"always":false},"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:identity_kept|Postgres|sha|runtime.json|a9d52dc25fefb0f07e21bc72afe473335bd80ab8844829b9c67ba6cabe5c3ac8
+carrier:identity_kept|Sqlite|sha|env.db.ts|ce796308f734590f37a4b4951656227d9196b7dbd47576b5311f1b8598cc35c6
 carrier:identity_kept|Sqlite|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"}}
 carrier:identity_kept|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" INTEGER NOT NULL, "legacy_id" TEXT NOT NULL )
-carrier:identity_kept|Mysql|sha|runtime.json|1f39232e700e15e943de1f12afaef5b73cc785260c3df4a1a1e772959858e03b
-carrier:identity_kept|Mysql|sha|env.db.ts|f9de952517d5eeb1abc87d7e66977047de159a7cbe8c23bc79a6240bc2f4008f
-carrier:identity_kept|Mysql|field|orders|id|{"type":"int","identity":{"always":false},"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
+carrier:identity_kept|Sqlite|field|orders|id|{"type":"int","identity":{"always":false},"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:identity_kept|Sqlite|sha|runtime.json|a9d52dc25fefb0f07e21bc72afe473335bd80ab8844829b9c67ba6cabe5c3ac8
+carrier:identity_kept|Mysql|sha|env.db.ts|ce796308f734590f37a4b4951656227d9196b7dbd47576b5311f1b8598cc35c6
 carrier:identity_kept|Mysql|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"}}
-carrier:identity_cleared_by_a_primary_key_replace|Postgres|sha|runtime.json|ee737991a2555eac3b14abf7413224238d449926017e61d50f49a9cc88737212
-carrier:identity_cleared_by_a_primary_key_replace|Postgres|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
+carrier:identity_kept|Mysql|field|orders|id|{"type":"int","identity":{"always":false},"required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"},"primaryKey":true}
+carrier:identity_kept|Mysql|sha|runtime.json|a9d52dc25fefb0f07e21bc72afe473335bd80ab8844829b9c67ba6cabe5c3ac8
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|sha|env.db.ts|63befa5f4485d5868ae60ca4f4db1d47ca9406244a3b553e1aecf6c54d1b6ae4
 carrier:identity_cleared_by_a_primary_key_replace|Postgres|field|orders|id|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:identity_cleared_by_a_primary_key_replace|Postgres|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"}}
-carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sha|runtime.json|ee737991a2555eac3b14abf7413224238d449926017e61d50f49a9cc88737212
-carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"},"primaryKey":true}
+carrier:identity_cleared_by_a_primary_key_replace|Postgres|sha|runtime.json|06889c1831a32715b14eab8b7d3b6e52fe9b7386546ecaf08c349d3cfd37e803
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sha|env.db.ts|63befa5f4485d5868ae60ca4f4db1d47ca9406244a3b553e1aecf6c54d1b6ae4
 carrier:identity_cleared_by_a_primary_key_replace|Sqlite|field|orders|id|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:identity_cleared_by_a_primary_key_replace|Sqlite|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"}}
 carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sqlite_create|orders|CREATE TABLE IF NOT EXISTS "orders" ( "id" INTEGER NOT NULL, "legacy_id" TEXT NOT NULL )
-carrier:identity_cleared_by_a_primary_key_replace|Mysql|sha|runtime.json|ee737991a2555eac3b14abf7413224238d449926017e61d50f49a9cc88737212
-carrier:identity_cleared_by_a_primary_key_replace|Mysql|sha|env.db.ts|6371c3cf20422a5459fb0f64d87d3c14bc7a7e11480cfcfb06f8e1e7adfe7c97
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"},"primaryKey":true}
+carrier:identity_cleared_by_a_primary_key_replace|Sqlite|sha|runtime.json|06889c1831a32715b14eab8b7d3b6e52fe9b7386546ecaf08c349d3cfd37e803
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|sha|env.db.ts|63befa5f4485d5868ae60ca4f4db1d47ca9406244a3b553e1aecf6c54d1b6ae4
 carrier:identity_cleared_by_a_primary_key_replace|Mysql|field|orders|id|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"id"}}
-carrier:identity_cleared_by_a_primary_key_replace|Mysql|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"}}
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|field|orders|legacy_id|{"type":"string","required":true,"unique":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"legacy_id"},"primaryKey":true}
+carrier:identity_cleared_by_a_primary_key_replace|Mysql|sha|runtime.json|06889c1831a32715b14eab8b7d3b6e52fe9b7386546ecaf08c349d3cfd37e803
 carrier:attached_partition_dropped|Postgres|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
-carrier:attached_partition_dropped|Postgres|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
+carrier:attached_partition_dropped|Postgres|sha|env.db.ts|e18e0c1c46968cf3d585d314747638460f044277e545e9e6e6222f429fe173a1
 carrier:attached_partition_dropped|Postgres|field|par|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_dropped|Postgres|field|par|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_dropped|Sqlite|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
-carrier:attached_partition_dropped|Sqlite|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
+carrier:attached_partition_dropped|Sqlite|sha|env.db.ts|e18e0c1c46968cf3d585d314747638460f044277e545e9e6e6222f429fe173a1
 carrier:attached_partition_dropped|Sqlite|field|par|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_dropped|Sqlite|field|par|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_dropped|Sqlite|sqlite_create|par|CREATE TABLE IF NOT EXISTS "par" ( "bucket" INTEGER NOT NULL, "payload" TEXT )
 carrier:attached_partition_dropped|Mysql|sha|runtime.json|a75591c102f5048df374d40d6f14260305473b2fb6f29ec48a2e1c18f46a0362
-carrier:attached_partition_dropped|Mysql|sha|env.db.ts|55efb0a0e1f3056e7ee10cb2414aab4a0be1f3e51c1589420f2aaab23b9cd9c1
+carrier:attached_partition_dropped|Mysql|sha|env.db.ts|e18e0c1c46968cf3d585d314747638460f044277e545e9e6e6222f429fe173a1
 carrier:attached_partition_dropped|Mysql|field|par|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_dropped|Mysql|field|par|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_detached|Postgres|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
-carrier:attached_partition_detached|Postgres|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
+carrier:attached_partition_detached|Postgres|sha|env.db.ts|bdf36d07e01d6f509812bc12a1aa415e790b9953c92d5b218a9860de15f46b7e
 carrier:attached_partition_detached|Postgres|field|p1|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_detached|Postgres|field|p1|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_detached|Postgres|field|par|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_detached|Postgres|field|par|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_detached|Sqlite|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
-carrier:attached_partition_detached|Sqlite|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
+carrier:attached_partition_detached|Sqlite|sha|env.db.ts|bdf36d07e01d6f509812bc12a1aa415e790b9953c92d5b218a9860de15f46b7e
 carrier:attached_partition_detached|Sqlite|field|p1|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_detached|Sqlite|field|p1|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_detached|Sqlite|sqlite_create|p1|CREATE TABLE IF NOT EXISTS "p1" ( "bucket" INTEGER NOT NULL, "payload" TEXT )
@@ -699,7 +591,7 @@ carrier:attached_partition_detached|Sqlite|field|par|bucket|{"type":"int","requi
 carrier:attached_partition_detached|Sqlite|field|par|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_detached|Sqlite|sqlite_create|par|CREATE TABLE IF NOT EXISTS "par" ( "bucket" INTEGER NOT NULL, "payload" TEXT )
 carrier:attached_partition_detached|Mysql|sha|runtime.json|91b641321a96aec00cc2c6fd1653b935d06fb6499016430204d325e3d3574027
-carrier:attached_partition_detached|Mysql|sha|env.db.ts|aaa426ddccb84f6f5d881f105d46c3dd400422f3229293d2e83ef1217bd69c8a
+carrier:attached_partition_detached|Mysql|sha|env.db.ts|bdf36d07e01d6f509812bc12a1aa415e790b9953c92d5b218a9860de15f46b7e
 carrier:attached_partition_detached|Mysql|field|p1|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}
 carrier:attached_partition_detached|Mysql|field|p1|payload|{"type":"string","readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"payload"}}
 carrier:attached_partition_detached|Mysql|field|par|bucket|{"type":"int","required":true,"readable":true,"filterable":true,"sortable":true,"projectable":true,"storage":{"valueColumn":"bucket"}}

@@ -37,7 +37,6 @@ export const DIALECT_TABLE: readonly DispositionRow[] = [
   { kind: "addConstraint", variant: "exclusion", dispositions: { mysql: "unsupported", postgres: "portable", sqlite: "unsupported" } },
   { kind: "addConstraint", variant: "fkComposite", dispositions: { mysql: "portable", postgres: "portable", sqlite: "portable" } },
   { kind: "addConstraint", variant: "fkNoLocalColumn", dispositions: { mysql: "unsupported", postgres: "unsupported", sqlite: "unsupported" } },
-  { kind: "addConstraint", variant: "fkNonId", dispositions: { mysql: "portable", postgres: "portable", sqlite: "portable" } },
   { kind: "addConstraint", variant: "fkNotValid", dispositions: { mysql: "unsupported", postgres: "portable", sqlite: "unsupported" } },
   { kind: "addConstraint", variant: "fkSimple", dispositions: { mysql: "portable", postgres: "portable", sqlite: "portable" } },
   { kind: "addConstraint", variant: "unique", dispositions: { mysql: "portable", postgres: "portable", sqlite: "unsupported" } },

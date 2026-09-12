@@ -4,7 +4,7 @@ use std::str::FromStr;
 
 use cedar_policy::{Context, Decision, PolicySet, Request, Response, RestrictedExpression, Schema};
 use compio_postgres::Client;
-use zeroship_core::user_id::UserId;
+use zeroship_id::UserId;
 
 use crate::authority::{self, Authority};
 use crate::entities::{assemble_entities, cedar_string, resource_entity_uid, uid};
@@ -230,7 +230,8 @@ fn build_request(
 /// This map and the `RequestContext` type in
 /// `deploy/policies/zeroship.cedarschema` must agree EXACTLY, in both
 /// directions - a schema-bound request refuses a missing key and an extra one
-/// alike. `tests/cedar_schema_vocabulary_gate.sh` compares the two.
+/// alike. `every_action_builds_a_schema_bound_request_at_every_resource_type`
+/// exercises this contract through the real request builder.
 fn build_context(ctx: &AuthzContext<'_>, authority: &Authority) -> Result<Context, AuthzError> {
     let request_ip = ctx
         .request_ip
@@ -338,6 +339,11 @@ mod tests {
     };
     use crate::entities::{resource_entity_uid, uid};
     use crate::{load_platform_policies, Action, Authority, AuthzError, Resource};
+    use zeroship_id::UserId;
+
+    fn principal() -> UserId {
+        UserId::mint()
+    }
 
     /// Every id-bearing variant records its own id, and each type tag is
     /// distinct. A shared tag would make two different resources
@@ -347,7 +353,7 @@ mod tests {
         let cases = [
             (
                 Resource::App {
-                    id: zeroship_core::app_id::AppId::mint(),
+                    id: zeroship_id::AppId::mint(),
                 },
                 "app",
             ),
@@ -399,7 +405,7 @@ mod tests {
         let resources = [
             Resource::Any,
             Resource::App {
-                id: zeroship_core::app_id::AppId::mint(),
+                id: zeroship_id::AppId::mint(),
             },
             Resource::Project {
                 id: "prj_0000123456789abcdefghijkl".to_owned(),
@@ -414,7 +420,7 @@ mod tests {
             for resource in &resources {
                 ruled_on += 1;
                 let ctx = AuthzContext {
-                    principal_id: zeroship_core::user_id::UserId::mint(),
+                    principal_id: principal(),
                     token_policy: None,
                     action: *action,
                     resource: resource.clone(),
@@ -468,10 +474,7 @@ mod tests {
             effective_rank: 40,
             billing_rank: 20,
         };
-        // ONE principal for both halves. The entity set is keyed by the
-        // principal's printed form, so a request naming a different one looks up
-        // an entity that is not there and the test proves nothing.
-        let principal = zeroship_core::user_id::UserId::mint();
+        let principal = principal();
         let entities = crate::assemble_entities(&principal, &authority, &Resource::Any)
             .expect("entities assemble");
         let request = cedar_policy::Request::new(

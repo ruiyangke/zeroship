@@ -1,69 +1,9 @@
-//! **Step 4, consumer 3: the wire `FieldDef` map comes from the single fold.**
+//! Check runtime field descriptors and SQLite rebuild DDL against the corpus.
 //!
-//! `docs/proposals/single-fold-and-effects.md` section G step 4 moves the consumers off
-//! their private walkers one at a time, in ascending blast radius.
-//! The `FieldDef` walker is the third and the first that is not artifact-only: its
-//! output is `schema.runtime.json`'s `fields` block AND, on SQLite,
-//! `LiveSchema::sdk_schemas`, which the 12-step table rebuild renders its new
-//! `CREATE TABLE` from. The proposal orders it third for exactly that reason
-//! (section I: "Step 4 touches SQLite rebuild DDL").
-//!
-//! This file is the OFFLINE half and always runs. The live half is
-//! `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`, which deploys to a real SQLite file
-//! through the shipped engine and reads the server's own `PRAGMA`s back.
-//!
-//! # What the move changes, measured rather than assumed
-//!
-//! A sweep of that walker against `FoldedSchema::project_field_defs` over
-//! EVERY PREFIX of the 27 recorded fixtures and the carriers in
-//! `tests/support/field_defs_corpus.rs`, on three dialects, compared 486 prefix/dialect
-//! pairs (216 more were refused by BOTH, and there was no prefix on which one refused
-//! and the other did not) and reported FIVE divergence families. The 27 recorded
-//! fixtures contributed ZERO of them - every one is a carrier - which is the same shape
-//! consumer 2 found and the reason the carriers exist.
-//!
-//! That sweep ran against 22 carriers; `column_level_reference_policy` was added
-//! afterwards, when this file's coverage floor reported that the un-lift fix had removed
-//! the golden's LAST `onDelete` row and left the facet unprotected. It is a positive
-//! control rather than a divergence, and the golden was re-captured from the walker to
-//! record it rather than blessed from the new path.
-//!
-//! Every family is one rule: the walker LIFTED a constraint's facet onto a column
-//! eagerly and kept a private side map to un-lift it from, and that side map was never
-//! kept in step with the constraint. The projection reads the constraints the model
-//! still holds, so there is nothing to keep in step.
-//!
-//! | family | the walker | the model |
-//! |---|---|---|
-//! | a dropped `UNIQUE` constraint | `unique: true` survives it | derived from the live constraint set |
-//! | a dropped `CHECK` bound | `min`/`max` survive it | same |
-//! | a dropped `CHECK` membership | `enum` survives it | same |
-//! | a column dropped and re-added under its old name | inherits the dropped column's FK policy and CHECK bounds | the constraint went with the column |
-//! | `dropPartition` | the dropped relation stays in the map | a dropped partition is a dropped relation |
-//!
-//! Which side is right is not decided here by preference. For the first four it is
-//! decided by `fold_ops`, the structural catalog oracle the live PostgreSQL, SQLite and
-//! MySQL suites already run against real servers, which has removed the constraint at
-//! the prefix where the two answers differ. For `dropPartition` it was decided by a live
-//! PostgreSQL in consumer 2's `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs` - the relation
-//! is gone from `pg_class` and the parent survives - and this move brings the second
-//! artifact into line with the first.
-//!
-//! # The DDL leg's blast radius is EMPTY, and that is a measurement
-//!
-//! All five families change `schema.runtime.json`. NONE of them can reach a SQLite table
-//! rebuild: `no_field_def_divergence_reaches_a_sqlite_rebuild` deploys each of them to a
-//! real SQLite database through `MigrationEngine::deploy_envelopes` and each is REFUSED
-//! before any DDL is emitted, for four different stated reasons. That is why this move
-//! ships with a live SQLite file rather than only a golden - the claim that the most
-//! dangerous consumer does not move is worth more than the claim that the artifacts do.
-//!
-//! # No re-bless affordance
-//!
-//! There is deliberately no environment variable that rewrites the golden, matching
-//! `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` and both predecessors. The file was captured from the
-//! OLD path by a SEPARATE, since-deleted binary before the consumer was switched, so the
-//! side that produced the expectation is not the side under test.
+//! Lifecycle carriers verify that removed constraints and columns do not leave
+//! stale field metadata. Whole-artifact hashes cover bytes outside the field rows.
+//! The live SQLite sibling verifies rebuilds against stored rows and catalog facts.
+//! The golden comparison has no automatic update mode.
 
 use crate::support;
 
@@ -231,25 +171,15 @@ fn the_corpus_golden_actually_covers_the_map_that_moved() {
              would still satisfy a `> 0` floor"
         );
     }
-    // The auxiliary leg is a different shape and a much thinner one: only a `vector`
-    // column on a target with no non-B-tree index method owns a shadow relation, which
-    // is Sqlite and Mysql here and never Postgres. Pinned separately so a change that
-    // stopped emitting it cannot hide inside the totals above.
-    assert!(
-        count("\"kind\":\"shadowTable\"") > 0,
-        "the golden must carry at least one `auxiliary` shadow relation, or a change \
-         that stopped naming them would regenerate green"
-    );
-    assert_eq!(
-        lines
-            .iter()
-            .filter(|line| line.contains("\"kind\":\"shadowTable\"")
-                && line.contains("|Postgres|"))
-            .count(),
-        0,
-        "and NONE of them on Postgres, which indexes a vector in place - the control \
-         that says the shadow relation is a capability answer, not a default"
-    );
+    let vectors: Vec<_> = lines.iter()
+        .filter(|line| line.contains("|field|") && line.contains("\"type\":\"vector\""))
+        .collect();
+    assert!(!vectors.is_empty(), "the corpus must exercise vector storage");
+    for line in vectors {
+        let parts: Vec<_> = line.splitn(6, '|').collect();
+        let field: serde_json::Value = serde_json::from_str(parts[5]).expect("field JSON");
+        assert_eq!(field["storage"], serde_json::json!({"valueColumn": parts[4]}));
+    }
 
     // Both outcomes of `render_artifacts`, so the golden pins refusals as well as
     // renders. An all-rendered corpus would say nothing about over-refusal.
@@ -420,11 +350,13 @@ fn a_re_added_column_does_not_inherit_the_dropped_columns_constraints() {
              that did went away with the column it named. Keeping it puts an \
              `ON DELETE CASCADE` in the artifact that no catalog has."
         );
+        assert!(
+            field.get("refTarget").is_none(),
+            "{dialect:?}: a dropped reference must not return"
+        );
         assert_eq!(
-            field.get("refTarget"),
-            Some(&serde_json::json!("accounts")),
-            "{dialect:?}: the reference the re-added column DOES declare is still there, \
-             or the line above is satisfied by losing the column's type"
+            field["type"], "string",
+            "{dialect:?}: the new column retains its declared type"
         );
     }
 

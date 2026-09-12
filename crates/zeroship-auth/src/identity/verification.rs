@@ -24,10 +24,10 @@
 //! `migrate` service / `deploy/ops/db-migrate.sh`).
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use compio_postgres::Client;
+use compio_postgres::{Client, GenericClient};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -131,7 +131,10 @@ pub async fn issue(db: &Client, user_id: &UserId, email: &str) -> Result<IssuedT
 /// # Errors
 ///
 /// [`AuthError::Db`] on PG failure.
-pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken>> {
+pub async fn redeem(
+    db: &(impl GenericClient + ?Sized),
+    raw_token: &str,
+) -> Result<Option<RedeemedToken>> {
     let token_hash = sha256(raw_token);
     let rows = db
         .query(
@@ -145,10 +148,10 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
         .await
         .map_err(|e| AuthError::Db(format!("verification redeem: {e}")))?;
     rows.first()
-        .map(|r| {
+        .map(|row| {
             Ok(RedeemedToken {
-                user_id: crate::entity_ids::user_id(r, "user_id")?,
-                email: r.get("email"),
+                user_id: crate::user_id::from_row(row, "user_id", "verification redeem")?,
+                email: row.get("email"),
             })
         })
         .transpose()
@@ -166,7 +169,7 @@ pub async fn redeem(db: &Client, raw_token: &str) -> Result<Option<RedeemedToken
 ///
 /// [`AuthError::Db`] on PG failure.
 pub async fn redeem_and_mark_verified(
-    db: &Client,
+    db: &(impl GenericClient + ?Sized),
     raw_token: &str,
 ) -> Result<Option<RedeemedToken>> {
     let token_hash = sha256(raw_token);
@@ -201,10 +204,14 @@ pub async fn redeem_and_mark_verified(
         .await
         .map_err(|e| AuthError::Db(format!("verification redeem and mark verified: {e}")))?;
     rows.first()
-        .map(|r| {
+        .map(|row| {
             Ok(RedeemedToken {
-                user_id: crate::entity_ids::user_id(r, "user_id")?,
-                email: r.get("email"),
+                user_id: crate::user_id::from_row(
+                    row,
+                    "user_id",
+                    "verification redeem and mark verified",
+                )?,
+                email: row.get("email"),
             })
         })
         .transpose()

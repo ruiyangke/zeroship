@@ -4690,7 +4690,7 @@ async fn a_command_timeout_closes_the_tls_session_cleanly() {
     let pool = compio_postgres::Pool::connect_with_config(config, pool_config)
         .await
         .expect("build a pool against the scripted TLS peer");
-    let mut client = pool.get().await.expect("lease a pooled connection");
+    let mut client = pool.acquire().await.expect("lease a pooled connection");
 
     // `command` is what arms the recovery guard; a bare `simple_query` derefs
     // straight to `Client` and never reaches the pool's timeout at all.
@@ -6871,7 +6871,7 @@ async fn a_command_timeout_whose_recovery_never_finishes_discards_the_session() 
     let pool = compio_postgres::Pool::connect_with_config(stub_config(server.addr), pool_config)
         .await
         .expect("build a pool against the silent peer");
-    let mut client = pool.get().await.expect("lease the pooled connection");
+    let mut client = pool.acquire().await.expect("lease the pooled connection");
 
     let outcome = compio::time::timeout(
         Duration::from_secs(20),

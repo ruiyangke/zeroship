@@ -303,7 +303,7 @@ export const shareToWebhook = action(
 // masking, replication) with failure modes unrelated to transactions; db-todos
 // is already proven end to end on BOTH tiers.
 //
-// Contract these exercise (crates/zeroship-data-engine/src/transaction/mod.rs):
+// Contract these exercise (crates/zeroship-data-orm/src/transaction/mod.rs):
 //   - `transaction(fn)` returns `Result<R>` -- resolve -> commit, throw ->
 //     rollback. There is no tx.commit()/tx.rollback().
 //   - Collections handed to the callback THROW instead of returning Result.
@@ -467,7 +467,7 @@ export const txIsolation = mutation(
         //                          to write "readCommitted" (default),
         //                          "repeatableRead" or "serializable".
         //   the runtime            normalize_isolation_level
-        //                          (crates/zeroship-plugin-db/src/v8_classes/db.rs:295)
+        //                          (crates/zeroship-data-v8/src/v8_classes/db.rs:295)
         //                          accepts camelCase, spaced and uppercase, all
         //                          four levels -- and its rejection message
         //                          recommends the camelCase spellings.
@@ -539,8 +539,8 @@ export const txDepth = mutation(
 // open at once. That is the whole point of `isolationLevel`, and
 // docs/reference/sqlite-divergences.md names it as unmeasured.
 //
-// The mechanism under test (crates/zeroship-plugin-db/src/context.rs:146 and
-// crates/zeroship-data-engine/src/transaction/mod.rs:227):
+// The mechanism under test (crates/zeroship-data-v8/src/context.rs:146 and
+// crates/zeroship-data-orm/src/transaction/mod.rs:227):
 //
 //   * the open tx connection lives in `tx_conns: HashMap<app_id, TxConnection>`
 //     -- ONE slot per app, per isolate.

@@ -1,9 +1,11 @@
+import type { FieldDef } from "./types";
 /**
  * Lazy query builder for @zeroship/db.
  * A Query is a thenable that collects sort/limit/skip/select options and
  * executes the native find call only when awaited or .then() is called.
  */
 import { mapResultDoc } from "./utils";
+import { isIdValue } from "./identity.js";
 import {
   InvalidOperationError,
   NotFoundError,
@@ -14,6 +16,13 @@ import {
   Result,
   Row,
   type Actor,
+  type ExactWithSpec,
+  type IdValue,
+  type RowId,
+  type SelectableField,
+  type SelectInput,
+  type SelectSpec,
+  type SortInput,
   type WithRelations,
   type WithSpec,
   ok,
@@ -34,18 +43,9 @@ type NativeFn = (
  */
 type CursorState = {
   orderBy: Record<string, 1 | -1>;
-  /**
-   * The last row's value for EVERY ordering key, not just the first.
-   *
-   * An earlier shape carried a single `lastValue` taken from
-   * `Object.keys(orderBy)[0]`, which made the seek predicate assume the
-   * emitted order was `(firstKey, id)`. It is not: the order is the caller's
-   * sort verbatim with no primary-key tiebreak appended, so on any multi-key
-   * sort the seek and the order disagreed and rows between them were skipped
-   * permanently. Seeking lexicographically requires every key's value.
-   */
+  /** Values for every ordering key in the last returned row. */
   lastValues: Record<string, unknown>;
-  lastId: string;
+  lastId: IdValue;
 };
 
 /** Page envelope returned by `Query.paginate()`. Matches Convex's shape so
@@ -59,7 +59,29 @@ export type PaginationResult<R> = {
 /** Base64-encode a CursorState using `btoa` so the cursor is a plain
  *  opaque string callers can round-trip through query params / URLs. */
 function encodeCursor(state: CursorState): string {
-  return btoa(JSON.stringify(state));
+  const json = JSON.stringify({
+    orderBy: state.orderBy,
+    lastValues: Object.fromEntries(Object.entries(state.lastValues).map(([key, value]) => [key, encodeCursorValue(value)])),
+    lastId: encodeCursorValue(state.lastId),
+  });
+  return btoa(Array.from(new TextEncoder().encode(json), byte => String.fromCharCode(byte)).join(""));
+}
+
+function encodeCursorValue(value: unknown): unknown {
+  if (typeof value === "bigint") return { bigint: value.toString() };
+  // Wrap JSON values so their keys cannot be mistaken for scalar type tags.
+  return value !== null && typeof value === "object" ? { json: value } : value;
+}
+
+function decodeCursorValue(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  if (Object.keys(value).length === 1) {
+    if ("json" in value) return value.json;
+    if ("bigint" in value && typeof value.bigint === "string" && /^-?(0|[1-9]\d*)$/.test(value.bigint)) {
+      return BigInt(value.bigint);
+    }
+  }
+  throw new TypeError("invalid cursor value");
 }
 
 /** Decode and shape-check a base64-JSON cursor string. Throws with
@@ -72,7 +94,7 @@ function decodeCursor(cursor: string): CursorState {
     });
   let decoded: string;
   try {
-    decoded = atob(cursor);
+    decoded = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(atob(cursor), char => char.charCodeAt(0)));
   } catch {
     throw invalid();
   }
@@ -88,12 +110,25 @@ function decodeCursor(cursor: string): CursorState {
     Array.isArray(parsed) ||
     typeof (parsed as CursorState).orderBy !== "object" ||
     (parsed as CursorState).orderBy === null ||
-    typeof (parsed as CursorState).lastId !== "string" ||
-    (parsed as CursorState).lastId.length === 0
+    Array.isArray((parsed as CursorState).orderBy) ||
+    typeof (parsed as CursorState).lastValues !== "object" ||
+    (parsed as CursorState).lastValues === null ||
+    Array.isArray((parsed as CursorState).lastValues)
   ) {
     throw invalid();
   }
-  return parsed as CursorState;
+  const state = parsed as CursorState;
+  try {
+    const lastId = decodeCursorValue(state.lastId);
+    if (!isIdValue(lastId) || lastId === "") throw invalid();
+    const lastValues = Object.fromEntries(Object.entries(state.lastValues).map(([key, value]) => [key, decodeCursorValue(value)]));
+    for (const [key, direction] of Object.entries(state.orderBy)) {
+      if ((direction !== 1 && direction !== -1) || !Object.hasOwn(lastValues, key)) throw invalid();
+    }
+    return { orderBy: state.orderBy, lastValues, lastId };
+  } catch {
+    throw invalid();
+  }
 }
 
 /** Compare two `{ field: 1 | -1 }` orderBy objects key-set and direction.
@@ -140,8 +175,8 @@ export class Query<
   private _limit: number | undefined;
   private _skip: number | undefined;
   private _select: string[] | undefined;
-  private _afterId: string | undefined;
-  private _with: WithSpec | undefined;
+  private _afterId: RowId<S> | undefined;
+  private _with: WithSpec<S> | undefined;
   private _unmask: string[] | undefined;
   private _actor: Actor | undefined;
   private _unmaskReason: string | undefined;
@@ -159,6 +194,7 @@ export class Query<
       actor?: Actor;
       unmaskReason?: string;
     },
+    private readonly _schema: Record<string, FieldDef> = {},
   ) {
     this._collection = collection;
     this._filter = filter;
@@ -173,10 +209,10 @@ export class Query<
 
   /**
    * Sets the sort order.
-   * Object: `{ field: 1 }` for ASC, `{ field: -1 }` for DESC.
-   * String: `"field"` for ASC, `"-field"` for DESC. Multiple: `"-created_at name"`.
+   * Objects can order by several fields: `{ score: -1, title: 1 }`.
+   * Strings order by one field: `"title"` or `"-score"`.
    */
-  sort(s: Record<string, number> | string): this {
+  sort(s: SortInput<S>): this {
     if (typeof s === "string") {
       const obj: Record<string, number> = {};
       for (const part of s.split(/\s+/).filter(Boolean)) {
@@ -188,7 +224,7 @@ export class Query<
       }
       this._sort = obj;
     } else {
-      this._sort = s;
+      this._sort = s as Record<string, number>;
     }
     return this;
   }
@@ -209,7 +245,7 @@ export class Query<
    * Cursor-based pagination: returns documents with `id > afterId`.
    * Merges an `{ id: { $gt: afterId } }` condition into the filter at execution time.
    */
-  after(id: string): this {
+  after(id: RowId<S>): this {
     this._afterId = id;
     return this;
   }
@@ -224,9 +260,10 @@ export class Query<
    * returns `Query<S, Row<S> & { user: PlainObject | null }>` so the awaited
    * `data[i].user` typechecks without a cast.
    */
-  with<W extends WithSpec>(spec: W): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  with(spec: WithSpec): Query<S, any, AllSchemas>;
-  with(spec: WithSpec): Query<S, any, AllSchemas> {
+  with<const W extends WithSpec<S>>(
+    spec: ExactWithSpec<S, W>,
+  ): Query<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  with(spec: WithSpec<S>): Query<S, any, AllSchemas> {
     // Reject early when the Query was constructed without a relation
     // loader (e.g. someone called `new Query(...)` directly outside
     // `Collection.find`). The old behaviour was a silent no-op — the
@@ -241,24 +278,28 @@ export class Query<
         { code: "QUERY_WITH_NO_LOADER" as const },
       );
     }
-    this._with = { ...(this._with ?? {}), ...spec };
+    this._with = { ...(this._with ?? {}), ...spec } as WithSpec<S>;
     return this as unknown as Query<S, any, AllSchemas>;
   }
 
   /**
    * Restricts the returned fields.
-   * String: `"name email"` (space-separated).
+   * String: `"name"`.
    * Array: `["name", "email"]`.
    * Object: `{ name: 1, email: 1 }` (Mongoose style — keys with truthy values).
+   * Untyped direct queries also accept a space-separated string.
    *
    * When called with a typed array of literal field names, the return type narrows
    * to `Query<S, Pick<Row<S>, K>>` so that awaited results only contain those fields.
    */
-  select<K extends keyof Row<S> & string>(fields: K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, P, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): Query<S, any, AllSchemas> {
+  select<K extends SelectableField<S>>(field: K): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): Query<S, Pick<Row<S>, K>, AllSchemas>;
+  select<const Selection extends SelectSpec<S>>(
+    fields: Selection,
+  ): Query<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
+  select(s: SelectInput<S>): Query<S, any, AllSchemas> {
     if (Array.isArray(s)) {
-      this._select = s;
+      this._select = [...s];
     } else if (typeof s === "string") {
       this._select = s.split(" ").filter((f) => f.length > 0);
     } else {
@@ -305,10 +346,12 @@ export class Query<
       );
     }
 
+    const key = "id";
+
     const orderBy: Record<string, 1 | -1> =
       this._sort !== undefined && Object.keys(this._sort).length > 0
         ? (this._sort as Record<string, 1 | -1>)
-        : { id: 1 };
+        : { [key]: 1 };
 
     let cursorState: CursorState | null = null;
     if (cursor !== null && cursor !== undefined) {
@@ -336,7 +379,7 @@ export class Query<
     // makes `_buildSeekFilter`'s final disjunct meaningful rather than
     // aspirational.
     const seekOrder: Record<string, 1 | -1> = { ...orderBy };
-    if (!("id" in seekOrder)) seekOrder.id = 1;
+    if (!(key in seekOrder)) seekOrder[key] = 1;
 
     const opts2: ZeroshipDbFindOpts = {
       orderBy: this._mapOrderByToColumns(seekOrder),
@@ -383,11 +426,11 @@ export class Query<
       let continueCursor = "";
       if (!isDone && kept.length > 0) {
         const last = page[page.length - 1] as PlainObject;
-        const lastId = last.id;
-        if (typeof lastId !== "string" || lastId.length === 0) {
+        const lastId = last[key];
+        if (!isIdValue(lastId) || lastId === "") {
           return err(
             Object.assign(
-              new TypeError(`paginate: row id must be a non-empty string (got ${typeof last.id})`),
+              new TypeError("paginate: row id must be text or a finite numeric value"),
               { code: "PAGINATE_INVALID_ID" as const },
             ),
           );
@@ -464,17 +507,7 @@ export class Query<
     return (terms.length === 1 ? terms[0] : { $or: terms }) as ZeroshipDbFilter;
   }
 
-  /**
-   * **P9 PR 1** — terminal returning the first matching row, or `null`
-   * when the query has no result. Loose semantics: a missing row is a
-   * normal outcome, not an error. Mirrors what `Collection.findOne`
-   * used to do — drop the old method's behaviour onto the Query
-   * builder.
-   *
-   * Implementation: applies `LIMIT 1` over the current query state and
-   * unwraps the single-row array. The orderBy / select / with / cursor
-   * settings carry through unchanged.
-   */
+  /** Return the first matching row, or `null`. */
   async first(): Promise<Result<P | null>> {
     const prevLimit = this._limit;
     this._limit = 1;
@@ -488,17 +521,7 @@ export class Query<
     }
   }
 
-  /**
-   * **P9 PR 1** — strict terminal: exactly one matching row required.
-   * Returns `err(NotFoundError)` on 0 matches and `err(NotUniqueError)`
-   * on >1 matches. Use this for unique-constraint enforced lookups
-   * (e.g. `find({ email }).unique()` against a `.unique()` column)
-   * where ambiguity is a contract violation, not a normal outcome.
-   *
-   * Implementation: `LIMIT 2` so we can detect "more than one" without
-   * dragging the whole table; if exactly one row materialises, resolve
-   * with it.
-   */
+  /** Return one row, failing when none or multiple rows match. */
   async unique(): Promise<Result<P>> {
     const prevLimit = this._limit;
     this._limit = 2;
@@ -518,16 +541,7 @@ export class Query<
     }
   }
 
-  /**
-   * **P9 PR 1** — terminal returning the last matching row in the
-   * current sort, or `null` when there are no matches. Implemented by
-   * reversing the configured `.sort(...)` and taking the first row;
-   * the original sort is restored before returning.
-   *
-   * Throws `InvalidOperationError("LAST_REQUIRES_SORT")` (as
-   * `err(...)`) if no sort was set on the query — "last" without an
-   * ordering would return arbitrary rows from the storage layer.
-   */
+  /** Return the last row in the configured order, or fail when no order is set. */
   async last(): Promise<Result<P | null>> {
     if (this._sort === undefined || Object.keys(this._sort).length === 0) {
       return err(
@@ -588,7 +602,7 @@ export class Query<
     // Merge cursor condition into filter
     let filter: ZeroshipDbFilter = this._filter;
     if (this._afterId !== undefined) {
-      const cursorCondition: ZeroshipDbFilter = { id: { $gt: this._afterId } };
+      const cursorCondition: ZeroshipDbFilter = { [this._toColumn("id")]: { $gt: this._afterId } };
       const hasKeys = Object.keys(filter).length > 0;
       filter = hasKeys
         ? { $and: [filter, cursorCondition] } as ZeroshipDbFilter

@@ -1,53 +1,12 @@
-//! **`gen-types` - the schema-artifact emitter.** Emit a typed authoring-schema
-//! artifact FROM the schema source (op.* migrations OR a declared
-//! `CollectionDescriptor` set). The runtime projection consumes the fold-and-recover
-//! seam - `FoldedSchema::project_field_defs`, which replaced a deleted op-stream
-//! `FieldDef` walker (`docs/proposals/single-fold-and-effects.md`) and reads
-//! the same value the other two projections are read from; the TypeScript projection
-//! replays the richer IR so physical types, defaults, value formats, and keys are
-//! not collapsed by the runtime `FieldDef` vocabulary.
+//! Generate runtime descriptors and passive TypeScript authoring schemas.
 //!
-//! (Backticks rather than an intra-doc link: the replacement is a `pub` method on a type
-//! this module does not import, and the link this line used to carry became the crate's
-//! only NEW `unresolved link` warning the moment the walker was deleted. Measured with
-//! `cargo doc -p zero-migrate --no-deps`, which no gate in this repo runs - so a dangling
-//! link here would have shipped green.)
+//! Migration operations and collection descriptors enter the same fold for the
+//! selected dialect. Runtime fields include protection and physical storage
+//! metadata; the TypeScript projection retains the richer authoring types, defaults
+//! and constraints using `@zeroship/migrate`.
 //!
-//! Two projections are produced from ONE snapshot, in ONE pass ([`render_artifacts`]):
-//!
-//! - **`schema.runtime.json`** - the v2 `RuntimeSchemaDescriptor`:
-//!   `{ version: 2, collections: { [collection]: { fields, options, indexes }}}`,
-//!   where each `FieldDef` additionally carries the physical `storage` mapping
-//!   (`valueColumn` / `rawColumn` / the raw column's capabilities / `auxiliary`) and
-//!   its own read-surface capability flags.
-//!   The `fields` map is snake_case columns, including exactly the fields injected
-//!   by the caller's effective policy, as the fold recovers them. The runtime
-//!   validates this shape.
-//! - **`env.db.ts`** - a GENERATED, passive `CreateTableArgs` schema map using the
-//!   current `zero-migrate` authoring builders. It contains no lifecycle calls;
-//!   `satisfies Record<string, CreateTableArgs>` makes `tsc` validate every emitted
-//!   column/constraint against the real public package.
-//!
-//! **Byte-identical-by-construction.** Both sources funnel through ONE renderer:
-//! op.* migrations fold directly; a declared `CollectionDescriptor` set is turned
-//! into ops via [`crate::descriptors_to_create_ops`] and then folds the same way.
-//! So the generated and manual paths produce identical artifacts for equivalent
-//! schemas - for the SAME target dialect. The artifacts are per-target, not
-//! portable: the fold selects `Op::Dialectal` legs, so one history legitimately
-//! yields different column sets on Postgres and MySQL.
-//!
-//! [`check_artifacts`] DIFFS already-generated artifacts against the committed ones -
-//! the CI drift gate, no DB write and no IO. It does NOT regenerate: it takes a
-//! `&GeneratedArtifacts` the CALLER produced and delegates to [`diff_artifacts`]. The
-//! distinction is not pedantry. This line used to say "regenerates", and a reviewer
-//! reasoning about what a change to the renderer could reach repeated it and had to be
-//! corrected by reading the signature - which is the cost of a doc that describes a
-//! function's job rather than its inputs.
-//!
-//! Alongside them, [`render_schema_export`] returns the same two artifacts PLUS the
-//! typed collection set they were rendered from, for a host that wants to render its
-//! own files rather than consume these. [`render_artifacts`] is that function with the
-//! collections dropped, so there is one fold behind both.
+//! `render_schema_export` also returns typed collection descriptors.
+//! `check_artifacts` compares supplied generated artifacts with committed text.
 
 use std::collections::{BTreeMap, BTreeSet};
 use zeroship_migrate_backend::registry::VendorSet;
@@ -64,7 +23,6 @@ use crate::model::ir::{
     IndexSortOrder, IrColumn, IrConstraint, IrConstraintKind, IrDefault, IrIndex, IrJsonValue,
     IrScalar, MigrationIr, Op, PartitionSpec, ValueFormat,
 };
-use zeroship_migrate_ir::backend::Capability;
 use zeroship_migrate_ir::dialect::DialectId;
 
 /// The two emitted artifact filenames (committed; the `--check` CI gate diffs
@@ -79,6 +37,9 @@ pub const ENV_DTS_FILE: &str = "env.db.ts";
 /// A `gen-types` emitter error (fold / IO / drift).
 #[derive(Debug, thiserror::Error)]
 pub enum GenTypesError {
+    /// Lifecycle options could not resolve a unique generated field.
+    #[error("gen-types: {0}")]
+    RuntimeMetadata(String),
     /// The producer that turns a declared descriptor set into ops refused the set.
     #[error("gen-types: produce ops from declared descriptors failed: {0}")]
     Produce(crate::ProduceError),
@@ -120,6 +81,8 @@ pub struct GeneratedArtifacts {
 pub(crate) struct RuntimeCollectionMetadata {
     pub(crate) options: crate::TableRuntimeOptions,
     pub(crate) indexes: Vec<RuntimeIndexDescriptor>,
+    pub(crate) assignments: BTreeMap<String, zeroship_migrate_policy::Assignment>,
+    pub(crate) primary_key: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -205,96 +168,10 @@ pub struct FieldStorage {
     /// [`Self::raw_filterable`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_projectable: Option<bool>,
-    /// Physical objects this field owns beyond its columns.
-    ///
-    /// Omitted entirely when empty rather than emitted as `[]`: the artifact is
-    /// byte-diffed by the drift gate, and an empty array on every field of every
-    /// collection is noise the diff has to carry forever.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub auxiliary: Vec<AuxiliaryObject>,
-}
-
-/// A physical database object a single field owns beyond its own columns.
-///
-/// Tagged by `kind` so the vocabulary can grow without any consumer having to guess
-/// from a name's shape which sort of object it is looking at - the failure mode this
-/// whole type exists to remove.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
-pub enum AuxiliaryObject {
-    /// A one-to-one SHADOW relation the field is searched through, joined to the base
-    /// table on a key and kept in step by triggers.
-    ///
-    /// A vector column needs one on any target that cannot index it natively. Which
-    /// module the shadow relation is built from is the backend's business; what the
-    /// data plane needs from the descriptor is the NAME it joins by and the trigger
-    /// names, both of which it currently derives by string formatting.
-    ///
-    /// **This records a NAME, not a creation.** The engine emits no DDL for it - the
-    /// data plane's own `ensure_vector_index` does, and that is
-    /// `#[cfg(any(test, feature = "test-helpers"))]`-gated today. The name is
-    /// nevertheless load-bearing on an ungated path, because the vector SEARCH builder
-    /// joins by it. So the descriptor is the right authority for what the object is
-    /// CALLED and the wrong authority for whether it EXISTS.
-    #[serde(rename_all = "camelCase")]
-    ShadowTable {
-        /// The shadow relation's name.
-        name: String,
-        /// The column both relations are joined on.
-        join_on: String,
-        /// The after-insert, after-delete and after-update trigger names, in that order.
-        triggers: Vec<String>,
-    },
-}
-
-/// The physical objects `field` owns beyond its own columns, on this target.
-///
-/// The target is asked a CAPABILITY question, never named. A vector column is searched
-/// through a shadow relation exactly when the target cannot express an index method
-/// other than B-tree, because that is what makes a native vector index impossible;
-/// a target that declares [`Capability::NonBtreeIndexMethod`] indexes the column in
-/// place and owns no extra object. Core resolving a backend by product name here would
-/// bake one backend's answer into the vocabulary every backend shares - the rule
-/// `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_at_all.rs` exists to hold, and which the
-/// first draft of this function broke with a `dialect.as_str() != "sqlite"` compare.
-fn auxiliary_objects(
-    vendors: VendorSet,
-    collection: &str,
-    field: &str,
-    def: &Value,
-    dialect: &DialectId,
-) -> Vec<AuxiliaryObject> {
-    if def.get("type").and_then(Value::as_str) != Some("vector") {
-        return Vec::new();
-    }
-    let native_vector_index = crate::render::backends::vendor(vendors, dialect)
-        .descriptor
-        .capabilities
-        .contains(Capability::NonBtreeIndexMethod);
-    if native_vector_index {
-        return Vec::new();
-    }
-    let name = format!("{collection}__vec_{field}");
-    let triggers = ["ai", "ad", "au"]
-        .iter()
-        .map(|suffix| format!("{name}_{suffix}"))
-        .collect();
-    vec![AuxiliaryObject::ShadowTable {
-        name,
-        join_on: "rowid".to_string(),
-        triggers,
-    }]
 }
 
 /// Where `field` physically lives, read from the DDL emitter rather than re-derived.
-fn field_storage(
-    vendors: VendorSet,
-    collection: &str,
-    field: &str,
-    def: &Value,
-    dialect: &DialectId,
-) -> FieldStorage {
-    let auxiliary = auxiliary_objects(vendors, collection, field, def, dialect);
+fn field_storage(field: &str, def: &Value) -> FieldStorage {
     // The ONE call that decides whether this field has a second column, and what it is
     // called. Everything else here is bookkeeping around its answer.
     match crate::schema::query::raw_column_for_field(field, def) {
@@ -312,7 +189,6 @@ fn field_storage(
             raw_filterable: Some(false),
             raw_sortable: Some(false),
             raw_projectable: Some(false),
-            auxiliary,
         },
         None => FieldStorage {
             value_column: field.to_string(),
@@ -320,7 +196,6 @@ fn field_storage(
             raw_filterable: None,
             raw_sortable: None,
             raw_projectable: None,
-            auxiliary,
         },
     }
 }
@@ -332,12 +207,7 @@ fn field_storage(
 /// `descriptor_to_sdk_schema`: that function also feeds the rename-rebuild path's
 /// `live.sdk_schemas`, which the CREATE emitter renders columns from. Widening its
 /// output would put descriptor bookkeeping into a DDL input for no gain.
-fn stamp_physical_storage(
-    vendors: VendorSet,
-    collection: &str,
-    fields: &Value,
-    dialect: &DialectId,
-) -> Value {
+fn stamp_physical_storage(fields: &Value) -> Value {
     let Some(obj) = fields.as_object() else {
         return fields.clone();
     };
@@ -348,19 +218,21 @@ fn stamp_physical_storage(
             continue;
         };
         let mut def_obj = def_obj.clone();
-        // The read surface of the LOGICAL field, so a consumer stops inferring it from
-        // one membership test. Every declared field is fully capable today, which is
-        // exactly what `validate_read_identifier` already concludes - the value is not
-        // the point. Narrowing one later becomes a change here rather than in Rust
-        // spread across the query builders.
+        // Encrypted fields remain readable and projectable, but randomised
+        // ciphertext cannot support predicates or ordering.
         def_obj.insert("readable".to_string(), Value::Bool(true));
-        def_obj.insert("filterable".to_string(), Value::Bool(true));
-        def_obj.insert("sortable".to_string(), Value::Bool(true));
+        def_obj.insert(
+            "filterable".to_string(),
+            Value::Bool(def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true)),
+        );
+        def_obj.insert(
+            "sortable".to_string(),
+            Value::Bool(def.get("encrypted").and_then(serde_json::Value::as_bool) != Some(true)),
+        );
         def_obj.insert("projectable".to_string(), Value::Bool(true));
         def_obj.insert(
             "storage".to_string(),
-            serde_json::to_value(field_storage(vendors, collection, field, def, dialect))
-                .expect("FieldStorage serializes"),
+            serde_json::to_value(field_storage(field, def)).expect("FieldStorage serializes"),
         );
         out.insert(field.clone(), Value::Object(def_obj));
     }
@@ -459,37 +331,97 @@ pub(crate) fn derived_unique_index_name(vendors: VendorSet, table: &str, field: 
 /// handed. A committed v1 artifact does not carry one; the version is what lets a reader
 /// refuse it outright instead of serving a descriptor with the facts silently missing.
 ///
-/// `dialect` is threaded in because storage is not target-neutral: a vector column owns
-/// a shadow relation on a target that cannot index it natively, and nothing on one that
-/// can. The artifact was already per-target - the fold selects `Op::Dialectal` legs - so
-/// this adds no new asymmetry. `vendors` rides alongside because the target is asked a
-/// capability rather than named; see [`auxiliary_objects`].
 fn render_runtime_descriptor_v2(
-    vendors: VendorSet,
     defs: &BTreeMap<String, Value>,
     metadata: &BTreeMap<String, RuntimeCollectionMetadata>,
-    dialect: &DialectId,
-) -> Value {
+) -> Result<Value, GenTypesError> {
+    use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
+    for (name, meta) in metadata {
+        for (enabled, role, event) in [
+            (
+                meta.options.soft_delete,
+                "softDelete",
+                AssignmentEvent::Delete,
+            ),
+            (
+                meta.options.versioning,
+                "concurrency",
+                AssignmentEvent::Write,
+            ),
+        ] {
+            if enabled
+                && meta
+                    .assignments
+                    .values()
+                    .filter(|assignment| {
+                        assignment.on == event
+                            && match event {
+                                AssignmentEvent::Delete => {
+                                    assignment.by == AssignmentGenerator::Now
+                                }
+                                _ => matches!(assignment.by, AssignmentGenerator::Increment(_)),
+                            }
+                    })
+                    .count()
+                    != 1
+            {
+                return Err(GenTypesError::RuntimeMetadata(format!(
+                    "collection '{name}' requires an unambiguous {role} generator"
+                )));
+            }
+        }
+    }
     let mut metadata = metadata.clone();
     let collections = defs
         .iter()
         .map(|(name, fields)| {
             let meta = metadata.remove(name).unwrap_or_default();
+            let mut fields = stamp_physical_storage(fields);
+            if let Some(fields) = fields.as_object_mut() {
+                for (field, definition) in fields {
+                    let definition = definition.as_object_mut().expect("field descriptor");
+                    if meta.primary_key.contains(field) {
+                        definition.insert("primaryKey".into(), Value::Bool(true));
+                    }
+                    if let Some(assignment) = meta.assignments.get(field) {
+                        definition.insert(
+                            "assign".into(),
+                            serde_json::to_value(assignment).expect("assignment serializes"),
+                        );
+                        definition.insert("writable".into(), Value::Bool(false));
+                        if meta.options.soft_delete
+                            && assignment.on == zeroship_migrate_policy::AssignmentEvent::Delete
+                            && assignment.by == zeroship_migrate_policy::AssignmentGenerator::Now
+                        {
+                            definition.insert("softDelete".into(), Value::Bool(true));
+                        }
+                        if meta.options.versioning
+                            && assignment.on == zeroship_migrate_policy::AssignmentEvent::Write
+                            && matches!(
+                                assignment.by,
+                                zeroship_migrate_policy::AssignmentGenerator::Increment(_)
+                            )
+                        {
+                            definition.insert("concurrency".into(), Value::Bool(true));
+                        }
+                    }
+                }
+            }
             (
                 name.clone(),
                 RuntimeCollectionDescriptorV2 {
-                    fields: stamp_physical_storage(vendors, name, fields, dialect),
+                    fields,
                     options: (&meta.options).into(),
                     indexes: meta.indexes,
                 },
             )
         })
         .collect();
-    serde_json::to_value(RuntimeSchemaDescriptorV2 {
+    Ok(serde_json::to_value(RuntimeSchemaDescriptorV2 {
         version: 2,
         collections,
     })
-    .expect("runtime descriptor v2 serializes")
+    .expect("runtime descriptor v2 serializes"))
 }
 
 /// Fold `ops` to per-collection wire-`FieldDef` maps and render both artifacts.
@@ -617,7 +549,7 @@ pub fn render_schema_export(
     // (a) RuntimeSchemaDescriptor v2 - fields plus their physical storage mapping and
     // read-surface capabilities, plus runtime-visible collection options and plain
     // indexes.
-    let runtime_value = render_runtime_descriptor_v2(vendors, &field_defs, &metadata, dialect);
+    let runtime_value = render_runtime_descriptor_v2(&field_defs, &metadata)?;
     let mut runtime_json =
         serde_json::to_string_pretty(&runtime_value).expect("serialize FieldDef map");
     runtime_json.push('\n');
@@ -638,7 +570,7 @@ pub fn render_schema_export(
 /// source). This turns the descriptors into `createTable` ops via
 /// [`crate::descriptors_to_create_ops`] - which resolves each descriptor's
 /// table shape under the supplied `effective` policy (injecting the confined
-/// system columns/indexes/PK the caller's charter declares) - and then routes
+/// injected columns/indexes/PK the caller's charter declares) - and then routes
 /// through the SAME [`render_artifacts`] tail. So the manual and generated paths
 /// are byte-identical for equivalent schemas, PROVIDED both are driven by an
 /// `EffectivePolicy` that injects the same shape (the generated path resolves the
@@ -1784,11 +1716,7 @@ fn js_key(s: &str) -> String {
             .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '$')
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
-    if is_ident {
-        s.to_string()
-    } else {
-        js_str(s)
-    }
+    if is_ident { s.to_string() } else { js_str(s) }
 }
 
 /// The structured outcome of a `--check` drift comparison for one file.
@@ -2203,11 +2131,10 @@ mod tests {
         )
         .expect("confined descriptor ops fold");
         let value = render_runtime_descriptor_v2(
-            crate::test_fixtures::VENDORS,
             &folded.project_field_defs(crate::test_fixtures::VENDORS),
             &folded.project_runtime_metadata(crate::test_fixtures::VENDORS),
-            &POSTGRES,
-        );
+        )
+        .unwrap();
         assert_eq!(value["version"], 2);
         let fields = &value["collections"]["hits"]["fields"];
         let inject = ResolvedInject::for_table(&effective, DEFAULT_PROJECT_SCHEMA, "hits")
@@ -2231,6 +2158,71 @@ mod tests {
             value["collections"]["hits"]["options"]["strictness"],
             "strict"
         );
+    }
+
+    #[test]
+    fn runtime_lifecycle_metadata_uses_generators_and_explicit_options() {
+        use zeroship_migrate_policy::{Assignment, AssignmentEvent, AssignmentGenerator};
+        let fields = BTreeMap::from([(
+            "entries".into(),
+            serde_json::json!({
+                "key":{"type":"string"}, "removed":{"type":"date"}, "revision":{"type":"integer"},
+                "deleted_at":{"type":"string"}, "version":{"type":"string"}
+            }),
+        )]);
+        let mut metadata = BTreeMap::from([(
+            "entries".into(),
+            RuntimeCollectionMetadata {
+                primary_key: vec!["key".into()],
+                assignments: BTreeMap::from([
+                    (
+                        "key".into(),
+                        Assignment {
+                            by: AssignmentGenerator::TypedId,
+                            on: AssignmentEvent::Insert,
+                        },
+                    ),
+                    (
+                        "removed".into(),
+                        Assignment {
+                            by: AssignmentGenerator::Now,
+                            on: AssignmentEvent::Delete,
+                        },
+                    ),
+                    (
+                        "revision".into(),
+                        Assignment {
+                            by: AssignmentGenerator::Increment(2),
+                            on: AssignmentEvent::Write,
+                        },
+                    ),
+                ]),
+                ..Default::default()
+            },
+        )]);
+        let disabled = render_runtime_descriptor_v2(&fields, &metadata).unwrap();
+        let disabled = &disabled["collections"]["entries"]["fields"];
+        assert_eq!(disabled["key"]["primaryKey"], true);
+        assert_eq!(
+            disabled["revision"]["assign"],
+            serde_json::json!({"by":"increment(2)", "on":"write"})
+        );
+        assert!(disabled["removed"].get("softDelete").is_none());
+        assert!(disabled["revision"].get("concurrency").is_none());
+        metadata.get_mut("entries").unwrap().options.soft_delete = true;
+        metadata.get_mut("entries").unwrap().options.versioning = true;
+        let enabled = render_runtime_descriptor_v2(&fields, &metadata).unwrap();
+        let enabled = &enabled["collections"]["entries"]["fields"];
+        assert_eq!(enabled["removed"]["softDelete"], true);
+        assert_eq!(enabled["revision"]["concurrency"], true);
+        assert!(enabled["deleted_at"].get("assign").is_none());
+        assert!(enabled["version"].get("assign").is_none());
+        metadata
+            .get_mut("entries")
+            .unwrap()
+            .assignments
+            .remove("revision");
+        assert!(render_runtime_descriptor_v2(&fields, &metadata).is_err());
     }
 
     #[test]

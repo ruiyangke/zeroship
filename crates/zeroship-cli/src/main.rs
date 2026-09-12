@@ -27,6 +27,7 @@ mod migrate;
 mod organizations;
 mod parent_death;
 mod project_config;
+mod project_keys;
 mod secrets;
 
 zeroship_core::declare_env_consumer!(
@@ -168,6 +169,22 @@ fn cmd_serve(args: &[String]) {
     // Socket is released here so `start_server` can bind the real listener.
     eprintln!("[zeroship] Starting server on port {port}");
 
+    // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
+    // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
+    // in the spawned child env. Without this, `process.env` in V8 is empty.
+    // Class `creator`, not `cli`: the names in this snapshot belong to the
+    // app being served, not to the platform, so there is nothing here for the
+    // platform to enumerate. This is the ONE legitimate whole-environment read.
+    let mut env_vars: std::collections::HashMap<String, String> =
+        zeroship_core::read_process_env_snapshot!(crate::ZeroshipCliConsumer)
+            .into_iter()
+            .collect();
+    // The single-app dev host owns its namespace just as the worker does.
+    // Keep it aligned with Vite's DEV_APP_ID when no identity was supplied.
+    env_vars
+        .entry("APP_ID".into())
+        .or_insert_with(|| "default".into());
+
     // Opt-in db plugin: when DATABASE_URL is set, register the db plugin
     // so JS `zeroship.db.*` works in the dev path (e.g. `vite-plugin` spawns
     // `zeroship serve` with DATABASE_URL forwarded from `.env`).
@@ -206,13 +223,20 @@ fn cmd_serve(args: &[String]) {
             // A URL naming no supported backend fails HERE, with the same
             // exit(2) the invalid-`ZEROSHIP_STORAGE_URL` arm below already
             // uses, rather than surfacing inside the creator's first query.
-            let service = match zeroship_plugin_db::service::DbService::new(
-                zeroship_plugin_db::service::DbServiceConfig {
-                    url,
-                    worker_id: format!("serve-{}", uuid::Uuid::new_v4()),
-                    meter: Some(Arc::clone(&dev_meter)),
-                },
-            ) {
+            let service = match zeroship_data_orm::connection::ConnectionFactory::for_url(&url)
+                .and_then(|connection| {
+                    zeroship_data_v8::service::DbService::new(
+                        zeroship_data_v8::service::DbServiceConfig {
+                            project_keys: project_keys::load(
+                                std::path::Path::new(".zeroship/private"),
+                                &env_vars["APP_ID"],
+                            ).map_err(|error| zeroship_data_orm::error::DbError::config("local_project_key", error))?,
+                            connection,
+                            cdc_relay: None,
+                            meter: Some(Arc::clone(&dev_meter)),
+                        },
+                    )
+                }) {
                 Ok(service) => service,
                 Err(e) => {
                     eprintln!("[zeroship] invalid DATABASE_URL: {e}");
@@ -233,10 +257,7 @@ fn cmd_serve(args: &[String]) {
         zeroship_core::declared_env!(cli, "ZEROSHIP_STORAGE_URL", crate::ZeroshipCliConsumer)
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "file://.zeroship/storage".to_string());
-    // `file://` is config ergonomics for a local path; strip the scheme so
-    // the parser sees a bare path. `s3://` falls through to the S3 leg.
-    let storage_arg = storage_url.strip_prefix("file://").unwrap_or(&storage_url);
-    let storage_cfg = match zeroship_plugin_storage::StorageBackendConfig::parse(storage_arg) {
+    let storage_cfg = match zeroship_storage::StorageBackendConfig::parse(&storage_url) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[zeroship] invalid ZEROSHIP_STORAGE_URL: {e}");
@@ -244,9 +265,9 @@ fn cmd_serve(args: &[String]) {
         }
     };
     let storage_kind = storage_cfg.kind();
-    match zeroship_plugin_storage::build_backend(&storage_cfg) {
+    match zeroship_storage::StorageStore::open(&storage_cfg) {
         Ok(backend) => {
-            plugins.push(Arc::new(zeroship_plugin_storage::StoragePlugin::with_backend_and_meter(
+            plugins.push(Arc::new(zeroship_storage_v8::StorageBinding::new(
                 backend,
                 Some(Arc::clone(&dev_meter)),
             )));
@@ -266,71 +287,45 @@ fn cmd_serve(args: &[String]) {
     plugins.push(Arc::new(zeroship_runtime::auth::AuthPlugin));
     eprintln!("[zeroship] auth plugin registered");
 
-    // KV plugin backend selection, in priority order:
-    //   1. ZEROSHIP_KV_URL set → Redis (distributed-correctness: shared
-    //                            across workers/regions).
-    //   2. otherwise           → redb (single-process persistent embedded
-    //                            store; self-host / dev tier). Path is
-    //                            ZEROSHIP_KV_PATH if set, else the default
-    //                            `./.zeroship/kv.redb`.
-    let kv_plugin = match zeroship_core::declared_env!(
+    // Resolve the host's runtime configuration before constructing storage.
+    let kv_config = match zeroship_core::declared_env!(
         cli,
-        "ZEROSHIP_KV_URL",
+        "ZEROSHIP_KV_CONFIG_FILE",
         crate::ZeroshipCliConsumer
     ) {
-        Some(url) if !url.is_empty() => {
-            eprintln!("[zeroship] kv plugin registered (redis)");
-            zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
-                Arc::new(zeroship_plugin_kv::Redis::new(url)),
-                Some(Arc::clone(&dev_meter)),
-            )
+        Some(path) if !path.is_empty() => {
+            let contents =
+                zeroship_core::config::secrets::read_secret_file(&path).unwrap_or_else(|error| {
+                    eprintln!("[zeroship] KV configuration: {error}");
+                    std::process::exit(1);
+                });
+            zeroship_kv::KvConfig::from_toml(&contents).unwrap_or_else(|error| {
+                eprintln!("[zeroship] KV configuration: {error}");
+                std::process::exit(1);
+            })
         }
-        _ => {
-            let kv_path: PathBuf = zeroship_core::declared_env_os!(
+        _ => zeroship_kv::KvConfig::Redb {
+            path: zeroship_core::declared_env_os!(
                 cli,
                 "ZEROSHIP_KV_PATH",
                 crate::ZeroshipCliConsumer
             )
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb"));
-            // Create the parent dir so a default `./.zeroship/kv.redb`
-            // opens cleanly on a fresh checkout.
-            if let Some(parent) = kv_path.parent() {
-                if let Err(e) = std::fs::create_dir_all(parent) {
-                    eprintln!(
-                        "[zeroship] kv: failed to create dir '{}': {e}",
-                        parent.display()
-                    );
-                    std::process::exit(1);
-                }
-            }
-            let backend = zeroship_plugin_kv::RedbBackend::open(&kv_path)
-                .unwrap_or_else(|e| {
-                    eprintln!(
-                        "[zeroship] kv: failed to open redb at '{}': {e}",
-                        kv_path.display()
-                    );
-                    std::process::exit(1);
-                });
-            eprintln!("[zeroship] kv plugin registered (redb; path={})", kv_path.display());
-            zeroship_plugin_kv::KvPlugin::with_backend_and_meter(
-                Arc::new(backend),
-                Some(Arc::clone(&dev_meter)),
-            )
-        }
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(".zeroship/kv.redb")),
+        },
     };
-    plugins.push(Arc::new(kv_plugin));
-
-    // Forward process env to the V8 runtime so `process.env.FOO` works in JS.
-    // Important for dev: the vite-plugin sets ZEROSHIP_ENTRY / ZEROSHIP_VITE_WS
-    // in the spawned child env. Without this, `process.env` in V8 is empty.
-    // Class `creator`, not `cli`: the names in this snapshot belong to the
-    // app being served, not to the platform, so there is nothing here for the
-    // platform to enumerate. This is the ONE legitimate whole-environment read.
-    let env_vars: std::collections::HashMap<String, String> =
-        zeroship_core::read_process_env_snapshot!(crate::ZeroshipCliConsumer)
-            .into_iter()
-            .collect();
+    let kv_store = zeroship_kv::KvStore::open(&kv_config).unwrap_or_else(|error| {
+        eprintln!("[zeroship] kv backend init failed: {error}");
+        std::process::exit(1);
+    });
+    eprintln!(
+        "[zeroship] kv binding registered (backend={})",
+        kv_config.kind()
+    );
+    plugins.push(Arc::new(zeroship_kv_v8::KvBinding::new(
+        kv_store,
+        Some(Arc::clone(&dev_meter)),
+    )));
 
     let workflow_db_path: PathBuf = zeroship_core::declared_env_os!(
         cli,
@@ -349,7 +344,7 @@ fn cmd_serve(args: &[String]) {
         }
     }
     let workflow_peer_plugins = plugins.clone();
-    let workflow_plugin = zeroship_plugin_workflow::WorkflowPlugin::dev_sqlite(
+    let workflow_binding = zeroship_workflow_v8::WorkflowBinding::dev_sqlite(
         &workflow_db_path,
         modules.clone(),
         env_vars.clone(),
@@ -362,9 +357,9 @@ fn cmd_serve(args: &[String]) {
         );
         std::process::exit(1);
     });
-    plugins.push(Arc::new(workflow_plugin));
+    plugins.push(Arc::new(workflow_binding));
     eprintln!(
-        "[zeroship] workflows plugin registered (sqlite; path={})",
+        "[zeroship] workflows binding registered (sqlite; path={})",
         workflow_db_path.display()
     );
 

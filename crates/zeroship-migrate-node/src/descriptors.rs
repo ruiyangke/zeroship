@@ -257,7 +257,7 @@ pub fn field_to_dto(field: &FieldDescriptor) -> FieldDescriptorDto {
         scale: field.scale,
         vector_metric: field.vector_metric.clone(),
         case_sensitive: field.case_sensitive,
-        encrypted: field.encrypted.clone(),
+        encrypted: field.encrypted,
         mask: field.mask.clone(),
         generated: field
             .generated

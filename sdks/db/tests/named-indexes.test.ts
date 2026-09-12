@@ -58,9 +58,10 @@ describe("SchemaBuilder.index(name, fields) — definition-time validation", () 
     assert.equal(s.indexes[1].name, "by_user_done");
   });
 
-  test("accepts the auto-generated columns (id, created_at, updated_at) in fields", () => {
+  test("accepts an explicitly declared assigned column", () => {
     const s = schema({
       title: t.string().required(),
+      created_at: t.timestamp().auto_now(),
     }).index("by_recency", ["created_at"]);
 
     assert.deepEqual(s.indexes[0].fields, ["created_at"]);

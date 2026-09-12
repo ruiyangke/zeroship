@@ -5,8 +5,6 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use flume::{Receiver, Sender};
-use uuid::Uuid;
-
 use crate::store::{TimerRow, WorkflowSchedulerStore, WorkflowSchedulerStoreError};
 
 #[derive(Debug, Clone, Eq, PartialEq)]

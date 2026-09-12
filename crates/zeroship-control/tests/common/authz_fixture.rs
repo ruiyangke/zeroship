@@ -1,6 +1,6 @@
-use uuid::Uuid;
 use zeroship_authz::Scope;
 use zeroship_control::AppState;
+use zeroship_core::UserId;
 
 /// A seeded control-plane principal plus the OAuth access token that
 /// authenticates it.
@@ -10,7 +10,7 @@ use zeroship_control::AppState;
 /// rows, and not every surface these fixtures drive is in the CLI's issuable
 /// set. See `common::CONSOLE_CLIENT_ID`.
 pub struct SeededPrincipal {
-    pub user_id: Uuid,
+    pub user_id: UserId,
     pub token: String,
 }
 
@@ -24,12 +24,15 @@ impl SeededPrincipal {
             .control_pg
             .execute(
                 "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
-                &[&self.user_id],
+                &[&self.user_id.as_str()],
             )
             .await;
         let _ = state
             .control_pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }
@@ -54,22 +57,21 @@ impl SeededPrincipal {
 /// only some of them use this, so the others would warn.
 #[allow(dead_code)]
 pub async fn seeded_principal(state: &AppState) -> SeededPrincipal {
-    let user_id = Uuid::new_v4();
-    let email = format!("bearer-{user_id}@zeroship.test");
+    let user_id = UserId::mint();
+    let email = format!("bearer-{}@zeroship.test", user_id.as_str());
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
              VALUES ($1, $2::citext, 'Bearer Test User', NOW())",
-            &[&user_id, &email],
+            &[&user_id.as_str(), &email],
         )
         .await
         .expect("insert bearer user");
 
-    SeededPrincipal {
-        user_id,
-        token: super::platform_token_for_client(user_id, &all_scopes(), super::CONSOLE_CLIENT_ID),
-    }
+    let token =
+        super::platform_token_for_client(&user_id, &all_scopes(), super::CONSOLE_CLIENT_ID);
+    SeededPrincipal { user_id, token }
 }
 
 fn all_scopes() -> String {

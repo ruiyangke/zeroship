@@ -7,7 +7,7 @@
 //!   - Action handlers can call fetch normally.
 //!
 //! The db-write refusal lives in
-//! `crates/zeroship-plugin-db/tests/capability.rs` — same shape, different
+//! `crates/zeroship-data-v8/tests/capability.rs` — same shape, different
 //! native callback. The two test files combined are the runtime
 //! defense-in-depth surface for B3.
 //!

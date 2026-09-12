@@ -107,18 +107,13 @@ expect 1 "the same arm id declared twice refuses" dup_arm
 distinct_arms() { gate_arms_init g; gate_arm a 5 1; gate_arm b 5 1; gate_arms_finish; }
 expect 0 "two distinct arm ids with the same counts pass" distinct_arms
 
-# --- the emission is a wire format, not prose -------------------------------
-#
-# tests/gate_arm_census.sh parses these lines. If the shape
-# drifts, that consumer silently enumerates nothing - which is this repo's
-# founding bug, one level up. Pin the exact line.
 emit_out="$(. "$LIB"; gate_arms_init widget; gate_arm citations 85 40; gate_arms_finish)"
 if printf '%s\n' "$emit_out" | grep -qx 'zsgate-arm gate=widget arm=citations examined=85 floor=40'; then
   pass=$((pass + 1))
   echo "ok   - the per-arm census line has its documented shape"
 else
   fail=$((fail + 1))
-  echo "FAIL - the per-arm census line changed shape; gate_arm_census.sh will parse nothing:" >&2
+  echo "FAIL - the per-arm census line changed shape; the diagnostic protocol is no longer recognizable:" >&2
   printf '%s\n' "$emit_out" | sed 's/^/       /' >&2
 fi
 

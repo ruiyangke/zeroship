@@ -127,7 +127,7 @@ GW-5 (streaming idle-timeout DoS) · RT-2 (fail-open `ZEROSHIP_DEV` SSRF bypass)
 | --- | --- | --- | --- |
 | 1 | **gateway** (`crates/gateway`) | internet-facing front door | ✅ 4 HIGH (host-trust ×2, rate-limit ×2), signing strong, no SSRF/traversal |
 | 2 | **runtime** (`crates/runtime`) | V8 sandbox, fetch/SSRF, WS, crypto, capability boundary | ✅ **4 CRITICAL** (isolate escape + 3 DoS), 2 MAJOR SSRF; node-compat + SSRF posture strong |
-| 3 | **plugin-kv + plugin-storage** | sibling native primitives (plugin-db lens) | ✅ kv STRONG (2 MAJOR quota/scan); storage 2 HIGH (path-validator, size cap), S3 N/A |
+| 3 | **kv-v8 + plugin-storage** | sibling native primitives (plugin-db lens) | ✅ kv STRONG (2 MAJOR quota/scan); storage 2 HIGH (path-validator, size cap), S3 N/A |
 | 4 | **control** (`crates/control`) | deploy, billing/Stripe, env, route registry | ✅ **1 CRITICAL** (fee unenforced), 1 HIGH (plan self-escalate), 3 MAJOR; IDOR/bundle-ingest solid |
 | 5 | **worker** (`crates/worker`) | bundle loading, isolate lifecycle/eviction | ✅ 2 MAJOR (identity not app-bound, redeploy no-cleanup); bundle-integrity/cache-keying solid |
 | 6 | **bundle** (`crates/bundle`) | .zship artifact: unpack/path-traversal, blob store | ✅ unpack/blob hardened (covered by control lane A) |
@@ -197,11 +197,11 @@ crypto/node-compat (4). **The highest-stakes module — 4 CRITICAL + 2 MAJOR.**
 
 ---
 
-## 3. plugin-kv + plugin-storage — findings ✅
+## 3. kv-v8 + plugin-storage — findings ✅
 
 Sibling native primitives, reviewed with the plugin-db lens.
 
-### plugin-kv — **STRONG** (no CRITICAL; better than the plugin-db baseline)
+### kv-v8 — **STRONG** (no CRITICAL; better than the plugin-db baseline)
 `app_id` un-spoofable (server-stamped, never a JS arg); keys `{app_id}:`-namespaced
 with `{`/`}`/control chars banned → **hash-tag isolation correct under cluster routing**;
 commands are RESP arrays (**no injection**); SCAN patterns glob-escaped; TTL overflow

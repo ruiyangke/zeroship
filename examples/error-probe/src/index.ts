@@ -35,7 +35,7 @@
 //                                                   same message, `status` added
 //   err.status4xxCode  status: 403, code: "..."  -> the ONE-VARIABLE partner of
 //                                                   err.status4xx: `code` added
-//   err.publicCode5xx  code: "version_mismatch"  -> the ONE-VARIABLE partner of
+//   err.publicCode5xx  code: "concurrency_mismatch"  -> the ONE-VARIABLE partner of
 //                                                   err.plain: `code` added, and
 //                                                   that code is on
 //                                                   `is_public_error_code`, so it
@@ -124,14 +124,14 @@ export const status4xxCodeThrow = query(
 );
 
 /**
- * `err.publicCode5xx` - `err.plain` plus `code: "version_mismatch"`, which is on
+ * `err.publicCode5xx` - `err.plain` plus `code: "concurrency_mismatch"`, which is on
  * `is_public_error_code` in `crates/zeroship-runtime/src/core/dispatch.rs`. No `status`,
  * so it lands at 500 and takes the sanitizer's EXEMPTION arm. The exemption was
  * written to keep the developer-facing `code` on the wire; this row measures
  * what ELSE rides along with it.
  */
 export const publicCode5xxThrow = query(
-  async (): Promise<never> => zsLeakFrameMarker({ code: "version_mismatch" }),
+  async (): Promise<never> => zsLeakFrameMarker({ code: "concurrency_mismatch" }),
   { id: "err.publicCode5xx" },
 );
 

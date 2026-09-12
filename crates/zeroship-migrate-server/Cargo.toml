@@ -17,7 +17,7 @@ path = "src/main.rs"
 async-trait = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 compio = { workspace = true }
-compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
 mimalloc = { workspace = true }
 ntex = { workspace = true }
 serde = { workspace = true }
@@ -29,6 +29,7 @@ uuid = { workspace = true }
 zeroship-authz = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-id = { workspace = true }
 # This service consumes ONLY the `zeroship-migrate` engine crates. It owns the
 # concrete driver producer itself, in `src/session.rs`: `CompioPgSession`, the
 # newtype mapping the platform's io_uring PG driver onto the engine's
@@ -59,12 +60,6 @@ zeroship-migrate-backend = { workspace = true }
 # PostgreSQL host, so it names the vendor it wants rather than reaching for a
 # re-export the facade deliberately no longer carries.
 zeroship-migrate-postgres = { workspace = true }
-# For `zeroship_schema::SchemaName` only. The physical schema this service
-# creates is the same value the data plane later derives its runtime role from,
-# and `runtime_role_provisioning_sql` is one half of that pair - so both halves
-# take the validated type rather than a `&str` either identity would satisfy.
-# A leaf crate: it depends on `zeroship-core` and nothing else of ours.
-zeroship-schema = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
@@ -77,56 +72,24 @@ toml = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem", "rand_core"] }
 jsonwebtoken = { workspace = true }
-# The two live-PG session proofs (`smoke_apply_pg`, `author_and_apply_pg`) return
-# early when there is no test database (PG_TEST_URL unset), which is the normal
-# state in this repo's CI. The announcement goes through `skip`, not `eprintln!`:
-# the harness replays captured output only for a FAILING test, so an eprintln on an
-# early return is invisible on the green run that is exactly when it matters.
-zeroship-test-support = { workspace = true }
 # Authoring proof: run the zero-migrate recorder inside zeroship-runtime's V8 isolate
 # to author an ir_version:1 envelope from a `.ts` migration - the platform's own V8
 # (no Node in the loop). Dev-only: the library surface stays V8-free.
 zeroship-runtime = { workspace = true }
 v8 = { workspace = true }
 
-# ---------------------------------------------------------------------------
-# Live-database test gate
-# ---------------------------------------------------------------------------
-# Same contract as `zeroship-control`'s feature of the same name: it marks the
-# targets that CANNOT run without a reachable, migrated PostgreSQL. Determined
-# by measurement - the built test executables were run with the test database
-# (`zeroship_core::config::test_database_url_opt()`) pointed at a dead port,
-# and `apply_api_test` was the one integration target that failed (it panics
-# in `connect`, it does not skip).
-#
-# The feature also gates `migration_store`'s in-crate `mod tests`, whose two
-# `*_pg` cases dial the same database from the LIB target. A `required-features`
-# entry cannot reach inside a lib, so that module carries the `cfg` directly.
-#
-# Covered in CI by one invocation, with no second list to drift from this one:
-#
-#     cargo test -p zeroship-migrate-server --features live-db-tests
-#
-# driven by `tests/run_billing_suite.sh` (the `billing-gate` job).
-[features]
-live-db-tests = []
+# Database verification is mandatory in ordinary cargo test runs.
+# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
+# migrated platform database required by these tests.
 
 [[test]]
 name = "apply_api_test"
 path = "tests/apply_api_test.rs"
-required-features = ["live-db-tests"]
 
-# The driver conformance target for `CompioPgSession`, the seam producer this
-# service SHIPS. It carries the same contract as `apply_api_test`: it cannot run
-# without a reachable PostgreSQL, and it PANICS naming the provisioning fixture
-# rather than skipping when the feature is on and no DSN is configured. A skipped
-# live suite reports exactly like a passing one, which is how this driver went
-# unconformed while `driver::conformance` was run only against the `PgDevSession`
-# and `MysqlDevSession` TEST harnesses in `crates/zeroship-migrate/tests/`.
+# Exercise the shipped CompioPgSession against a required PostgreSQL server.
 [[test]]
 name = "compio_pg_conformance"
 path = "tests/compio_pg_conformance.rs"
-required-features = ["live-db-tests"]
 
 [lints]
 workspace = true

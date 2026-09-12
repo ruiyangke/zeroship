@@ -29,6 +29,20 @@ pub fn default_worker_threads() -> usize {
     std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
+/// Resolve the worker's KV configuration, requiring shared storage when enabled.
+pub fn open_kv_store(input: &str) -> Result<Option<zeroship_kv::KvStore>, zeroship_kv::KvError> {
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let config = zeroship_kv::KvConfig::from_toml(input)?;
+    if !matches!(config, zeroship_kv::KvConfig::Redis { .. }) {
+        return Err(zeroship_kv::KvError::invalid_argument(
+            "worker KV requires shared Redis-compatible storage",
+        ));
+    }
+    zeroship_kv::KvStore::open(&config).map(Some)
+}
+
 /// Every value a worker launch resolves before it starts serving.
 #[zeroship_config(binary = "zeroship-worker", scope = "worker")]
 #[derive(Debug)]
@@ -75,22 +89,12 @@ pub struct WorkerSettings {
     #[config(name = "worker.database_url")]
     pub database_url: Secret<String>,
 
-    /// Redis connection URL for the app `env.kv` namespace.
-    ///
-    /// Multi-node KV MUST be a SHARED store so a `set` on one worker node is
-    /// visible on another - Redis is that store (the bespoke compio-redis
-    /// driver; zero tokio). The URL selects single-node
-    /// (`redis://host:port`) or cluster (`redis://seed/?cluster=true&seeds=...`)
-    /// mode. When unset the `env.kv` namespace is absent (apps using
-    /// `@zeroship/kv` then fail loudly rather than silently diverging on a
-    /// per-process embedded store). The single-tenant CLI's per-process `redb`
-    /// backend is deliberately NOT used here - it cannot stay consistent across
-    /// a worker fleet.
-    ///
-    /// It may embed `redis://user:pass@host`, which is why it is secret-classed
-    /// rather than operational.
-    #[config(name = "worker.kv_url")]
-    pub kv_url: Secret<String>,
+    /// TOML KV deployment configuration, supplied as secret material because it
+    /// can contain data-server and Sentinel credentials. Distributed workers
+    /// require a shared Redis-compatible deployment; an absent configuration
+    /// leaves env.kv unavailable.
+    #[config(name = "worker.kv_config")]
+    pub kv_config: Secret<String>,
 
     /// `EnvFilter` directive for the tracing subscriber.
     #[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]
@@ -112,6 +116,14 @@ pub struct WorkerSettings {
     #[arg(hide = true)]
     #[config(name = "worker.workflow_advance_unsigned", env = false)]
     pub workflow_advance_unsigned: BootstrapControl<bool>,
+
+    /// TLS endpoint of the PostgreSQL CDC relay.
+    #[config(name = "worker.cdc_relay_url", default = String::new())]
+    pub cdc_relay_url: Operational<String>,
+
+    /// Private certificate authority for the CDC relay; empty uses host trust.
+    #[config(name = "worker.cdc_relay_ca_file", default = PathBuf::new())]
+    pub cdc_relay_ca_file: Operational<PathBuf>,
 
     /// HTTP listen port.
     #[config(name = "worker.port", default = 8080)]
@@ -254,6 +266,20 @@ mod tests {
     use zeroship_core::config::{GeneratedConfig, OverlaySelector};
 
     use super::{default_worker_threads, WorkerSettings, WorkerSettingsSources};
+
+    #[test]
+    fn kv_configuration_accepts_shared_topologies_and_rejects_local_storage() {
+        assert!(super::open_kv_store("").unwrap().is_none());
+        assert!(super::open_kv_store("backend = 'redb'\npath = 'unused.redb'").is_err());
+        for topology in [
+            "mode = 'standalone'\nendpoint = 'localhost:6379'",
+            "mode = 'cluster'\nseeds = ['redis-a:6379', 'redis-b:6379']",
+            "mode = 'sentinel'\nendpoints = ['sentinel:26379']\nservice_name = 'kv'",
+        ] {
+            let input = format!("backend = 'redis'\n[redis.topology]\n{topology}");
+            assert!(super::open_kv_store(&input).unwrap().is_some());
+        }
+    }
 
     #[test]
     fn worker_cannot_select_or_discover_a_shared_overlay() {

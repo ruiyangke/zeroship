@@ -353,7 +353,7 @@ before.
    `format!` near env reads and found only URL and error-string construction -
    **VERIFIED for `crates/cli` only**, not for the plugin crates it links.
 2. **Link-time versus source-time.** `DECLARED_ENV_READS` is populated by whatever
-   the binary *links*. If `zeroship-runtime`, `plugin-db`, `plugin-kv`,
+   the binary *links*. If `zeroship-runtime`, `plugin-db`, `kv-v8`,
    `plugin-storage` or `plugin-workflow` read environment variables internally,
    those reads are in the shipped `zeroship` binary but are invisible to a grep of
    `crates/zeroship-cli/src/`. **NOT CHECKED.** The authoritative enumeration is to run a
@@ -730,7 +730,7 @@ adding one for the runtime would not be, and is not needed.
 **VERIFIED: zeroship has no per-app runtime version pin.** A repo-wide grep for
 `compatibility_date|compat_date|runtime_version|api_version` finds only Stripe's
 `api_version` in the billing tests, and `schema_version` in `plugin-db`, which is
-a per-app DDL counter (`crates/zeroship-plugin-db/src/register_model/bootstrap.rs:39-42`),
+a per-app DDL counter (`crates/zeroship-data-v8/src/register_model/bootstrap.rs`),
 not a runtime behaviour pin. `Manifest.version` (`crates/zeroship-bundle/src/manifest.rs:33-39`)
 is a **wire-format** version - "Schema version. Reject unknown values" - not a
 behaviour selector. Nothing in the tree lets a deployed app say "give me the V8

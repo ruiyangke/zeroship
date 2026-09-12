@@ -17,16 +17,17 @@ path = "src/main.rs"
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-runtime = { workspace = true }
-zeroship-plugin-db = { workspace = true }
-# The worker handles `DbError` directly (the slot reaper's return type). That
-# vocabulary belongs to data-core, not to the adapter that happens to surface
-# it, so the dependency is named rather than reached through plugin-db.
-zeroship-data-core = { workspace = true }
-zeroship-plugin-kv = { workspace = true }
+zeroship-data-v8 = { workspace = true }
+# The worker handles the ORM's typed errors directly in its slot reaper.
+zeroship-data-orm = { workspace = true }
+zeroship-kv = { workspace = true, features = ["redis"] }
+zeroship-kv-v8 = { workspace = true }
 zeroship-metering = { workspace = true }
 zeroship-stream = { workspace = true }
-zeroship-plugin-storage = { workspace = true, features = ["s3"] }
-zeroship-plugin-workflow = { workspace = true }
+zeroship-storage = { workspace = true, features = ["s3"] }
+zeroship-storage-v8 = { workspace = true }
+zeroship-workflow = { workspace = true }
+zeroship-workflow-v8 = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 ntex = { workspace = true }
 serde = { workspace = true }
@@ -43,47 +44,13 @@ base64 = { workspace = true }
 cyper = { workspace = true }
 tracing = { workspace = true }
 
-# ---------------------------------------------------------------------------
-# Live-database test gate
-# ---------------------------------------------------------------------------
-# `live-db-tests` compiles `handler::workflow_live_tests` - seven tests that
-# drive `workflow_advance_unsigned` end to end - plus db_posture's full worker
-# boot test. They need a PostgreSQL that is MIGRATED, not merely reachable: the
-# claim and posture paths read `zeroship.apps`, `zeroship.plans` and
-# `zeroship.app_deploys`
-# (crates/zeroship-plugin-workflow/src/claim.rs:89-91), and those tables come
-# from the committed corpus in `db/migrations-ts/`, never from a fixture.
-#
-# THEY WERE UNGATED UNTIL 2026-08-28 and nothing provisioned that database, so
-# `cargo test -p zeroship-worker` reported seven FAILED lines reading
-# `relation "zeroship.plans" does not exist` - a void run wearing the costume of
-# a regression. It was invisible only while nobody ran the bin target;
-# d57ba4caa made the documented command reach it. `zeroship-control` hit the
-# identical shape on 2026-08-20 (see its own `live-db-tests` block, and in
-# particular the paragraph on why a DEAD-PORT probe cannot find this class of
-# gap - an empty-but-answering database is the case that bites).
-#
-# Gating hides tests from the default build, which is the very failure a gate is
-# meant to prevent, so it is honest only while something else runs them. That
-# something is `tests/run_worker_suite.sh`: it creates and migrates a database
-# named after this tree's migration set, exports it as `PG_TEST_URL`, runs
-#
-#     cargo test -p zeroship-worker --features live-db-tests
-#
-# and then FAILS unless at least seven `workflow_advance_*` tests and the one
-# full boot-posture test reported `ok`. Those named arms matter - a total-passes
-# floor cannot tell a gated-out live set from a shrunken one, because both just
-# print a smaller number. CI runs the script as the `worker-live-gate` job.
-#
-# The dev-dependency below is NOT gated with it: Cargo rejects
-# `optional = true` on a dev-dependency, so `zeroship-migrate-server` is built
-# for every test profile whether or not the feature is on.
-[features]
-live-db-tests = []
+# Database verification is mandatory in ordinary cargo test runs.
+# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
+# migrated platform database required by these tests.
 
 [dev-dependencies]
 # DEV-only, and zeroship-migrate-server does not depend on zeroship-worker, so
-# no cycle (same pattern as zeroship-plugin-db's and zeroship-control's
+# no cycle (same pattern as zeroship-data-v8's and zeroship-control's
 # dev-dependency on it). The workflow-advance handler tests seed an app by
 # INSERTing into zeroship.apps directly, which - like every such seed in this
 # workspace - skips the migration apply that creates the app's app_<uuid>
@@ -94,10 +61,9 @@ zeroship-migrate-server = { workspace = true }
 # The generated-controls test parses an overlay fixture to prove a persisted
 # entry cannot enable the unsigned workflow-advance ingress.
 toml = { workspace = true }
-# The faithful four-namespace dispatch test (kv + storage + db + auth) roots a
-# temp LocalFs storage dir + blob dir per run (KV uses the real Redis backend at
-# REDIS_TEST_URL); tempfile gives each test an isolated dir for the FS legs.
+# The kernel dispatch test owns its Redis container and temporary storage dirs.
 tempfile = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking"] }
 tar = { workspace = true }
 zstd = { workspace = true }
 

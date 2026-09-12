@@ -27,7 +27,8 @@ verification** are real.
   (`packages/zero-migrate-cli/dist/cli-bin.js`, which the harness reaches
   through `zs_platform_migrate` in `tests/lib/runtime_secrets.sh`), `node`,
   `openssl`, `curl`, and `psql` (taken from $PATH, else the nix store;
-  override with `PSQL`. Absent psql is a refusal, not a skip).
+  override with `PSQL`). Every one of these is a refusal when absent, not a
+  skip.
 - The operator's Stripe **TEST** keys, sourced from the env file (see Secrets).
 
 ## Run
@@ -37,7 +38,7 @@ verification** are real.
 cargo build --release -p zeroship-control
 pnpm install && pnpm build
 
-# 2. Source the Stripe TEST keys (REQUIRED — the harness skips cleanly if unset)
+# 2. Source the Stripe TEST keys (REQUIRED — the harness refuses if unset)
 source /home/ruiyang/.config/zeroship-stripe-test.env
 
 # 3. Run
@@ -47,9 +48,14 @@ source /home/ruiyang/.config/zeroship-stripe-test.env
 STRICT=1 ./tests/e2e_stripe_billing.sh
 ```
 
-The harness **skips cleanly (exit 0)** when prereqs are absent (keys not
-sourced, no PG :5440, no docker, missing tools) so it is CI-safe. It
-**refuses to run** if `STRIPE_TEST_SECRET_KEY` is not an `sk_test_` key.
+The harness **refuses (exit 2)** when any prerequisite is absent - keys not
+sourced, no PG :5440, no docker, missing tools - naming the thing and its
+remedy. It also refuses if `STRIPE_TEST_SECRET_KEY` is not an `sk_test_` key.
+
+It used to exit 0 on all of those, which is why this section once called it
+"CI-safe". Nothing in `.github/workflows/` runs it and neither does
+`tests/run_billing_suite.sh`, so nothing depended on that: the exit 0 bought no
+CI job and cost the hand-runner a green that had measured nothing.
 
 ## Secrets handling
 

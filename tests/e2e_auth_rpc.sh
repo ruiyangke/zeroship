@@ -27,7 +27,7 @@
 # fourth line used to read "authed auth.notes.list → 200". There is no such
 # assertion and there never was - see the comment at the notes.list call below,
 # which states the reason. `tests/lib/e2e_stack.sh` starts NO Redis and passes
-# NO ZEROSHIP_WORKER_KV_URL (grep: zero hits), so an authed kv-backed read would fail for a
+# NO ZEROSHIP_WORKER_KV_CONFIG (grep: zero hits), so an authed kv-backed read would fail for a
 # reason that has nothing to do with the seam under test. The omission is
 # correct; the header was not. This list also omitted the two `whoamiStrict`
 # arms it does run, so it was wrong in both directions.

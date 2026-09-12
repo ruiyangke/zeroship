@@ -1,17 +1,12 @@
 import type { IdLoader } from "./loader";
+import type { IdValue } from "./types";
 
-type LoaderRow = { id: string };
+type LoaderRow = { id: IdValue };
 
 /**
- * Internal JS-only transaction bookkeeping carried by each Collection.
- *
- * The native runtime owns BEGIN / SAVEPOINT / COMMIT / ROLLBACK and the
- * actual tx connection routing. The SDK still needs two bits of JS state:
- * `_txDepth` for loader/live guards, and `_idLoader` so bootstrap can
- * flush pending batches before opening a transaction.
+ * JS loader state carried by each Collection.
  */
 export interface TransactionStateCarrier {
-  _txDepth: number;
   _idLoader: IdLoader<LoaderRow> | null;
 }
 
@@ -24,12 +19,8 @@ function requireTransactionStateCarrier(value: unknown): TransactionStateCarrier
     throw new Error("@zeroship/db/internal: expected a Collection transaction-state carrier.");
   }
   const carrier = value as {
-    _txDepth?: unknown;
     _idLoader?: unknown;
   };
-  if (typeof carrier._txDepth !== "number") {
-    throw new Error("@zeroship/db/internal: transaction-state carrier is missing numeric _txDepth.");
-  }
   if (
     carrier._idLoader !== null &&
     carrier._idLoader !== undefined &&
@@ -40,19 +31,6 @@ function requireTransactionStateCarrier(value: unknown): TransactionStateCarrier
   return carrier as TransactionStateCarrier;
 }
 
-export function readTransactionDepth(value: unknown): number {
-  if (value === null || typeof value !== "object") return 0;
-  const depth = (value as { _txDepth?: unknown })._txDepth;
-  return typeof depth === "number" ? depth : 0;
-}
-
-export function anyCollectionInTransaction(db: Record<string, unknown>): boolean {
-  for (const value of Object.values(db)) {
-    if (readTransactionDepth(value) > 0) return true;
-  }
-  return false;
-}
-
 export async function drainCollectionLoaders(collections: Iterable<unknown>): Promise<void> {
   const drains: Promise<void>[] = [];
   for (const collection of collections) {
@@ -61,22 +39,4 @@ export async function drainCollectionLoaders(collections: Iterable<unknown>): Pr
     if (drain !== undefined) drains.push(drain);
   }
   await Promise.all(drains);
-}
-
-export function enterTransactionScope(
-  collections: Iterable<unknown>,
-): TransactionStateCarrier[] {
-  const carriers: TransactionStateCarrier[] = [];
-  for (const collection of collections) {
-    const carrier = requireTransactionStateCarrier(collection);
-    carrier._txDepth += 1;
-    carriers.push(carrier);
-  }
-  return carriers;
-}
-
-export function exitTransactionScope(collections: Iterable<TransactionStateCarrier>): void {
-  for (const collection of collections) {
-    collection._txDepth -= 1;
-  }
 }

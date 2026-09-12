@@ -1,11 +1,10 @@
 # SQLite divergences
 
-`plugin-db` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. The remaining differences are in engine-specific search, transaction isolation, locking, scoring, ordering, and system-column timestamp resolution.
+`zeroship-data-orm` keeps the creator-facing CRUD surface aligned across Postgres and SQLite. Array updates share complete-element and structural-equality semantics; SQLite's connection setup installs the SQL comparison helper described in [the ORM architecture](../architecture/data-orm.md). The remaining differences are in engine-specific search, transaction isolation, locking, scoring, and ordering.
 
-Most rows below are deliberate. System timestamp resolution is a consequence of
-the storage each backend uses for a shared column, not a choice. Typed-id ordering
-is retained in the table as an explicit parity guarantee: it used to diverge, and
-the column collation now prevents that regression.
+Most rows below are deliberate. Typed-ID ordering is retained as an explicit
+parity guarantee because column collation prevents the databases from comparing
+the generated values differently.
 
 For the **migration** authoring surface, the equivalent boundary — which DML transforms are portable across both backends, the `.splitPart` portable-expression envelope, and the `EXPR_NOT_PORTABLE` hard error out of envelope — is documented in [migrate-op-dsl.md](./migrate-op-dsl.md#the-dml-portability-boundary).
 
@@ -24,7 +23,7 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 | Journal mode of app data | not applicable — one Postgres cluster, MVCC | the session's own database is **WAL**, but each app's `zs-<app>.sqlite` is **DELETE** (rollback journal). `PRAGMA journal_mode` is per database and does not propagate across `ATTACH`, and the migration engine pins app files to DELETE and refuses to run otherwise (`crates/zeroship-migrate-sqlite/src/backend/actor.rs:719-729`) | **WAL's reader-writer concurrency does not apply to your app's own tables.** A reader still proceeds while a writer holds `RESERVED`, so ordinary overlapping reads are fine, but there is no per-connection snapshot and a `SQLITE_BUSY_SNAPSHOT` write-upgrade conflict cannot arise on app data — an upgrade conflict there is a plain `SQLITE_BUSY` that waits out `busy_timeout` (5000 ms) instead of failing at once. Both are the same typed lock-contention surface to a caller; the difference is how long you wait for it. |
 | Text ordering | backend ordering plus the database collation | emulates PG NULL placement with `IS NULL` buckets, but does not inject a cross-engine collation | Do not depend on locale-sensitive or Unicode string ordering matching exactly across backends. |
 | Ordering by `id` | sortable entity `id` columns pin `COLLATE "C"` | sortable entity `id` columns pin/use `BINARY` byte order | **Parity guarantee.** `id` is a base62 UUIDv7 typed id whose alphabet spans digits, uppercase, and lowercase. Both tiers compare its bytes, so `.sort({ id: -1 })` is newest-first and cursor range predicates use the same ordering. Ordinary text still follows the general text-ordering row above. |
-| System timestamp resolution | `created_at` / `updated_at` are `timestamptz` defaulting to `NOW()` — microsecond | the injected DDL is `TEXT ... DEFAULT CURRENT_TIMESTAMP`, which SQLite renders at **whole-second** resolution | Rows written inside the same second share one `created_at` on SQLite and have distinct values on Postgres — measured at six back-to-back inserts giving 6 distinct values deployed and 1 in dev. Both tiers return epoch milliseconds, so the type matches and only the granularity differs; SQLite's always end in `000`. Do not use `created_at` as a tiebreak or an ordering key on the dev tier, and do not expect a local ordering bug to reproduce in production — the local tier is the degenerate one. |
+| Declared timestamp default precision | PostgreSQL timestamp defaults retain the database's native fractional precision | SQLite timestamp defaults use a UTC `strftime` expression with fractional seconds | The runtime returns epoch milliseconds on both backends. Precision beyond that contract is not portable. |
 | Migration column-shape verify (existence-guard / drift) | compares the full `information_schema` type spelling | compares only the SQLite **type affinity** (`text`/`integer`/`real`/`numeric`/`blob`) | Several distinct SDK facets fold to the `text` affinity on SQLite (`string`/`ref`/`date`/`json`/…). A within-text-affinity facet change (e.g. `string`→`ref`) is invisible to SQLite introspection and is treated as **no change** by both the differ and the `ifNotExists` existence-guard probe (a `ref` adds no FK via `ALTER` on SQLite — it is physically the same `text` column). A genuine affinity change (`text`↔`real`, i.e. string↔number) IS detected. |
 | Migration enum/domain types | `CREATE TYPE ... AS ENUM` and `CREATE DOMAIN` objects | inline column type plus `CHECK`/default/nullability at each use site | The logical constraint must match. SQLite does not create standalone named type objects. |
 | Migration table `CHECK` constraints | intended closed-AST `CHECK` rendering | intended closed-AST `CHECK` rendering | Current op.* validate-refuses table-level `CHECK` until the expression renderer lands; enum/domain `CHECK` emulations are supported. |
@@ -37,19 +36,22 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 
 ## Source of truth
 
-- [crates/zeroship-data-engine/src/backend/mod.rs](../../crates/zeroship-data-engine/src/backend/mod.rs) - cross-backend trait contracts for vector and spatial search
-- [crates/zeroship-data-sqlite/src/lib.rs](../../crates/zeroship-data-sqlite/src/lib.rs) — SQLite implementations
-- [crates/zeroship-data-sqlite/src/vector.rs](../../crates/zeroship-data-sqlite/src/vector.rs) — `vector_unsupported_metric`
-- [crates/zeroship-data-sqlite/src/spatial.rs](../../crates/zeroship-data-sqlite/src/spatial.rs) — haversine helper
-- [crates/zeroship-data-sqlite/src/session.rs](../../crates/zeroship-data-sqlite/src/session.rs) — WAL + `busy_timeout`
-- [crates/zeroship-data-sqlite/src/error.rs](../../crates/zeroship-data-sqlite/src/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
-- [crates/zeroship-plugin-db/src/v8_classes/transaction.rs](../../crates/zeroship-plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
-- [crates/zeroship-schema/src/query.rs](../../crates/zeroship-schema/src/query.rs) — cross-backend `ORDER BY` shaping and the `IS NULL` buckets, plus the system-column and index emission
-- [crates/zeroship-data-engine/src/crud/mod.rs](../../crates/zeroship-data-engine/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
-- [crates/zeroship-data-sqlite/src/dialect.rs](../../crates/zeroship-data-sqlite/src/dialect.rs) — `now_fn()` returns `CURRENT_TIMESTAMP`, which is where the whole-second system-timestamp resolution comes from
+- [crates/zeroship-data-orm/src/backend/mod.rs](../../crates/zeroship-data-orm/src/backend/mod.rs) - cross-backend trait contracts for vector and spatial search
+- [crates/zeroship-data-orm/src/backend/sqlite/mod.rs](../../crates/zeroship-data-orm/src/backend/sqlite/mod.rs) — SQLite implementations
+- [crates/zeroship-data-orm/src/backend/sqlite/vector.rs](../../crates/zeroship-data-orm/src/backend/sqlite/vector.rs) — `vector_unsupported_metric`
+- [crates/zeroship-data-orm/src/backend/sqlite/spatial.rs](../../crates/zeroship-data-orm/src/backend/sqlite/spatial.rs) — haversine helper
+- [crates/zeroship-data-orm/src/backend/sqlite/session.rs](../../crates/zeroship-data-orm/src/backend/sqlite/session.rs) — WAL + `busy_timeout`
+- [crates/zeroship-data-orm/src/backend/sqlite/error.rs](../../crates/zeroship-data-orm/src/backend/sqlite/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
+- [crates/zeroship-data-v8/src/v8_classes/transaction.rs](../../crates/zeroship-data-v8/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
+- [crates/zeroship-data-orm/src/sql/compiler/shared.rs](../../crates/zeroship-data-orm/src/sql/compiler/shared.rs) — cross-backend `ORDER BY` and null placement
+- [crates/zeroship-data-orm/src/crud/mod.rs](../../crates/zeroship-data-orm/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
+- [crates/zeroship-migrate-core/src/render/backends/mod.rs](../../crates/zeroship-migrate-core/src/render/backends/mod.rs) — backend timestamp-default rendering
 
 ## Test coverage
 
-SQLite-specific backend coverage lives in [crates/zeroship-plugin-db/tests/sqlite_integration.rs](../../crates/zeroship-plugin-db/tests/sqlite_integration.rs). The parity matrix helpers live in [crates/zeroship-plugin-db/tests/parity/mod.rs](../../crates/zeroship-plugin-db/tests/parity/mod.rs).
+SQLite-specific backend coverage lives in [crates/zeroship-data-orm/src/tests/sqlite/mod.rs](../../crates/zeroship-data-orm/src/tests/sqlite/mod.rs). The parity matrix helpers live in [crates/zeroship-data-v8/src/tests/fixtures/parity.rs](../../crates/zeroship-data-v8/src/tests/fixtures/parity.rs).
 
-The two rows above that compare the *tiers* rather than the engines — transaction isolation, and system timestamp resolution — are measured by [tests/e2e_dev_vs_deployed_db.sh](../../tests/e2e_dev_vs_deployed_db.sh), which runs one identical operation sequence against `pnpm dev` and against the same app deployed behind the gateway and diffs the results. A crate-local test cannot see either, because both are properties of the seam and not of a backend.
+The transaction rows that compare complete runtime tiers are exercised by
+[examples/db-todos/tests/database.test.ts](../../examples/db-todos/tests/database.test.ts),
+which runs the same operation sequence against local development and a deployed
+app. Crate-local tests cover the backend-specific pieces.

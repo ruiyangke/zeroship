@@ -1653,7 +1653,7 @@ addresses we assigned, a trust root we issued, and a membership list we control.
 Paying that complexity for discovery problems we do not have is a bad trade
 before any dependency question arises. It also arrives on a tokio reactor, which
 AGENTS.md permits only as a `[dev-dependencies]` exemption, with
-`tests/zero_tokio_gate.sh` enforcing both directions. That is the second reason
+`cargo xtask test repository` enforcing both directions. That is the second reason
 and should not be the argument that gets made.
 
 **etcd.** Rejected because its job is already done here, and because its known
@@ -1829,7 +1829,7 @@ in zone A must read zone A's database. Until anchors are addressable from any zo
 app moves its sessions' storage out from under whichever gateway holds the cookie.
 
 **Encryption keys are derived from the app id with no rotation surface.**
-MEASURED: `crates/zeroship-data-core/src/encryption/keys.rs` derives both AEAD
+MEASURED: `crates/zeroship-data-orm/src/encryption/keys.rs` derives both AEAD
 halves with HKDF-SHA256 salted by the app id. The module header spells it out
 (`salt = app_id`, `info = "zsenc/aead/v1/k_enc"` and `.../k_siv"`) and
 `derive_key` does exactly that:
@@ -1942,7 +1942,7 @@ an app's ciphertext can be re-keyed when it moves.
 **Recommendation: build the rotation surface, and treat "every zone holds every
 root" as the interim only if it is written down as such.** MEASURED, the module
 already names the work: "adding one will require rewiring the cache to track key
-versions" (`crates/zeroship-data-core/src/encryption/keys.rs`). The interim option
+versions" (`crates/zeroship-data-orm/src/encryption/keys.rs`). The interim option
 is not free - it makes zone isolation nominal for the one thing zone isolation
 would most be wanted for - and it is the kind of interim that becomes permanent
 because nothing fails while it holds. Sequencing this after the delivery work is
@@ -2288,7 +2288,7 @@ the estimate was wrong in both directions" does not teach better.
 An early draft repeated a claim from `docs/architecture/data-system.md`, which
 says: "This is the discipline `DbResourceKey` already applies to DSN passwords: a
 digest chosen so the secret 'cannot reach `Debug` or a log line'." MEASURED, the
-source (`crates/zeroship-plugin-db/src/service.rs`) says the opposite:
+source (`crates/zeroship-data-v8/src/service.rs`) says the opposite:
 
 ```
 //! # What a `DbResourceKey` is for
@@ -2311,11 +2311,9 @@ real file.
 draft asserted that `cluster_id` lives on the `Datastore` entity. MEASURED:
 `grep -rn "struct Datastore\b" crates/ --include='*.rs'` returns nothing, and
 `grep -rln datastore db/migrations-ts/` returns nothing. `DatastoreId` and
-`ClusterId` exist only as wire types in `crates/zeroship-cdc-wire`
-(`src/ids.rs`, consumed in `src/frame.rs` and `src/request.rs`). Both spellings
-are open questions - issue #178 records that `ds_` contradicts its own proposal
-and `clu_` is an invention. A design that placed zone or cluster identity on a
-datastore entity would have been building on a type that does not exist.
+`ClusterId` were proposed as wire types. The relay extraction removed those
+unused contracts. A design that places zone or cluster identity on a datastore
+must introduce the entity that owns that authority.
 
 **3. Gossip was dismissed for the wrong reason, then adopted for a different
 one.** The first pass rejected gossip as "a distributed system added only to
@@ -2374,7 +2372,7 @@ and nothing else. The claim as first drafted read as though the gateway could
 recompute the sector from what it already has. It cannot, today.
 
 **10. "An app cannot move between zones" does not follow from key derivation.**
-The HKDF salt is the `app_id` (`crates/zeroship-data-core/src/encryption/keys.rs`,
+The HKDF salt is the `app_id` (`crates/zeroship-data-orm/src/encryption/keys.rs`,
 `derive_key`), which is stable across a move. The real constraints are root-key
 presence per zone and the absent rotation surface, both stated in that module's own
 header. The corrected statement is narrower and more useful.

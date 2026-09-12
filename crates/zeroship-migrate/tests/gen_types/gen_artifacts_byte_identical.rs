@@ -138,6 +138,7 @@ fn people_with_team_descriptor() -> CollectionDescriptor {
         name: "teamId".to_string(),
         ty: "ref".to_string(),
         references: Some("teams".to_string()),
+        reference_column: Some("id".into()),
         ..Default::default()
     });
     descriptor
@@ -177,7 +178,7 @@ fn people_raw_envelope() -> MigrationIr {
         "columns": [
             { "name": "name", "type": "text" },
             { "name": "email", "type": "text", "nullable": false },
-            { "name": "teamId", "type": { "ref": { "references": "teams" } } }
+            { "name": "teamId", "type": { "ref": { "references": "teams" } }, "references": {"table": "teams", "column": "id"} }
         ],
         "primaryKey": null,
         "indexes": [

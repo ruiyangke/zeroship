@@ -669,7 +669,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// A SCAN-shaped reply: `[cursor, [key; n]]` with 512-byte keys, i.e.
-    /// exactly the shape `plugin-kv` produces at `LIST_MAX_LIMIT`.
+    /// exactly the shape `zeroship-kv` produces at `LIST_MAX_LIMIT`.
     fn scan_reply(keys: usize) -> Vec<u8> {
         let key = "k".repeat(512);
         let mut out = Vec::with_capacity(keys * 525 + 32);

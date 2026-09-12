@@ -50,7 +50,7 @@ use crate::store::sessions::{self, SessionKind, SessionSummary};
 /// The caller's resolved identity for a `/me/sessions` request: the user id
 /// plus the id of their current (cookie) session, so the list can flag it.
 struct Caller {
-    user_id: zeroship_core::user_id::UserId,
+    user_id: zeroship_core::UserId,
     current_session_id: uuid::Uuid,
 }
 
@@ -89,8 +89,8 @@ pub async fn list(
     let views: Vec<SessionView> = summaries
         .into_iter()
         .map(|summary| {
-            let current = summary.kind == SessionKind::Idp
-                && summary.id == caller.current_session_id;
+            let current =
+                summary.kind == SessionKind::Idp && summary.id == caller.current_session_id;
             SessionView { summary, current }
         })
         .collect();
@@ -217,10 +217,7 @@ pub async fn revoke(
 /// missing/invalid/expired. `validate` slides the idle window, so hitting
 /// this surface counts as activity — same as `/me`.
 #[allow(clippy::future_not_send)]
-async fn resolve_caller(
-    req: &HttpRequest,
-    db: &compio_postgres::Client,
-) -> Option<Caller> {
+async fn resolve_caller(req: &HttpRequest, db: &compio_postgres::Client) -> Option<Caller> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -277,7 +274,11 @@ mod tests {
         let mk = |id, kind| SessionSummary {
             id,
             kind,
-            app_id: if kind == SessionKind::App { Some(app_id.clone()) } else { None },
+            app_id: if kind == SessionKind::App {
+                Some(app_id.clone())
+            } else {
+                None
+            },
             created_at: now,
             last_seen_at: now,
             expires_at: now,

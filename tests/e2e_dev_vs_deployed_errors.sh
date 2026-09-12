@@ -21,7 +21,7 @@
 #   asserts the absolute property separately, against the RAW deployed bytes.
 #
 #   Symmetrically, a crate-local suite reads the envelope from ONE side only:
-#   `crates/zeroship-plugin-db/tests/capability.rs` can read a verbose `code`/`details`
+#   `crates/zeroship-data-v8/tests/capability.rs` can read a verbose `code`/`details`
 #   body because `CAPABILITY_VIOLATION` is on `is_public_error_code`'s
 #   allow-list, so it never exercises the blanking arm this harness measures.
 #
@@ -32,7 +32,7 @@
 #     err.plain          {}                          -> 500, sanitizer's blank arm
 #     err.status4xx      {status:403}                -> one variable vs err.plain
 #     err.status4xxCode  {status:403,code:...}       -> one variable vs err.status4xx
-#     err.publicCode5xx  {code:"version_mismatch"}   -> one variable vs err.plain,
+#     err.publicCode5xx  {code:"concurrency_mismatch"}   -> one variable vs err.plain,
 #                                                       and that code is on
 #                                                       `is_public_error_code`, so
 #                                                       it takes the 5xx

@@ -159,7 +159,7 @@ fn quote_ident(ident: &str) -> Result<String, RoleError> {
 /// Derive the deterministic migrator role name for a project.
 ///
 /// `migrator_<readable-prefix>_<hash>` with the project id sanitized to the
-/// Postgres identifier charset (`[a-z0-9_]`) and disambiguated by a base62
+/// Postgres identifier charset (`[a-z0-9_]`) and disambiguated by a base36
 /// SHA-256 suffix over the raw project id. The result is always quoted at use
 /// sites, so this is defense-in-depth, not the sole injection guard.
 ///

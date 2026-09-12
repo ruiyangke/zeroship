@@ -119,7 +119,7 @@ JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index
 # --- PER-RUN ports + containers ---------------------------------------------
 # The header used to call these "DEDICATED ... distinct from every other
 # harness", and the second half was not true. :5471 was ALSO this Postgres in
-# tests/e2e_s3_large_stream.sh:114 and tests/e2e_project_config.sh:56 (and
+# the retired storage stress script and tests/e2e_project_config.sh (and
 # tests/e2e_gateway_path_backslash.sh:82 already carried a comment saying so);
 # :8071 was tests/e2e_real_app_end_to_end.sh:52's GATEWAY port. A constant is
 # only "dedicated" against the harnesses that were written after it and looked.
@@ -421,6 +421,7 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control healthy (lite provider, stream=redpanda, stripe→mock :$MOCK_PORT)" || { fail "control unhealthy"; tail -30 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # worker - publishes drained usage events to redpanda. It takes NO `--config`
 # (9b205f6ed removed its TOML overlay source as a credential boundary), so its
 # stream settings arrive as flags. The WAL path is per process: redb is
@@ -452,7 +453,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
   && pass "gateway healthy (route-pull poll-interval 2s)" || { fail "gateway unhealthy"; tail -30 "$WORK/gate.log"; exit 1; }
 e2e_assert_usage_producer "$WORK/gate.log" "gateway"
 
-# The migration service. Same invocation as tests/e2e_db_app_end_to_end.sh.
+# The migration service. Same invocation as examples/db-hitcounter/tests/deployed.test.ts.
 "$BIN/zeroship-migrate-server" --port "$ZEROSHIP_MIGRATE_SERVER_PORT" \
   --tmp-dir "$WORK/migrated-tmp" \
   > "$WORK/migrated.log" 2>&1 &
@@ -738,7 +739,7 @@ if [ -n "$CPU" ] && [ "$CPU" -ge 0 ] 2>/dev/null; then pass "cpu_us present (syn
 # so nothing installs on env.db and every insert fails -- which is exactly what
 # `probe db write ok=false` above was reporting. This harness also never invokes
 # zeroship-migrate-server (zero references in the file), unlike
-# tests/e2e_db_app_end_to_end.sh, whose db-hitcounter has a committed
+# examples/db-hitcounter/tests/deployed.test.ts, whose db-hitcounter has a committed
 # migrations/20260711000000_create_hits.ts and an apply step.
 #
 # So this gate is RED at HEAD BY DESIGN until the probe gets migrations. That is
@@ -889,7 +890,7 @@ MOCK_REQS="$(curl -s "$MOCK_URL/__mock/requests")"
 # which is why .billed and .period_start were never affected.
 #
 # THIS COMMENT SAID "a NUMBER" UNTIL 2026-08-12, and that wording cost a whole
-# extra round. Booleans colourise identically: e2e_app_primitives_kv_storage.sh
+# extra round. Booleans colourise identically: the retired storage smoke suite
 # compared `.deleted` and `.found` and got ESC[33mtrueESC[39m /
 # ESC[33mfalseESC[39m, so the storage-delete assertion reported a failure over
 # correct behaviour. I had swept for the class the day before and declared it

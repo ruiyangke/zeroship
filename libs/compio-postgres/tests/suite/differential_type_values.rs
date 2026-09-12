@@ -4804,6 +4804,10 @@ async fn both_drivers_agree_on_temporal_text_and_binary_codecs() {
     assert_eq!(ours, expected, "server_version_num={server}");
 }
 
+#[cfg(any(
+    feature = "with-jiff-0_2",
+    all(feature = "with-chrono-0_4", feature = "with-time-0_3")
+))]
 const TYPED_TEMPORAL_SQL: &str = "SELECT \
      '0001-01-01 BC'::date, \
      '1999-12-31 23:59:59.999999'::timestamp, \
@@ -4814,6 +4818,10 @@ const TYPED_TEMPORAL_SQL: &str = "SELECT \
      '-infinity'::timestamptz, 'infinity'::timestamptz, \
      '24:00'::time";
 
+#[cfg(any(
+    feature = "with-jiff-0_2",
+    all(feature = "with-chrono-0_4", feature = "with-time-0_3")
+))]
 const TYPED_TEMPORAL_REBOUND_SQL: &str = "SELECT \
      $1::date::text, $2::timestamp::text, $3::timestamptz::text, $4::time::text, \
      $5::date::text, $6::date::text, \

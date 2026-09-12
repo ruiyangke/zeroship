@@ -12,10 +12,8 @@ pub mod __private {
 }
 
 pub mod app_derivation;
-pub mod worker_ring;
 pub mod auth;
 pub mod auth_provider;
-pub mod change_event;
 pub mod client_ip;
 pub mod config;
 pub mod crypto;
@@ -29,8 +27,10 @@ pub mod observability;
 pub mod oidc_verify;
 pub mod pkce;
 pub mod preview_ports;
+pub mod project_data_key;
 pub mod readiness;
 pub mod replication_names;
+pub mod schema_name;
 pub mod service_assertion;
 pub mod service_identity;
 pub mod service_peers;
@@ -39,6 +39,7 @@ pub mod types;
 pub mod usage_event;
 pub mod workflow_signal_token;
 pub mod user_envelope;
+pub mod worker_ring;
 
 // The entity-id vocabulary lives in `zeroship-id`, a leaf that carries only
 // `uuid` and `serde`. It is re-exported at the paths it has always occupied
@@ -50,7 +51,8 @@ pub mod user_envelope;
 // keys can be depended on by an artifact format. One `AppId` for the whole tree
 // is the property being bought.
 pub use zeroship_id::{
-    app_id, entity_id, invite_id, organization_id, project_id, typed_id, user_id,
+    app_id, entity_id, invite_id, organization_id, project_id, typed_id, user_id, AppId,
+    InviteId, OrganizationId, ProjectId, UserId,
 };
 
 pub use superjson::Envelope;

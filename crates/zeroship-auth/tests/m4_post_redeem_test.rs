@@ -11,11 +11,11 @@ use ntex::service::{Pipeline, Service};
 use ntex::web::{self, test};
 
 use common::test_auth_config;
+use uuid::Uuid;
 use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::{magic_link, verification};
 use zeroship_auth::server;
 use zeroship_auth::store::users;
-use uuid::Uuid;
 
 macro_rules! init_app {
     ($ctx:expr) => {
@@ -50,12 +50,11 @@ struct M4TestCtx {
 
 impl M4TestCtx {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let db_url = zeroship_core::config::test_database_url_opt()?;
-        let (pg_client, pg_connection) =
-            compio_postgres::connect(&db_url, compio_postgres::NoTls)
-                .await
-                .expect("connect pg");
+    async fn boot() -> Self {
+        let db_url = crate::common::test_database_url();
+        let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+            .await
+            .expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(e) = pg_connection.run().await {
                 eprintln!("[m4_post_redeem_test] pg connection driver: {e}");
@@ -67,15 +66,15 @@ impl M4TestCtx {
         let cfg = Arc::new(test_auth_config(&db_url));
         let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url, 4);
 
-        Some(Self {
+        Self {
             cfg,
             pg,
             refresh_pool,
-        })
+        }
     }
 
     #[allow(clippy::future_not_send)]
-    async fn seed_verification(&self) -> (zeroship_core::user_id::UserId, String, String) {
+    async fn seed_verification(&self) -> (zeroship_core::UserId, String, String) {
         let email = format!("m4-verify-{}@zeroship.test", Uuid::new_v4().simple());
         let user = users::create(&self.pg, &email, "M4 Verify", None)
             .await
@@ -136,72 +135,68 @@ impl M4TestCtx {
             .await;
         let _ = self
             .pg
-            .execute("DELETE FROM zeroship.users WHERE email = $1::citext", &[&email])
+            .execute(
+                "DELETE FROM zeroship.users WHERE email = $1::citext",
+                &[&email],
+            )
             .await;
     }
-
 }
 
 #[test]
 fn verify_get_renders_interstitial_does_not_consume_token() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let (user_id, email, token) = ctx.seed_verification().await;
-    let app = init_app!(&ctx);
+        let ctx = M4TestCtx::boot().await;
+        let (user_id, email, token) = ctx.seed_verification().await;
+        let app = init_app!(&ctx);
 
-    let resp = call_get(&app, &format!("/verify?token={token}")).await;
-    assert_eq!(resp.status().as_u16(), 200);
-    assert_eq!(header(resp.headers(), CACHE_CONTROL), "no-store");
-    let body = read_body(resp).await;
-    assert!(body.contains(r#"<form method="POST" action="/verify/redeem">"#));
-    assert!(body.contains(&format!(r#"name="token" value="{token}""#)));
+        let resp = call_get(&app, &format!("/verify?token={token}")).await;
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(header(resp.headers(), CACHE_CONTROL), "no-store");
+        let body = read_body(resp).await;
+        assert!(body.contains(r#"<form method="POST" action="/verify/redeem">"#));
+        assert!(body.contains(&format!(r#"name="token" value="{token}""#)));
 
-    let remaining: i64 = ctx
-        .pg
-        .query_one(
-            "SELECT COUNT(*) FROM zeroship.email_verifications \
+        let remaining: i64 = ctx
+            .pg
+            .query_one(
+                "SELECT COUNT(*) FROM zeroship.email_verifications \
              WHERE user_id = $1 AND consumed_at IS NULL",
-            &[&user_id.as_str()],
-        )
-        .await
-        .expect("count verification rows")
-        .get(0);
-    assert_eq!(remaining, 1, "GET /verify must not consume the token");
+                &[&user_id.as_str()],
+            )
+            .await
+            .expect("count verification rows")
+            .get(0);
+        assert_eq!(remaining, 1, "GET /verify must not consume the token");
 
-    ctx.cleanup_email(&email).await;
+        ctx.cleanup_email(&email).await;
     });
 }
 
 #[test]
 fn verify_post_redeem_consumes_token_and_marks_verified() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let (user_id, email, token) = ctx.seed_verification().await;
-    let app = init_app!(&ctx);
-    let csrf = csrf_from_verify_get(&app, &token).await;
+        let ctx = M4TestCtx::boot().await;
+        let (user_id, email, token) = ctx.seed_verification().await;
+        let app = init_app!(&ctx);
+        let csrf = csrf_from_verify_get(&app, &token).await;
 
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf", &csrf)
-        .append_pair("token", &token)
-        .finish();
-    let resp = call_post_form(
-        &app,
-        "/verify/redeem",
-        body,
-        Some(format!("__Host-zsidp_csrf={csrf}")),
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let html = read_body(resp).await;
-    assert!(html.contains("Email verified"));
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("csrf", &csrf)
+            .append_pair("token", &token)
+            .finish();
+        let resp = call_post_form(
+            &app,
+            "/verify/redeem",
+            body,
+            Some(format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let html = read_body(resp).await;
+        assert!(html.contains("Email verified"));
 
-    let verified: bool = ctx
+        let verified: bool = ctx
         .pg
         .query_one(
             "SELECT email_verified_at IS NOT NULL AS verified FROM zeroship.users WHERE id = $1",
@@ -210,143 +205,128 @@ fn verify_post_redeem_consumes_token_and_marks_verified() {
         .await
         .expect("load user")
         .get("verified");
-    assert!(verified, "POST /verify/redeem must mark email verified");
+        assert!(verified, "POST /verify/redeem must mark email verified");
 
-    ctx.cleanup_email(&email).await;
+        ctx.cleanup_email(&email).await;
     });
 }
 
 #[test]
 fn verify_post_redeem_with_invalid_csrf_rejected() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let (_, email, token) = ctx.seed_verification().await;
-    let app = init_app!(&ctx);
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf", "wrong")
-        .append_pair("token", &token)
-        .finish();
+        let ctx = M4TestCtx::boot().await;
+        let (_, email, token) = ctx.seed_verification().await;
+        let app = init_app!(&ctx);
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("csrf", "wrong")
+            .append_pair("token", &token)
+            .finish();
 
-    let resp = call_post_form(&app, "/verify/redeem", body, None).await;
-    assert_eq!(resp.status().as_u16(), 403);
+        let resp = call_post_form(&app, "/verify/redeem", body, None).await;
+        assert_eq!(resp.status().as_u16(), 403);
 
-    ctx.cleanup_email(&email).await;
+        ctx.cleanup_email(&email).await;
     });
 }
 
 #[test]
 fn verify_post_redeem_with_invalid_token_renders_error_page() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let app = init_app!(&ctx);
-    let request_id = format!("m4-invalid-{}", Uuid::new_v4().simple());
-    let token = format!("missing-{}", Uuid::new_v4().simple());
-    let csrf = csrf_from_verify_get(&app, &token).await;
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf", &csrf)
-        .append_pair("token", &token)
-        .finish();
+        let ctx = M4TestCtx::boot().await;
+        let app = init_app!(&ctx);
+        let request_id = format!("m4-invalid-{}", Uuid::new_v4().simple());
+        let token = format!("missing-{}", Uuid::new_v4().simple());
+        let csrf = csrf_from_verify_get(&app, &token).await;
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("csrf", &csrf)
+            .append_pair("token", &token)
+            .finish();
 
-    let resp = call_post_form_with_request_id(
-        &app,
-        "/verify/redeem",
-        body,
-        Some(format!("__Host-zsidp_csrf={csrf}")),
-        &request_id,
-    )
-    .await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let html = read_body(resp).await;
-    assert!(html.contains("session expired"));
-    assert_eq!(
-        verification_failure_audit_count(&ctx.pg, &request_id).await,
-        1
-    );
+        let resp = call_post_form_with_request_id(
+            &app,
+            "/verify/redeem",
+            body,
+            Some(format!("__Host-zsidp_csrf={csrf}")),
+            &request_id,
+        )
+        .await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let html = read_body(resp).await;
+        assert!(html.contains("session expired"));
+        assert_eq!(
+            verification_failure_audit_count(&ctx.pg, &request_id).await,
+            1
+        );
     });
 }
 
 #[test]
 fn verify_post_redeem_idempotent_second_call_returns_error() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let (_, email, token) = ctx.seed_verification().await;
-    let app = init_app!(&ctx);
-    let csrf = csrf_from_verify_get(&app, &token).await;
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("csrf", &csrf)
-        .append_pair("token", &token)
-        .finish();
+        let ctx = M4TestCtx::boot().await;
+        let (_, email, token) = ctx.seed_verification().await;
+        let app = init_app!(&ctx);
+        let csrf = csrf_from_verify_get(&app, &token).await;
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("csrf", &csrf)
+            .append_pair("token", &token)
+            .finish();
 
-    let first = call_post_form(
-        &app,
-        "/verify/redeem",
-        body.clone(),
-        Some(format!("__Host-zsidp_csrf={csrf}")),
-    )
-    .await;
-    assert_eq!(first.status().as_u16(), 200);
+        let first = call_post_form(
+            &app,
+            "/verify/redeem",
+            body.clone(),
+            Some(format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(first.status().as_u16(), 200);
 
-    let second = call_post_form(
-        &app,
-        "/verify/redeem",
-        body,
-        Some(format!("__Host-zsidp_csrf={csrf}")),
-    )
-    .await;
-    assert_eq!(second.status().as_u16(), 200);
-    let html = read_body(second).await;
-    assert!(html.contains("session expired"));
+        let second = call_post_form(
+            &app,
+            "/verify/redeem",
+            body,
+            Some(format!("__Host-zsidp_csrf={csrf}")),
+        )
+        .await;
+        assert_eq!(second.status().as_u16(), 200);
+        let html = read_body(second).await;
+        assert!(html.contains("session expired"));
 
-    ctx.cleanup_email(&email).await;
+        ctx.cleanup_email(&email).await;
     });
 }
 
 #[test]
 fn reset_get_html_includes_history_replace_state_script() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let app = init_app!(&ctx);
+        let ctx = M4TestCtx::boot().await;
+        let app = init_app!(&ctx);
 
-    let resp = call_get(&app, "/reset?token=ABC").await;
-    assert_eq!(resp.status().as_u16(), 200);
-    let body = read_body(resp).await;
-    assert!(body.contains("window.history.replaceState"));
+        let resp = call_get(&app, "/reset?token=ABC").await;
+        assert_eq!(resp.status().as_u16(), 200);
+        let body = read_body(resp).await;
+        assert!(body.contains("window.history.replaceState"));
     });
 }
 
 #[test]
 fn cache_control_no_store_on_all_three_interstitials() {
     run_compio(async {
-    let Some(ctx) = M4TestCtx::boot().await else {
-        zeroship_test_support::skip("skipping m4_post_redeem_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let app = init_app!(&ctx);
+        let ctx = M4TestCtx::boot().await;
+        let app = init_app!(&ctx);
 
-    let verify = call_get(&app, "/verify?token=ABC").await;
-    assert_eq!(header(verify.headers(), CACHE_CONTROL), "no-store");
+        let verify = call_get(&app, "/verify?token=ABC").await;
+        assert_eq!(header(verify.headers(), CACHE_CONTROL), "no-store");
 
-    let magic = call_get(
-        &app,
-        "/magic/verify?token=ABC&return_to=/oauth2/authorize?client_id=oac_123",
-    )
-    .await;
-    assert_eq!(header(magic.headers(), CACHE_CONTROL), "no-store");
+        let magic = call_get(
+            &app,
+            "/magic/verify?token=ABC&return_to=/oauth2/authorize?client_id=oac_123",
+        )
+        .await;
+        assert_eq!(header(magic.headers(), CACHE_CONTROL), "no-store");
 
-    let reset = call_get(&app, "/reset?token=ABC").await;
-    assert_eq!(header(reset.headers(), CACHE_CONTROL), "no-store");
+        let reset = call_get(&app, "/reset?token=ABC").await;
+        assert_eq!(header(reset.headers(), CACHE_CONTROL), "no-store");
     });
 }
 
@@ -429,13 +409,11 @@ where
 {
     let resp = call_get(app, &format!("/verify?token={token}")).await;
     assert_eq!(resp.status().as_u16(), 200);
-    read_set_cookie(resp.headers(), "__Host-zsidp_csrf").expect("__Host-zsidp_csrf cookie set on GET /verify")
+    read_set_cookie(resp.headers(), "__Host-zsidp_csrf")
+        .expect("__Host-zsidp_csrf cookie set on GET /verify")
 }
 
-async fn verification_failure_audit_count(
-    pg: &compio_postgres::Client,
-    request_id: &str,
-) -> i64 {
+async fn verification_failure_audit_count(pg: &compio_postgres::Client, request_id: &str) -> i64 {
     pg.query_one(
         "SELECT COUNT(*) FROM zeroship.audit_events \
          WHERE event_type = 'verification_redeemed' \

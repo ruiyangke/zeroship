@@ -9,6 +9,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { assertPolicyColumns } from "./_policy-fixture.js";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -33,17 +34,6 @@ async function makeFixture(
   }
   return { root, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }
-
-/** The 7 platform system fields the producer injects into every collection. */
-const SYSTEM_FIELDS = [
-  "id",
-  "created_at",
-  "updated_at",
-  "created_by",
-  "updated_by",
-  "version",
-  "deleted_at",
-] as const;
 
 /**
  * A minimal, self-contained re-statement of the v2 RuntimeSchemaDescriptor
@@ -97,14 +87,18 @@ export const schema = {
   users: defineSchema({
     email: t.string().required().mask({ kind: "email", classification: "pii" }),
     secret: t.encrypted(),
+    secretAmount: t.encrypted({ of: t.number() }),
+    secretBytes: t.encrypted({ of: t.bytes() }),
     age: t.number(),
+    handle: t.string().required().unique(),
   })
     .softDelete()
     .index("users_email_idx", ["email"]),
   posts: defineSchema({
     id: t.id("post"),
     title: t.string().required(),
-    authorId: t.ref("users"),
+    authorId: t.ref("users", { column: "id" }),
+    authorHandle: t.ref("users", { column: "handle" }),
   }),
 };
 `;
@@ -162,18 +156,20 @@ describe("manual schema source", () => {
       assert.ok(json.collections.users, "users collection present");
       assert.ok(json.collections.posts, "posts collection present");
 
-      // System fields injected into every collection.
       for (const coll of ["users", "posts"]) {
-        for (const sys of SYSTEM_FIELDS) {
-          assert.ok(json.collections[coll].fields[sys], `${coll}.${sys} injected`);
-        }
+        assertPolicyColumns(json.collections[coll].fields);
       }
 
       // Author facets survived: mask, encrypted, id-prefix, ref.
       assert.ok(json.collections.users.fields.email.mask, "email carries mask facet");
-      assert.ok(json.collections.users.fields.secret.encrypted, "secret carries encrypted facet");
+      for (const [name, type] of [["secret", "string"], ["secretAmount", "number"], ["secretBytes", "bytes"]]) {
+        assert.equal(json.collections.users.fields[name].encrypted, true);
+        assert.equal(json.collections.users.fields[name].type, type);
+      }
       assert.equal(json.collections.posts.fields.id.idPrefix, "post", "post id carries prefix");
       assert.equal(json.collections.posts.fields.authorId.refTarget, "users", "ref target");
+      assert.equal(json.collections.posts.fields.authorId.refColumn, "id");
+      assert.equal(json.collections.posts.fields.authorHandle.refColumn, "handle");
 
       // Options reflected.
       assert.equal(json.collections.users.options.softDelete, true, "softDelete honoured");
@@ -183,7 +179,7 @@ describe("manual schema source", () => {
       // `descriptors_to_create_ops` into the CreateTable op, alongside the injected
       // system indexes. (The earlier Step-1 gap that dropped them is fixed.)
       const idxNames: string[] = json.collections.users.indexes.map((i: { name: string }) => i.name);
-      assert.ok(idxNames.includes("users_updated_at_idx"), "system index injected");
+      assert.ok(idxNames.includes("users_updated_at_idx"), "policy index injected");
       assert.ok(
         idxNames.includes("users_email_idx"),
         "author named index survives descriptors_to_create_ops (W2 fix)",
@@ -315,7 +311,7 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
       name: t.string().required().unique(),
       count: t.number(),
       handle: t.id("handle"),
-      owner: t.ref("users"),
+      owner: t.ref("users", { column: "account_key" }),
     });
     const fields = builder.fields as Record<string, { toFieldDef(): import("@zeroship/db").FieldDef }>;
 
@@ -331,6 +327,7 @@ describe("NormalizedSchema -> CollectionDescriptorDto mapping", () => {
     const owner = fieldDefToDto("c", "owner", fields.owner.toFieldDef());
     assert.equal(owner.type, "ref");
     assert.equal(owner.references, "users");
+    assert.equal(owner.referenceColumn, "account_key");
   });
 
   test("the JS mapper carries author named indexes into the DTO (drop is downstream)", async () => {

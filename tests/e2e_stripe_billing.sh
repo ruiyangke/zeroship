@@ -54,8 +54,21 @@
 # the control port is allocated per run (tests/lib/e2e_ports.sh), so the
 # sentence above is true by construction rather than by nobody having tried.
 #
-# Skips CLEANLY (exit 0) when prereqs are absent (no PG :5440, no docker for the
-# DB migrate, or the Stripe TEST env not sourced).
+# REFUSES (exit 2, naming the missing thing and its remedy) when a prerequisite
+# is absent: no PG :5440, no docker for the DB migrate, no built control binary,
+# no zero-migrate CLI dist, or the Stripe TEST keys not sourced. It does NOT exit
+# 0 on any of them, and the reason is written two screens below in this file's
+# own words: the psql resolution used to default to a nix-store hash that existed
+# on one machine, "everywhere else it was absent and the absence was `exit 0`, so
+# this suite measured nothing and reported success". That lesson was recorded and
+# the other exit-0 arms were left in place; they are gone now.
+#
+# NOT WIRED INTO CI, deliberately and by inspection: nothing in
+# .github/workflows/ names this script, and tests/run_billing_suite.sh (which CI
+# does run) does not invoke it either. It needs an operator's live Stripe TEST
+# keys, which CI has no way to hold, so a refusal here cannot turn a CI job
+# permanently red. Refusing is only useful to the person who ran it by hand -
+# which is exactly who it now tells the truth to.
 #
 # Usage:
 #   # put the Stripe TEST keys in the gitignored repo-root .env (auto-sourced):
@@ -99,12 +112,28 @@ echo "============================================"
 echo "  zeroship E2E — billing→Stripe rail (REAL Stripe TEST mode, not the mock)"
 echo "============================================"
 
-# --- prereq gates: skip on absent Stripe credentials, REFUSE on absent psql -
+# --- prereq gates: EVERY missing prerequisite REFUSES ----------------------
 # psql: $PATH first, then any postgresql in the nix store, then refuse. This
 # replaced ZEROSHIP_PSQL, whose default was one pinned /nix/store hash that
 # resolved on exactly one machine; everywhere else it was absent and the
 # absence was `exit 0`, so this suite measured nothing and reported success.
 # Same chain as tests/e2e_auth_ui.sh, same variable name.
+#
+# THAT SENTENCE WAS THE ONLY ONE ACTED ON at the time: psql got a refusal and
+# every other prerequisite below kept its `exit 0`, so the diagnosis was written
+# down beside seven arms it applied to verbatim. They refuse now too.
+#
+# `zs_prereq` is the one shape they share: it names the thing, how the absence
+# was detected, and the command that fixes it, then exits 2 - never 0.
+zs_prereq() {
+  echo "" >&2
+  echo "  x MISSING PREREQUISITE: $1" >&2
+  echo "    remedy: $2" >&2
+  echo "" >&2
+  echo "    This harness does not skip. A run that cannot reach what it tests" >&2
+  echo "    must not print the exit code of a run that tested it." >&2
+  exit 2
+}
 PSQL="${PSQL:-}"
 if [ -z "$PSQL" ]; then
   if command -v psql >/dev/null 2>&1; then
@@ -127,9 +156,8 @@ DB="$TEST_DB"
 source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ] || [ -z "${STRIPE_TEST_PUBLISHABLE_KEY:-}" ]; then
-  echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY / STRIPE_TEST_PUBLISHABLE_KEY not set."
-  echo "         put them in the gitignored repo-root .env (auto-sourced), or export them first."
-  exit 0
+  zs_prereq "STRIPE_TEST_SECRET_KEY / STRIPE_TEST_PUBLISHABLE_KEY are not set, so there is no Stripe TEST account to drive." \
+            "put both in the gitignored repo-root .env (this script auto-sources it), or export them first."
 fi
 case "$STRIPE_TEST_SECRET_KEY" in
   sk_test_*) ;;
@@ -139,19 +167,21 @@ esac
   echo "  x ABORT: no psql on \$PATH or in the nix store; set PSQL to the Postgres client binary." >&2
   exit 2
 }
-command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 0; }
-command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
-command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
-[ -x "$BIN/zeroship-control" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 0; }
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "  ⚠ SKIP: missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 0; }
+command -v node    >/dev/null 2>&1 || zs_prereq "node is not on PATH; the harness mints its bearer and signs webhook payloads with it." "install Node, or enter the dev shell: nix develop"
+command -v openssl >/dev/null 2>&1 || zs_prereq "openssl is not on PATH; the gateway signing key is generated with it." "install openssl, or enter the dev shell: nix develop"
+command -v curl    >/dev/null 2>&1 || zs_prereq "curl is not on PATH; every Stripe and control-plane call goes through it." "install curl, or enter the dev shell: nix develop"
+[ -x "$BIN/zeroship-control" ] || zs_prereq "no control binary at $BIN/zeroship-control; this harness drives the real one." "cargo build --release -p zeroship-control"
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || zs_prereq "the zero-migrate CLI dist is missing, so the platform migration set cannot be applied." 'pnpm install && pnpm build'
 
 export PGPASSWORD="$PGPW"
 psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }
 if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
+  zs_prereq "PostgreSQL at $PGHOST:$PGPORT did not answer 'SELECT 1' as $PGUSER; the per-run database lives there." \
+            "start it (tests/provision_test_backends.sh), or point PGPORT at a server that answers."
 fi
 if [ -f "$ROOT/deploy/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker required step."; exit 0
+  zs_prereq "docker is not on PATH and deploy/ops/db-migrate.sh needs it to apply the platform migration set." \
+            "install docker and start its daemon."
 fi
 
 SK="$STRIPE_TEST_SECRET_KEY"

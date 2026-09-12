@@ -76,7 +76,11 @@ fn exec_cfg() -> ExecutorConfig {
 }
 
 fn guard_cfg() -> GuardConfig {
-    GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT)
+    GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        zeroship_migrate_sqlite::DIALECT,
+        PROJECT,
+    )
 }
 
 fn effective_policy() -> EffectivePolicy {

@@ -168,7 +168,7 @@ bypass. Break the cycle with an install-time **`--bootstrap-console`** control p
    control via **`@zeroship/control`** — no runtime `env.auth.*` op, no control-side mint. The **env-var
    wiring** (declare + inject the console's control-credential env var; point `@zeroship/control` at the
    internal control URL) lands in **R5**, with the console cutover.
-2. **Worker kernel convergence (blocking, independent value).** Register `KvPlugin` + `StoragePlugin` in
+2. **Worker kernel convergence (blocking, independent value).** Register `KvBinding` + `StoragePlugin` in
    `crates/zeroship-worker/src/cache.rs create_plugins()` so the multi-node worker exposes the full
    `env.{db,kv,storage,auth}` kernel that single-tenant `zeroship serve` already does. Removes a real
    dev/prod capability skew. Regression test: all four namespaces resolve in a worker-served app.

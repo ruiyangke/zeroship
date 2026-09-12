@@ -20,13 +20,16 @@ Current internal endpoints are:
 - `GET /internal/versions`
 - `GET /internal/apps/{app_id}`
 - `GET /internal/apps/{app_id}/env`
+- `GET /internal/apps/{app_id}/data-key`
 - `POST /internal/usage`
 - `POST /internal/webhooks/stripe`
 
 Mutating `/api/*` endpoints are authorized per request through the Cedar
-`AuthzGuard` against the caller OAuth access token. `/internal/*` is always gated
-by the control-key bearer, the machine-to-machine credential gateway and worker
-use for feeds and usage reporting.
+`AuthzGuard` against the caller OAuth access token. Worker and gateway reads
+under `/internal/*` require service assertions and the endpoint allowlist in
+`crates/zeroship-core/src/service_identity.rs` for gateway and worker feeds.
+The project data-key endpoint permits worker identities; it does not expose
+keys through the creator API or app environment.
 
 ## Module map
 
@@ -41,6 +44,8 @@ authz_guard.rs     Cedar-backed request authorization (crates/authz)
 egress_rules.rs    creator self-service raw-TCP egress rules
 env_handlers.rs    vars/secrets CRUD + process.env exposure list
 env_store.rs       encrypted-at-rest env/secrets storage
+project_keys.rs    persistent project column keys and host delivery
+secret_cipher.rs   shared control-owned secret wrapping keyring
 registry.rs        PostgreSQL-backed app registry
 stripe_handlers.rs Stripe-facing HTTP routes
 stripe_store.rs    Stripe/account persistence
@@ -104,6 +109,15 @@ registry falls back to `Manifest::passthrough()` and logs an error.
 
 Gateway polls `/internal/routes` every 5 seconds. Worker polls `/internal/versions` every 5 seconds and fetches env snapshots lazily from `/internal/apps/{app_id}/env` when `env_version` changes.
 These feeds are polled rather than pushed so the control plane stays stateless with respect to gateway and worker consumers.
+
+Before loading an app with a database service, the worker fetches its project
+column key from `/internal/apps/{app_id}/data-key` into the host's shared
+`SuppliedProjectKeys`. Control resolves the app's project from the registry and
+serializes initial provisioning by locking that project. The wrapped key lives
+in `zeroship.project_data_keys`, accessible only to control's database role.
+Wrapping-key rotation preserves the data key. App environments, runtime
+descriptors, and bundles contain no key material. Standalone local development
+persists a separate key in `.zeroship/private/project-data-key.json`.
 
 ## Deploy ingest
 

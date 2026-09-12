@@ -1,35 +1,8 @@
 import { table, t } from "@zeroship/migrate";
 
-// db-e2e's schema, authored migration-first.
-//
-// WHY THIS FILE EXISTS. This example used to declare its schema INLINE
-// (`export default { schema: dbSchema }` built from `@zeroship/db`'s
-// `schema()`/`t.*`) with no `migrations/` directory. That is the #209/#174
-// mechanism: the installer builds `env.db` from the generated runtime
-// descriptor, which is folded from COMMITTED MIGRATIONS, and an inline
-// `schema` export is not a source for it. The app built, served, and answered
-// `health` -- and then every data-plane call failed, because `env.db.<name>`
-// was undefined. Measured 2026-08-12: `db-e2e.seed-demo` returned
-// `500 {"message":"internal error"}` over `TypeError: Cannot read properties
-// of undefined (reading 'insertMany')`, and `.zeroship/` held no `dev.sqlite`
-// at all. All 15 of this example's RPCs were unreachable and always had been.
-//
-// TWO SPELLING RULES, both learned by failing rather than from the types:
-//
-//   1. The seven platform system columns (id, created_at, updated_at,
-//      created_by, updated_by, version, deleted_at) are INJECTED by the
-//      confined charter. Declaring `id` here collides with the injected
-//      column and the descriptor is refused.
-//
-//   2. `t.ref()` is DECLARED in @zeroship/migrate's public types
-//      (packages/zero-migrate/src/types.ts) but is not accepted by the
-//      engine; a native foreign key is spelled
-//      `t.text().references(table, column)`. examples/db-todos carries the
-//      same note, written after the same failure.
-//
-// The inline `dbSchema` in src/server.ts stays as the QUERY-side type source
-// (it is what gives `db.tasks.find(...)` its types); it is this file that
-// creates the tables. db-todos has the same pair.
+// Migrations own the schema and its mask configuration. Generated env.db.ts
+// supplies the matching TypeScript surface. The charter injects system fields;
+// application relationships are declared with native foreign keys.
 export default {
   name: "create_db_e2e",
   schema() {
@@ -49,47 +22,8 @@ export default {
         handle: t.text().notNull().unique(),
         fullName: t.text().notNull(),
         email: t.text().notNull().unique(),
-        // BLOCKED, AND THIS IS THE ONE THING THIS FILE CANNOT EXPRESS.
-        // src/server.ts declares `contactEmail` as `mode: "deterministic",
-        // keyId: "db_e2e"` and `ssn` as `mode: "randomised", keyId: "db_e2e"`.
-        // NEITHER the mode NOR the key id is representable in a migration:
-        // `t.encrypted()` takes only `of`, and `keyId` appears ZERO times in
-        // the whole of packages/zero-migrate/src. The engine says so itself, by
-        // design and fail-closed rather than silently wrong -- see the comment
-        // and test in third_party/zero-migrate/.../render/fold.rs, anchored on
-        // the text "op.* can author ONLY a DEFAULT-mode encrypted column ...
-        // there is no IR surface for a non-default mode/keyId" (quote the text,
-        // not a line number: it has already moved once upstream).
-        //
-        // THE VALUE IS OVERWRITTEN, NOT DROPPED, which is the sharper and more
-        // useful statement -- established 2026-08-12 with zero-migrate over
-        // ZEROSHIP-2026-08-12-251/252 and confirmed by my own read of the
-        // vendored tree. The op lane DOES build the encrypted facet:
-        //
-        //     fold.rs `fold_create_column_to_field`
-        //       -> lower.rs `ir_column_to_field_resolved_create`
-        //         -> lower.rs `ir_column_to_field`, whose ColType::Encrypted arm
-        //            emits a literal `{ mode: "randomised", keyId: "default",
-        //            wraps: <inner> }`
-        //
-        // so the descriptor comes out WITH a keyId that the creator never chose,
-        // rather than with the facet missing. That is why the failure below is
-        // "key 'default' not configured" and not "no encryption configured".
-        //
-        // The OBSERVABLE consequence, measured 2026-08-12: the generated
-        // descriptor comes out carrying `keyId: "default"`, so the running app
-        // demands `ZEROSHIP_COLUMN_KEY_DEFAULT` and fails with
-        // `Column key 'default' not configured` -- while README.md, the schema
-        // and e2e/run.mjs all say the key is `db_e2e`. An app moving from an
-        // inline schema to migration-first therefore LOSES its key selection
-        // and its encryption mode, and nothing warns.
-        //
-        // Deliberately NOT worked around: weakening src/server.ts to the
-        // default key/mode would make this example pass by deleting the
-        // property it exists to cover. It stays red here until the IR can
-        // carry mode/keyId.
-        contactEmail: t.encrypted({ of: t.text() }),
-        ssn: t.encrypted({ of: t.text() }),
+        contactEmail: t.encrypted({ of: t.text() }).mask({ kind: "email", classification: "pii" }),
+        ssn: t.encrypted({ of: t.text() }).mask({ kind: "last4", classification: "spi" }),
         city: t.text().notNull(),
       },
       indexes: [{ name: "users_workspace_idx", on: ["workspaceId"] }],

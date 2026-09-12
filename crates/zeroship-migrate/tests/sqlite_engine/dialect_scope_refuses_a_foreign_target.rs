@@ -125,7 +125,7 @@ fn lower_on_postgres(json: &str) -> zeroship_migrate::render::lower::LoweredArti
         &zeroship_migrate_postgres::DIALECT,
         &charter,
     );
-    let guard_cfg = GuardConfig::from_policy(charter, zeroship_migrate_postgres::DIALECT);
+    let guard_cfg = GuardConfig::from_policy(charter, zeroship_migrate_postgres::DIALECT, SCHEMA);
     author
         .load_and_lower_guarded(
             json,

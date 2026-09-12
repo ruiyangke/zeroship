@@ -1,3 +1,4 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
  * **P5.5 PR 1** — masking foundation: `t.string().mask(...)` /
  * `t.encrypted().mask(...)` DSL modifier + default-mask rule for
@@ -36,7 +37,7 @@ import { t } from "@zeroship/db";
 // is a type-only `declare class`. It can only be imported as a type
 // (no runtime constructor). Its runtime behaviour (coercion, unmask,
 // brand check) is covered by the Rust unit tests in
-// `crates/zeroship-plugin-db/src/v8_classes/masked_value.rs` and the
+// `crates/zeroship-data-v8/src/v8_classes/masked_value.rs` and the
 // `p9-pr2-masked-value-v8-class` suite.
 import type { Row, MaskedValueRepr, MaskedValue } from "@zeroship/db";
 
@@ -49,8 +50,8 @@ describe("P5.5 PR 1 — t.encrypted() default-mask rule", () => {
     assert.equal(def.mask!.classification, "pii");
   });
 
-  test("t.encrypted({ mode: 'deterministic' }) also gets the default mask", () => {
-    const b = t.encrypted({ mode: "deterministic" });
+  test("t.encrypted({  }) also gets the default mask", () => {
+    const b = t.encrypted({  });
     const def = b.toFieldDef();
     assert.ok(def.mask);
     assert.equal(def.mask!.kind, "full");
@@ -163,10 +164,10 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
 
   test("masked encrypted field is wrapped in MaskedValue<string>", () => {
     const fields = {
-      ssn: t.encrypted({ mode: "randomised" }).required(),
+      ssn: t.encrypted({  }).required(),
       name: t.string(),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     // Type-level assertion: `ssn` is MaskedValue<string>, `name` is
     // string | undefined. The line below would fail to compile if the
     // inference broke (e.g. a bare string assigned to `ssn`).
@@ -195,7 +196,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     const fields = {
       email: t.string().mask({ kind: "none" }),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     const sample: R = {
       id: "usr_001",
       created_at: 0,
@@ -213,7 +214,7 @@ describe("P5.5 PR 1 — Row<S> type inference (compile-time)", () => {
     const fields = {
       email: t.string().mask({ kind: "email" }).required(),
     };
-    type R = Row<typeof fields>;
+    type R = Row<typeof fields & typeof generatedSchema>;
     const sample: R = {
       id: "usr_001",
       created_at: 0,

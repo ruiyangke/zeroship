@@ -205,18 +205,9 @@ impl<T, C: ConfigConsumer> DeclaredEnvKey<T, C> {
 
 /// A FAMILY of environment names sharing one literal prefix.
 ///
-/// Some names are keyed by data rather than fixed:
-/// `ZEROSHIP_COLUMN_KEY_<KEYID>` names one root key per creator-chosen column
-/// key id, so the set is open and no finite list of literals describes it. The
-/// alternative was a raw read on an assembled string, which is exactly the
-/// invisibility Step 4 removes - and it is worse than it looks, because the
-/// name that never appears as a literal is also the name that never appears in
-/// `docs/reference/env-vars.md`.
-///
-/// A family declares the PREFIX, which is the part an operator reads in a
-/// runbook and an auditor greps for. The suffix is data and is deliberately not
-/// recorded: it is a creator's key id, and putting it in a linked static would
-/// be both impossible (it is not known at compile time) and wrong.
+/// For names whose suffix is supplied at runtime, the declaration records the
+/// literal prefix. Reports can then identify the family without persisting a
+/// potentially sensitive suffix or requiring it to be known at compile time.
 ///
 /// This is the concept the proposal spells `ExternalEnvFamily` in its
 /// source-policy vocabulary.
@@ -394,9 +385,8 @@ impl DeclaredEnvRead {
 
     /// Whether [`DeclaredEnvRead::name`] is a whole name or a family prefix.
     ///
-    /// Without this a report cannot tell `ZEROSHIP_COLUMN_KEY_` the variable
-    /// from `ZEROSHIP_COLUMN_KEY_` the prefix, and would document a name no
-    /// operator ever sets.
+    /// Reports distinguish a complete variable name from a prefix that still
+    /// needs a runtime suffix.
     #[must_use]
     pub const fn is_family(self) -> bool {
         self.family

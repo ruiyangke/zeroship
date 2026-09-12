@@ -21,7 +21,7 @@
 //! cannot take a bind parameter; `set_config(..., $1, true)` is the
 //! parameterized equivalent.)
 //!
-//! Usage pattern in a store fn (operates on a `&mut Client`; a `PooledClient`
+//! Usage pattern in a store fn (operates on a `&mut Client`; a `PoolConnection`
 //! derefs mutably to it):
 //!
 //! ```ignore

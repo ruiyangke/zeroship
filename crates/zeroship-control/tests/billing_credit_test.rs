@@ -31,8 +31,6 @@ use crate::common;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use ntex::http::StatusCode;
-use ntex::web::{self, test};
 use uuid::Uuid;
 
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
@@ -336,19 +334,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
     organization_id
 }
 
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Credit Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
-}
-
 async fn ensure_organization_billing(state: &AppState, organization: &str) {
     state
         .control_pg
@@ -624,7 +609,7 @@ async fn finalize_consumes_oldest_first_and_balances() {
     assert_eq!(inv.3, 0, "total = subtotal − credit + tax (0) = 0");
 
     // Balance conserved: $8 granted − $5 consumed = $3.
-    let bal = credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("balance");
+    let bal = credit::balance(&*fx.state.control_pg, organization, "usd").await.expect("balance");
     assert_eq!(bal, 300, "balance after consume = $8 − $5 = $3");
 
     // Per-grant consumed entries: g_old fully drawn (−300), g_new partially (−200).
@@ -690,7 +675,7 @@ async fn reconcile_rerun_does_not_double_consume() {
         .await
         .expect("tick 1");
     assert_eq!(billed1, 1);
-    let bal1 = credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap();
+    let bal1 = credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap();
     assert_eq!(bal1, 600, "after first run: $10 − $4 = $6");
 
     // RE-RUN the same period. The finalized short-circuit returns Ok(false); the
@@ -699,7 +684,7 @@ async fn reconcile_rerun_does_not_double_consume() {
         .await
         .expect("tick 2");
     assert_eq!(billed2, 0, "re-run is a no-op (already finalized)");
-    let bal2 = credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap();
+    let bal2 = credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap();
     assert_eq!(bal2, 600, "balance conserved across re-run — NO double-consume");
 
     // Exactly one consumed entry (one grant drawn once).
@@ -749,7 +734,7 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
         .expect("claim draft");
 
     // First consume: draw $6 of a $6 subtotal from the $10 grant.
-    let first = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 600, "usd")
+    let first = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 600, "usd")
         .await
         .expect("consume 1");
     assert_eq!(first.applied_cents, 600);
@@ -757,14 +742,14 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
 
     // SECOND consume on the SAME draft id (a crash-window re-drive): recompute,
     // append NOTHING.
-    let second = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 600, "usd")
+    let second = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 600, "usd")
         .await
         .expect("consume 2");
     assert_eq!(second.applied_cents, 600, "re-run recomputes the same applied credit");
     assert_eq!(second.draws.len(), 0, "re-run appends NO new consumed entry");
 
     // Balance conserved: $10 − $6 = $4 (not $10 − $12).
-    let bal = credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap();
+    let bal = credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap();
     assert_eq!(bal, 400, "balance conserved — the helper never double-draws on a re-drive");
 
     drop(fx);
@@ -859,9 +844,9 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
     assert_eq!(inv.3, 400, "total = 500 − 100 = 400");
 
     // The USD balance reflects only USD entries; the EUR grant is separate.
-    let usd_bal = credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap();
+    let usd_bal = credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap();
     assert_eq!(usd_bal, 0, "USD balance: $1 granted − $1 consumed = 0");
-    let eur_bal = credit::balance(&*fx.state.control_pg, &organization, "eur").await.unwrap();
+    let eur_bal = credit::balance(&*fx.state.control_pg, organization, "eur").await.unwrap();
     assert_eq!(eur_bal, 1000, "the EUR grant is untouched");
 
     drop(fx);
@@ -884,7 +869,7 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     let key = format!("idem-{}", Uuid::new_v4());
 
     // First grant.
-    let r1 = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
+    let r1 = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
         .await
         .expect("grant 1");
     let id1 = match r1 {
@@ -893,13 +878,13 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     };
 
     // Same key + SAME body ⇒ Duplicate (the first grant id), no second row.
-    let r2 = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
+    let r2 = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
         .await
         .expect("grant 2");
     assert_eq!(r2, GrantOutcome::Duplicate(id1.clone()), "same key+body returns the first grant");
 
     // Same key + DIFFERENT body ⇒ Conflict (no second grant).
-    let r3 = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 999, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
+    let r3 = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 999, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
         .await
         .expect("grant 3");
     assert_eq!(r3, GrantOutcome::Conflict, "same key + different amount is a conflict");
@@ -918,7 +903,7 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
     assert_eq!(n, 1, "exactly one grant for the reused key — no double grant");
 
     // A non-USD grant is rejected at the boundary.
-    let bad = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "eur", kind: "grant", expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
+    let bad = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "eur", kind: "grant", expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
     .await;
     assert!(bad.is_err(), "a non-USD grant is rejected at the Rust boundary (v1 USD-pinned)");
 
@@ -931,29 +916,6 @@ async fn grant_helper_idempotency_key_and_fingerprint() {
 //     a different body (no double grant). Drives the REAL `api::grant_credit`
 //     handler through an ntex test app + the REAL authz guard.
 // ===========================================================================
-
-struct Caller {
-    token: String,
-}
-
-impl Caller {
-    fn bearer(&self) -> String {
-        format!("Bearer {}", self.token)
-    }
-}
-
-/// Issue a real platform OAuth bearer scoped to `scope` (faithful AuthzGuard path).
-/// Issue a platform OAuth bearer for `user_id` carrying `scope`.
-///
-/// It used to take an optional platform role and seed a `platform_admin_roles`
-/// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary organization.
-async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
-    let _ = state;
-    Caller {
-        token: common::platform_token_for_client(user_id, scope, common::CONSOLE_CLIENT_ID),
-    }
-}
 
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so per-app narrowing now comes from Cedar app membership
@@ -982,7 +944,7 @@ async fn grant_note_change_is_a_conflict() {
     let key = format!("idem-{}", Uuid::new_v4());
 
     // First grant carries note "promo A".
-    let r1 = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo A"), idempotency_key: &key })
+    let r1 = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo A"), idempotency_key: &key })
     .await
     .expect("grant 1");
     let id1 = match r1 {
@@ -991,7 +953,7 @@ async fn grant_note_change_is_a_conflict() {
     };
 
     // Same key + same body INCLUDING the note ⇒ Duplicate (safe retry).
-    let r_same = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo A"), idempotency_key: &key })
+    let r_same = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo A"), idempotency_key: &key })
     .await
     .expect("grant same");
     assert_eq!(
@@ -1001,7 +963,7 @@ async fn grant_note_change_is_a_conflict() {
     );
 
     // Same key + DIFFERENT note ⇒ Conflict (note is in the fingerprint).
-    let r_diff = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo B"), idempotency_key: &key })
+    let r_diff = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: Some("promo B"), idempotency_key: &key })
     .await
     .expect("grant diff note");
     assert_eq!(
@@ -1012,11 +974,11 @@ async fn grant_note_change_is_a_conflict() {
 
     // Some("") vs None must also be distinguishable (presence byte).
     let key2 = format!("idem-{}", Uuid::new_v4());
-    let none_grant = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key2 })
+    let none_grant = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key2 })
     .await
     .expect("none note");
     assert!(matches!(none_grant, GrantOutcome::Created(_)));
-    let empty_note = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "grant", expires_at: None, note: Some(""), idempotency_key: &key2 })
+    let empty_note = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "grant", expires_at: None, note: Some(""), idempotency_key: &key2 })
     .await
     .expect("empty note");
     assert_eq!(
@@ -1070,7 +1032,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
     // Both creators share the SAME idempotency key (cross-tenant reuse).
     let key = format!("idem-shared-{}", Uuid::new_v4());
 
-    let r_a = credit::grant(&*fx.state.control_pg, &organization_a, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
+    let r_a = credit::grant(&*fx.state.control_pg, organization_a, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
     .await
     .expect("grant a");
     let id_a = match r_a {
@@ -1080,7 +1042,7 @@ async fn grant_idempotency_key_is_creator_scoped() {
 
     // Creator B reuses A's key. The globally-unique index makes the INSERT no-op;
     // the organization-scoped re-SELECT finds no row for B ⇒ Conflict (NOT A's id).
-    let r_b = credit::grant(&*fx.state.control_pg, &organization_b, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
+    let r_b = credit::grant(&*fx.state.control_pg, organization_b, credit::GrantRequest { amount_cents: 500, currency: "usd", kind: "grant", expires_at: None, note: None, idempotency_key: &key })
     .await
     .expect("grant b");
     assert_eq!(
@@ -1108,9 +1070,9 @@ async fn grant_idempotency_key_is_creator_scoped() {
         .get("n");
     assert_eq!(n_b, 0, "no grant was appended for organization B");
     // Creator A's grant is intact.
-    let bal_a = credit::balance(&*fx.state.control_pg, &organization_a, "usd").await.unwrap();
+    let bal_a = credit::balance(&*fx.state.control_pg, organization_a, "usd").await.unwrap();
     assert_eq!(bal_a, 500, "organization A's grant is untouched");
-    let bal_b = credit::balance(&*fx.state.control_pg, &organization_b, "usd").await.unwrap();
+    let bal_b = credit::balance(&*fx.state.control_pg, organization_b, "usd").await.unwrap();
     assert_eq!(bal_b, 0, "organization B has no credit");
 
     drop(fx);
@@ -1134,7 +1096,7 @@ async fn grant_kind_is_case_insensitive() {
     ensure_organization_billing(&fx.state, organization).await;
 
     let key = format!("idem-{}", Uuid::new_v4());
-    let r = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 700, currency: "usd", kind: "GRANT", expires_at: None, note: None, idempotency_key: &key })
+    let r = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 700, currency: "usd", kind: "GRANT", expires_at: None, note: None, idempotency_key: &key })
     .await
     .expect("uppercase kind accepted");
     let id = match r {
@@ -1153,7 +1115,7 @@ async fn grant_kind_is_case_insensitive() {
     assert_eq!(kind, "grant", "an uppercase kind is normalized to lowercase before INSERT");
 
     // A mixed-case "Promo" is also accepted.
-    let r2 = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "Promo", expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
+    let r2 = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 100, currency: "usd", kind: "Promo", expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
     .await
     .expect("mixed-case promo accepted");
     assert!(matches!(r2, GrantOutcome::Created(_)));
@@ -1235,7 +1197,7 @@ async fn consume_takes_per_organization_advisory_lock() {
     })
     .detach();
     let tx = conn.transaction().await.expect("tx");
-    let applied = credit::consume_at_finalize(&tx, &organization, &inv, 600, "usd")
+    let applied = credit::consume_at_finalize(&tx, organization, &inv, 600, "usd")
         .await
         .expect("consume");
     assert_eq!(applied.applied_cents, 600, "drew $6 of the $10 grant");
@@ -1302,7 +1264,7 @@ async fn consume_takes_per_organization_advisory_lock() {
     })
     .detach();
     let tx2 = conn2.transaction().await.expect("tx2");
-    let applied2 = credit::consume_at_finalize(&tx2, &organization, &inv2, 900, "usd")
+    let applied2 = credit::consume_at_finalize(&tx2, organization, &inv2, 900, "usd")
         .await
         .expect("consume 2");
     tx2.commit().await.expect("commit 2");
@@ -1312,7 +1274,7 @@ async fn consume_takes_per_organization_advisory_lock() {
     );
 
     // Balance is exactly 0 (never negative): $10 − $6 − $4 = $0.
-    let bal = credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap();
+    let bal = credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap();
     assert_eq!(bal, 0, "balance is non-negative and exact after both draws ($10 − $6 − $4)");
     assert!(bal >= 0, "balance MUST never go negative");
 
@@ -1350,7 +1312,7 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
         .expect("claim draft");
 
     // Consume against a $5 subtotal with NO available credit.
-    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 500, "usd")
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 500, "usd")
         .await
         .expect("consume on empty ledger");
     assert_eq!(applied.applied_cents, 0, "no credit available ⇒ applied = 0");
@@ -1370,7 +1332,7 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
         .get("n");
     assert_eq!(n, 0, "an empty-ledger consume appends NO consumed entries");
     // Balance stays exactly 0 (nothing granted, nothing drawn).
-    assert_eq!(credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap(), 0);
+    assert_eq!(credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap(), 0);
 
     drop(fx);
     common::drain_pg().await;
@@ -1405,7 +1367,7 @@ async fn consume_with_zero_subtotal_short_circuits() {
         .expect("claim draft");
 
     // Subtotal 0 ⇒ short-circuit (no draw against a $0 bill).
-    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 0, "usd")
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 0, "usd")
         .await
         .expect("consume zero subtotal");
     assert_eq!(applied.applied_cents, 0, "a $0 subtotal draws no credit");
@@ -1425,7 +1387,7 @@ async fn consume_with_zero_subtotal_short_circuits() {
     assert_eq!(n, 0, "a zero-subtotal consume appends NO consumed entries");
     // The $10 grant is untouched.
     assert_eq!(
-        credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap(),
+        credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap(),
         1000, "the grant is preserved — never drawn against a $0 bill",
     );
 
@@ -1464,7 +1426,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
         .expect("claim draft");
 
     // Consume against a $5 subtotal: only the $3 grant is visible ⇒ applied = $3.
-    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 500, "usd")
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 500, "usd")
         .await
         .expect("consume");
     assert_eq!(applied.applied_cents, 300, "only the $3 grant visible at consume time is drawn");
@@ -1476,7 +1438,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
     // The already-consumed invoice's applied credit is UNCHANGED (no retroactive draw):
     // a re-drive of the SAME invoice recomputes $3 (the re-run guard recomputes from the
     // existing consumed rows; it does NOT draw the late grant).
-    let redrive = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 500, "usd")
+    let redrive = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 500, "usd")
         .await
         .expect("re-drive consume");
     assert_eq!(redrive.applied_cents, 300, "re-drive recomputes $3 — the late grant is NOT retroactively drawn");
@@ -1499,7 +1461,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
     // Balance: $3 granted − $3 consumed + $10 late grant = $10 (the late grant is fully
     // available for the NEXT bill — no over-draw, the consume never touched it).
     assert_eq!(
-        credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap(),
+        credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap(),
         1000, "the late grant's full value is preserved for the next bill",
     );
 
@@ -1523,7 +1485,7 @@ async fn grant_rejects_non_operator_kinds_at_the_boundary() {
     ensure_organization_billing(&fx.state, organization).await;
 
     for kind in ["consumed", "void_reversal", "refund_clawback"] {
-        let r = credit::grant(&*fx.state.control_pg, &organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind, expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
+        let r = credit::grant(&*fx.state.control_pg, organization, credit::GrantRequest { amount_cents: 500, currency: "usd", kind, expires_at: None, note: None, idempotency_key: &format!("idem-{}", Uuid::new_v4()) })
         .await;
         assert!(
             matches!(r, Err(RegistryError::InvalidInput(_))),
@@ -1648,7 +1610,7 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
         .expect("claim draft");
 
     // Consume against a $6 subtotal: applied = min($100, $6) = $6.
-    let applied = credit::consume_at_finalize(&*fx.state.control_pg, &organization, &inv, 600, "usd")
+    let applied = credit::consume_at_finalize(&*fx.state.control_pg, organization, &inv, 600, "usd")
         .await
         .expect("consume");
     assert_eq!(applied.applied_cents, 600, "credit capped at the subtotal ($6), NOT the full $100 grant");
@@ -1658,7 +1620,7 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
 
     // Leftover balance preserved: $100 − $6 = $94.
     assert_eq!(
-        credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap(),
+        credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap(),
         9400, "the leftover grant balance ($94) is preserved",
     );
 
@@ -1742,7 +1704,7 @@ async fn consume_and_record_plan_change_serialize_on_the_organization_lock() {
     })
     .detach();
     let tx = conn.transaction().await.expect("tx");
-    let applied = credit::consume_at_finalize(&tx, &organization, &inv, 600, "usd")
+    let applied = credit::consume_at_finalize(&tx, organization, &inv, 600, "usd")
         .await
         .expect("consume drew $6 of the $10 grant");
     assert_eq!(applied.applied_cents, 600);
@@ -1799,7 +1761,7 @@ async fn consume_and_record_plan_change_serialize_on_the_organization_lock() {
 
     // Balance is exact + non-negative: $10 granted − $6 consumed = $4 (the plan change
     // never touched credit; serialization prevented any over-draw).
-    let bal = credit::balance(&*fx.state.control_pg, &organization, "usd").await.unwrap();
+    let bal = credit::balance(&*fx.state.control_pg, organization, "usd").await.unwrap();
     assert_eq!(bal, 400, "balance after the serialized consume = $10 − $6 = $4");
     assert!(bal >= 0, "balance never goes negative under consume↔plan-change serialization");
 

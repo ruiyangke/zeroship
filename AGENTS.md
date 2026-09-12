@@ -48,18 +48,19 @@ None of this is licence to measure less - measure more, and put the result in a 
 | --- | --- |
 | **Routing / dispatch / manifest** | `docs/architecture/gateway-routing.md` · `crates/zeroship-gateway/src/router/dispatch.rs` · `crates/zeroship-bundle/src/{manifest,rule}.rs` (`Manifest`, `Rule`, `Match`, `Action`) |
 | **V8 runtime** (fetch, streams, WebSocket, modules) | `docs/architecture/runtime.md` · `crates/zeroship-runtime/` |
-| **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/zeroship-runtime-macros/` · `crates/plugin-{db,kv,storage}/` |
+| **Adding a native primitive** (`env.*`) | `docs/reference/plugin-system.md` · `crates/zeroship-runtime-macros/` · `crates/zeroship-{data,kv,storage}-v8/` |
 | **Control plane** (app CRUD, deploy, env, route registry) | `docs/architecture/control-plane.md` · `crates/zeroship-control/src/api.rs` · `crates/zeroship-control/src/registry.rs` |
 | **Control-plane TypeScript client** (`@zeroship/control`) | `docs/reference/control.md` · `sdks/control/` · `crates/zeroship-control/src/{api,env_handlers}.rs` |
 | **Deploy artifact** (.zship + manifest + blob storage) | `docs/reference/zship.md` · `docs/architecture/blob-store.md` · `crates/zeroship-bundle/` (manifest types, BlobStore, pack/unpack) |
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/zeroship-auth/` · `crates/zeroship-gateway/src/oidc_rp.rs` · gates: `tests/run_auth_suite.sh` (live PG) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
 | **How data is stored, reached and isolated** (databases, datastores, grants, schema authority) | `docs/architecture/data-system.md` - read this before changing anything in the data plane |
-| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-plugin-db/` (adapter: V8 classes, per-isolate context, CDC) · `crates/zeroship-data-engine/` (engine: CRUD, transactions, exec, lanes) |
-| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `packages/zero-migrate/` (the one authoring package and recorder) · `crates/zeroship-schema/` · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
-| **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `tests/platform_migration_corpus_gate.sh` (proves it records and applies the corpus) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
-| **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/zeroship-plugin-kv/` |
+| **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-data-v8/` (adapter: V8 classes, per-isolate context, CDC) · `crates/zeroship-data-orm/` (engine: CRUD, transactions, exec, lanes) |
+| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `packages/zero-migrate/` (the one authoring package and recorder) · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
+| **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `cargo xtask test migrations` (native corpus test in `crates/zeroship-migrate-node/tests/platform_corpus.rs`) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
+| **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `sdks/storage/` |
+| **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `sdks/kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
-| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-plugin-workflow/` · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/zeroship-runtime/src/core/init.rs` |
@@ -149,18 +150,22 @@ For the long form with sequence diagrams, see `docs/architecture/distributed.md`
 
 ## Crate index
 
+ORM structure and driver contracts: `docs/architecture/data-orm.md`.
+
 ```
 crates/
 ├── zeroship-core/    Inter-service wire types (RouteEntry, AppRecord, UsageReport, ControlEvent), typed_id, auth utils, observability
 ├── zeroship-bundle/  .zship deploy artifact: Manifest types, BlobStore, BundleStore, tar.zst pack/unpack
-├── zeroship-schema/  Shared schema authority — DDL builders, diff classifier, live introspection, sentinel codec. Leaf (no v8/runtime); reused by the migration engine (write/diff) + plugin-db's data plane (read/introspect).
 ├── zeroship-migrate-server/ Managed-policy creator migration *service* — applies app migrations under the operator-ceiling ⊓ creator-draft trust profile. Its `session.rs` also carries `CompioPgSession`, the newtype bridging the `zeroship-migrate-*` engine crates to compio-postgres over their `SqlSession` seam. PostgreSQL only — it applies pure DDL and REFUSES anything else, including the SQLite rebuild step. The engine is multi-dialect; this host is not, and nothing here drives its MySQL or SQLite backends.
 ├── zeroship-runtime/ V8 + compio event loop + fetch + WebSocket + crypto + auth context
 ├── zeroship-runtime-macros/ #[v8_class] proc macro (V8 ObjectTemplate-backed classes)
-├── zeroship-plugin-db/      env.db.* ADAPTER: the V8 classes, the per-isolate composition root (context.rs), the service lifecycle and the CDC modules. It re-exports zeroship-data-engine's modules under their old names, so `crate::crud::…` and `zeroship_plugin_db::exec::…` resolve exactly as they did before the cut.
-├── zeroship-data-engine/    env.db.* ENGINE: CRUD passes, the SC-1 transaction protocol, the routed executor, the per-isolate transaction lanes, the `BackendHandle` dispatch enum, per-app role provisioning. Extracted from plugin-db 2026-09-03. The one NON-VENDOR crate that names both drivers on purpose - `BackendHandle` is a closed sum over them - and it names no V8 type and no adapter module, which its manifest enforces by omission.
-├── zeroship-plugin-kv/      env.kv.* native ops
-├── zeroship-plugin-storage/ env.storage.* native ops
+├── zeroship-data-v8/      env.db.* ADAPTER: V8 classes, per-isolate composition, service lifecycle and CDC. CRUD dispatch prepares and executes the engine's ORM operations, then encodes results for V8.
+├── zeroship-data-orm/    ORM: bound Database and Collection handles, Rust model mapping, native values, SQL compilation, CRUD protection passes, transaction protocol, routed execution, transaction lanes and per-app role provisioning. The shared driver interface registers backend adapters. No V8 or adapter dependency.
+├── zeroship-data-macros/    Migration-derived Rust collection metadata and FromRow, Insertable, Changeset derives. Re-exported through data-orm::orm; no runtime or driver dependency.
+├── zeroship-kv/         App-scoped KV contract, errors, and Redis/redb backends; no V8
+├── zeroship-kv-v8/      env.kv binding: V8 conversion, isolate state, dispatch, metering
+├── zeroship-storage/    Scoped Rust object storage, LocalFs and S3 backends; no V8
+├── zeroship-storage-v8/ env.storage binding, isolate-owned streams and metering
 ├── zeroship-metering/ Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
 ├── zeroship-stream/  Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)
 │
@@ -172,28 +177,40 @@ crates/
 ├── zeroship-worker/  V8-per-thread, on-demand bundle loading, LRU eviction
 │
 │ Tools
-+-- zeroship-cli/     CLI: serve, deploy, migrate, config, login, logout, whoami, organization, secret, var, dev
-                      (no `build` — builds go through @zeroship/vite-plugin)
++-- zeroship-cli/     Creator CLI; run `zeroship --help` for available commands
 ```
 
-**Writing or changing a gate.** Every arm of every gate declares the number of
-items THAT ARM RULED ON and a floor that number must clear
-(`tests/lib/gate_arms.sh`; worked example `tests/ws_subscription_stub_gate.sh`).
-This is not ceremony: on 2026-08-20 four gates were found to be examining
-nothing and printing exactly what a clean tree prints, and a gate-level "3 arms
-ran" guard was green throughout one of them because three arms did run, one over
-an empty set. The floor lives beside the code that produces the number, never in
-a central table - a table of expected counts is a census, and stale censuses are
-how four OTHER gates went red the same week when two new crates landed.
-`tests/gate_arm_census.sh tests` checks that every gate participates; add
-`--run <gate.sh>` and it also rules on the counts those gates emit.
+**Database verification is required.** Control, migration-service and worker
+tests run in ordinary `cargo test` and require a migrated PostgreSQL database.
+Use `tests/run_billing_suite.sh` and `tests/run_worker_suite.sh` to prepare it
+and run the suites. Database verification must never be an opt-in feature.
+`zeroship-data-orm` and
+`zeroship-data-v8` include PostgreSQL tests in ordinary `cargo test`. Do not
+put required database cases behind opt-in features, ignore them, or report success
+when the server or its required extensions are unavailable. Database contracts
+live in their owning source crates, grouped by backend and behavior. Private
+fixtures own test setup and teardown. `cargo xtask test data` runs the data crates
+through nextest and rejects feature-gated test targets. Data fixtures own their
+PostgreSQL containers; Docker is required and no external database URL is used.
 
-EVERY GATE IS A SHELL SCRIPT under `tests/`, and the census itself is one. Five
-compose gates and the census were Rust in a `zeroship-gatekit` crate for a week;
-all of it was deleted on 2026-08-21, the gates for the complexity they cost and
-the census because 959 lines of Rust to read shell scripts and enforce a shell
-convention is a workspace member paying for nothing. Write a new gate in shell,
-source `tests/lib/gate_arms.sh`, and give every arm a floor.
+**Writing or changing a check.** Keep nonempty-input assertions and rejection
+controls beside each check. Do not add or port source-text checks: tests must
+exercise behavior, compiler contracts, parsed artifacts or structured metadata,
+rather than search implementation text for expected spellings. Retire existing
+source scanners as their suites are migrated. Surviving shell gates use
+`tests/lib/gate_arms.sh` for per-arm floors and failure propagation. There is no central script-count
+census or requirement to recreate retired bookkeeping checks in Rust.
+
+Data architecture checks are Rust tests in `xtask/tests/data_architecture.rs`,
+run by `cargo xtask test data-architecture` and the complete data suite.
+Workspace dependency and feature rules run through `cargo xtask test repository`
+in `xtask/tests/repository_architecture.rs`. Driver and storage trait shape is
+checked by the data architecture suite. The ORM and V8 adapter deny
+`private_interfaces` and `private_bounds` during ordinary compilation.
+Keep nonempty-input assertions and rejection controls beside the checks. Example acceptance
+tests live inside each example and use Vitest, TypeScript fixtures and browser
+assertions. Other repository gates remain shell scripts under `tests/` and
+participate in `tests/lib/gate_arms.sh`.
 
 Standalone, zeroship-independent driver libraries (own top-level `libs/`, publishable):
 
@@ -212,53 +229,62 @@ Per-crate READMEs (where present) carry the responsibility statement and list of
 
 These don't change. If you're about to violate one, stop and ask.
 
-- **Zero tokio in the stack.** Everything is compio/io_uring. Drivers are bespoke (`compio-postgres`, `compio-redis`). The rule holds for code we write: no crate here declares tokio as a normal or build dependency, and every `tokio::` string in the tree is a comment saying what compio replaces. **A `[dev-dependencies]` tokio is ALLOWED, by an operator decision on 2026-08-24.** The invariant is that no tokio runtime drives our I/O in a shipped binary; a test binary is not shipped. It buys the strongest oracle a port can have - running tokio-postgres beside `compio-postgres` in one process and diffing their behaviour against the same server. The exemption is narrow and mechanically enforced: `kind == "dev"` only, declared in the member's own `[dev-dependencies]` with its own version. A normal or build dependency stays a hard red, and so does tokio in the root `[workspace.dependencies]`, which carries no kind and can be inherited into any table. Both directions are mutation-proved in `tests/zero_tokio_gate.sh`. It does NOT yet hold for the dependency graph - `cyper` pulls `hyper`, which pulls tokio, so `libtokio-*.rlib` is built (re-measured 2026-08-21 via `cargo tree -i tokio -e normal`: the third-party carriers are `cyper`, `cyper-core`, `hyper`, `hyper-util`, and NINE of our crates name `cyper` directly. The carrier set is unchanged since 2026-08-20; the entrypoint set went nine to ten and BACK TO NINE on 2026-09-03, when `zeroship-cdc-transport-spike` added a DEV dependency on `cyper` to validate the CDC relay's transport and was deleted the same day, once the four properties it existed to prove were measured and written into `docs/proposals/2026-08-28-cdc-service.md`. It was the only non-normal entry this pin has ever carried. The gate reads every dependency kind, so `dev` is not a way around this pin and was not used as one - it went red on the ADDITION and red again on the DELETION, and the pin and this sentence moved together both times. A pin that only resisted growth would have stayed green while the set shrank). Removing that is the `investigate/cyper-tokio-removal` branch. **That edge is LINKED, NOT DRIVEN, and this paragraph used to omit it** - which is how a task was dispatched on 2026-08-21 to hand-roll an HTTP/1.1 client purely to avoid "adding a tokio edge" that was never a running runtime. No tokio reactor starts on our paths. `cyper` and `cyper-core` contain zero `tokio` occurrences in their own source (`grep -rc tokio ~/.cargo/registry/src/*/cyper{,-core}-*/src/*.rs`), and cyper-core supplies `CompioExecutor` (`hyper::rt::Executor` over `compio::runtime::spawn`) and `CompioTimer` (`hyper::rt::Timer` over `compio::time::sleep`), which `cyper::ClientBuilder::build` installs alongside its own `Connector` - so hyper's spawn, timer and connect hooks all land on compio and hyper-util's tokio-based `HttpConnector` is never constructed. hyper itself declares only `tokio = { features = ["sync"] }`, which needs no reactor. The `net`/`mio` features come from `hyper-util/client` naming `tokio/net` outright, NOT from hyper-util defaults (`default = []` is empty), so `default-features = false` would change nothing and the edge cannot be flagged away without dropping `hyper_util::client::legacy::Client` - which cyper uses. Empirically, a `cyper` GET returns `Ok(200)` inside a bare `#[compio::test]` runtime; a live path touching `tokio::net` or `tokio::time` would panic there instead (that exercises connect plus one request, not pool-idle timers). Read the pinned carrier sets as "compiled in", never as "a second runtime is running". The closure BEHIND those sets can shrink without either set moving, and did: `zeroship-gatekit` dropped its last `zeroship-core` dependency on 2026-08-21 (before the crate itself was deleted), taking the reachable count from 26 to 25. The gate was green either way, because gatekit reached tokio through core rather than by naming a carrier - so treat the two pinned sets as "has the accepted edge moved", never as a count of who is behind it. Do not read the exception as licence: adding a tokio-dependent crate still needs to be raised. **`tests/zero_tokio_gate.sh` now checks both halves** - it bans a non-dev tokio declaration in any manifest we own, and pins those two sets so the accepted edge cannot grow, shrink, or vanish without this paragraph changing in the same commit.
+- **Zero tokio in the stack.** Shipped I/O runs on compio/io_uring. Workspace
+  members must not declare `tokio` or `tokio-*` as normal or build dependencies,
+  including renamed and target-specific declarations. A member-owned
+  `[dev-dependencies]` declaration with its own version is allowed for test
+  oracles such as `tokio-postgres`. The root `[workspace.dependencies]` table
+  must not declare these packages because its entries can be inherited into
+  any dependency kind.
+
+  The accepted transitive dependency through `cyper`, `cyper-core`, `hyper`, and
+  `hyper-util` still compiles Tokio. Cyper installs compio executors, timers,
+  and connectors; the dependency graph does not establish which runtime drives
+  I/O. Adding a Tokio-dependent package still needs to be raised.
+
+  Native tests in `xtask/tests/repository/tokio_boundary.rs`, run by
+  `cargo xtask test repository`, enforce declarations and the accepted
+  dependency boundary. Cargo selects normal dependency paths under default
+  and all workspace features for the host platform. The tests compare their
+  union against `CARRIERS` and inspect every dependency kind when comparing
+  direct workspace consumers against `ENTRYPOINTS`. A new dev dependency on
+  a carrier therefore changes the boundary even though direct Tokio dev
+  dependencies are allowed. Internal dependency changes behind those direct
+  consumers need not change either set.
+
+  Update the sets and this invariant together when that accepted boundary
+  changes, including when Tokio is removed. Rejection tests cover dependency
+  aliases, target-specific kinds, TOML spellings, missing input, and optional
+  feature activation. The workflow HTTP client belongs to `zeroship-workflow`;
+  its accepted cyper dependency follows the Rust client.
+
 - **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/zeroship-worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-core/src/typed_id.rs`.
 - **Wire formats are explicit contracts.** `Manifest`, `RouteEntry`, `AppRecord`, `.zship` archive layout, and RPC envelopes must be changed deliberately. Pre-launch can break them, but every producer, consumer, fixture, and reference doc changes in the same patch; no hidden compatibility shim.
 - **Native primitives are the kernel.** Anything user code can do via `fetch` or composition belongs in an npm package (`@zeroship/*`), not in Rust. The native surface is small and stable on purpose.
 - **The gateway is dumb.** It does manifest dispatch, JWT, rate-limit, CHWBL routing — and forwards. All app logic runs in the worker.
-- **Privilege follows the PROCESS, not the function.** The worker executes creator code. Granting the worker a privileged database capability - a `SECURITY DEFINER` wrapper, an elevated role, a signed session token it presents on its own behalf - does not create a boundary; it creates the *appearance* of one, because everything behind that capability is reachable by whatever reaches the worker. The rule that follows has two halves and both are load-bearing:
-  - **If the worker can do it, it is not privileged.** It lives in the **app's own schema**, written by ordinary parameterised SQL, with provenance enforced at the Rust call boundary. No system schema, no `SECURITY DEFINER`, no session ceremony.
-  - **If it must be privileged, it belongs to a separate service** that does not execute creator code - the migration service, the CDC relay, the control plane. Never to a function the worker calls.
+- **Privilege follows the process.** The worker executes creator code. A privileged
+  database function the worker can invoke does not create a security boundary.
+  Runtime writes belong in the app's schema under scoped, parameterized SQL.
+  Privileged schema changes, replication ownership and key management belong to
+  the migration service, CDC relay and control plane respectively.
 
-  A platform-owned system schema under the `__zeroship` prefix is therefore reserved for exactly one thing: **state a separate service WRITES and the worker only READS**, which the tenant must not be able to forge. A schema epoch is that shape. It is not a place to keep the worker's powers.
+  Every table in a bound creator schema is visible through the ORM and V8
+  adapter. A table-name prefix does not change access, role grants or CDC
+  publication. Schema binding remains the tenant boundary, and runtime code
+  still cannot create schema objects. Any future shared system schema must hold
+  state written by a separate service that workers cannot forge.
 
-  **THAT SCHEMA DOES NOT EXIST TODAY, AND THIS PARAGRAPH SAID IT DID UNTIL 2026-08-29.** The sentence above describes the END STATE the invariant permits, not the tree. The schema, its six tables and its 32 definer-rights routines were deleted on 2026-08-27 under this very invariant, and `crates/zeroship-data-engine/src/auth/bootstrap.rs` records that **nothing replaced them**. `db/migrations-ts/` provisions no such schema - measured against every file in that directory, with a positive control proving the search would have found the `__zeroship_` prefix had it been there.
+  Runtime descriptors define an isolate's schema. Catalog protection markers
+  prevent descriptors from removing masking or encryption. Transaction identity
+  checks support schema epochs, but `expected_authority` in
+  `crates/zeroship-data-orm/src/transaction/driver.rs` still supplies a placeholder
+  epoch; do not treat it as a live migration fence.
 
-  **NO CODE NAMES IT, AND THIS PARAGRAPH CLAIMED OTHERWISE UNTIL 2026-09-07 - IN THE DIRECTION THAT READS AS A LIVE DEFECT.** It said one statement still named the schema and "therefore fails on every database", citing a PITR placeholder in `zeroship-data-postgres`. That statement carried `#[cfg(feature = "test-helpers")]` on both its module and its `impl Backup for PostgresBackend` block - feature only, no `any(test, ...)` arm - so it shipped in no binary and could not fail on any database. It had no caller and no test. It was deleted on 2026-09-07 together with the `Backup::pitr_replay` method it implemented, the `PitrTarget` type in its signature and the SQLite refusal arm that deferred to it; `zeroship_data_core::storage::Backup`'s rustdoc now records why PITR is an operator capability with a database-server contract rather than a data-store method. Both line citations in the deleted sentence had also drifted by roughly a hundred lines, which is the defect this file documents about itself elsewhere and had here.
-
-  **The name is reserved, not retired, and the fences that hold it are not guarding an empty namespace.** `__zeroship_` is the live prefix of tables in every app schema today - the migration journal, the unmask audit table, the workflow journal - so the five reservation surfaces (the namespace, column and alias tables in `zeroship-data-query-builder`'s `ident`, `zeroship-schema`'s `RESERVED_NAMES`, and the `PLATFORM_RESERVED_COLLECTION_PREFIXES` list three crates pin against each other) protect live objects as well as holding the namespace open. Do not narrow them on the grounds that the schema is gone.
-
-  The schema epoch does not exist either - but **a comparison for it is built**. `crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:265-267` compares observed against expected and returns `Verdict::ReResolve`. The producer is missing: `expected_authority` at `crates/zeroship-data-engine/src/transaction/driver.rs:142-148` mints `SchemaEpoch::new(0)`, and `observation_for` at `:157-167` echoes it back, so both sides are the same constant. Both say so - "The wiring is real; the *input* is not yet... the day a record exists, this is the one function that has to change."
-
-  **THIS PARAGRAPH HAS NOW BEEN WRONG IN BOTH DIRECTIONS WITHIN ONE DAY, AND THE SECOND ERROR IS THE MORE INSTRUCTIVE ONE.** Earlier on 2026-08-29 it said the producer was the only missing piece. That was corrected the same morning to "necessary and not sufficient", on the grounds that a real `SET LOCAL ROLE` failure arrived as `BeginCompleted { opened: false }` and was routed to cleanup before `classify` ever saw it, so an epoch fence enforced by PostgreSQL needed a third piece nobody had named: an adapter from the session-setup outcome into `Verdict::ReResolve`.
-
-  **That correction was itself outdated hours later, by a fix that landed the same day.** `8e191f650` replaced the `opened: bool` with a typed `BeginOutcome`, and the adapter now exists (`crates/zeroship-data-engine/src/transaction/reducer/mod.rs:985-989`):
-
-  ```rust
-  BeginOutcome::SetupFailed => {
-      self.force(CleanupCause::SessionSetupFailed, now).1
-  }
-  BeginOutcome::ReResolve => self.on_verdict(Verdict::ReResolve, now),
-  BeginOutcome::Denied(reason) => self.on_verdict(Verdict::Deny(reason), now),
-  ```
-
-  It is reachable, not merely spelled: `crates/zeroship-data-engine/src/transaction/driver.rs:528-537` maps `SessionSetupDisposition::ReResolve` and its denial arm onto those outcomes, and both are covered at `crates/zeroship-data-engine/src/transaction/reducer/tests.rs:1679` and `:1698`. `CleanupCause::BeginFailed` survives at `reducer/mod.rs:996` for a BEGIN that genuinely failed, which is what it was always for; it is no longer where classified setup errors go to die.
-
-  So: the invariant is live and binding, the schema is a reservation rather than a fact, and **the epoch again needs only its producer** - the classifier, the adapter, the retryable verdict and both rotation directions all ship. Read the two sentences above as a design permission, never as a description of what you will find.
-
-  **CORRECTED 2026-09-04, AND THE SCALE OF THE DRIFT IS THE POINT.** This passage carried TEN line citations. SEVEN were wrong: `identity.rs:325-327` (the comparison is at `:265-267`; `:325-327` is prose inside a test's doc comment), `driver.rs:106` (`SchemaEpoch::new(0)` is at `:146`, inside `expected_authority` at `:142-148`; `:104-108` is unrelated `BACKEND_GENERATION` doc prose), `reducer/mod.rs:1005-1016` (`:985-989`), `driver.rs:460-462` (`:528-537`), a bare `:1015` for `CleanupCause::BeginFailed` (`:996`; `:1015` is the `TransactionConnectionBusy` arm), the parenthetical re-litigating `:313-315`, and "mints `SchemaEpoch::new(0)` on both sides" - which was wrong as a CLAIM, not just a number: `expected_authority` mints it and `observation_for` at `:157-167` ECHOES it. Three were right: `identity.rs:97`, `tests.rs:1679`, `:1698`. That last range was `:158-165` until later the same day - the struct-literal body, one line below the `fn` line, while its sibling `expected_authority` is cited `:142-148`, signature through closing brace. Substantively right, inconsistent by one line, and both spellings are now the sibling's. The fenced quote was also no longer verbatim - rustfmt has since wrapped the `SetupFailed` arm across three lines.
-
-  `docs/architecture/data-system.md` drifted INDEPENDENTLY and DIFFERENTLY over the same code, so this was not one copy-paste propagating. All of it stayed green under `tests/doc_citation_gate.sh`, which checks that a cited line is inside its file and never that it is the right line - and AGENTS.md is not line-checked at all, because arm 1's character class excludes `:`. A line-accuracy arm was measured and rejected again on 2026-09-04; the reasoning is in that gate's header. So: **the path is the durable claim and the line is a courtesy.** Verify these numbers before you rely on them, and if a line matters to an argument, quote the code.
-
-  **The counter-example is live in the tree.** DB-3: app JS reached a privileged unmask call and could pass `actor: { kind: "auto" }` to read its own PII, PHI and PCI at will. It is patched by `sanitize_app_actor`, which strips an actor claiming a reserved system kind to `None` (defined in `crates/zeroship-data-engine/src/crud/unmask.rs`). **THIS SENTENCE SAID "ALL THREE SITES" UNTIL 2026-09-01; THERE ARE FIVE**, and the two it omitted are the creator-facing ones - `zeroship-plugin-db`'s `v8_classes/masked_value.rs:300` (single unmask) and `:423` (bulk), each carrying its own `DB-3` comment and feeding `UnmaskFieldArgs` / `BulkUnmaskArgs`. The three it named are real and are now the ENGINE's: `zeroship-data-engine`'s `crud/mod.rs:692` (the query hint, which moved out of `dispatch_find` into `plan_find` on 2026-09-02 and is a fence on the EAGER half, not the async body) plus `crud/unmask.rs:1514` and `:1629` (arg parsing). **THE FIVE FENCES NOW SPAN TWO CRATES**, which is the third re-measurement this paragraph has needed: the line numbers drifted on 2026-09-02, and on 2026-09-03 the engine tier left `zeroship-plugin-db` for `zeroship-data-engine`, taking three of the five with it and making the previous one-root grep an undercount by construction. Count them with `grep -rn 'sanitize_app_actor(' crates/zeroship-data-engine/src crates/zeroship-plugin-db/src` - BOTH roots - and do NOT pipe that through `head`; a truncated enumeration read as a complete one is how this paragraph was nearly "corrected" in the wrong direction, into a report of a live regression that does not exist. An undercount here is not harmless: it invites an auditor to conclude the two undocumented fences are redundant.
-
-  **The fence is now bound on live PostgreSQL, and the binding exposed a second gap.** `crates/zeroship-plugin-db/tests/mask_flip.rs` drives app-shaped JSON through `parse_args` / `parse_bulk_args` and refuses it; restoring DB-3 by deleting either `sanitize_app_actor` call makes exactly one of those tests fail, and it fails by RETURNING THE PLAINTEXT, because the no-policy fallback is literally `Ok(kind == "auto")`. The gap: `sanitize_app_actor` strips the WHOLE actor, `id` included, so the denied audit row carries `actor_role=""` / `actor_id=""` - byte-identical to a call that simply sent no actor. The one durable record of an attempt to exploit DB-3 is therefore indistinguishable from routine anonymous traffic. The strip is right and stays; what is missing is auditing the REJECTED claim in its own column rather than forwarding it into the trusted fields.
-
-  But the bug is not an accident of that implementation. It is what the shape produces, and a privileged call the worker can make will keep producing it.
-
-  Operator decision, 2026-08-27. Consequences already taken: the HMAC session anchor (`hmac_keys`, `session_ctx`, `session_nonces`, `sign_session`, `verify_signature`, `init_session`, `rotate_session_keys`) is deleted rather than completed; CDC slot and publication ownership moves to the CDC relay service rather than to a wrapper the worker calls.
+  Creator-supplied actors must pass through `sanitize_app_actor` in
+  `crates/zeroship-data-orm/src/protection/unmask.rs`. Reserved system claims are
+  removed from authorization and retained separately for audit. Unmask audit
+  writes must survive rollback of the creator transaction.
 
 ---
 
@@ -283,7 +309,7 @@ env.auth.*     getUser/requireUser — per-request identity (AuthPlugin, registe
                on the worker + CLI `zeroship serve` vectors). Fed in prod by the
                gateway's `ZeroShip-User` header; in dev by the dev-auth provider
                (see `docs/reference/auth-dev-tier.md`).
-env.workflows.* durable workflow run start/control handles (`WorkflowPlugin`,
+env.workflows.* durable workflow run start/control handles (`WorkflowBinding`,
                registered on the worker + CLI `zeroship serve` vectors).
 ```
 
@@ -534,32 +560,9 @@ cargo test -p compio-postgres \
 # see either gap: that is how both suites stayed silently unrun for a whole
 # session of otherwise-green --all-features checks.
 
-# Lint the workspace. NONE of the per-crate runs above invoke clippy, which is
-# why main went red twice in a week without anyone noticing. Run this before you
-# push, not just before you wonder why CI is red.
-#
-# It is not a bare `cargo clippy --workspace`: a deny-level lint in one crate
-# ABORTS the run before the crates downstream of it are ever scheduled, and a
-# crate that was never reached prints exactly what a clean crate prints. The
-# gate audits cargo's own json stream against `cargo metadata` and names any
-# package or target that went unlinted. CI runs this same script.
-#
-# It lints under `--all-features`, and a fourth arm checks that every feature
-# the manifests declare really came out enabled. That arm exists because the
-# first three audit ONE feature resolution: a target whose `required-features`
-# are unmet is not counted as unlinted, it is filtered out of the expectation,
-# so the gate reported 148 of 148 on a workspace declaring 158. The 10 missing
-# ones included zeroship-migrate-adapter's `platform_migrate`, which held eleven
-# standing deny-level `clippy::await_holding_lock` errors the whole time. THAT
-# CRATE IS GONE (deleted 2026-08-28); do not go looking for it. The example is
-# kept because the arm it justifies is live and the failure it describes is the
-# one that arm exists to catch.
-#
-# It needs `pnpm build` and setup-wpt.sh to have run (crates/zeroship-runtime
-# `include_str!`s their output); it refuses, naming them, rather than linting a
-# smaller workspace.
-./tests/clippy_gate.sh
-./tests/clippy_gate.sh --preflight-only   # "can this machine lint at all?" - seconds
+# Lint after building the SDKs and preparing WPT inputs.
+# Workspace lint levels determine which diagnostics fail the command.
+cargo clippy --workspace --all-targets --all-features
 
 # Web Platform Tests (WPT) — fetched on demand by setup-wpt.sh, NOT
 # tracked in git. The script shallow-clones a pinned commit into

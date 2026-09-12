@@ -65,19 +65,15 @@ cargo build --workspace
 Rust gates - run them before pushing:
 
 ```
-./tests/clippy_gate.sh
+cargo clippy --workspace --all-targets --all-features
 cargo check --workspace
 cargo test --workspace
 ```
 
-**Lint through `tests/clippy_gate.sh`, which is what CI runs, and NOT through
-`cargo clippy --workspace -- -D warnings`.** The workspace grades its own lints
-in the root `Cargo.toml`; `-D warnings` promotes the pedantic and nursery groups
-it deliberately leaves as warnings, so it reports thousands of errors that are
-not gate failures (measured on one crate alone: 1744). The gate also audits
-cargo's JSON stream to catch packages that were never linted at all, which a
-bare `cargo clippy` cannot do because a deny-level lint in one crate aborts the
-run before the crates after it are scheduled.
+**Use the same Clippy invocation locally and in CI.** The root `Cargo.toml`
+sets lint severity. Preserve those levels; a blanket `-D warnings` would turn
+intentionally warning-level groups into errors. A failed Cargo command means
+the lint run failed; fix the errors and rerun it.
 
 **There is no `cargo fmt` gate.** CI runs no formatting step, and the tree does
 not currently satisfy `cargo fmt --all -- --check` - it reports diffs in 888
@@ -100,6 +96,11 @@ pnpm check            # typecheck every sdks/* package
 pnpm test             # vitest across sdks/*
 ```
 
+Examples own their tests, fixtures, test configuration, and test dependencies
+under their example directory. Repository test commands and CI invoke those
+local entry points. Keep example-specific acceptance logic out of shared test
+helpers and platform crate test suites.
+
 Web Platform Tests (only when you touch the runtime's web surface) are fetched on
 demand and are not tracked in git:
 
@@ -107,7 +108,7 @@ demand and are not tracked in git:
 ./crates/runtime/tests/setup-wpt.sh
 ```
 
-DB-gated and end-to-end suites (bring up the dev Postgres via
+Database and end-to-end suites (bring up the dev Postgres via
 `docker compose -f deploy/compose/docker-compose.yml up -d postgres`, or point at your
 own server):
 
@@ -118,13 +119,8 @@ tests/run_auth_suite.sh         # the auth live-database gate. Uses a SHARED
                                 # at the same time; --database <name> for a
                                 # private one. TEST_DB in the environment is
                                 # refused. docs/runbooks/local-dev.md says why.
-tests/run_billing_suite.sh      # provisions the DB + runs every live-database suite
-                                # (everything behind the `live-db-tests` feature
-                                #  in zeroship-control / zeroship-migrate-server)
-tests/run_worker_suite.sh       # the same, for zeroship-worker: seven workflow-
-                                # advance tests that join zeroship.apps/plans/
-                                # app_deploys and so need a MIGRATED database.
-                                # --dsn <url> points it at a server you control.
+tests/run_billing_suite.sh      # migrate + test zeroship-control and zeroship-migrate-server
+tests/run_worker_suite.sh       # migrate + test zeroship-worker
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it
@@ -203,7 +199,7 @@ A single lowercase token (may contain `-`) naming the area touched. Reuse an exi
 scope before inventing one - grep `git log` for the current vocabulary. Common scopes:
 
 - Services & kernel: `gateway`, `runtime`, `control`, `worker`, `auth`, `authz`,
-  `plugin-db`, `plugin-kv`, `plugin-storage`, `metering`, `stream`, `bundle`, `core`,
+  `plugin-db`, `kv-v8`, `storage-v8`, `metering`, `stream`, `bundle`, `core`,
   `cli`, `mailer`
 - Drivers (`libs/`): `compio-postgres`, `compio-redis`, `compio-s3`
 - SDKs: `db`, `kv`, `storage`, `rpc`, `ui`, `vite-plugin`, `bootstrap`, `payments`

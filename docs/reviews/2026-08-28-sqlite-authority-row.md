@@ -70,7 +70,7 @@ The chain is fixed and pre-user (`descriptor.rs:34-49`):
 (`crates/zeroship-runtime/src/core/init.rs:3424-3432`, called once from
 `init.rs:2221`) -> `installSchema` (`sdks/bootstrap/src/install-schema.ts:1320-1350`)
 -> `register_model_dispatch` -> the per-isolate store
-(`crates/zeroship-plugin-db/src/register_model/mod.rs:104-106`).
+(`crates/zeroship-data-v8/src/register_model/mod.rs`).
 
 **In production the descriptor is frozen after boot, by capability deletion.**
 `registerModel` is not on `env.db`; it is reachable only through the private
@@ -85,7 +85,7 @@ HMR.** `applyRuntimeDescriptorJson` sets and deletes the global
 callback beside `entry.resetSchemaInstalled()`
 (`dev-bootstrap/index.ts:182-186`); `cache_schema` overwrites in place, and says
 why: "Idempotent: a re-register overwrites, which is what a dev re-deploy of the
-same deploy token means" (`crates/zeroship-plugin-db/src/context.rs:627-630`).
+same deploy token means" (`crates/zeroship-data-v8/src/context.rs`).
 
 That is the fact that decides this sub-question, and it decides it against the
 row. **On the only tier SQLite runs on, "the schema changed" already has a live
@@ -105,7 +105,7 @@ descriptor's `version: 2` is a **wire-format** version
 type at all; the entries are `Arc<serde_json::Value>` in a map
 (`context.rs:293`) keyed by `format!("{}:{}:{}", app_id, deploy_token,
 collection)` (`context.rs:616-624`), and `DbBinding` is
-`{ app_id, deploy_token }` (`crates/zeroship-plugin-db/src/binding.rs:14-18`).
+`{ app_id, deploy_token }` (`crates/zeroship-data-v8/src/binding.rs`).
 The only durable identity is the manifest's sha256 of the blob
 (`crates/zeroship-bundle/src/manifest.rs:183-186`), which the worker uses to
 fetch it (`sync.rs:47-49`) and plugin-db never observes.
@@ -155,7 +155,7 @@ peculiar to this backend.
 
 The tree's actual answer is a protocol command, not a row:
 `Command::ReattachFile` DETACHes the alias on both connections, `rename`s, and
-re-ATTACHes (`crates/zeroship-plugin-db/src/backend/sqlite/session.rs:249-258`,
+re-ATTACHes (`crates/zeroship-data-v8/src/backend/sqlite/session.rs`,
 implemented at `:1851-1866`). It is the shipped form of SC-2's `DetachApp` and
 it carries **no** incarnation and reads **no** row.
 
@@ -200,7 +200,7 @@ Decision 1 (`sc2:67-68`), already built:
 
 One reading would keep the row as the SQLite substitute for a catalog read that
 still happens elsewhere. It does not happen anywhere. Measured across
-`crates/zeroship-plugin-db/src/`:
+`crates/zeroship-data-v8/src/`:
 
 - The `SchemaIntrospect` trait and both implementations are compiled out of
   every release build: `backend/mod.rs:556-568`, `backend/postgres.rs:334-344`,
@@ -213,19 +213,19 @@ still happens elsewhere. It does not happen anywhere. Measured across
   (`backend/sqlite/cdc.rs:652-663`, fallback at `:588-599`). It never reaches
   `collection_schema`.
 - ~~`epoch` occurs **0 times** in `crates/zeroship-schema/src/`. All 20 hits in
-  `crates/zeroship-plugin-db/src/` are Unix-time arithmetic or prose; the one
+  `crates/zeroship-data-v8/src/` are Unix-time arithmetic or prose; the one
   schema-epoch mention is an explicit negation at
-  `crates/zeroship-plugin-db/src/auth/mod.rs:36-38`.~~
+  `crates/zeroship-data-v8/src/auth/mod.rs`.~~
 
   **CORRECTED 2026-09-04: ALL THREE OF THOSE NUMBERS ARE NOW WRONG, and the
   cited file does not exist.** The 2026-09-03 engine extraction moved the data
-  plane out of `zeroship-plugin-db` into `zeroship-data-engine`, which
+  plane out of `zeroship-data-v8` into `zeroship-data-orm`, which
   invalidated the measurement rather than merely the path - so repointing the
   citation alone would have left two stale counts standing beside a freshly
   corrected link. Re-measured today with `grep -rio epoch`:
-  `crates/zeroship-schema/src/` **6** (not 0), `crates/zeroship-plugin-db/src/`
-  **0** (not 20), `crates/zeroship-data-engine/src/` **69**. The quoted
-  negation is verbatim at `crates/zeroship-data-engine/src/auth/mod.rs:36-38`.
+  `crates/zeroship-schema/src/` **6** (not 0), `crates/zeroship-data-v8/src/`
+  **0** (not 20), `crates/zeroship-data-orm/src/` **69**. The quoted
+  negation is verbatim at `crates/zeroship-data-orm/src/auth/mod.rs`.
 
   The 69 also change what the bullet ARGUED. It was offered as evidence that the
   data plane does not carry an epoch; the data plane now carries the whole
@@ -240,8 +240,8 @@ still happens elsewhere. It does not happen anywhere. Measured across
 **CORRECTED 2026-09-04: IT DOES NOT. THIS WHOLE SUBSECTION IS NOW FALSE, and it
 is left standing rather than deleted because a later document leans on it.** The
 carrier and all four of the code citations below are gone.
-`crates/zeroship-plugin-db/src/audit.rs` does not exist; the deletion is recorded
-in two places - `crates/zeroship-data-engine/src/backend/mod.rs:300-304` says the
+`crates/zeroship-data-v8/src/audit.rs` does not exist; the deletion is recorded
+in two places - `crates/zeroship-data-orm/src/backend/mod.rs` says the
 audit-table operations "(`ensure_audit_table`, `next_schema_version`,
 `write_audit_row`, ...) and the `IndexBuilder` capability they existed to record
 are both DELETED", because with the data plane's last DDL removed the provenance
@@ -263,7 +263,7 @@ The original text follows, for the record:
 Worth recording so nobody re-mints `__zeroship_state` later. A monotonic per-app
 schema revision, written by the migration path into the **app's own schema**,
 already exists on both backends: `__zeroship_migrations.schema_version`
-(`crates/zeroship-plugin-db/src/audit.rs:219`, DDL at `:251`, minted by
+(`crates/zeroship-data-v8/src/audit.rs`, DDL at `:251`, minted by
 `next_schema_version` at `:343-352`; SQLite counterpart at
 `backend/sqlite/mod.rs:1287-1332`). It also satisfies `AGENTS.md`'s "if the
 worker can do it, it is not privileged" rule by construction, because it is not
@@ -340,7 +340,7 @@ lifecycle Fork C fences does not reach the SQLite tier:
 - **SQLite's deprovision is a no-op.** `SqliteChangeStream::deprovision` returns
   `Ok(())` and says so: "No-op. Disarming hooks for a session whose app is being
   torn down is not implemented."
-  (`crates/zeroship-plugin-db/src/backend/sqlite/cdc.rs:752-756`).
+  (`crates/zeroship-data-v8/src/backend/sqlite/cdc.rs`).
 - **The dev app id is a literal.** `export const DEV_APP_ID = "default"`
   (`sdks/vite-plugin/src/gen-types/dev-apply.ts:35`), used by both the migrate
   command (`migrate-dev.ts:125`) and the dev server (`dev-server.ts:411`). On

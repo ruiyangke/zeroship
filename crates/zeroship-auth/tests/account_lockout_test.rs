@@ -25,7 +25,6 @@ use std::sync::Arc;
 use compio_postgres::{connect, NoTls};
 use ntex::web::test::TestRequest;
 use uuid::Uuid;
-use zeroship_core::user_id::UserId;
 
 use zeroship_auth::identity::credentials::{verify_password_credentials, CredentialError};
 use zeroship_auth::identity::eligibility::{self, LoginIneligible};
@@ -58,10 +57,7 @@ const BAD_PW: &str = "definitely the wrong password here";
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn consecutive_failures_lock_account_then_success_resets() {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping account_lockout_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db_url = crate::common::test_database_url();
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {
         if let Err(e) = pg_connection.run().await {
@@ -165,24 +161,29 @@ async fn consecutive_failures_lock_account_then_success_resets() {
             .expect("query post-success state");
         (row.get("failed_login_count"), row.get("locked_until"))
     };
-    assert_eq!(count, 0, "successful login must reset failed_login_count to 0");
+    assert_eq!(
+        count, 0,
+        "successful login must reset failed_login_count to 0"
+    );
     assert!(
         locked.is_none(),
         "successful login must clear locked_until, got {locked:?}"
     );
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }
 
-/// Connect + spawn the PG driver, returning a shared client. Returns `None`
-/// (and prints a skip note) when no test database is configured.
-async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>> {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip(&format!("skipping {label} (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))"));
-        return None;
-    };
+/// Connect + spawn the PG driver, returning a shared client.
+///
+/// The DSN comes from [`crate::common::test_database_url`], which refuses the
+/// whole run rather than letting a test proceed without a database.
+async fn connect_pg(label: &'static str) -> Arc<compio_postgres::Client> {
+    let db_url = crate::common::test_database_url();
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
     compio::runtime::spawn(async move {
         if let Err(e) = pg_connection.run().await {
@@ -190,7 +191,7 @@ async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>>
         }
     })
     .detach();
-    Some(Arc::new(pg_client))
+    Arc::new(pg_client)
 }
 
 /// Lock a real user by driving THRESHOLD consecutive wrong-password attempts
@@ -199,7 +200,7 @@ async fn connect_pg(label: &'static str) -> Option<Arc<compio_postgres::Client>>
 async fn lock_account_via_failures(
     pg: &compio_postgres::Client,
     email: &str,
-    user_id: &UserId,
+    user_id: &zeroship_core::UserId,
 ) {
     let req = TestRequest::default().to_http_request();
     for n in 0..LOCKOUT_THRESHOLD {
@@ -247,9 +248,7 @@ async fn lock_account_via_failures(
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn locked_account_recovers_via_password_reset() {
-    let Some(pg) = connect_pg("locked_account_recovers_via_password_reset").await else {
-        return;
-    };
+    let pg = connect_pg("locked_account_recovers_via_password_reset").await;
 
     let email = format!("lockout-reset-{}@zeroship.test", Uuid::new_v4().simple());
     let old_phc = password::hash(GOOD_PW).expect("hash old password");
@@ -267,7 +266,7 @@ async fn locked_account_recovers_via_password_reset() {
         .await
         .expect("issue reset token");
     let new_phc = password::hash(NEW_PW).expect("hash new password");
-    let completed = password_reset::complete(&pg, &issued.raw, &new_phc)
+    let completed = password_reset::complete(pg.as_ref(), &issued.raw, &new_phc)
         .await
         .expect("complete reset")
         .expect("reset must complete");
@@ -276,17 +275,11 @@ async fn locked_account_recovers_via_password_reset() {
     // The account must now be recoverable: the NEW password verifies.
     // Pre-fix this is rejected `Ineligible` (locked_until still set).
     let req = TestRequest::default().to_http_request();
-    let verified = verify_password_credentials(
-        &pg,
-        &req,
-        "test-client",
-        "198.51.100.200",
-        &email,
-        NEW_PW,
-    )
-    .await
-    .expect("post-reset login with the NEW password must succeed (account recovered)");
-    assert_eq!(&verified.id, &user.id, "recovered user id mismatch");
+    let verified =
+        verify_password_credentials(&pg, &req, "test-client", "198.51.100.200", &email, NEW_PW)
+            .await
+            .expect("post-reset login with the NEW password must succeed (account recovered)");
+    assert_eq!(verified.id, user.id, "recovered user id mismatch");
 
     // And the lockout state is fully cleared.
     let (count, locked): (i32, Option<chrono::DateTime<chrono::Utc>>) = {
@@ -305,9 +298,12 @@ async fn locked_account_recovers_via_password_reset() {
         "password reset must clear locked_until, got {locked:?}"
     );
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }
 
 /// F2 regression — the magic-link and OAuth success paths share the
@@ -326,11 +322,7 @@ async fn locked_account_recovers_via_password_reset() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
-    let Some(pg) =
-        connect_pg("locked_account_recovers_at_eligibility_gate_after_lockout_clear").await
-    else {
-        return;
-    };
+    let pg = connect_pg("locked_account_recovers_at_eligibility_gate_after_lockout_clear").await;
 
     let email = format!("lockout-elig-{}@zeroship.test", Uuid::new_v4().simple());
     let phc = password::hash(GOOD_PW).expect("hash password");
@@ -370,9 +362,12 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
         other => panic!("disabled account must still be rejected, got {other:?}"),
     }
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }
 
 /// 5.1 regression (status-code enumeration oracle) — a LOCKED real account, an
@@ -396,10 +391,7 @@ async fn locked_account_recovers_at_eligibility_gate_after_lockout_clear() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
-    let Some(pg) = connect_pg("locked_absent_and_wrongpw_are_status_indistinguishable").await
-    else {
-        return;
-    };
+    let pg = connect_pg("locked_absent_and_wrongpw_are_status_indistinguishable").await;
 
     let req = TestRequest::default().to_http_request();
 
@@ -425,16 +417,10 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
 
     // ── Probe B: an ABSENT account. ──
     let ghost_email = format!("oracle-ghost-{}@zeroship.test", Uuid::new_v4().simple());
-    let absent_err = verify_password_credentials(
-        &pg,
-        &req,
-        "test-client",
-        &probe_ip(2),
-        &ghost_email,
-        BAD_PW,
-    )
-    .await
-    .expect_err("absent account must fail");
+    let absent_err =
+        verify_password_credentials(&pg, &req, "test-client", &probe_ip(2), &ghost_email, BAD_PW)
+            .await
+            .expect_err("absent account must fail");
 
     // ── Probe C: a real account with the WRONG password (one sub-threshold
     //    attempt so it does not itself lock). ──
@@ -443,16 +429,10 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
     let real_user = users::create(&pg, &real_email, "Oracle Real", Some(&phc2))
         .await
         .expect("seed real user");
-    let wrongpw_err = verify_password_credentials(
-        &pg,
-        &req,
-        "test-client",
-        &probe_ip(3),
-        &real_email,
-        BAD_PW,
-    )
-    .await
-    .expect_err("wrong password must fail");
+    let wrongpw_err =
+        verify_password_credentials(&pg, &req, "test-client", &probe_ip(3), &real_email, BAD_PW)
+            .await
+            .expect_err("wrong password must fail");
 
     // The crux: status codes (via CredentialError) must be IDENTICAL. A locked
     // real account that answers 403 while absent/wrong answer 401 is a
@@ -476,7 +456,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
 
     pg.execute(
         "DELETE FROM zeroship.users WHERE id = ANY($1)",
-        &[&vec![locked_user.id.as_str().to_string(), real_user.id.as_str().to_string()]],
+        &[&vec![locked_user.id.as_str(), real_user.id.as_str()]],
     )
     .await
     .ok();
@@ -504,9 +484,7 @@ async fn locked_absent_and_wrongpw_are_status_indistinguishable() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn failure_arms_perform_equivalent_db_roundtrips() {
-    let Some(pg) = connect_pg("failure_arms_perform_equivalent_db_roundtrips").await else {
-        return;
-    };
+    let pg = connect_pg("failure_arms_perform_equivalent_db_roundtrips").await;
 
     // A real, password-bearing user for the wrong-password arm (arm 6b).
     let real_email = format!("f7-real-{}@zeroship.test", Uuid::new_v4().simple());
@@ -589,7 +567,10 @@ async fn failure_arms_perform_equivalent_db_roundtrips() {
          arm ({real_delta}); a faster path here is a distinguishable account-state oracle"
     );
 
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user.id.as_str()])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user.id.as_str()],
+    )
+    .await
+    .ok();
 }

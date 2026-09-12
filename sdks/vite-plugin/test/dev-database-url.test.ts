@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { resolveDatabaseUrl, DevDatabaseUrlSchemeError } from "../src/dev-database-url.js";
+import { devSqliteDir } from "../src/gen-types/dev-apply.js";
 
 /**
  * `resolveDatabaseUrl` is the ONE resolution shared by `migrate-dev.ts` and
@@ -16,6 +17,20 @@ import { resolveDatabaseUrl, DevDatabaseUrlSchemeError } from "../src/dev-databa
  */
 
 const SQLITE_DEFAULT = "sqlite:.zeroship/dev.sqlite";
+
+test("memory and empty SQLite selectors are refused before runtime or migration setup", () => {
+  for (const url of ["sqlite:", "sqlite://", "sqlite::memory:", "sqlite://:MEMORY:",
+    "sqlite:file:db?mode=memory", "sqlite:db?mode=memory&cache=shared"]) {
+    assert.throws(() => resolveDatabaseUrl({ DATABASE_URL: url }, {}, SQLITE_DEFAULT), /must name a SQLite file/);
+    assert.throws(() => devSqliteDir("/project", url), /must name a SQLite file/);
+  }
+});
+
+test("runtime and migration setup resolve the same explicit database file", () => {
+  assert.equal(devSqliteDir("/project", "sqlite:.state/dev.sqlite"), "/project/.state");
+  assert.equal(devSqliteDir("/project", "sqlite:///tmp/dev.sqlite"), "/tmp");
+  assert.equal(devSqliteDir("/project", "sqlite://state/dev.sqlite"), "/project/state");
+});
 
 test("a postgres:// DATABASE_URL from the shell env is refused, naming the shell as source", () => {
   assert.throws(

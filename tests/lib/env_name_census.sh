@@ -55,7 +55,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-find crates/*/tests libs/*/tests crates/zeroship-test-support/src \
+find crates/*/tests libs/*/tests tests/fixtures \
   -name '*.rs' -type f 2>/dev/null | sort > "$work/rust.list"
 find tests -name '*.sh' -type f 2>/dev/null | sort > "$work/shell.list"
 

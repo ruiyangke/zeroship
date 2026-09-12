@@ -114,6 +114,7 @@ fn guard_cfg(cfg: &ExecutorConfig) -> GuardConfig {
     GuardConfig::from_policy(
         support::no_inject(&cfg.project_schema),
         zeroship_migrate_postgres::DIALECT,
+        &cfg.project_schema,
     )
 }
 
@@ -591,7 +592,7 @@ async fn adding_a_mask_to_an_existing_encrypted_column_names_key_material_refusa
                    "secret" BYTEA NOT NULL
                );
                COMMENT ON COLUMN "{}"."secrets"."secret"
-                   IS 'zero-migrate:enc:randomised:default:string';
+                   IS 'zero-migrate:enc:string';
                INSERT INTO "{}"."secrets" ("row_key", "secret")
                    VALUES ('row-a', decode('AA==', 'base64'));"#,
             cfg.project_schema, cfg.project_schema, cfg.project_schema
@@ -616,11 +617,7 @@ async fn adding_a_mask_to_an_existing_encrypted_column_names_key_material_refusa
                     name: "secret".into(),
                     ty: "string".into(),
                     required: true,
-                    encrypted: Some(serde_json::json!({
-                        "mode": "randomised",
-                        "keyId": "default",
-                        "wraps": "string"
-                    })),
+                    encrypted: Some(true),
                     mask: Some(serde_json::json!({
                         "kind": "full",
                         "classification": "pii"

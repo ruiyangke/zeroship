@@ -266,7 +266,11 @@ async fn a_mysql_declarative_rename_is_refused_at_plan_time_and_nothing_reaches_
         OWNER,
         zeroship_migrate_mysql::DIALECT,
     );
-    let guard = GuardConfig::from_policy(policy_for(&database), zeroship_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(
+        policy_for(&database),
+        zeroship_migrate_mysql::DIALECT,
+        &database,
+    );
     let backend = MysqlBackend::new_generic(&session);
 
     // v1: create the table, then WRITE A ROW. Without data a rename cannot lose
@@ -547,7 +551,11 @@ async fn postgres_control_the_same_declarative_rename_applies_and_the_rows_survi
         OWNER,
         zeroship_migrate_postgres::DIALECT,
     );
-    let guard = GuardConfig::from_policy(policy_for(&schema), zeroship_migrate_postgres::DIALECT);
+    let guard = GuardConfig::from_policy(
+        policy_for(&schema),
+        zeroship_migrate_postgres::DIALECT,
+        &schema,
+    );
     let backend = PostgresBackend::new_generic(&session);
 
     let v1 = people(OLD_COLUMN, false);

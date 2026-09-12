@@ -10,20 +10,20 @@
 // `InferSchema`/`Row`/`Collections`/`Db`/`Id<>`/`MaskedValue<>` inference
 // chain a declared schema would.
 //
-// That equivalence is about TYPES, not about DDL, and the difference is not
-// cosmetic: feeding this file back in as a declared schema would NOT
-// reproduce the columns the migrations built. `int`, `integer`, `bigInt`,
-// `number` and `float` all render as `t.number()`, because `@zeroship/db`
-// has no integer builder — so an `int` column that the migration created as
-// INTEGER would come back as DOUBLE PRECISION.
-//
-// Read `t.number()` here as "some numeric column", not as the column's
-// type. The schema source above remains the ground truth for DDL.
+// This module reconstructs runtime types. Fixed-precision numeric facets are
+// preserved, while the migration source remains the authority for DDL.
 import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   places: defineSchema({
-    workspaceId: t.ref("workspaces").required(),
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
+    workspaceId: t.ref("workspaces", { column: "id" }).required(),
     name: t.string().required(),
     description: t.string().required(),
     category: t.string().required(),
@@ -32,8 +32,15 @@ const schema = {
     open: t.boolean().required().default(true),
   }).index("places_workspace_category_idx", ["workspaceId","category"]).index("places_deleted_at_idx", ["deleted_at"]).index("places_updated_at_idx", ["updated_at"]).index("places_created_by_idx", ["created_by"]),
   tasks: defineSchema({
-    workspaceId: t.ref("workspaces").required(),
-    ownerId: t.ref("users").required(),
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
+    workspaceId: t.ref("workspaces", { column: "id" }).required(),
+    ownerId: t.ref("users", { column: "id" }).required(),
     title: t.string().required(),
     description: t.string().required(),
     status: t.string().required().default("open"),
@@ -43,15 +50,29 @@ const schema = {
     tags: t.json(),
   }).index("tasks_workspace_status_idx", ["workspaceId","status"]).index("tasks_workspace_priority_idx", ["workspaceId","priority"]).index("tasks_deleted_at_idx", ["deleted_at"]).index("tasks_updated_at_idx", ["updated_at"]).index("tasks_created_by_idx", ["created_by"]),
   users: defineSchema({
-    workspaceId: t.ref("workspaces").required(),
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
+    workspaceId: t.ref("workspaces", { column: "id" }).required(),
     handle: t.string().required().unique(),
     fullName: t.string().required(),
     email: t.string().required().unique(),
-    contactEmail: t.encrypted(),
-    ssn: t.encrypted(),
+    contactEmail: t.encrypted().mask({ kind: "email", classification: "pii" }),
+    ssn: t.encrypted().mask({ kind: "last4", classification: "spi" }),
     city: t.string().required(),
   }).uniqueIndex("users_handle_key", ["handle"]).uniqueIndex("users_email_key", ["email"]).index("users_workspace_idx", ["workspaceId"]).index("users_deleted_at_idx", ["deleted_at"]).index("users_updated_at_idx", ["updated_at"]).index("users_created_by_idx", ["created_by"]),
   workspaces: defineSchema({
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
     slug: t.string().required().unique(),
     name: t.string().required(),
     tier: t.string().required().default("free"),

@@ -305,7 +305,6 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
         None => {
             return Err(rejected_promise_global(
                 scope,
-                ErrorKind::Type,
                 &format!("Illegal invocation on non-{} object", T::CLASS_LABEL),
             ));
         }
@@ -331,14 +330,12 @@ fn pre_flight<T: Body + BodyMarker + 'static>(
         if stream_disturbed_or_used(scope, this, stream_local) {
             return Err(rejected_promise_global(
                 scope,
-                ErrorKind::Type,
                 &format!("{} body has already been consumed", T::CLASS_LABEL),
             ));
         }
     } else if check_used_marker(scope, this) {
         return Err(rejected_promise_global(
             scope,
-            ErrorKind::Type,
             &format!("{} body has already been consumed", T::CLASS_LABEL),
         ));
     }
@@ -399,26 +396,14 @@ enum PreFlight {
     },
 }
 
-#[derive(Clone, Copy)]
-enum ErrorKind {
-    Type,
-    Range,
-    Syntax,
-}
-
 fn rejected_promise_global(
     scope: &mut v8::PinScope,
-    kind: ErrorKind,
     msg: &str,
 ) -> v8::Global<v8::Promise> {
     let resolver = v8::PromiseResolver::new(scope).unwrap();
     let promise = resolver.get_promise(scope);
     let m = v8::String::new(scope, msg).unwrap();
-    let exc = match kind {
-        ErrorKind::Type => v8::Exception::type_error(scope, m),
-        ErrorKind::Range => v8::Exception::range_error(scope, m),
-        ErrorKind::Syntax => v8::Exception::syntax_error(scope, m),
-    };
+    let exc = v8::Exception::type_error(scope, m);
     resolver.reject(scope, exc);
     v8::Global::new(scope, promise)
 }

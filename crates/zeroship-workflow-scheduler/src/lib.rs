@@ -11,7 +11,6 @@
 
 pub mod config;
 
-use zeroship_core::app_id::AppId;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -109,29 +108,26 @@ pub async fn run(store: WorkflowSchedulerStore, config: SchedulerConfig) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+    use zeroship_core::app_id::AppId;
+    use testcontainers::{core::{IntoContainerPort, WaitFor}, runners::SyncRunner, Container, GenericImage, ImageExt};
     use uuid::Uuid;
 
-    // A missing Postgres is a FAILURE, not a skip. The timer wheel's
-    // fire/ack/reconcile guarantees are only proven against the real
-    // store; a run that quietly returned None used to let that proof lapse
-    // while the suite still reported green. Dial it or panic naming the
-    // provisioning command.
-    async fn store(label: &str) -> WorkflowSchedulerStore {
-        let db_url = zeroship_core::config::test_database_url();
-        let store = WorkflowSchedulerStore::new(db_url);
+    async fn store() -> (Container<GenericImage>, WorkflowSchedulerStore) {
+        let server = GenericImage::new("postgres", "18")
+            .with_exposed_port(5432.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("PostgreSQL init process complete; ready for start up."))
+            .with_wait_for(WaitFor::message_on_stderr("database system is ready to accept connections"))
+            .with_env_var("POSTGRES_PASSWORD", "scheduler-fixture")
+            .start().expect("scheduler tests require Docker and PostgreSQL");
+        let url = format!("postgres://postgres:scheduler-fixture@{}:{}/postgres", server.get_host().unwrap(), server.get_host_port_ipv4(5432).unwrap());
+        let store = WorkflowSchedulerStore::new(url);
         store.provision().await.expect("provision scheduler store");
-        store
-            .clear_for_tests()
-            .await
-            .unwrap_or_else(|err| panic!("clear scheduler store for {label}: {err}"));
-        store
+        (server, store)
     }
 
     #[compio::test]
-    #[serial]
     async fn store_register_fire_and_ack_next_timer() {
-        let store = store("register-fire-ack").await;
+        let (_server, store) = store().await;
         let run_id = format!("run_{}", Uuid::new_v4().simple());
         let app_id = AppId::mint();
         let wake_at = Utc::now() - chrono::Duration::milliseconds(10);
@@ -161,9 +157,8 @@ mod tests {
     }
 
     #[compio::test]
-    #[serial]
     async fn store_reconcile_moves_inflight_back_to_timer() {
-        let store = store("reconcile-move").await;
+        let (_server, store) = store().await;
         let run_id = format!("run_{}", Uuid::new_v4().simple());
         let app_id = AppId::mint();
         let wake_at = Utc::now() - chrono::Duration::milliseconds(10);

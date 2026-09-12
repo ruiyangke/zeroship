@@ -11,8 +11,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use zeroship_core::app_id::AppId;
-use zeroship_core::user_id::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::config::AuthConfig;
 use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
@@ -414,17 +413,19 @@ async fn authorize_inner(
                 return Ok(error_see_other(&redirect));
             }
         };
-        let consent_covers =
-            match consent_covers(db, &session.user_id, &client.client_id, &requested_scopes).await {
-                Ok(consent_covers) => consent_covers,
-                Err(_) => {
-                    return prompt_none_error_see_other(
-                        &auth_request,
-                        issuer,
-                        "interaction_required",
-                    );
-                }
-            };
+        let consent_covers = match consent_covers(
+            db,
+            &session.user_id,
+            &client.client_id,
+            &requested_scopes,
+        )
+        .await
+        {
+            Ok(consent_covers) => consent_covers,
+            Err(_) => {
+                return prompt_none_error_see_other(&auth_request, issuer, "interaction_required");
+            }
+        };
         if !consent_covers {
             let redirect = authorization_error_redirect(
                 &auth_request.redirect_uri,
@@ -587,7 +588,7 @@ async fn token_inner(
                     tracing::error!(error = %err, "token: dedicated database pool checkout failed");
                     OAuthError::server_error("token database unavailable")
                 })?;
-            let mut conn = pool.get().await.map_err(|err| {
+            let mut conn = pool.acquire().await.map_err(|err| {
                 tracing::error!(error = %err, "token: dedicated database session checkout failed");
                 OAuthError::server_error("token database unavailable")
             })?;
@@ -711,10 +712,11 @@ async fn exchange_authorization_code(
         pkce_method: row.get("pkce_method"),
         granted_scopes: row.get("granted_scopes"),
         nonce: row.try_get("nonce").ok().flatten(),
-        user_id: crate::entity_ids::user_id(row, "user_id").map_err(|err| {
-            tracing::error!(error = %err, "token: consumed code carries an unreadable user id");
-            OAuthError::server_error("authorization code store unavailable")
-        })?,
+        user_id: crate::user_id::from_row(row, "user_id", "authorization code user_id is invalid")
+            .map_err(|err| {
+                tracing::error!(error = %err, "token: authorization code user_id decode failed");
+                OAuthError::server_error("authorization code store unavailable")
+            })?,
         auth_credential_version: row.get("auth_credential_version"),
         sid: row.get("sid"),
     };
@@ -771,7 +773,6 @@ async fn exchange_authorization_code(
     let refresh_token = established.secret;
     let proof = &established.proof;
 
-    let user_id = consumed.user_id.as_str().to_string();
     let access_token = mint_access_token(
         db,
         issuer,
@@ -799,18 +800,21 @@ async fn exchange_authorization_code(
         // claims. A bare-`openid` (authentication-only) exchange derives `sub`
         // from the already-in-hand `user_id`, so it needs no row.
         let identity_claims = if wants_identity_claims {
-            let user = users::find_by_id(db, &user_id)
+            let user = users::find_by_id(db, &consumed.user_id)
                 .await
                 .map_err(|err| {
                     tracing::error!(
                         error = %err,
-                        user_id = %user_id,
+                        user_id = consumed.user_id.as_str(),
                         "token: id-token user lookup failed"
                     );
                     OAuthError::server_error("id token user lookup failed")
                 })?
                 .ok_or_else(|| {
-                    tracing::error!(user_id = %user_id, "token: consumed code user is missing");
+                    tracing::error!(
+                        user_id = consumed.user_id.as_str(),
+                        "token: consumed code user is missing"
+                    );
                     OAuthError::server_error("id token user missing")
                 })?;
             Some(scope_gated_identity_claims(
@@ -897,7 +901,7 @@ async fn exchange_authorization_code(
 
     if id_token.is_some() {
         let subject = if client.brokered {
-            user_id.clone()
+            consumed.user_id.as_str().to_owned()
         } else {
             issuer.pairwise_subject(&consumed.user_id, &client.sector_identifier)
         };
@@ -955,8 +959,13 @@ async fn revoke_replayed_authorization_code_lineage(
         return Ok(false);
     };
     let client_id: String = row.get("client_id");
-    let user_id = crate::entity_ids::user_id(row, "user_id").map_err(|err| {
-        tracing::error!(error = %err, "token: replayed code carries an unreadable user id");
+    let user_id = crate::user_id::from_row(
+        row,
+        "user_id",
+        "authorization code replay user_id is invalid",
+    )
+    .map_err(|err| {
+        tracing::error!(error = %err, "token: authorization code replay user_id decode failed");
         OAuthError::server_error("authorization code store unavailable")
     })?;
     let sector_identifier: String = row.get("sector_identifier");
@@ -1658,13 +1667,16 @@ mod access_identity_tests {
         // `db/migrations-ts/20260907000100_session_object.ts` arrives here as
         // an opaque 500 inside `proof_for`'s `expect`, and the tests below
         // present as named failures naming nothing that is wrong with them.
-        // That is the void run `zeroship_testkit::live_db` exists to remove: it
+        // That is the void run `crate::platform_fixture::live_db` exists to remove: it
         // names the database, says how far short its journal is, and prints
         // `deploy/ops/db-migrate.sh`. Asking for the journal schema is what
         // turns that ledger comparison on; the schema list alone would call a
         // behind database ready. Memoised per process, because any of these
         // tests can be the first to reach a database under a filter.
-        zeroship_testkit::live_db::require_once(&dsn, zeroship_testkit::live_db::PLATFORM_SCHEMAS);
+        crate::platform_fixture::live_db::require_once(
+            &dsn,
+            crate::platform_fixture::live_db::PLATFORM_SCHEMAS,
+        );
         let setup = pg_connect(&dsn).await;
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;
@@ -1704,20 +1716,10 @@ mod access_identity_tests {
             backchannel_logout_uri: None,
             brokered: false,
         };
-        // PER-PROCESS, not the fixed `[61u8; 32]` this used to be.
-        //
-        // `zeroship.signing_keys` allows one `active` OP key per DATABASE:
-        // `publish_active_key` retires every other active row and refuses to
-        // reactivate a retired one. A constant seed gives every run the same
-        // kid, so two runs sharing a suite database retire each other and the
-        // second dies on its own key. MEASURED 2026-08-20, two auth suites on
-        // one database: 3 failures in each run, both
-        //   publish mint-race signing key: Config("signing key
-        //     L0N3gfnVojR3MCyMbPF6lMf6P9ywvEtOlQe2mLgT18c is terminally
-        //     retired and cannot be reactivated")
-        // naming the same kid in both logs. Same reasoning as
-        // `crates/zeroship-auth/tests/common/mod.rs::op_signing_key`, which cannot be
-        // reached from here because this is a lib test.
+        // These lib tests still share an externally configured database.
+        // Publishing retires other active keys and refuses to reactivate a
+        // retired key, so each process needs its own signing identity. Move
+        // this fixture to an owned database to remove that coordination.
         let issuer = Issuer::from_signing_key(
             &ed25519_dalek::SigningKey::from_bytes(&mint_race_signing_seed()),
             [62_u8; 32],
@@ -1786,7 +1788,10 @@ mod access_identity_tests {
 
     async fn cleanup_mint_fixture(setup: &Client, user_id: &UserId, client_id: &str) {
         let _ = setup
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&user_id.as_str()],
+            )
             .await;
         let _ = setup
             .execute(
@@ -1912,9 +1917,9 @@ mod access_identity_tests {
             )
             .await
             .expect("name deletion session");
-        let deleting = user_id.clone();
+        let deletion_user_id = user_id.clone();
         let deletion_task = compio::runtime::spawn(async move {
-            crate::store::users::request_deletion(&mut deletion, &deleting, 30).await
+            crate::store::users::request_deletion(&mut deletion, &deletion_user_id, 30).await
         });
         let mut observed_wait = false;
         for _ in 0..200 {

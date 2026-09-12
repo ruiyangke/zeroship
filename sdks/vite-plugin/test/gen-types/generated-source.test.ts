@@ -1,21 +1,8 @@
-/**
- * The GENERATED schema source: record `op.*` migrations, fold via genArtifacts.
- *
- * The generated front-end records each `.ts` migration into an IR envelope
- * (pure-JS recorder, no CLI) and folds the envelopes through the Rust
- * `genArtifacts` verb into a valid v2 `schema.runtime.json` carrying the 7
- * injected system fields + system indexes, off which gen-types then renders the
- * inline `const schema = { ... } as const` `env.db.ts` literal of
- * `@zeroship/db` builder calls. These tests run the LIBRARY path in-process -
- * no subprocess is ever spawned.
- *
- * The db-hitcounter example is the golden proof: regenerating its committed
- * artifacts from its migrations reproduces them byte-identically (`--check`
- * clean).
- */
+// Record migrations and render runtime descriptors through the native library.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { assertPolicyColumns } from "./_policy-fixture.js";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -34,17 +21,6 @@ const HITCOUNTER = resolve(import.meta.dirname, "../../../../examples/db-hitcoun
 
 /** The scaffold every new creator app is stamped from. */
 const SCAFFOLD = resolve(import.meta.dirname, "../../../create-zeroship-app/template");
-
-/** The 7 platform system fields the producer injects into every collection. */
-const SYSTEM_FIELDS = [
-  "id",
-  "created_at",
-  "updated_at",
-  "created_by",
-  "updated_by",
-  "version",
-  "deleted_at",
-] as const;
 
 async function makeFixture(
   files: Record<string, string>,
@@ -94,14 +70,49 @@ export default {
     table("hits").create({
       columns: {
         path: t.text().notNull(),
+        counter: t.bigInt().notNull(),
       },
     });
   },
 };
 `;
 
+test("encrypted migration fields carry their logical type into generated SDK builders", async () => {
+  const migration = `
+import { table, t } from "@zeroship/migrate";
+export default {
+  name: "create_secrets",
+  schema() {
+    table("secrets").create({ columns: {
+      message: t.encrypted({ of: t.text() }),
+      amount: t.encrypted({ of: t.int() }),
+      payload: t.encrypted({ of: t.bytes() }),
+    }});
+  },
+};`;
+  const fx = await makeFixture({ "migrations/20260711000000_create_secrets.ts": migration });
+  const outDir = join(fx.root, "generated/zeroship");
+  try {
+    await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
+    const descriptor = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
+    for (const [field, type] of [["message", "string"], ["amount", "number"], ["payload", "bytes"]]) {
+      const def = descriptor.collections.secrets.fields[field];
+      assert.equal(def.type, type);
+      assert.equal(def.encrypted, true);
+      assert.equal(def.filterable, false);
+      assert.equal(def.sortable, false);
+    }
+    const source = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
+    assert.match(source, /message: t\.encrypted\(\)/);
+    assert.match(source, /amount: t\.encrypted\(\{ of: t\.number\(\) \}\)/);
+    assert.match(source, /payload: t\.encrypted\(\{ of: t\.bytes\(\) \}\)/);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 describe("generated schema source (record -> genArtifacts)", () => {
-  test("records a migration → valid v2 descriptor + all 7 system fields, no subprocess", async () => {
+  test("records a migration with policy assignments without a migration subprocess", async () => {
     const fx = await makeFixture({ "migrations/20260711000000_create_hits.ts": CREATE_HITS });
     const outDir = join(fx.root, "generated/zeroship");
 
@@ -134,14 +145,12 @@ describe("generated schema source (record -> genArtifacts)", () => {
       const json = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
       assertRuntimeDescriptorV2(json);
       assert.ok(json.collections.hits, "hits collection present");
-      for (const sys of SYSTEM_FIELDS) {
-        assert.ok(json.collections.hits.fields[sys], `hits.${sys} injected`);
-      }
+      assertPolicyColumns(json.collections.hits.fields);
       assert.equal(json.collections.hits.fields.path.type, "string", "author path field");
 
-      // System indexes injected (updated_at / created_by / deleted_at).
+      // Policy indexes survive generation.
       const idxNames: string[] = json.collections.hits.indexes.map((i: { name: string }) => i.name);
-      assert.ok(idxNames.includes("hits_updated_at_idx"), "system index injected");
+      assert.ok(idxNames.includes("hits_updated_at_idx"), "policy index injected");
 
       // env.db.ts is the inline generated literal (NOT the manual augmentation).
       const envDb = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
@@ -167,6 +176,8 @@ describe("generated schema source (record -> genArtifacts)", () => {
       const envDb = await fs.readFile(join(outDir, ENV_DB_FILE), "utf8");
 
       // Every `from "..."` / bare `import "..."` specifier in the emitted module.
+      assert.match(envDb, /counter: t\.bigInt\(\)\.required\(\)/);
+
       const specifiers = new Set<string>();
       for (const m of envDb.matchAll(/\bfrom\s+"([^"]+)"/g)) specifiers.add(m[1]!);
       for (const m of envDb.matchAll(/\bimport\s+"([^"]+)"/g)) specifiers.add(m[1]!);

@@ -4,6 +4,7 @@
  * format, calls the native driver, and maps results back to the user-facing shape.
  */
 import type { IdLoader } from "./loader";
+import { AliasedCollection } from "./read";
 import {
   requireNativeCollection,
   type NativeCollection,
@@ -15,23 +16,30 @@ import {
   ValidationError,
 } from "./errors";
 import type { Query } from "./query";
-import type { NormalizedSchema } from "./schema";
+import { validateCollectionIdentity, type NormalizedSchema } from "./schema";
 import type {
   Actor,
+  ExactWithSpec,
   Filter,
+  GeoField,
+  DistinctField,
   Id,
+  IdValue,
+  RowId,
   NamedIndexSpec,
   NamingStrategy,
   PlainObject,
   Result,
   Row,
   RowInput,
+  SortSpec,
+  UpsertOptions,
   UpdateExpression,
+  VectorField,
   WithRelations,
   WithSpec,
 } from "./types";
 import { err, naming, ok } from "./types";
-import { CONFINED_SYSTEM_SHAPE_COLUMN_NAMES } from "./generated/confined-system-shape.generated";
 import {
   aggregateCollection,
   countCollection,
@@ -145,8 +153,6 @@ export class Collection<
   private _knownFields: Set<string>;
   private _toColumn: (field: string) => string;
   private _toField: (column: string) => string;
-  private _softDelete: boolean;
-  private _versioning: boolean;
   /**
    * Named multi-column indexes declared via `schema(...).index(name, fields)`.
    * Field names are already mapped to column names so the runtime warning
@@ -154,7 +160,7 @@ export class Collection<
    */
   private _indexes: readonly NamedIndexSpec[];
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
-  private _idLoader: IdLoader<Row<S>> | null;
+  private _idLoader: IdLoader<Row<S>, IdValue> | null;
   /**
    * Sibling-collection lookup, planted by `installSchema` so `with: { fk: true }`
    * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
@@ -165,17 +171,12 @@ export class Collection<
   private _resolveCollection:
     | ((name: string) => Collection<unknown> | undefined)
     | null;
-  /**
-   * Active-transaction depth. `db.transaction()` wraps `tx.x.*` calls
-   * with an increment/decrement so the loader is bypassed while a tx is
-   * live on this collection — see `tx-state.ts`. Mixing a
-   * batched read with `TX_CONN`-routed reads in the same microtask
-   * would otherwise blur the connection-routing boundary.
-   */
-  private _txDepth: number;
-
-  declare readonly Id: Id<N>;
+  declare readonly Id: Id<N, RowId<S>>;
   declare readonly RowInput: RowInput<S>;
+
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A> {
+    return new AliasedCollection(this._native, this._name, alias, Object.keys(this._schema), this._toColumn, this._toField);
+  }
 
   constructor(
     name: string,
@@ -183,38 +184,21 @@ export class Collection<
     native: NativeDb,
     options?: {
       naming?: NamingStrategy;
-      softDelete?: boolean;
-      versioning?: boolean;
       indexes?: readonly NamedIndexSpec[];
     },
   ) {
+    validateCollectionIdentity(schema);
     this._name = name;
     this._schema = schema;
     this._native = native;
     this._nativeCol = null;
-    this._softDelete = options?.softDelete ?? false;
-    this._versioning = options?.versioning ?? false;
     this._idLoader = null;
-    this._txDepth = 0;
     this._resolveCollection = null;
 
     const strategy = options?.naming ?? naming.asIs;
     const fieldToCol: Record<string, string> = {};
     const colToField: Record<string, string> = {};
     for (const field of Object.keys(schema)) {
-      const col = strategy.toColumn(field);
-      fieldToCol[field] = col;
-      colToField[col] = field;
-    }
-    // The platform columns, from the operator charter rather than restated
-    // here. Adding an eighth is a charter line, not an edit to this loop.
-    //
-    // NOTE this loop OVERWRITES rather than collides: a creator field whose
-    // strategy-mapped column equals one of these silently loses its
-    // `colToField` entry to the platform name, because the platform pass runs
-    // second. That is a real hazard and it is not introduced here - see the
-    // `deletedAt` note in installSchema's model().
-    for (const field of CONFINED_SYSTEM_SHAPE_COLUMN_NAMES) {
       const col = strategy.toColumn(field);
       fieldToCol[field] = col;
       colToField[col] = field;
@@ -248,19 +232,14 @@ export class Collection<
 
   /**
    * Resolve the Collection v8_class instance for this collection name.
-   * Cached on first call so subsequent CRUD ops are a single property
-   * read. The native runtime exposes `env.db.collection(name)` as a
-   * Db v8_method that returns a typed Collection wrapper; calling it
-   * twice with the same `name` returns the same JS object (identity is
-   * cached on the Db wrapper).
+   * Cached on first call so subsequent CRUD ops are a single property read.
+   * The native runtime caches the V8 wrapper by collection name.
    */
   private _nativeCollection(): NativeCollection {
     if (this._nativeCol) return this._nativeCol;
     this._nativeCol = requireNativeCollection(this._native, this._name, {
       code: "NATIVE_COLLECTION_UNAVAILABLE",
-      message:
-        "@zeroship/db: env.db.collection(name) not available — " +
-        "runtime is missing the Collection v8_class surface.",
+      message: "@zeroship/db: env.db.collection(name) is unavailable",
     });
     return this._nativeCol;
   }
@@ -272,8 +251,12 @@ export class Collection<
     this._resolveCollection = fn;
   }
 
-  async _loadRelations(rows: PlainObject[], withSpec: WithSpec): Promise<void> {
-    return loadRelations(this._relations(), rows, withSpec);
+  async _loadRelations(
+    rows: PlainObject[],
+    withSpec: WithSpec,
+    transactionScoped = false,
+  ): Promise<void> {
+    return loadRelations(this._relations(), rows, withSpec, transactionScoped);
   }
 
   /** Wraps an operation in try/catch and maps it to Result. */
@@ -289,11 +272,8 @@ export class Collection<
     return toResultError(e);
   }
 
-  private async _loadById(
-    id: string,
-    txDepthAtCall: number,
-  ): Promise<Row<S> | null> {
-    return loadByIdCollection(this._crud(), id, txDepthAtCall);
+  private async _loadById(id: IdValue): Promise<Row<S> | null> {
+    return loadByIdCollection(this._crud(), id);
   }
 
   async insert(row: RowInput<S>): Promise<Result<Row<S>>> {
@@ -305,23 +285,23 @@ export class Collection<
   }
 
   async get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Id<N> | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
+    idOrFilter: RowId<S> | Filter<S>,
+    opts: { select: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
-  async get<W extends WithSpec>(
-    idOrFilter: string | Id<N> | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
+  async get<const W extends WithSpec<S>>(
+    idOrFilter: RowId<S> | Filter<S>,
+    opts: { with: ExactWithSpec<S, W>; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
-    idOrFilter: string | Id<N> | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
+    idOrFilter: RowId<S> | Filter<S>,
+    opts?: { orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<Row<S> | null>>;
   async get(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: {
       actor?: Actor;
       select?: (string & keyof Row<S>)[];
-      orderBy?: Record<string, 1 | -1>;
+      orderBy?: SortSpec<S>;
       unmask?: (string & keyof Row<S>)[];
       unmaskReason?: string;
       with?: WithSpec;
@@ -340,9 +320,9 @@ export class Collection<
     return existsCollection(this._crud(), filter);
   }
 
-  find<W extends WithSpec>(
+  find<const W extends WithSpec<S>>(
     filter: Filter<S>,
-    opts: { with: W } & ReadHints<S>,
+    opts: { with: ExactWithSpec<S, W> } & ReadHints<S>,
   ): Query<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
   find(
@@ -355,13 +335,13 @@ export class Collection<
 
   async upsert(
     row: RowInput<S>,
-    options: { conflictFields: (string & keyof Row<S>)[] },
+    options: UpsertOptions<S>,
   ): Promise<Result<Row<S>>> {
     return upsertCollection(this._crud(), row, options);
   }
 
   async update(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     patch: UpdateExpression<S>,
   ): Promise<Result<Row<S> | null>> {
     return updateCollection(this._crud(), idOrFilter, patch);
@@ -375,7 +355,7 @@ export class Collection<
   }
 
   async delete(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return deleteCollection(this._crud(), idOrFilter);
   }
@@ -387,7 +367,7 @@ export class Collection<
   }
 
   async purge(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return purgeCollection(this._crud(), idOrFilter);
   }
@@ -399,7 +379,7 @@ export class Collection<
   }
 
   async restore(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return restoreCollection(this._crud(), idOrFilter);
   }
@@ -414,10 +394,10 @@ export class Collection<
     return countCollection(this._crud(), filter);
   }
 
-  async distinct(
-    field: string & keyof Row<S>,
+  async distinct<K extends DistinctField<S> & keyof Row<S>>(
+    field: K,
     filter: Filter<S> = {} as Filter<S>,
-  ): Promise<Result<(string | number | boolean | null)[]>> {
+  ): Promise<Result<Exclude<Row<S>[K], undefined>[]>> {
     return distinctCollection(this._crud(), field, filter);
   }
 
@@ -429,11 +409,11 @@ export class Collection<
 
   async bulkUnmask(
     items: ReadonlyArray<{
-      id: string;
+      id: RowId<S>;
       columns: readonly (string & keyof Row<S>)[];
     }>,
     opts: { actor: Actor; reason?: string },
-  ): Promise<Result<Map<string, Record<string, unknown>>>> {
+  ): Promise<Result<Map<RowId<S>, Record<string, unknown>>>> {
     return bulkUnmaskCollection(this._masking(), items, opts);
   }
 
@@ -442,7 +422,7 @@ export class Collection<
       vector: number[];
       k?: number;
       metric?: import("./types").VectorMetric;
-      column?: string;
+      column?: VectorField<S>;
       filter?: Filter<S>;
     },
   ): Promise<Result<(Row<S> & { _distance?: number })[]>> {
@@ -450,7 +430,7 @@ export class Collection<
   }
 
   async near(args: {
-    field: keyof S & string;
+    field: GeoField<S>;
     point: { lat: number; lng: number };
     radius: number;
     filter?: Filter<S>;

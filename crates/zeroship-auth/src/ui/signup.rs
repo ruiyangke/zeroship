@@ -32,10 +32,10 @@ use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
 use crate::identity::{email as email_validation, password, verification};
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::store::users;
 use crate::ui::{ErrorPage, PublicErrorMessage, SignupPage};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use zeroship_mailer::templates::{build_email, VerifyEmailHtml, VerifyEmailText};
 use zeroship_mailer::{Address, Mailer};
 
@@ -210,16 +210,8 @@ pub async fn post(
     if let Some(user) = &created {
         match verification::issue(db.as_ref(), &user.id, &user.email).await {
             Ok(issued) => {
-                let link = format!(
-                    "{}/verify?token={}",
-                    cfg.public_url(),
-                    issued.raw,
-                );
-                let name_hint = user
-                    .name
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("there");
+                let link = format!("{}/verify?token={}", cfg.public_url(), issued.raw,);
+                let name_hint = user.name.split_whitespace().next().unwrap_or("there");
 
                 let html = VerifyEmailHtml {
                     name: name_hint,
@@ -320,20 +312,14 @@ fn render_signup_bad_request(return_to: &str, err: &str) -> HttpResponse {
     render_signup_error_with_status(return_to, err, StatusCode::BAD_REQUEST)
 }
 
-fn render_signup_error_with_status(
-    return_to: &str,
-    err: &str,
-    status: StatusCode,
-) -> HttpResponse {
+fn render_signup_error_with_status(return_to: &str, err: &str, status: StatusCode) -> HttpResponse {
     let csrf_token = csrf::generate_token();
     let page = SignupPage {
         return_to,
         csrf: &csrf_token,
         error: Some(err),
     };
-    let body = page
-        .render()
-        .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
+    let body = page.render().unwrap_or_else(|_| format!("<h1>{err}</h1>"));
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));

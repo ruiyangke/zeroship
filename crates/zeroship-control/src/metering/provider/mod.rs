@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use uuid::Uuid;
+use zeroship_core::AppId;
 
 pub mod adapters;
 pub mod control_store;
@@ -128,7 +128,7 @@ pub trait Invoicer {
 #[async_trait::async_trait(?Send)]
 pub trait LiteStore: Send + Sync {
     async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;
-    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<Uuid>, ProviderError>;
+    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<AppId>, ProviderError>;
     async fn period_billable_units(
         &self,
         organization: &str,
@@ -258,10 +258,7 @@ impl BillingStack {
     #[must_use]
     pub fn with_meter_for_tests(meter: Arc<dyn MeteringProvider>) -> Arc<Self> {
         let invoicer: Arc<dyn MeteringProvider> = Arc::new(TestProvider);
-        Arc::new(Self {
-            meter,
-            invoicer,
-        })
+        Arc::new(Self { meter, invoicer })
     }
 }
 
@@ -328,10 +325,7 @@ pub fn build_stack(
         }
     }
 
-    Ok(BillingStack {
-        meter,
-        invoicer,
-    })
+    Ok(BillingStack { meter, invoicer })
 }
 
 #[derive(Debug)]
@@ -442,7 +436,9 @@ mod tests {
     #[async_trait::async_trait(?Send)]
     impl Meter for RecomputeFedProvider {
         async fn ingest(&self, _batch: &[UsageEvent]) -> Result<IngestAck, ProviderError> {
-            Err(ProviderError::Store("recompute-fed: no forwarded ingest".into()))
+            Err(ProviderError::Store(
+                "recompute-fed: no forwarded ingest".into(),
+            ))
         }
         async fn read_aggregate(&self, _q: &AggregateQuery) -> Result<u64, ProviderError> {
             Ok(0)
@@ -480,7 +476,9 @@ mod tests {
         let mut registry = ProviderRegistry::default();
         register_test(&mut registry);
         let err = expect_provider_err(registry.build("missing", &ctx()));
-        assert!(err.to_string().contains("unknown metering provider 'missing'"));
+        assert!(err
+            .to_string()
+            .contains("unknown metering provider 'missing'"));
         assert!(err.to_string().contains("known: test"));
     }
 
@@ -720,7 +718,7 @@ mod tests {
             })
         }
 
-        async fn owned_app_ids(&self, _organization: &str) -> Result<Vec<Uuid>, ProviderError> {
+        async fn owned_app_ids(&self, _organization: &str) -> Result<Vec<AppId>, ProviderError> {
             Ok(Vec::new())
         }
 

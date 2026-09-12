@@ -2,60 +2,21 @@
 # ============================================================================
 # provision_test_backends.sh - stand up the backends the test suites REQUIRE.
 #
-# WHY THIS EXISTS
-# ---------------
-# PostgreSQL and Redis are not optional for this workspace's tests, but until
-# now nothing in the tree stood them up. The suites simply assumed a server was
-# there, and when it was not the affected tests returned early and counted as
-# passes. `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` existed to turn those into
-# failures; it was opt-in, so the developer who most needed it was the one who
-# did not know it existed. The flag is deleted. Provisioning is a real step
-# instead, and this is it.
+# Provisions the shared PostgreSQL and SMTP services used by the shell suites.
+# KV and Redis driver tests own their servers through Testcontainers.
 #
-# WHAT IT PROVISIONS, and it is deliberately the two named backends and nothing
-# else:
+# PostgreSQL comes from deploy/compose so its logical-decoding and prepared-
+# transaction settings match the service definition. Mailpit is a disposable
+# SMTP sink for zeroship-mailer's plaintext transport test.
 #
-#   postgres  deploy/compose's `postgres` service, on 127.0.0.1:5440.
-#             It runs with `wal_level=logical` and
-#             `max_prepared_transactions=10`, which are LOAD-BEARING and are
-#             the reason this script uses the compose definition rather than a
-#             `docker run` of its own. The former enables plugin-db's logical
-#             subscriptions; the latter lets compio-postgres exercise the real
-#             pgoutput two-phase frames instead of skipping them.
-#   redis     deploy/compose's `redis` service, on 127.0.0.1:6390.
+# Usage:
+#   tests/provision_test_backends.sh          # start and wait
+#   tests/provision_test_backends.sh --check  # adopt existing servers
 #
-# WHAT IT DOES NOT PROVISION, so a green here is not over-read: MinIO (the
-# `compio-s3` / storage-parity suites start their own container and announce a
-# skip when docker is unavailable), Redpanda, a Dragonfly CLUSTER
-# (deploy/compose/cluster.yml), an SMTP sink. Those still announce skips, and
-# the suite gates count them.
-#
-# THE DEFAULTS LINE UP ON PURPOSE. The addresses above are exactly what
-# `PG_TEST_URL` and `REDIS_TEST_URL` fall back to when unset, so a developer who
-# runs this script needs to export nothing at all. If you change a port here,
-# change the two defaults in libs/compio-postgres/tests/common/mod.rs and
-# libs/compio-redis/tests/common/mod.rs in the same commit. (The compio-postgres
-# default moved out of integration.rs when it had drifted into 42 test files;
-# every target now calls `common::test_url()`.)
-#
-# USAGE
-# -----
-#   tests/provision_test_backends.sh            # up + wait for healthy
-#   tests/provision_test_backends.sh --check    # adopt servers already running
-#
-# BOTH FORMS WRITE THE OVERLAY. That is not a side effect, it is the deliverable:
-# the servers are useless to the suites without a file naming them, and
-# `zs_test_config_load` fails hard rather than guessing when there is none. What
-# `--check` skips is the `docker compose up`, and nothing else.
-#
-# `--check` is therefore the arm for a caller who already HAS the servers and
-# only needs them described - a GitHub Actions job whose `services:` containers
-# the runner started and owns, which is what .github/workflows/ci.yml's
-# auth-gate and billing-gate do. Pointing the full form at those would try to
-# bind compose's postgres to a port the service container already holds. Name
-# the servers through the PG_*/REDIS_* inputs above; the overlay is written to
-# match, and the `wal_level` probe below degrades to a WARN because there is no
-# compose-managed container to ask.
+# Both forms write deploy/ops/zeroship.test.toml in the platform config schema.
+# The file is generated and gitignored because database credentials are secrets.
+# PG_* inputs select PostgreSQL; SMTP_* inputs select the sink. Test suites may
+# override their targets with PG_TEST_URL and AUTH_TEST_SMTP_SINK.
 # ============================================================================
 set -euo pipefail
 
@@ -82,11 +43,16 @@ PG_PORT="${PG_PORT:-5440}"
 PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-zeroship}"
 PG_DB="${PG_DB:-zeroship}"
-REDIS_HOST="${REDIS_HOST:-127.0.0.1}"
-REDIS_PORT="${REDIS_PORT:-6390}"
+# The SMTP sink. `SMTP_UI_PORT` is mailpit's web inbox, which is how a developer
+# reads what a failing send actually delivered; the suites never dial it.
+SMTP_HOST="${SMTP_HOST:-127.0.0.1}"
+SMTP_PORT="${SMTP_PORT:-1025}"
+SMTP_UI_PORT="${SMTP_UI_PORT:-8025}"
+SMTP_CONTAINER="${SMTP_CONTAINER:-zeroship-test-smtp-sink}"
+SMTP_IMAGE="${SMTP_IMAGE:-axllent/mailpit:latest}"
 
 PG_DSN="postgres://${PG_USER}:${PG_PASS}@${PG_HOST}:${PG_PORT}/${PG_DB}"
-REDIS_URL="redis://${REDIS_HOST}:${REDIS_PORT}"
+SMTP_SINK="${SMTP_HOST}:${SMTP_PORT}"
 
 TEST_OVERLAY="$ROOT/deploy/ops/zeroship.test.toml"
 
@@ -103,7 +69,7 @@ READY_TIMEOUT_SECONDS="${READY_TIMEOUT_SECONDS:-60}"
 fatal() { echo "FATAL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
-# The placeholder env file, and why `docker compose up -d postgres redis` needs
+# The placeholder env file, and why `docker compose up -d postgres` needs
 # one.
 #
 # MEASURED 2026-08-18 on a checkout with no `deploy/compose/.env`: that command
@@ -116,9 +82,8 @@ fatal() { echo "FATAL: $*" >&2; exit 1; }
 # and stay: booting the platform with junk credentials is exactly what they
 # exist to stop.
 #
-# So the parse is satisfied and the boot is not. `up` below names `postgres` and
-# `redis` and nothing else, so no service that reads any of these values is ever
-# created - the placeholders make the file PARSE, they cannot make anything RUN.
+# `up` below selects only `postgres`, so no platform service that consumes
+# these placeholder secrets is created.
 # A real `deploy/compose/.env` is loaded after this one and wins, so on a
 # machine that has run `zeroship dev init` the real values are what compose
 # sees.
@@ -166,8 +131,7 @@ port_open() {
 # says it is fine is worse than none.
 #
 # So: the compose HEALTHCHECK is the signal when there is a container to ask
-# (postgres runs `pg_isready`, redis runs `redis-cli ping` - both real
-# protocol-level probes), and the TCP check is the fallback for a server this
+# (postgres runs `pg_isready`), and the TCP check is the fallback for a server this
 # script did not start, where there is no container to inspect and the caller
 # has pointed PG_TEST_URL somewhere of their own.
 wait_for_backend() {
@@ -199,41 +163,75 @@ if [ "$CHECK_ONLY" -eq 0 ]; then
   command -v docker >/dev/null 2>&1 \
     || fatal "docker is not on PATH, and the test backends are containers.
        Install docker, or point the suites at servers you already run:
-         PG_TEST_URL=postgres://user:pass@host:port/db
-         REDIS_TEST_URL=redis://host:port"
+         PG_TEST_URL=postgres://user:pass@host:port/db"
 
   [ -f "$COMPOSE_FILE" ] || fatal "compose file not found: $COMPOSE_FILE"
 
-  echo "==> docker compose up -d postgres redis"
-  # Two service names and no more, so this does not drag the gateway, worker,
-  # control, auth, Caddy, verdaccio or redpanda along with it. A test run needs
-  # two servers, not the platform - and this is also what makes the placeholder
-  # env file above harmless, since no service that reads one of those values is
-  # ever created.
-  dc up -d postgres redis \
-    || fatal "docker compose could not start postgres and redis.
+  echo "==> docker compose up -d postgres"
+  # Start only PostgreSQL, so placeholder platform secrets are never consumed.
+  dc up -d postgres \
+    || fatal "docker compose could not start postgres.
        If the port is already taken by a container this file does not own,
        that container is what your tests have been running against - stop it
        (docker stop <name>) and re-run, so the server under test is the one
        this repo defines."
+
+  # The sink, and only when nothing already answers on its port. A developer who
+  # runs their own mailpit, or a second worktree that started this one, keeps
+  # it: the test dials an ADDRESS, and a second container fighting for the port
+  # would take the working one down. `docker start` before `docker run` so a
+  # stopped container from a previous run is reused rather than colliding by
+  # name.
+  echo "==> SMTP sink (${SMTP_IMAGE}) on ${SMTP_SINK}"
+  if port_open "$SMTP_HOST" "$SMTP_PORT"; then
+    echo "  ok   something already answers on ${SMTP_SINK}; left alone"
+  elif docker start "$SMTP_CONTAINER" >/dev/null 2>&1; then
+    echo "  ok   restarted ${SMTP_CONTAINER}"
+  else
+    docker run -d --name "$SMTP_CONTAINER" \
+      -p "${SMTP_PORT}:1025" -p "${SMTP_UI_PORT}:8025" "$SMTP_IMAGE" >/dev/null \
+      || fatal "could not start an SMTP sink on ${SMTP_SINK}.
+       crates/zeroship-mailer's plaintext transport test dials that address and
+       FAILS without it, and tests/run_auth_suite.sh runs that package. Start
+       one yourself and re-run, or point the test elsewhere with
+       AUTH_TEST_SMTP_SINK=host:port."
+  fi
 fi
 
 echo "==> waiting for the backends (bound: ${READY_TIMEOUT_SECONDS}s each)"
 wait_for_backend postgres "$PG_HOST" "$PG_PORT" "PostgreSQL" \
   || fatal "PostgreSQL never came up on ${PG_HOST}:${PG_PORT} within ${READY_TIMEOUT_SECONDS}s.
        docker compose -f $COMPOSE_FILE logs postgres"
-wait_for_backend redis "$REDIS_HOST" "$REDIS_PORT" "Redis" \
-  || fatal "Redis never came up on ${REDIS_HOST}:${REDIS_PORT} within ${READY_TIMEOUT_SECONDS}s.
-       docker compose -f $COMPOSE_FILE logs redis"
+
+# The sink is waited on in BOTH forms, including `--check`, and that is the same
+# relationship `--check` has with PostgreSQL above: the caller may own the
+# container (a GitHub `services:` entry does), but this script is what says the
+# address is real. A port probe rather than a healthcheck - there is no compose
+# service to inspect, and mailpit answering its SMTP port is the whole contract.
+smtp_deadline=$(( $(date +%s) + READY_TIMEOUT_SECONDS ))
+while ! port_open "$SMTP_HOST" "$SMTP_PORT"; do
+  if [ "$(date +%s)" -ge "$smtp_deadline" ]; then
+    fatal "no SMTP sink answered on ${SMTP_SINK} within ${READY_TIMEOUT_SECONDS}s.
+       crates/zeroship-mailer's plaintext transport test dials that address and
+       FAILS without it - there is no variable that turns that back into a skip.
+       Start one:
+         docker run -d --name ${SMTP_CONTAINER} -p ${SMTP_PORT}:1025 -p ${SMTP_UI_PORT}:8025 ${SMTP_IMAGE}
+       or point the test at your own with AUTH_TEST_SMTP_SINK=host:port."
+  fi
+  sleep 1
+done
+echo "  ok   SMTP sink answering on ${SMTP_SINK}"
 
 # These settings checks are not decoration. A Postgres that answers on 5440 is
 # not necessarily THIS Postgres: on a shared development machine the port is
 # routinely held by a hand-started container nobody owns, and the one that was
-# holding it while this script was written ran the postgres:16 default. Ten
-# plugin-db tests then skip themselves and still report as passed, so the
-# server being wrong is invisible in every number a run prints. Checking it
-# HERE, where the answer is one query, is the difference between a provisioning
-# step and a hope.
+# holding it while this script was written ran the postgres:16 default. The
+# wal-guarded plugin-db tests then skipped themselves and still reported as
+# passed, so the server being wrong was invisible in every number a run printed.
+# They FAIL now, which is what makes a wrong server visible in cargo's own
+# output; this probe still earns its place by naming the setting BEFORE a suite
+# spends its build time discovering it. Checking it HERE, where the answer is
+# one query, is the difference between a provisioning step and a hope.
 #
 # Reported, not fatal: `--check` also describes service containers owned by
 # auth and billing jobs, which do not run these logical-replication tests.
@@ -248,10 +246,12 @@ wait_for_backend redis "$REDIS_HOST" "$REDIS_PORT" "Redis" \
 #
 # Observed 2026-08-27: 127.0.0.1:5440 was held by `zs-auth-pg-5440` (up 12
 # days) running wal_level=replica, max_prepared_transactions=0. Both
-# LOAD-BEARING values were wrong, the ten `pg_has_logical_wal`-guarded tests in
-# crates/zeroship-plugin-db/tests/integration.rs skip-and-count-as-passed
-# (integration.rs:2045 and nine siblings call `skip(...)` then `return`), and
-# nothing in any printed number said so.
+# LOAD-BEARING values were wrong, the `pg_has_logical_wal`-guarded tests in
+# the former ORM integration suite skipped-and-counted-as-passed,
+# and nothing in any printed number said so. That reading is the argument for
+# the guards being refusals today - it is not a description of them: `skip` and
+# the crate that announced it are deleted, and the same wrong server now takes
+# those tests red.
 #
 # Resolution order: the container PUBLISHING the port wins; the compose service
 # is only the fallback for when nothing publishes it (host-network, remote).
@@ -269,10 +269,10 @@ if command -v docker >/dev/null 2>&1; then
       echo "  ok   PostgreSQL wal_level=logical (logical-decoding tests will run)"
     else
       echo "  WARN PostgreSQL wal_level=${wal:-unknown}, not 'logical'." >&2
-      echo "       The 10 pg_has_logical_wal-guarded tests in" >&2
-      echo "       crates/zeroship-plugin-db/tests/integration.rs skip -- and a" >&2
-      echo "       skip COUNTS AS A PASS. The run's totals will look identical" >&2
-      echo "       to one where all ten actually ran and passed." >&2
+      echo "       Suites using this server cannot verify logical replication." >&2
+      echo "       Setting it is postmaster-level: ALTER" >&2
+      echo "       SYSTEM SET needs a RESTART, not a reload, and the compose" >&2
+      echo "       postgres already carries -c wal_level=logical." >&2
     fi
     prepared="$(docker exec "$pg_cid" psql -U postgres -tAc \
       'show max_prepared_transactions' 2>/dev/null || true)"
@@ -319,10 +319,9 @@ cat >"$TEST_OVERLAY" <<EOF
 # GENERATED by tests/provision_test_backends.sh - do not edit, and do not commit
 # (deploy/ops/zeroship.test.toml is gitignored; see the note in that script).
 #
-# The one definition of the servers this workspace's tests dial. Read through
+# Shared PostgreSQL coordinates for suites using the overlay. Read through
 # zeroship_core::config::test_overlay in Rust and tests/lib/test_config.sh in
-# shell. PG_TEST_URL / REDIS_TEST_URL override it for a per-run scratch
-# database.
+# shell. PG_TEST_URL overrides it for a per-run scratch database.
 
 [control]
 database_url = "$PG_DSN"
@@ -338,7 +337,6 @@ database_url = "$PG_DSN"
 
 [worker]
 database_url = "$PG_DSN"
-kv_url = "$REDIS_URL"
 
 [workflow_scheduler]
 database_url = "$PG_DSN"
@@ -347,7 +345,8 @@ echo "  ok   wrote ${TEST_OVERLAY#"$ROOT/"}"
 
 cat <<EOF
 
-Backends ready, and ${TEST_OVERLAY#"$ROOT/"} names them, so nothing needs exporting:
-  postgres  $PG_DSN
-  redis     $REDIS_URL
+Backends ready. ${TEST_OVERLAY#"$ROOT/"} names PostgreSQL, and the sink's
+address is the default the mailer test falls back to:
+  postgres   $PG_DSN
+  smtp sink  $SMTP_SINK   (inbox: http://${SMTP_HOST}:${SMTP_UI_PORT})
 EOF

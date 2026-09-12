@@ -49,8 +49,8 @@
 
 use std::collections::BTreeMap;
 
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -652,21 +652,8 @@ pub enum ColType {
     },
     /// Application-level encrypted column wrapping an inner type.
     ///
-    /// CARRIES THE INNER TYPE ONLY. There is deliberately no `mode` and no
-    /// `keyId` here, so `t.encrypted({ of })` is the only form a migration can
-    /// express, and the render stamps the kernel defaults (`randomised`,
-    /// `default`) when it builds the column's encrypted facet. That keeps the
-    /// variant fail-closed: a migration cannot assert an encryption posture it
-    /// has no way to name.
-    ///
-    /// The cost is a ONE-WAY DOOR at the authoring surface, and it is silent. A
-    /// declarative schema may declare `mode` and `keyId`; re-authoring that
-    /// column as a migration drops both, and nothing diagnoses it - the
-    /// migration records, the descriptor generates, and the first symptom is a
-    /// runtime failure naming a key nobody chose. By the time a migration
-    /// reaches the engine the intent is already gone, so no layer downstream of
-    /// here can warn. Migration-first authoring supports default-mode
-    /// encryption only.
+    /// Carries the plaintext type. Encryption is always randomised; the
+    /// runtime authenticates each value's collection, column and row identity.
     Encrypted {
         /// The inner (plaintext) type.
         of: Box<Self>,
@@ -1054,13 +1041,12 @@ pub enum VectorMetric {
 #[serde(rename_all = "camelCase")]
 pub enum ColumnCollation {
     /// Compare and order this column by its stored BYTES, so a value whose byte
-    /// order is its semantic order (a ULID, a TypeID, a base62 UUIDv7) sorts the
+    /// order is its semantic order (a ULID, a TypeID, a base36 UUIDv7) sorts the
     /// way it was minted.
     ///
     /// PostgreSQL `COLLATE "C"`, SQLite `COLLATE BINARY`, MySQL
     /// `utf8mb4_0900_bin`. Without it the column takes the database default,
-    /// which on a `en_US.utf8` PostgreSQL interleaves the upper- and lower-case
-    /// runs of base62 and silently stops `ORDER BY id` being creation order.
+    /// which may not use the same ordering rules as the encoded value.
     Bytewise,
 }
 
@@ -1381,12 +1367,12 @@ pub struct IrColumn {
     /// the whole story.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub references: Option<ColumnReference>,
-    /// Legacy internal platform-ID prefix for the
-    /// `<prefix>_<22 base62 UUIDv7>` format. This is a DECLARED-ONLY hint DB
+    /// Internal platform-ID prefix for the
+    /// `<prefix>_<25 base36 UUIDv7>` format. This is a DECLARED-ONLY hint DB
     /// introspection cannot recover (the minted value is opaque text in the
     /// catalog; the prefix is a mint-time input, not a stored column attribute).
-    /// It is retained for internal platform descriptors and old data only; it is
-    /// neither TypeID nor public migration authoring. Carried so gen-types - and
+    /// It is used by internal platform descriptors; it is neither TypeID nor
+    /// public migration authoring. Carried so gen-types - and
     /// the runtime, once it deletes the declared-schema cache - keep that legacy
     /// internal brand.
     /// Default-absent + `skip_serializing_if` so a column that declares no prefix is

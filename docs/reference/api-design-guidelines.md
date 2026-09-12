@@ -138,7 +138,7 @@ Zeroship surfaces error codes from two namespaces:
   (`OptimisticLockError`), `NOT_FOUND` (`NotFoundError`), `NOT_UNIQUE`
   (`NotUniqueError`).
 - **Native DB wire codes** — `lower_snake_case` strings the runtime stamps from
-  the `DbError` variant in [`crates/zeroship-data-core/src/error.rs`](../../crates/zeroship-data-core/src/error.rs):
+  the `DbError` variant in [`crates/zeroship-data-orm/src/error.rs`](../../crates/zeroship-data-orm/src/error.rs):
   `unique_violation`, `fk_violation`, `not_null_violation`, `check_violation`,
   `serialization_failure`, `lock_not_available`, `transient`, …
 

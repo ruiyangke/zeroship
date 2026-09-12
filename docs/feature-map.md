@@ -178,7 +178,7 @@ but absent from the plugin's `RUNTIME_NATIVE_MODULES`, so in dev they fall throu
 The platform's structured database layer. Creators declare schema through committed
 op.* migrations; the generated runtime descriptor installs collection wrappers on
 `env.db` at boot, and all CRUD/search/transaction/migration/reactive operations go
-through that typed surface &mdash; no raw SQL. The Rust plugin (`crates/zeroship-plugin-db`)
+through that typed surface &mdash; no raw SQL. The Rust plugin (`crates/zeroship-data-v8`)
 provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postgres
 (prod) and SQLite (dev/test) are supported.
 
@@ -187,52 +187,52 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Schema DSL — t.* type builders | 🟢 | `import { t } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | t.encrypted/vector/geoPoint/id; no t.date(). |
 | Schema refinements (.required/.unique/.index/...) | &#x1F7E2; | chained on t.*() | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/types.test.ts` | |
 | Per-collection options (schema() builder) | 🟢 | `import { schema } from '@zeroship/db'` | `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | softDelete/withVersioning are hints; cols always created. |
-| Native runtime-descriptor binding | &#x1F7E2; | internal (runtime plugin boot hook) | `crates/zeroship-runtime/src/core/plugin.rs`, `crates/zeroship-plugin-db/src/lib.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/src/lib.rs` | Runtime validates once, then plugin-db atomically replaces every descriptor entry for the app-at-deploy binding before creator modules evaluate. |
+| Native runtime-descriptor binding | &#x1F7E2; | internal (runtime plugin boot hook) | `crates/zeroship-runtime/src/core/plugin.rs`, `crates/zeroship-data-v8/src/lib.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/src/lib.rs` | Runtime validates the descriptor, then data-v8 installs the app-at-deploy collection set before creator modules evaluate. |
 | Per-app Postgres schema isolation | &#x1F7E2; | internal | `crates/zeroship-migrate-server/src/apply.rs` | `docs/reference/db.md` | &mdash; | The migration service derives the schema from app_id; SQLite uses one file per app. |
-| System fields (id, created_at, ..., deleted_at) | 🟢 | internal (on every Row<S>) | `crates/zeroship-schema/src/query.rs`, `crates/zeroship-data-engine/src/crud/system_fields_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | 7 columns; names reserved at deploy. |
-| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-data-engine/src/crud/system_fields_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
-| Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
-| Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters deleted_at; masked → MaskedValue. |
+| Descriptor assignments | 🟢 | declared generators on Row<S> fields | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `crates/zeroship-data-orm/src/sql/statement.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | Generators and lifecycle roles come from the migration-generated descriptor. |
+| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
+| Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
+| Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters the declared soft-delete field; masked → MaskedValue. |
 | Query builder (lazy thenable) | 🟢 | `@zeroship/db` Query class | `sdks/db/src/query.ts` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | sort/limit/skip/select/after/paginate/with/first/unique. |
 | Collection.exists | 🟢 | `Collection.exists(filter?)` | `sdks/db/src/collection/crud.ts` | `docs/reference/db.md` | — | find(...).limit(1) SDK-side. |
-| Collection.count | 🟢 | `Collection.count(filter, opts?)` | `crates/zeroship-data-engine/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | Auto-filters soft-deleted. |
-| Collection.distinct | 🟢 | `Collection.distinct(field, filter?, opts?)` | `crates/zeroship-data-engine/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | opts.field required. |
-| Collection.update / updateMany | 🟢 | `Collection.update(filter, patch)` / `updateMany(...)` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr4-update-version.test.ts` | CAS version; $inc/$push/$set operators. |
-| Collection.delete / deleteMany (soft) | 🟢 | `Collection.delete(idOrFilter)` / `deleteMany(...)` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Sets deleted_at; emits Update CDC. |
-| Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
-| Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Clears deleted_at, bumps version. |
-| Collection.upsert | 🟢 | `Collection.upsert(doc, { conflictFields })` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | — | conflictFields required. |
-| Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/zeroship-data-engine/src/crud/mod.rs`, `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
-| Filter operators | &#x1F7E2; | Filter<S> on read/write | `crates/zeroship-schema/src/query.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized. |
-| Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/zeroship-data-engine/src/crud/system_fields_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
+| Collection.count | 🟢 | `Collection.count(filter, opts?)` | `crates/zeroship-data-orm/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | Auto-filters soft-deleted. |
+| Collection.distinct | 🟢 | `Collection.distinct(field, filter?, opts?)` | `crates/zeroship-data-orm/src/crud/mod.rs`, `query.rs` | `docs/reference/db.md` | — | opts.field required. |
+| Collection.update / updateMany | 🟢 | `Collection.update(filter, patch)` / `updateMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr4-update-version.test.ts` | CAS version; $inc/$push/$set operators. |
+| Collection.delete / deleteMany (soft) | 🟢 | `Collection.delete(idOrFilter)` / `deleteMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Sets the declared soft-delete field; emits Update CDC. |
+| Collection.purge / purgeMany (hard) | 🟢 | `Collection.purge(idOrFilter)` / `purgeMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | GDPR erase; bypasses soft-delete filter. |
+| Collection.restore / restoreMany | 🟢 | `Collection.restore(idOrFilter)` / `restoreMany(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr5-soft-delete.test.ts` | Clears the declared soft-delete field and applies declared write generators. |
+| Collection.upsert | 🟢 | `Collection.upsert(doc, { conflictFields })` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | — | conflictFields required. |
+| Collection.aggregate | 🟢 | `Collection.aggregate(pipeline, opts?)` | `crates/zeroship-data-orm/src/crud/aggregate.rs`, `crates/zeroship-data-orm/src/sql/compiler/shared.rs` | `docs/reference/db.md` | — | $match/$group/$having/$sort/$limit; $first sort-order future. |
+| Filter operators | &#x1F7E2; | Filter<S> on read/write | `crates/zeroship-data-orm/src/crud/predicate.rs`, `crates/zeroship-data-orm/src/sql/predicate.rs` | `docs/reference/db.md` | `sdks/db/tests/query-and-or-semantics.test.ts` | All values parameterized. |
+| Optimistic concurrency (version + withRetry) | 🟢 | `Collection.update({id,version},...)` / `withRetry` | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `sdks/db/src/with-retry.ts` | `docs/reference/db.md` | `sdks/db/tests/optimistic-lock-in-tx.test.ts` | withRetry max:3, no backoff default. |
 | Relations — with: { fk: true } | 🟢 | `find(filter, { with })` / `Query.with(spec)` | `sdks/db/src/collection/relations.ts` | `docs/reference/db.md` | `sdks/db/tests/relations.test.ts` | v1 single-level; no nested with. |
-| Foreign keys (t.ref) | &#x1F7E2; | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` plus server-derived schema), not `crates/zeroship-plugin-db/src/cross_app_fk.rs (DELETED)`, which has no production call site as of 2026-08-20. See db.md. |
+| Foreign keys (t.ref) | &#x1F7E2; | `t.ref('collection', opts?)` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/b2-ref-validation.test.ts` | Default restrict/deferrable. An FK cannot leave the app, but the enforcement is the migration engine's (`reject_cross_app_ref` plus server-derived schema), not `crates/zeroship-data-v8/src/cross_app_fk.rs (DELETED)`, which has no production call site as of 2026-08-20. See db.md. |
 | Named multi-column indexes | &#x1F7E2; | `schema({...}).index('name', [...])` | `sdks/db/src/types.ts`, `crates/zeroship-migrate-core/src/render/declarative.rs` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Declared indexes are emitted by the migration engine. |
-| Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-data-engine/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `sdks/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
-| Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/zeroship-data-engine/src/crud/mod.rs`, `backend/sqlite/vector.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
-| Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/zeroship-data-engine/src/crud/mod.rs`, `backend/sqlite/spatial.rs`, `backend/postgres.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan; polygon PG-only. |
-| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({wraps})` | `crates/zeroship-data-core/src/encryption/`, `crud/encryption_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | AES-256-GCM; fenced from filters. |
-| Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-data-engine/src/crud/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
-| MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-data-engine/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
-| defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/zeroship-data-engine/src/crud/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
+| Native transactions + nested savepoints | 🟢 | `env.db.transaction(async tx => {...})` | `crates/zeroship-data-orm/src/transaction/mod.rs`, `v8_classes/db.rs` | `docs/reference/db.md` | `sdks/db/tests/p9-pr3-native-transaction.test.ts` | PG isolation; SQLite ignores level. |
+| Vector search (t.vector + search({vector})) | 🟢 | `Collection.search({ vector, k, ... })` | `crates/zeroship-data-orm/src/crud/search.rs`, `crates/zeroship-data-orm/src/backend/sqlite/search.rs`, `crates/zeroship-data-orm/src/backend/postgres/search.rs` | `docs/reference/db.md` | — | pgvector / sqlite-vec; innerProduct PG-only. |
+| Geo / spatial search (t.geoPoint + near()) | 🟢 | `Collection.near({ field, point, radius, ... })` | `crates/zeroship-data-orm/src/crud/search.rs`, `crates/zeroship-data-orm/src/backend/sqlite/search.rs`, `crates/zeroship-data-orm/src/backend/postgres/search.rs` | `docs/reference/db.md` | — | PostGIS; SQLite haversine flat scan. |
+| Column-level encryption (t.encrypted) | 🟢 | `t.encrypted({ of })` | `crates/zeroship-data-orm/src/encryption/`, `crates/zeroship-data-orm/src/protection/encryption_pass.rs` | `docs/reference/db.md` | `sdks/db/tests/p5-encrypted-builder-and-filter-fence.test.ts` | Randomised AES-GCM; fenced from filters. |
+| Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-data-orm/src/protection/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
+| MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-data-orm/src/protection/unmask.rs`, `sdks/db/src/collection/masking.ts` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
+| defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/zeroship-data-orm/src/protection/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
 | Mask/encryption backfill pipeline | 🟡 | internal (DDL apply) | the migration engine (`crates/zeroship-migrate-core/src/schema/diff.rs`, `MaskBackfill`) | — | — | PG only; SQLite returns backend_unsupported. |
-| Data backfill migrations | ⚫ | none (superseded) | — | `docs/reference/migrate-op-dsl.md` | — | `@zeroship/migrations` and plugin-db's `migrations.rs` were REMOVED: the online-backfill orchestrator was redundant with the migration engine's own batched/cursor/resumable `.backfill()` op (`packages/zero-migrate/src/types.ts`, `BackfillArgs`), which is now the only way to backfill data. |
-| Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | Deleted with `@zeroship/migrations`; there is no orphan-migration state left to reap. |
-| Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-data-core/src/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
+| Data backfill migrations | ⚫ | none (superseded) | — | `docs/reference/migrate-op-dsl.md` | — | Runtime backfill orchestration was removed; `@zeroship/migrate` owns the resumable `.backfill()` operation. |
+| Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | No runtime-owned migration state remains to reap. |
+| Process-wide CDC broker (openSubscription) | green | `collection.openSubscription()` / `subscribe(name)` | `crates/zeroship-data-orm/src/cdc/broker.rs`, `v8_classes/subscription.rs`, `sdks/db/src/subscribe.ts` | - | `sdks/db/tests/subscribe-close.test.ts` | Cross-isolate within one worker process; coarse-grained; 1024-event queue. |
 | Live queries — db.live(queryFn) | 🟢 | `db.live(queryFn, opts?)` | `sdks/db/src/live.ts` | `docs/reference/db.md` | `sdks/db/tests/live.test.ts` | v1 coarse-grained; LIVE_IN_TRANSACTION error. |
-| WAL replication consumer | green | `Subscription.ready()` auto-start | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `wal_consumer.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | One slot per app per worker process; starts on first live subscription and stops on last close. |
-| Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close teardown. Archive retains the worker feed and does not request CDC teardown. |
-| Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | internal (SQL-readable) | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Admin-written append-only events in the per-app schema. |
-| Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/zeroship-data-engine/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
-| App namespace drop (drop_namespace) | &#x1F7E2; | internal library (no app-archive caller) | `crates/zeroship-plugin-db/src/drop_namespace.rs` | &mdash; | &mdash; | DROP SCHEMA CASCADE; PG-only. Archive never calls it; privileged database teardown belongs to zeroship-migrate-server. |
-| Dual-backend support (PG + SQLite) | 🟢 | internal (`DbService::new`) | `crates/zeroship-plugin-db/src/service.rs` | `docs/reference/sqlite-divergences.md` | `crates/zeroship-plugin-db/tests/sqlite_integration.rs` | URL-driven; the backend is selected once at composition. SQLite dev/test only. |
-| Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-data-engine/src/auth/` | — | — | PG-only; SQLite has shim. |
+| PostgreSQL CDC relay | green | `Subscription.ready()` starts the ORM relay client | `crates/zeroship-data-orm/src/cdc/relay.rs`, `crates/zeroship-data-cdc-server/src/source.rs` | `docs/runbooks/cdc-relay.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | Workers use authenticated TLS; the separate relay owns logical decoding. |
+| Replication slot/publication lifecycle | green | relay-managed capture | `crates/zeroship-data-cdc-server/src/source.rs`, `crates/zeroship-data-orm/src/cdc/lifecycle.rs` | `docs/runbooks/cdc-relay.md` | `crates/zeroship-data-v8/tests/distributed_live.rs` | The relay shares capture by app and cleans up slots. Workers subscribe to migration-provisioned publications through the relay. |
+| Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | descriptor-declared ORM collection | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Engine-managed relation; its prefix does not alter ORM or CDC behavior. |
+| Unmask audit log (__zeroship_audit_unmask) | 🟢 | descriptor-declared ORM collection | `crates/zeroship-data-orm/src/protection/unmask.rs` | `docs/reference/db.md` | — | Audit writes commit independently; its prefix does not alter ORM or CDC behavior. |
+| Worker database teardown | removed | none | `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-system.md` | `xtask/tests/data_architecture.rs` | The adapter releases local subscriptions. Privileged schema teardown belongs to a separate service. |
+| Pluggable ORM backends | green | host `ConnectionFactory` | `crates/zeroship-data-orm/src/connection/factory.rs`, `crates/zeroship-data-v8/src/service.rs` | `docs/architecture/data-orm.md` | `crates/zeroship-data-v8/src/v8_classes/cold_open.rs` | Built-in PostgreSQL and file-backed SQLite, or a host-defined factory; V8 uses the same adapter. |
+| Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-data-orm/src/auth/` | — | — | PG-only; SQLite has shim. |
 | DataLoader (batched get by id) | 🟢 | internal (Collection.get) | `sdks/db/src/loader.ts` | — | `sdks/db/tests/loader.test.ts` | Per-collection, per-tx-depth. |
 | Input validation | 🟢 | automatic on insert/update | `sdks/db/src/validate.ts` | `docs/reference/db.md` | `sdks/db/tests/validate.test.ts` | Runs in JS before native call. |
 | env.db generated type augmentation | 🟢 | `generated/zeroship/env.db.ts` in tsconfig include | `sdks/vite-plugin/src/gen-types/` | `docs/reference/db.md` | `sdks/vite-plugin/test/gen-types/` | Folded migration set is canonical; `@zeroship/db/env` is retired. |
 | Schema strictness (strict/lenient/off) | &#x1F7E1; | `schema({...}).strictness(...)` | `crates/zeroship-migrate-ir/src/ir.rs`, `crates/zeroship-migrate-core/src/render/fold.rs` | `docs/reference/db.md` | &mdash; | Defaults to strict and survives in folded runtime metadata; no deploy-time refusal consumer is wired. |
-| Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-data-engine/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
-| Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/zeroship-plugin-db/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
+| Per-query unmask hint (find opts.unmask) | 🟢 | `Collection.find(filter, { unmask, actor, ... })` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | id must be in select if projecting. |
+| Collection.unmaskField / bulkUnmask | 🟢 | `collection.unmaskField(rowPk, column, opts?)` | `crates/zeroship-data-v8/src/v8_classes/collection.rs`, `crud/unmask.rs` | `docs/reference/db.md` | — | Collection name un-spoofable; audited. |
 | Unindexed query runtime warnings | 🟢 | automatic (dev) | `sdks/db/src/collection/index-warnings.ts` | `docs/reference/db.md` | `sdks/db/tests/named-indexes.test.ts` | Suppressed in production. |
 | Encrypted field filter fence | 🟢 | automatic when schema has t.encrypted | `sdks/db/src/collection/encryption-fence.ts` | — | `sdks/db/tests/filter-encryption-types.test.ts` | Deterministic mode allows equality. |
 
@@ -247,22 +247,22 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| env.kv.get | 🟢 | `env.kv.get(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Raw string at native layer; SDK JSON.parses. |
-| env.kv.set | 🟢 | `env.kv.set(key, value, {ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Value must be string; TTL≤100yr. |
-| env.kv.delete | 🟢 | `env.kv.delete(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | {deleted:bool}; no error on miss. |
-| env.kv.incr | 🟢 | `env.kv.incr(key, {by?, ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Fixed-window TTL; Lua EVAL on Redis. |
-| env.kv.setIfAbsent | 🟢 | `env.kv.setIfAbsent(key, value, {ttlMs?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Redis SET NX; redb MVCC. |
-| env.kv.expire | 🟢 | `env.kv.expire(key, ttlMs)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | PEXPIRE; updated:false on miss. |
-| env.kv.ttl | 🟢 | `env.kv.ttl(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/mod.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | 3-state TtlState. |
-| env.kv.persist | 🟢 | `env.kv.persist(key)` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Redis PERSIST. |
-| env.kv.list | 🟢 | `env.kv.list(prefix?, {cursor?, limit?})` | `crates/zeroship-plugin-kv/src/v8_class.rs`, `backend/redb.rs`, `backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Literal prefix; opaque cursor; max 10000. |
-| redb backend | 🟢 | internal (ZEROSHIP_KV_URL unset) | `crates/zeroship-plugin-kv/src/backend/redb.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Single-writer MVCC; Durability::Immediate. |
-| Redis/Dragonfly backend (single-node) | 🟢 | internal (redis:// URL) | `crates/zeroship-plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Per-thread pool; Lua incr. |
-| Redis/Dragonfly backend (cluster) | 🟢 | internal (?cluster=true) | `crates/zeroship-plugin-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Hash-tag slot; single-shard ceiling per app. |
-| Per-app key namespacing / isolation | 🟢 | internal (Backend::scope) | `crates/zeroship-plugin-kv/src/backend/mod.rs` | — | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | {app_id}:key; braces rejected in user keys. |
-| Input validation and limits | 🟢 | internal | `crates/zeroship-plugin-kv/src/limits.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | key 512B, value 256KiB, list clamp 10000. |
-| Typed error classification | 🟢 | error.code on rejected Promises | `crates/zeroship-plugin-kv/src/error.rs` | `docs/reference/kv.md` | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
-| KvPlugin / NativePlugin registration | 🟢 | internal | `crates/zeroship-plugin-kv/src/lib.rs`, `v8_class.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | One Kv instance/isolate. |
+| env.kv.get | 🟢 | `env.kv.get(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Raw string at native layer; SDK JSON.parses. |
+| env.kv.set | 🟢 | `env.kv.set(key, value, {ttlMs?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Value must be string; TTL≤100yr. |
+| env.kv.delete | 🟢 | `env.kv.delete(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | {deleted:bool}; no error on miss. |
+| env.kv.incr | 🟢 | `env.kv.incr(key, {by?, ttlMs?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Fixed-window TTL; Lua EVAL on Redis. |
+| env.kv.setIfAbsent | 🟢 | `env.kv.setIfAbsent(key, value, {ttlMs?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Redis SET NX; redb MVCC. |
+| env.kv.expire | 🟢 | `env.kv.expire(key, ttlMs)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | PEXPIRE; updated:false on miss. |
+| env.kv.ttl | 🟢 | `env.kv.ttl(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `crates/zeroship-kv/src/backend/mod.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | 3-state TtlState. |
+| env.kv.persist | 🟢 | `env.kv.persist(key)` | `crates/zeroship-kv-v8/src/v8_class.rs`, `dispatch.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Redis PERSIST. |
+| env.kv.list | 🟢 | `env.kv.list(prefix?, {cursor?, limit?})` | `crates/zeroship-kv-v8/src/v8_class.rs`, `crates/zeroship-kv/src/backend/redb.rs`, `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Literal prefix; opaque cursor; max 10000. |
+| redb backend | 🟢 | internal (ZEROSHIP_KV_URL unset) | `crates/zeroship-kv/src/backend/redb.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Single-writer MVCC; Durability::Immediate. |
+| Redis/Dragonfly backend (single-node) | 🟢 | internal (redis:// URL) | `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv/tests/redis_backend.rs` | Per-thread pool; Lua incr. |
+| Redis/Dragonfly backend (cluster) | 🟢 | internal (?cluster=true) | `crates/zeroship-kv/src/backend/redis.rs` | `docs/reference/kv.md` | `crates/zeroship-kv/tests/redis_backend.rs` | Hash-tag slot; single-shard ceiling per app. |
+| Per-app key namespacing / isolation | 🟢 | internal (Backend::scope) | `crates/zeroship-kv/src/backend/mod.rs` | — | `crates/zeroship-kv/tests/redis_backend.rs` | {app_id}:key; braces rejected in user keys. |
+| Input validation and limits | 🟢 | internal | `crates/zeroship-kv/src/limits.rs`, `crates/zeroship-kv-v8/src/limits.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Shared key/value limits; binding converts JS numeric options. |
+| Typed error classification | 🟢 | error.code on rejected Promises | `crates/zeroship-kv-v8/src/error.rs` | `docs/reference/kv.md` | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Validation → TypeError; runtime → coded. |
+| KvBinding / NativePlugin registration | 🟢 | internal | `crates/zeroship-kv-v8/src/lib.rs`, `v8_class.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | One Kv instance/isolate. |
 | @zeroship/kv kv.get<T> | 🟢 | `kv.get<T>(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | ok(null) on miss. |
 | @zeroship/kv kv.getString | 🟢 | `kv.getString(key)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | get<string> convenience. |
 | @zeroship/kv kv.set<T> | 🟢 | `kv.set<T>(key, value, {ttlMs?})` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | JSON-encodes. |
@@ -277,44 +277,30 @@ typed TS SDK (`@zeroship/kv`) adding JSON serialization, Result wrapping, and co
 | @zeroship/kv kv.getOrSet | 🟢 | `kv.getOrSet<T>(key, {ttlMs?}, factory)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | NOT atomic (stampede possible). |
 | @zeroship/kv kv.namespace | 🟢 | `kv.namespace(prefix)` | `sdks/kv/src/index.ts` | `docs/reference/kv.md` | `sdks/kv/tests/kv.test.ts` | String-concat sugar; composes. |
 | createKv factory / NativeKv injection | 🟢 | `import { createKv } from "@zeroship/kv"` | `sdks/kv/src/index.ts` | — | `sdks/kv/tests/kv.test.ts` | Mock injection for tests. |
-| Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/zeroship-plugin-kv/src/backend/redis.rs`, `error.rs` | — | `crates/zeroship-plugin-kv/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
-| Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/zeroship-plugin-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/zeroship-plugin-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
-| Redis list SCAN glob escaping | 🟢 | internal | `crates/zeroship-plugin-kv/src/limits.rs` | — | `crates/zeroship-plugin-kv/src/limits.rs` | Escapes glob metachars. |
+| Backend unavailability / graceful rejection | 🟢 | error.code === 'kv_connection' | `crates/zeroship-kv/src/backend/redis.rs`, `error.rs` | — | `crates/zeroship-kv-v8/tests/e2e_runtime.rs` | Rejects rather than hangs; retry hint. |
+| Redis cluster hash-tag slot targeting | 🟢 | internal | `crates/zeroship-kv/src/backend/mod.rs`, `backend/redis.rs` | — | `crates/zeroship-kv/tests/redis_backend.rs` | Single-shard ceiling per whale app. |
+| Redis list SCAN glob escaping | 🟢 | internal | `crates/zeroship-kv/src/limits.rs` | — | `crates/zeroship-kv/src/limits.rs` | Escapes glob metachars. |
 | Worker / CLI plugin wiring | 🟢 | `zeroship serve` / worker | `crates/zeroship-cli/src/main.rs`, `crates/zeroship-worker/src/main.rs` | `docs/reference/kv.md` | — | URL→Redis, else redb; absent → env.kv absent. |
 
 ---
 
 ## 5. env.storage / @zeroship/storage
 
-An object-store CRUD primitive (`env.storage.*`) wrapped by `@zeroship/storage` as a typed
-`Bucket` class. The Rust kernel is fully implemented against a LocalFs backend keyed under
-`<root>/<app_id>/<bucket>/<key>`; an S3/R2 backend is declared in a feature flag with **no
-implementation**. The SDK ships in the app template, but there is **no reference doc page**.
+Scoped object storage lives in `zeroship-storage`, with a separate
+`zeroship-storage-v8` binding for `env.storage`. Both Rust services and creator
+apps can use LocalFs or S3-compatible backends. See [Object storage](reference/storage.md).
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| env.storage.put | 🟢 | `env.storage.put(bucket, key, bytesBase64, contentType?)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/zeroship-worker/src/handler.rs` | content_type silently ignored; 2x-RAM OOM vector (ST-2). |
-| env.storage.get | 🟢 | `env.storage.get(bucket, key)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `crates/zeroship-worker/src/handler.rs` | contentType always null; triple-buffers (ST-3). |
-| env.storage.delete | 🟢 | `env.storage.delete(bucket, key)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Returns false on NotFound. |
-| env.storage.list | 🟢 | `env.storage.list(bucket, prefix?)` | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | `sdks/create-zeroship-app/template/src/index.ts` | Blocking read_dir; no pagination; follows symlinks (ST-6). |
-| Multi-tenancy isolation via app_id | 🟢 | internal | `crates/zeroship-plugin-storage/src/callbacks.rs`, `backend/local.rs` | — | — | Falls back to "default" if APP_ID absent (ST-5). |
-| Path-traversal rejection | 🟡 | internal | `crates/zeroship-plugin-storage/src/backend/mod.rs` | — | `crates/zeroship-plugin-storage/src/backend/mod.rs` | No NUL/backslash/dotfile reject (ST-1); list bypasses validator (ST-4). |
-| LocalFs backend | 🟢 | internal | `crates/zeroship-plugin-storage/src/backend/local.rs` | — | — | compio AsyncWriteAt/ReadAt; list walk is blocking std::fs. |
-| S3/R2/MinIO/Spaces/B2 backend (s3 flag) | 🟠 | internal | `crates/zeroship-plugin-storage/Cargo.toml` | — | — | Feature flag exists; zero source files; gates nothing. |
-| Pluggable Backend trait | 🟢 | internal | `crates/zeroship-plugin-storage/src/backend/mod.rs` | `docs/reference/plugin-system.md` | — | async_trait(?Send); ObjectMeta/ListEntry. |
-| StoragePlugin constructor variants | 🟢 | internal | `crates/zeroship-plugin-storage/src/lib.rs` | — | — | ::new is a back-compat alias (removal candidate). |
-| StoragePlugin registration | 🟢 | `zeroship serve` / worker --storage-root | `crates/zeroship-cli/src/main.rs`, `crates/zeroship-worker/src/main.rs`, `worker/src/cache.rs` | — | — | Degrades gracefully if root empty. |
-| @zeroship/storage — Bucket class | 🟢 | `import { Bucket, bucket } from '@zeroship/storage'` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | Result envelopes; no tests dir present. |
-| @zeroship/storage — bucket() factory | 🟢 | `import { bucket } from '@zeroship/storage'` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | Canonical template entry. |
-| @zeroship/storage — Bucket.put() | 🟢 | `bucket.put(key, body, opts?)` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | contentType discarded by LocalFs. |
-| @zeroship/storage — Bucket.get() | 🟢 | `bucket.get(key)` | `sdks/storage/src/index.ts` | — | — | contentType always null in practice. |
-| @zeroship/storage — Bucket.getText() | 🟢 | `bucket.getText(key)` | `sdks/storage/src/index.ts` | — | — | Thin UTF-8 wrapper. |
-| @zeroship/storage — Bucket.delete() | 🟢 | `bucket.delete(key)` | `sdks/storage/src/index.ts` | — | — | deleted:false if not found. |
-| @zeroship/storage — Bucket.list() | 🟢 | `bucket.list(prefix?)` | `sdks/storage/src/index.ts` | — | `sdks/create-zeroship-app/template/src/index.ts` | modifiedAt → Date; inherits unbounded walk. |
-| Presigned URL / direct upload URL | 🔵 | `env.storage.presignUrl` (planned) | — | `docs/proposals/feature-roadmap.md` | — | Requires S3 backend. |
-| Image resize / transform on upload | 🔵 | @zeroship/storage (planned) | — | `docs/proposals/feature-roadmap.md` | — | No code. |
-| content_type sidecar metadata | 🟠 | put contentType / get contentType | `crates/zeroship-plugin-storage/src/backend/local.rs` | — | — | Accepted, dropped; always null on get. |
-| Per-app storage quota enforcement | 🔵 | internal | — | — | — | Open finding ST-2 (HIGH); no code. |
+| Scoped Rust operations | 🟢 | `StorageStore`, `Storage`, `Namespace` | `crates/zeroship-storage/src/store.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/README.md` | App and platform handles; typed errors; no V8 dependency. |
+| App isolation | 🟢 | Host-bound namespace | `crates/zeroship-storage/src/namespace.rs`, `crates/zeroship-storage-v8/src/lib.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/store.rs` | Identity and backend captured at initialization; invalid coordinates rejected. |
+| LocalFs | 🟢 | Runtime backend selection | `crates/zeroship-storage/src/backend/local.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/backend_parity.rs` | Separate content-type sidecars; paginated directory walk on the blocking pool. |
+| S3-compatible backend | 🟢 | `s3` feature and storage URL | `crates/zeroship-storage/src/backend/s3.rs` | `docs/reference/storage.md` | `crates/zeroship-storage/tests/backend_parity.rs` | Compio client; multipart uploads; Testcontainers MinIO verification. |
+| Buffered and streaming native operations | 🟢 | `env.storage` | `crates/zeroship-storage-v8/src/callbacks.rs` | `docs/reference/storage.md` | `crates/zeroship-storage-v8/tests/e2e_streaming.rs` | Size limits, backpressure and metering. |
+| Download ownership | 🟢 | Isolate-owned handles | `crates/zeroship-storage-v8/src/live_streams.rs` | `docs/reference/storage.md` | `crates/zeroship-storage-v8/tests/cross_tenant_streams.rs` | Isolates cannot access each other's downloads; teardown releases sources. |
+| TypeScript bucket API | 🟢 | `Bucket`, `bucket()` | `sdks/storage/src/index.ts` | `docs/reference/storage.md` | `sdks/storage/tests` | Result envelopes, byte/text helpers, streaming and paginated listing. |
+| Aggregate stored-byte quotas | 🔵 | Per-app quota | — | — | — | Operation limits ship; total retained-byte enforcement does not. |
+| Presigned URLs and image transforms | 🔵 | Planned | — | `docs/proposals/feature-roadmap.md` | — | No implementation. |
 
 ---
 
@@ -341,7 +327,7 @@ audit, and a dev-tier parity implementation.
 | TOTP 2FA | 🟡 | POST /me/2fa/enroll, /confirm, /disable; /login/2fa | `crates/zeroship-auth/src/identity/totp.rs`, `ui/totp.rs`, `sessions/totp_challenge.rs` | `docs/reference/auth.md` | `crates/zeroship-auth/src/identity/totp.rs` | RFC 6238; AES-256-GCM secret bound to user_id. NO IN-REPO CALLER: the three enrolment routes are POST-only and nothing in this repository calls them; `/me` renders no two-factor section. Same shape as `/me/sessions` (JSON) and `/me/delete` (POST-only), so the console may own all three - unverifiable from here. Green requires "wired", and in-tree it is not. |
 | TOTP backup codes | 🟢 | internal | `crates/zeroship-auth/src/identity/totp.rs` | — | `crates/zeroship-auth/src/identity/totp.rs` | 10 single-use Argon2id-hashed codes. |
 | IdP session management | 🟢 | GET /me/sessions, POST /me/sessions/{id}/revoke | `crates/zeroship-auth/src/sessions/login.rs`, `store/sessions.rs`, `ui/sessions.rs` | `docs/reference/auth.md` | — | 12h hard / 30m sliding; __Host- cookie. |
-| GDPR deletion request / erasure | 🟢 | POST /me/delete, GET+POST /me/delete/cancel; cron | `crates/zeroship-auth/src/ui/account_deletion.rs`, `cron/account_reaper.rs` | `docs/reference/auth.md` | `crates/zeroship-auth/tests/account_deletion_test.rs`, `tests/user_erasure_reachability_gate.sh` | 30-day grace; refused while the requester is an organization's last owner; undo by mailed single-use token. |
+| GDPR deletion request / erasure | 🟢 | POST /me/delete, GET+POST /me/delete/cancel; cron | `crates/zeroship-auth/src/ui/account_deletion.rs`, `cron/account_reaper.rs` | `docs/reference/auth.md` | `crates/zeroship-auth/tests/account_deletion_test.rs`, `crates/zeroship-auth/tests/account_deletion/http.rs`, `crates/zeroship-migrate-node/tests/platform_corpus/user_erasure.rs` | Scheduled grace period; refused while the requester is an organization's last owner; undo by mailed single-use token. |
 | OIDC consent flow | 🟢 | GET /consent, POST /consent/accept, /deny | `crates/zeroship-auth/src/ui/consent.rs`, `oidc/authorization_code.rs` | `docs/reference/auth.md` | — | Mints relay alias at consent. |
 | Device Authorization Grant (RFC 8628) | 🟢 | GET/POST /device; POST /oauth2/device/authorization | `crates/zeroship-auth/src/ui/device.rs`, `oidc/device_token.rs` | `docs/reference/auth.md` | — | Requires IdP session; CSRF. |
 | RP-initiated logout | 🟢 | GET/POST /oauth2/logout | `crates/zeroship-auth/src/ui/logout.rs`, `oidc/refresh.rs` | `docs/reference/auth.md` | — | Revokes local OP session + refresh families. |
@@ -455,7 +441,7 @@ its compiled dist files and the Vite plugin imports it for dev. User code must n
 | default-export contract | 🟢 | internal (user module namespace) | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | fetchFast recognized but undocumented. |
 | normalizeUserModule | 🟢 | `@zeroship/bootstrap` API | `sdks/bootstrap/src/normalize.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Named exports win over default.rpc; registry wins. |
 | installSchema / schema auto-discovery | &#x1F7E2; | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | &mdash; | `sdks/bootstrap/tests/install-schema.test.ts` | Plants typed Collection wrappers from the generated descriptor; native boot already bound Rust schema metadata. |
-| normalizeSchema + expandUnionToFlatColumns | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Refuses reserved system names. |
+| normalizeSchema + expandUnionToFlatColumns | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Keeps native method names; colliding collections use `collection(name)`. |
 | validateRefTargets | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Every `t.ref` target must be a key of the same schema map, else `REF_TARGET_NOT_FOUND`. A qualified `other_app.users` fails that membership test, but as an undeclared name, not by a cross-app rule. |
 | __zsDispatch (embedded RPC dispatcher) | 🟢 | internal | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Idempotent IIFE; dev+prod identical JS. |
 | runtime-entry (prod TLA orchestrator) | 🟢 | internal (include_str!) | `sdks/bootstrap/src/runtime-entry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Runs after dispatcher; skips if env.db absent. |
@@ -912,17 +898,17 @@ observability, and OIDC/OAuth protocol primitives.
 | PG connection pool | &#x1F7E2; | internal | `libs/compio-postgres/src/pool.rs` | &mdash; | `libs/compio-postgres/tests/suite/integration.rs` | !Send; FIFO-fair; dirty barrier on checkout. |
 | PG test-utils feature | 🟢 | internal (feature=test-utils) | `libs/compio-postgres/src/test_utils.rs` | — | — | Excluded from prod builds. |
 | PG config — connection string parser | 🟢 | internal | `libs/compio-postgres/src/config.rs` | — | — | DSN parser; Unix socket support. |
-| Redis single-node client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
+| Redis single-node client | 🟢 | internal (zeroship-kv) | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/tests/integration.rs` | Literal IP only; no TLS; one cmd in flight. |
 | Redis reply size cap (64 MB) | 🟢 | internal | `libs/compio-redis/src/client.rs` | — | `libs/compio-redis/src/client.rs` | OOM guard; array-bomb rejected. |
 | Redis dirty-barrier for pool reuse | 🟢 | internal | `libs/compio-redis/src/client.rs`, `pool.rs` | — | `libs/compio-redis/src/pool.rs` | Cross-tenant desync prevention. |
-| Redis cluster client | 🟢 | internal (plugin-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
+| Redis cluster client | 🟢 | internal (zeroship-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
 | Redis connection pool | 🟢 | internal | `libs/compio-redis/src/pool.rs` | — | `libs/compio-redis/src/pool.rs` | LIFO; test-on-borrow; no wait queue. |
 | Redis — no TLS | 🔵 | internal | `libs/compio-redis/src/lib.rs` | — | — | rediss:// not implemented; MITM possible. |
 | typed_id — UUIDv7 base62 IDs | 🟢 | internal | `crates/zeroship-core/src/typed_id.rs` | — | `crates/zeroship-core/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |
 | Wire types — AppRecord/RouteEntry/... | 🟢 | internal | `crates/zeroship-core/src/types.rs` | `docs/architecture/gateway-routing.md` | — | env_version monotonic counter. |
 | Wire types — UsageReport/AppUsage/ControlEvent | 🟢 | internal | `crates/zeroship-core/src/types.rs` | — | — | CommonError enum. |
 | AppRuntimeLimits | 🟢 | internal | `crates/zeroship-core/src/types.rs` | `docs/reference/runtime-limits.md` | — | Defaults None. |
-| Crypto — AES-256-GCM secrets at rest | 🟢 | internal (plugin-db EnvStore) | `crates/zeroship-core/src/crypto.rs` | — | `crates/zeroship-core/src/crypto.rs` | Versioned AAD; per-app HKDF not yet done. |
+| Crypto — AES-256-GCM secrets at rest | 🟢 | internal (control EnvStore) | `crates/zeroship-core/src/crypto.rs`, `crates/zeroship-control/src/env_store.rs` | — | `crates/zeroship-core/src/crypto.rs` | Versioned AAD; per-app HKDF not yet done. |
 | Auth utils — constant-time key compare | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | — | `crates/zeroship-core/src/auth/mod.rs` | Constant iteration count. |
 | Auth utils — HMAC-SHA256 sign/verify | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | — | `crates/zeroship-core/src/auth/mod.rs` | RFC 4231 KAT. |
 | Auth utils — ZeroShip-User header sign/verify | 🟢 | internal | `crates/zeroship-core/src/auth/mod.rs` | `docs/reference/auth.md` | `crates/zeroship-core/src/auth/mod.rs` | 60s age, 5s skew, per-request bind. |
@@ -959,7 +945,7 @@ replaces the external auth/gateway stack. Production builds produce a `.zship` a
 | --- | --- | --- | --- | --- | --- | --- |
 | zeroship serve | 🟢 | `zeroship serve <file> [--port] [...]` | `crates/zeroship-cli/src/main.rs` | `docs/runbooks/local-dev.md` | `examples/http-handler.js` | .js path only; registers db/storage/auth/kv. |
 | zeroship deploy | 🟢 | `zeroship deploy [path.zship] [--app] [--control] [--env] [--config]` | `crates/zeroship-cli/src/main.rs` | `docs/reference/project-config.md` | — | curl POST; prints deploy_hash and the provenance of app/control. Does NOT apply migrations. |
-| zeroship migrate | green | `zeroship migrate [migrations.ir.json] [--app] [--control] [--env] [--config] [--yes]` | `crates/zeroship-cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `tests/e2e_db_app_end_to_end.sh` | Reuses the control URL. The edge sends `/v1/*` directly to migrate-server, so today's app-id route and a later database-id re-key use the same ingress split. Required after deploy for env.db apps. `"protected": true` needs `--yes`. |
+| zeroship migrate | green | `zeroship migrate [migrations.ir.json] [--app] [--control] [--env] [--config] [--yes]` | `crates/zeroship-cli/src/migrate.rs` | `docs/build-and-deploy-golden-path.md` | `examples/db-hitcounter/tests/deployed.test.ts` | Reuses the control URL. The edge sends `/v1/*` directly to migrate-server, so today's app-id route and a later database-id re-key use the same ingress split. Required after deploy for env.db apps. `"protected": true` needs `--yes`. |
 | zeroship login (Device Grant) | 🟢 | `zeroship login [--auth-url]` | `crates/zeroship-cli/src/auth.rs` | — | `crates/zeroship-cli/tests/login_test.rs` | RFC 8628; token.json mode 0600. |
 | zeroship logout | 🟢 | `zeroship logout` | `crates/zeroship-cli/src/auth.rs` | — | `crates/zeroship-cli/tests/login_test.rs` | /oauth2/revoke; deletes creds. |
 | zeroship whoami | 🟢 | `zeroship whoami` | `crates/zeroship-cli/src/auth.rs` | — | `crates/zeroship-cli/tests/login_test.rs` | /userinfo; transparent refresh. |
@@ -1180,11 +1166,11 @@ surfaces have no `docs/reference/` page. The actionable list, grouped by area:
   the `__zeroshipNodeBuiltin` dev bridge, and the `getCiphers()` / `node:zlib`–`node:os`
   build↔runtime divergences are undocumented.
 
-**env.db:** CDC broker / `openSubscription`, WAL replication consumer, replication slot lifecycle,
-mask/encryption backfill DDL ops, `__zeroship_migrations` audit table, migration
-sweeper, `drop_namespace`, per-app PG auth bootstrap, DataLoader, encrypted-field filter fence,
-`init_pool_async` lazy-init contract. (`sqlite-divergences.md` omits auth/session bootstrap and
-the SQLite mask-migration limitation.)
+**env.db:** CDC ownership and relay operation are described in
+`docs/architecture/data-orm.md` and `docs/runbooks/cdc-relay.md`. The ORM's
+connection factories and lazy initialization contract are covered in the
+architecture document. Reference coverage remains incomplete for per-app
+PostgreSQL auth bootstrap and encrypted-field filter restrictions.
 
 **env.kv:** the `{app_id}:` scope/hash-tag wire format, the validation constants (key 512 B, value
 256 KiB, TTL 100 yr, list limits), the full error-code set + sync TypeError paths, `createKv`

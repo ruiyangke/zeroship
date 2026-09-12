@@ -127,7 +127,7 @@ async fn apply<B: MigrationBackend>(
         dialect,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), (*dialect).clone());
+    let guard = GuardConfig::from_policy(policy.clone(), (*dialect).clone(), &cfg.project_schema);
     let artifact = author
         .load_and_lower_guarded(&source, OWNER, &registry(), &live, &guard)
         .map_err(|error| format!("lower: {error}"))?;

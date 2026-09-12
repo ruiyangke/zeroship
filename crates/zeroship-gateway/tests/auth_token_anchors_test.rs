@@ -1,6 +1,6 @@
 // This test target is its own crate ROOT and overflows rustc's layout query.
 // `recursion_limit` is per crate root, so the gateway's lib and its sibling
-// test targets do not cover this one. Caught by `tests/clippy_gate.sh`, which
+// test targets do not cover this one. Caught by `cargo clippy --workspace --all-targets --all-features`, which
 // lints `--all-targets`; a bare `cargo test -p zeroship-gateway --lib` never
 // builds this file, which is why it compiled clean until the gate ran.
 #![recursion_limit = "256"]
@@ -18,9 +18,10 @@
 //! OP refresh") is exact. No stubs of the issuer or the single-flight.
 //!
 //! The DB-backed handler tests (token-exchange → anchor row →
-//! session?mint=1) are gated on a test database (set `PG_TEST_URL`; the
-//! established env-skip convention — no live PG in CI by default). The mock-OP
-//! single-flight test and the cookie/Origin tests run unconditionally.
+//! session?mint=1) REQUIRE a test database: with none configured they refuse
+//! and name `tests/provision_test_backends.sh`, rather than skipping into a
+//! green. The mock-OP single-flight test and the cookie/Origin tests run
+//! unconditionally.
 
 mod common;
 
@@ -1181,27 +1182,18 @@ async fn op_refresh(oidc: &OidcRp, op: &MockOP) -> Result<(), String> {
 
 // ─── PG-backed full-handler tests (gated on a test database) ──────
 
-/// Resolve the anchors test DB DSN.
+/// Resolve the anchors test DB DSN, or refuse the run.
 ///
-/// FAIL LOUDLY in CI: if `CI` is set (the harness expects full coverage) but
-/// there is no test database, panic instead of silently skipping —
-/// the repo's faithful-e2e mandate forbids a DB-gated test that quietly
-/// no-ops in CI. Locally (no `CI`), `None` ⇒ the test prints a skip line and
-/// returns, the established env-skip convention for a dev box without PG.
-fn db_url() -> Option<String> {
-    match common::platform_db_or_skip() {
-        Some(dsn) if !dsn.is_empty() => Some(dsn),
-        _ => {
-            if zeroship_core::declared_env!(external, "CI", zeroship_core::config::TestHarness).is_some() {
-                panic!(
-                    "PG_TEST_URL must be set in CI so the DB-backed anchor handler \
-                     tests run the real /token→anchor→/session?mint=1 path instead of silently \
-                     skipping (faithful-e2e mandate)"
-                );
-            }
-            None
-        }
-    }
+/// THIS USED TO BRANCH ON `CI`. Without that variable a missing database
+/// printed a skip line, which cargo counts as a pass, so the real
+/// /token -> anchor -> /session?mint=1 path was silently unexercised on every
+/// dev box; with it set, the same absence panicked. Two verdicts for one
+/// state, decided by an environment variable nobody sets locally, is exactly
+/// the faithful-e2e hole the `CI` arm was written to close - so the arm is
+/// gone and the refusal is unconditional. `common::require_platform_db` names
+/// `tests/provision_test_backends.sh` and `deploy/ops/db-migrate.sh`.
+fn db_url() -> String {
+    common::require_platform_db()
 }
 
 /// Seed the global user row the anchor FKs into, returning its id.
@@ -1341,10 +1333,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
     // scope, NO id_token, NO token_type, NO scopes on the user. A
     // gateway_sessions row is created. The global UUID never reaches the
     // browser.
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip token_exchange (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -1457,7 +1446,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
         )
         .await
         .expect("pool");
-        let conn = pool.get().await.expect("conn");
+        let conn = pool.acquire().await.expect("conn");
         let rows = conn
             .query(
                 "SELECT user_id, app_id FROM zeroship.gateway_sessions \
@@ -1481,10 +1470,7 @@ async fn token_exchange_is_identity_only_and_sets_both_cookies() {
 /// stamps) is ABSENT from the entire SPA-facing body.
 #[ntex::test]
 async fn token_exchange_swaps_email_for_relay_alias() {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip token_email_swap (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -1536,10 +1522,7 @@ async fn token_exchange_swaps_email_for_relay_alias() {
 /// closed, never leak real email."
 #[ntex::test]
 async fn token_exchange_fails_closed_when_no_alias() {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip token_email_failclosed (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -1582,10 +1565,7 @@ async fn token_exchange_fails_closed_when_no_alias() {
 
 #[ntex::test]
 async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip abs_expiry (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -1595,7 +1575,7 @@ async fn anchor_abs_expiry_is_created_at_plus_30d_not_slid() {
     // Create an anchor directly through the REAL store and assert
     // abs_expires_at ≈ created_at + 30d (set once at create).
     let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-    let mut conn = pool.get().await.expect("conn");
+    let mut conn = pool.acquire().await.expect("conn");
     let refresh_enc = zeroship_core::crypto::encrypt(
         &zeroship_core::crypto::derive_key("k"),
         b"aad",
@@ -1635,10 +1615,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // ONCE, RE-creates the gateway_sessions row, RE-sets __Host-zeroship_app_session,
     // and returns the identity projection — with NO JWT and NO real email in
     // the body, and the pws_ id (never the global UUID).
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_mint_recovers (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -1668,7 +1645,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     //    and /session?mint=1 must fall through to anchor reload-recovery.
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
-        let conn = pool.get().await.unwrap();
+        let conn = pool.acquire().await.unwrap();
         conn.execute(
             "UPDATE zeroship.gateway_sessions SET revoked_at = NOW() WHERE user_id = $1",
             &[&user_id.as_str()],
@@ -1756,7 +1733,7 @@ async fn session_mint_recovers_after_reload_one_refresh() {
     // (carrying the rotated name + avatar), keyed by the canonical app UUID.
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.unwrap();
-        let conn = pool.get().await.unwrap();
+        let conn = pool.acquire().await.unwrap();
         let rows = conn
             .query(
                 "SELECT name, avatar_url FROM zeroship.gateway_sessions \
@@ -1785,10 +1762,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
     // refresh grant. Pre-fix, the rotated gateway_sessions row was written with
     // sid=NULL, so a logout_token carrying sid matched zero rows and left the
     // anchor alive; /session?mint=1 could re-mint the user after global logout.
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip bcl_refreshed_session (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(BCL_REFRESH_CLIENT_ID));
     op.omit_refresh_id_token_on_refresh();
     let user_id = op.user_id.clone();
@@ -1913,7 +1887,7 @@ async fn backchannel_logout_revokes_refreshed_session_with_sid_logout_token() {
 
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let row = conn
             .query_one(
                 "SELECT revoked_at IS NOT NULL AS revoked \
@@ -1989,10 +1963,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
     // gateway must persist the NEW refresh token returned by the first
     // `?mint=1`; otherwise the second mint would replay the stale token and the
     // OP's reuse detection would kill the family with `invalid_grant`.
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_mint_persists_rotated_refresh_token (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     op.enforce_refresh_reuse_detection();
     seed_user(&dsn, &op.user_id).await;
@@ -2040,7 +2011,7 @@ async fn session_mint_persists_rotated_refresh_token_for_next_rotation() {
 
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
             &AppId::parse(APP_ID).expect("fixed app id"),
@@ -2089,10 +2060,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
     // P5c regression: OP `invalid_grant` on refresh means the rotating family is
     // dead. The gateway must delete the server-held anchor, clear recovery
     // cookies, and surface `login_required` rather than treating it as retryable.
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_mint_invalid_grant_deletes_anchor (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -2155,7 +2123,7 @@ async fn session_mint_invalid_grant_deletes_anchor_and_requires_login() {
 
     {
         let pool = zeroship_gateway::db::checkout(&db_cfg).await.expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let anchor = anchors::read_live(
             &mut conn,
             &AppId::parse(APP_ID).expect("fixed app id"),
@@ -2179,10 +2147,7 @@ async fn session_steady_state_reads_gateway_session_without_op() {
     // __Host-zeroship_app_session cookie reads the gateway_sessions row directly and
     // returns the relay-swapped identity projection — NO anchor read, NO OP
     // round-trip, NO JWT in the body.
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_steady_state (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -2253,10 +2218,7 @@ async fn session_minted_cookie_verifies_locally_bound_to_route_client() {
     // verify it with the EXACT verifier + binding the dispatch arm uses. It MUST
     // verify under CLIENT_ID; a DIFFERENT client_id MUST fail (the audience
     // binding that stops a cookie minted for app A from authenticating app B).
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip session_minted_cookie_verifies_locally (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let op = Arc::new(MockOP::new(CLIENT_ID));
     seed_user(&dsn, &op.user_id).await;
     let user_id = op.user_id.clone();
@@ -2456,10 +2418,7 @@ async fn cleanup_f1(dsn: &str, user_id: &UserId) {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip cookie_mint_writes_identity (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let auth_dsn = match zeroship_core::config::test_database_url_opt() {
         Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
@@ -2507,7 +2466,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
         )
         .await
         .expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let persisted = zeroship_gateway::identities::lookup_pairwise_sub(
             &mut conn, CLIENT_ID, &user_id,
         )
@@ -2589,10 +2548,7 @@ async fn cookie_mint_writes_identity_so_reset_evicts_cookie_session() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip interactive_cookie_mint_writes_identity (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let auth_dsn = match zeroship_core::config::test_database_url_opt() {
         Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),
@@ -2649,7 +2605,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
         )
         .await
         .expect("pool");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         let persisted =
             zeroship_gateway::identities::lookup_pairwise_sub(&mut conn, CLIENT_ID, &user_id)
                 .await
@@ -2729,10 +2685,7 @@ async fn interactive_cookie_mint_writes_identity_so_reset_evicts_session() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn mint_racing_concurrent_reset_fails_closed_no_fresh_cookie() {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[anchors] skip mint_racing_concurrent_reset (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = db_url();
     let auth_dsn = match zeroship_core::config::test_database_url_opt() {
         Some(d) if !d.is_empty() => d,
         _ => dsn.clone(),

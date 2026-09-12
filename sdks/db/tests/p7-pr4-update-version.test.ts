@@ -1,29 +1,13 @@
-/**
- * **P7 PR 4** — `update(filter, patch)` interaction with the platform's
- * server-side `version` auto-bump + optimistic-concurrency typed error.
- *
- * Two SDK-side responsibilities the runtime can't observe directly:
- *
- * 1. The SDK no longer adds `$inc: { version: 1 }` to the patch (the
- *    runtime's `build_update_*_with_system_fields` appends the bump).
- *    A pre-PR-4 SDK that still adds it would double-bump; we pin the
- *    behaviour change so a regression in `_augmentUpdateWithVersion`
- *    is caught.
- * 2. When the runtime throws a typed optimistic-concurrency error, the
- *    SDK's `update()` / `updateMany()` translate to `OptimisticLockError`
- *    so callers can branch on the class or `OPTIMISTIC_CONCURRENCY`.
- */
+/** SDK optimistic-concurrency behavior follows descriptor field roles. */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t, schema as schemaWrap } from "@zeroship/db";
+import { Collection, t, schema as schemaWrap } from "@zeroship/db";
 import { OptimisticLockError } from "@zeroship/db";
 import type { NativeDb } from "../src/native.js";
 
 type AnyRec = Record<string, unknown>;
 
-/** Native double that captures the last `update` arguments so the
- *  test can assert the SDK no longer ships `$inc: { version: 1 }`. */
 function makeNativeCapturingUpdate() {
   const captured: { filter?: AnyRec; update?: AnyRec } = {};
   const native = {
@@ -32,10 +16,6 @@ function makeNativeCapturingUpdate() {
         async update(filter: AnyRec, update: AnyRec) {
           captured.filter = filter;
           captured.update = update;
-          // Echo a faux row back so the SDK returns it through the
-          // map-doc path. Includes the version field bumped by 1 so
-          // the assertion below matches what the runtime would have
-          // produced after auto-bumping server-side.
           return { id: "post_x", title: update.title ?? "x", version: 2 };
         },
       };
@@ -45,17 +25,15 @@ function makeNativeCapturingUpdate() {
   return { native: native as unknown as NativeDb, captured };
 }
 
-/** Native double that throws the runtime's typed CAS-failure code from
- *  `update` to simulate the PR 4 path. */
 function makeNativeOptimisticConcurrencyFailure() {
   const native = {
     collection(_name: string) {
       return {
         async update(_filter: AnyRec, _update: AnyRec) {
           const e = new Error(
-            "Optimistic concurrency check failed for posts post_x: expected version 5",
+            "Optimistic concurrency check failed for posts post_x: expected `revision` value 5",
           );
-          (e as Error & { code: string }).code = "version_mismatch";
+          (e as Error & { code: string }).code = "concurrency_mismatch";
           throw e;
         },
       };
@@ -83,9 +61,6 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
     const row = result.data as AnyRec | null;
     assert.ok(row);
     assert.equal(row.version, 2, "version comes back bumped (runtime auto-bumped)");
-    // CRITICAL — the SDK must NOT add `$inc: { version: 1 }`. The
-    // runtime's auto-bump owns the increment; SDK-side $inc would
-    // double-bump.
     assert.equal(
       (captured.update as AnyRec | undefined)?.$inc,
       undefined,
@@ -93,23 +68,21 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
     );
   });
 
-  test("update_with_stale_version_throws_OPTIMISTIC_CONCURRENCY", async () => {
+  test("update_with_stale_custom_concurrency_field_reports_that_field", async () => {
     const native = makeNativeOptimisticConcurrencyFailure();
-    const db = installSchemaForTest(
+    const posts = new Collection(
+      "posts",
       {
-        posts: schemaWrap({
-          title: t.string().required(),
-        }).withVersioning(),
+        id: { type: "string", required: true, primaryKey: true },
+        title: { type: "string", required: true },
+        revision: { type: "integer", required: true, concurrency: true },
       },
-      { native },
+      native,
     );
-    const result = await db.posts.update(
-      { id: "post_x", version: 5 } as never,
+    const result = await posts.update(
+      { id: "post_x", revision: 5 } as never,
       { title: "renamed" },
     );
-    // Runtime threw its typed optimistic-concurrency error; SDK rethrew as
-    // `OptimisticLockError`; the `_run` rail catches + returns it via
-    // `result.error`.
     assert.equal(result.data, null);
     assert.ok(result.error);
     assert.ok(
@@ -117,14 +90,14 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
       `expected OptimisticLockError, got ${(result.error as Error).constructor.name}`,
     );
     assert.equal((result.error as OptimisticLockError).code, "OPTIMISTIC_CONCURRENCY");
-    assert.equal((result.error as OptimisticLockError).expectedVersion, 5);
-    // The `retryable: true` advisory flag must be set.
+    assert.equal((result.error as OptimisticLockError).concurrencyColumn, "revision");
+    assert.equal((result.error as OptimisticLockError).expectedValue, 5);
+    assert.equal("expectedVersion" in (result.error as OptimisticLockError), false);
+    assert.match(result.error.message, /expected `revision` value 5/);
     assert.equal((result.error as OptimisticLockError).retryable, true);
   });
 
   test("update_without_version_filter_succeeds_blindly", async () => {
-    // No `version` in filter → non-CAS path. The SDK must not throw
-    // OptimisticLockError; the runtime's blind UPDATE returns a row.
     const { native } = makeNativeCapturingUpdate();
     const db = installSchemaForTest(
       {
@@ -143,12 +116,36 @@ describe("P7 PR 4 — update() + version CAS via runtime", () => {
     assert.ok(row);
   });
 
+  test("non_integer_concurrency_filter_is_not_reported_as_a_conflict", async () => {
+    const native = {
+      collection() {
+        return { async update() { return null; } };
+      },
+    } as unknown as NativeDb;
+    const posts = new Collection(
+      "posts",
+      {
+        id: { type: "string", required: true, primaryKey: true },
+        title: { type: "string", required: true },
+        revision: { type: "integer", required: true, concurrency: true },
+      },
+      native,
+    );
+
+    const result = await posts.update(
+      { id: "post_x", revision: 1.5 } as never,
+      { title: "renamed" },
+    );
+
+    assert.equal(result.error, null);
+    assert.equal(result.data, null);
+  });
+
   test("OPTIMISTIC_CONCURRENCY_error_is_retryable", () => {
-    // Pure unit check on `OptimisticLockError`: the `retryable: true`
-    // advisory flag is the SDK-side surface for the runtime's hint.
-    const e = new OptimisticLockError(7, "posts");
+    const e = new OptimisticLockError({ column: "revision", expected: 7 }, "posts");
     assert.equal(e.retryable, true);
     assert.equal(e.code, "OPTIMISTIC_CONCURRENCY");
-    assert.equal(e.expectedVersion, 7);
+    assert.equal(e.concurrencyColumn, "revision");
+    assert.equal(e.expectedValue, 7);
   });
 });

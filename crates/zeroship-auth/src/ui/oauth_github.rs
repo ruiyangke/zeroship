@@ -153,7 +153,10 @@ pub async fn callback(
         .await;
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
-    let Some(stash) = OAuthStash::decode(&stash_blob, cfg.settings.stash_signing_key.expose_str().as_bytes()) else {
+    let Some(stash) = OAuthStash::decode(
+        &stash_blob,
+        cfg.settings.stash_signing_key.expose_str().as_bytes(),
+    ) else {
         audit::emit(
             db.as_ref(),
             &AuditEvent {
@@ -300,10 +303,7 @@ pub async fn callback(
                 HeaderValue::from_str(&location)
                     .unwrap_or_else(|_| HeaderValue::from_static("/link")),
             );
-            resp.header(
-                SET_COOKIE,
-                clear_stash_cookie(github_stash_cookie_name()),
-            );
+            resp.header(SET_COOKIE, clear_stash_cookie(github_stash_cookie_name()));
             return resp.finish();
         }
     };
@@ -345,7 +345,7 @@ pub async fn callback(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id: &user_id,
+            user_id: user_id.clone(),
             auth_method: PROVIDER,
             amr: vec!["oauth".into()],
             acr: Some(ACR_GITHUB),
@@ -383,14 +383,8 @@ pub async fn callback(
     let native_return_to =
         return_to_after_prompt_interaction(native_return_to, &["login", "select_account"]);
     let mut resp = return_to::see_other(&native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
-    resp.header(
-        SET_COOKIE,
-        clear_stash_cookie(github_stash_cookie_name()),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
+    resp.header(SET_COOKIE, clear_stash_cookie(github_stash_cookie_name()));
     resp.header("cache-control", "no-store");
     resp.finish()
 }
@@ -433,10 +427,7 @@ fn render_error(message: PublicErrorMessage) -> HttpResponse {
 /// Same as [`render_error`] but also clears the stash cookie. Use on
 /// the callback path so an aborted dance doesn't leave a stale stash
 /// on the browser.
-fn render_error_clearing(
-    message: PublicErrorMessage,
-    _cfg: &AuthConfig,
-) -> HttpResponse {
+fn render_error_clearing(message: PublicErrorMessage, _cfg: &AuthConfig) -> HttpResponse {
     let page = ErrorPage {
         message,
         error_code: message.error_code(),
@@ -446,10 +437,7 @@ fn render_error_clearing(
         .unwrap_or_else(|_| format!("<h1>{}</h1>", message.as_str()));
     let mut resp = HttpResponse::Ok();
     resp.content_type("text/html; charset=utf-8");
-    resp.header(
-        SET_COOKIE,
-        clear_stash_cookie(github_stash_cookie_name()),
-    );
+    resp.header(SET_COOKIE, clear_stash_cookie(github_stash_cookie_name()));
     resp.body(body)
 }
 

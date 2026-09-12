@@ -52,7 +52,9 @@ use crate::store::relay;
 use zeroship_authn::rate_limit::{self, Quota};
 use zeroship_mailer::bounce::{bounce_type_is_permanent, verify_basic_auth, PostmarkEvent};
 use zeroship_mailer::forward::{build_bounce, build_forward, BounceReason};
-use zeroship_mailer::inbound::{normalize_alias, InboundMessage, RELAY_MAX_HOPS, SPAM_SCORE_THRESHOLD};
+use zeroship_mailer::inbound::{
+    normalize_alias, InboundMessage, RELAY_MAX_HOPS, SPAM_SCORE_THRESHOLD,
+};
 use zeroship_mailer::sns::{self, is_valid_sns_cert_url, SesEvent, SnsEnvelope};
 use zeroship_mailer::{suppressions, Email, MailerError, RelayForwardMailer};
 
@@ -94,7 +96,10 @@ pub async fn postmark(
         .and_then(|v| v.to_str().ok());
     let (Some(expected_user), Some(expected_pass)) = (
         cfg.postmark_webhook_user(),
-        cfg.settings.postmark_webhook_password.expose_secret().map(String::as_str),
+        cfg.settings
+            .postmark_webhook_password
+            .expose_secret()
+            .map(String::as_str),
     ) else {
         tracing::warn!("postmark webhook hit but credentials not configured — rejecting");
         return HttpResponse::Unauthorized().finish();
@@ -239,8 +244,7 @@ pub async fn ses_sns(
             version = %envelope.signature_version,
             "sns webhook: unsupported SignatureVersion"
         );
-        return HttpResponse::BadRequest()
-            .body("only SignatureVersion 1 or 2 is supported");
+        return HttpResponse::BadRequest().body("only SignatureVersion 1 or 2 is supported");
     }
 
     // 3. Validate SigningCertURL host (anti-SSRF). Done BEFORE the
@@ -308,13 +312,8 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
     match ev {
         SesEvent::Bounce { bounce } if bounce.bounce_type == "Permanent" => {
             for rec in &bounce.bounced_recipients {
-                if let Err(e) = suppressions::add(
-                    db,
-                    &rec.email_address,
-                    "ses_permanent_bounce",
-                    None,
-                )
-                .await
+                if let Err(e) =
+                    suppressions::add(db, &rec.email_address, "ses_permanent_bounce", None).await
                 {
                     tracing::error!(error = %e, email_domain = %email_domain(&rec.email_address),
                                     "ses-sns suppression add failed");
@@ -374,7 +373,10 @@ async fn handle_ses_event(db: &compio_postgres::Client, ev: SesEvent, req: &Http
 }
 
 fn email_domain(email: &str) -> &str {
-    email.split_once('@').map(|(_, domain)| domain).unwrap_or("")
+    email
+        .split_once('@')
+        .map(|(_, domain)| domain)
+        .unwrap_or("")
 }
 
 // ─── Relay inbound (`POST /webhooks/relay-inbound`) — Slice 5b ──────────────
@@ -425,7 +427,10 @@ pub async fn relay_inbound(
         .and_then(|v| v.to_str().ok());
     let (Some(expected_user), Some(expected_pass)) = (
         cfg.relay_inbound_user(),
-        cfg.settings.relay_inbound_password.expose_secret().map(String::as_str),
+        cfg.settings
+            .relay_inbound_password
+            .expose_secret()
+            .map(String::as_str),
     ) else {
         tracing::warn!("relay-inbound hit but credentials not configured — rejecting");
         return HttpResponse::Unauthorized().finish();
@@ -642,7 +647,14 @@ pub async fn relay_inbound(
         Ok(_) => {
             // Terminal success — commit the dedup sentinel so a replay (or a
             // lost-200 Postmark retry of THIS message) does not forward twice.
-            audit_relay(db.as_ref(), "relay_forward", "success", &target.app_client_id, &req).await;
+            audit_relay(
+                db.as_ref(),
+                "relay_forward",
+                "success",
+                &target.app_client_id,
+                &req,
+            )
+            .await;
             commit_seen_logged(db.as_ref(), &msg.message_id).await;
             // Successful pass through the limiter resets the abuse streak.
             reset_abuse_streak(db.as_ref(), &alias).await;
@@ -885,21 +897,20 @@ async fn request_alias_auto_revoke(
     target: &relay::AliasTarget,
 ) -> AutoRevokeOutcome {
     // (1) Disable our OWN forwarding immediately — the protection we can apply.
-    let outcome = match relay::revoke_local_alias(db, &target.app_client_id, &target.global_user_id)
-        .await
-    {
-        Ok(n) if n > 0 => AutoRevokeOutcome::LocalRevokedCrossServicePending,
-        Ok(_) => AutoRevokeOutcome::AlreadyLocalRevokedCrossServicePending,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                app_client_id = %target.app_client_id,
-                global_user_id = target.global_user_id.as_str(),
-                "relay auto-revoke: LOCAL alias disable failed"
-            );
-            AutoRevokeOutcome::Failed
-        }
-    };
+    let outcome =
+        match relay::revoke_local_alias(db, &target.app_client_id, &target.global_user_id).await {
+            Ok(n) if n > 0 => AutoRevokeOutcome::LocalRevokedCrossServicePending,
+            Ok(_) => AutoRevokeOutcome::AlreadyLocalRevokedCrossServicePending,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    app_client_id = %target.app_client_id,
+                    global_user_id = target.global_user_id.as_str(),
+                    "relay auto-revoke: LOCAL alias disable failed"
+                );
+                AutoRevokeOutcome::Failed
+            }
+        };
 
     // (2) The cross-service grant revoke is NOT implemented — do NOT pretend it
     // ran. Surface the gap at WARN so it is observable.

@@ -800,7 +800,10 @@ fn wpt_must_pass_v1_compliance() {
         for r in results {
             match &r.outcome {
                 Outcome::Pass => t.pass += 1,
-                Outcome::Skip(_) => t.skip += 1,
+                Outcome::Skip(reason) => {
+                    t.skip += 1;
+                    eprintln!("SKIP {} / {}: {reason}", entry.name, r.name);
+                }
                 Outcome::Fail(_) => {
                     t.fail += 1;
                     failures.push((entry.name, r));

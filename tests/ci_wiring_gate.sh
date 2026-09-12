@@ -1,148 +1,4 @@
 #!/usr/bin/env bash
-# ============================================================================
-# EVERY GATE MUST BE RUN BY CI.
-#
-# THE MISS THIS EXISTS FOR, found 2026-09-03. `tests/vendor_embedding_gate.sh`
-# enforces decision 5 of the crate split ("no non-vendor crate embeds a vendor
-# type"), and the tracker closed that item as "mechanically enforced, not a
-# convention". IT HAD NEVER RUN IN CI. Measured against git history:
-#
-#   $ git show be17704ae:.github/workflows/ci.yml | grep -n vendor_embedding
-#   455:      # decision 5 beside it had tests/vendor_embedding_gate.sh. The ...
-#
-# ONE occurrence, and it is a COMMENT - a sentence in the decision-four step
-# saying what decision 4 lacked. For three days the only thing enforcing
-# decision 5 was whoever remembered to run the script by hand. It is wired now,
-# as its own self-test and run steps in the `rust` job, and this gate is what
-# stops the next one.
-#
-# WHY THE TWO META-GATES ALREADY HERE COULD NOT HAVE CAUGHT IT:
-#
-#   tests/ci_invocable_gate.sh   counts BARE INVOCATIONS found IN ci.yml and
-#                                checks their file mode. A gate absent from
-#                                that file contributes nothing to the count and
-#                                nothing to miss. It answers "can what CI names
-#                                actually execute", never "is everything named".
-#   tests/gate_arm_census.sh     answers "does every gate declare arms with
-#                                floors". A gate can declare perfect arms and
-#                                never run.
-#
-# Nothing asked "is every gate actually wired into CI". That is mechanically
-# decidable, so it is decided here.
-#
-# ---------------------------------------------------------------------------
-# DECISION 1 - WHAT COUNTS AS A GATE: `tests/*_gate.sh`, maxdepth 1.
-#
-# Deliberately the SAME glob `tests/gate_arm_census.sh` enumerates, character
-# for character, so the two meta-gates rule on ONE population. A second,
-# subtly different population would let a gate satisfy one and be invisible to
-# the other, which is the divergence both scripts exist to prevent one level
-# down.
-#
-# The excluded set is NOT silently filtered: arm `excluded_scripts` enumerates
-# every other `tests/*.sh`, classifies it by a stated family rule, and REFUSES
-# a name that matches no family. So a new checker that is a gate in substance
-# but not in name cannot slip out of scope unnoticed - it lands as a refusal
-# telling the author to rename it or put it on the residue list with a reason.
-# The families, and why each is out:
-#
-#   e2e_*.sh        end-to-end harnesses. They need a running platform and are
-#                   wired job-by-job (dev-vs-deployed, golden-path,
-#                   billing-pipeline-e2e); several are deliberately NOT wired
-#                   and the dev-vs-deployed job carries the reasons in prose
-#                   beside the steps (`IS NOT WIRED HERE` marks them). That is
-#                   a different question with a different answer per file.
-#   run_*.sh        suite runners (cargo/pnpm wrappers), each owning a CI job.
-#   *_selftest.sh   a gate's or library's own positive/control pair. It is run
-#                   BESIDE the thing it tests, so its wiring is that thing's
-#                   wiring, not an independent obligation.
-#   bench_*.sh      benchmarks. Not verdicts.
-#   RESIDUE         9 named files that match no family, each with a one-line
-#                   classification below. Kept short on purpose: a long list
-#                   here is the census that goes stale.
-#
-# `tests/lib/` is out by directory rule - it holds sourced libraries. That rule
-# is not self-evidently safe (tests/ci_invocable_gate.sh's header records that
-# CI invokes `tests/lib/dev_ready_selftest.sh` bare, so the directory is not a
-# reliable "library" marker), so the maxdepth-1 blind spot is CHECKED rather
-# than assumed: a `*_gate.sh` anywhere under `tests/` below depth 1 is a
-# refusal, because the enumeration above would not see it.
-#
-# ---------------------------------------------------------------------------
-# DECISION 2 - WHAT COUNTS AS WIRED: the command word of a shell command inside
-# a `run:` value.
-#
-# THIS IS THE CRUX. The real miss was a gate name present in ci.yml and present
-# only in a comment, so any predicate built on "does the filename appear in the
-# workflow" reports that gate as wired and this whole gate is decorative. These
-# are therefore distinguished, and `--self-test` proves every one of them with
-# one-variable controls:
-#
-#   run: tests/x_gate.sh              WIRED
-#   run: bash tests/x_gate.sh         WIRED (an interpreter still runs it)
-#   run: tests/x_gate.sh --range ...  WIRED (arguments are not the question)
-#   # tests/x_gate.sh                 NOT wired (YAML comment - the real miss)
-#   run: |                            NOT wired (shell comment in a run block)
-#     # tests/x_gate.sh
-#   run: grep -c tests/x_gate.sh f    NOT wired (an ARGUMENT, not a command)
-#   name: tests/x_gate.sh             NOT wired (not a run: value at all)
-#   run: tests/x_gate.sh --self-test  NOT wired ON ITS OWN
-#
-# THAT LAST ONE WAS FOUND BY WRITING THIS GATE'S RED CONTROL, and it is the
-# rule that makes the predicate mean something. Every gate here with a
-# self-test is wired as two steps: the self-test proves the instrument
-# discriminates, the bare run rules on the tree. Deleting only the second leaves
-# a gate that is fully checked and checks NOTHING - this repo's founding bug in
-# a different hat - and the first draft of this gate called it wired.
-#
-# The extractor is YAML-block-scalar aware rather than a grep, because `run: |`
-# blocks are where most of this workflow's commands live and a line-oriented
-# grep cannot tell block content from the comment three lines above it.
-# Interpreter prefixes are skipped, so `bash tests/x_gate.sh` counts (which is
-# how tests/project_config_gate.sh is wired) - the question here is "does it
-# RUN", not "is it exec-bit clean", which is tests/ci_invocable_gate.sh's
-# question and the reason that gate deliberately requires the bare form.
-#
-# Every `.github/workflows/*.yml` is read, not ci.yml alone: a gate moved into
-# a second workflow is still wired, and there is no reason to make this gate go
-# red on a refactor it should not have an opinion about.
-#
-# ---------------------------------------------------------------------------
-# DECISION 3 - THE ALLOWLIST, and what a legitimate reason is.
-#
-# Each row carries a one-line REASON, the way tests/sync_claim_gate.sh's ledger
-# and tests/decision_four_gate.sh's baseline carry theirs. A row without one is
-# an exemption nobody remembers granting.
-#
-# NOTE WHAT THE ALLOWLIST IS NOT FOR IN THIS REPO. "It needs a live database"
-# is not a reason here: CI runs four live-Postgres jobs (billing-gate,
-# auth-gate, plugin-db-live-gate, worker-live-gate) and the `rust` job itself
-# runs tests/provision_test_backends.sh before its tests. Neither is "it is
-# slow" - that job already runs a full workspace test and a clippy audit under
-# `--all-features`, which is minutes of compiling either way. The bar is
-# that the gate CANNOT be a step: it needs infrastructure of its own that a
-# step cannot bring with it.
-#
-# ---------------------------------------------------------------------------
-# DECISION 4 - BOTH DIRECTIONS. Arm `allowlist_liveness` refuses a row naming a
-# gate that no longer exists, and arm `excluded_scripts` refuses a residue row
-# naming a file that no longer exists. Without the reverse arm each list rots
-# into an exemption list nobody remembers granting, and - the case that matters
-# more - a stale row is how the enumeration could stop matching while the
-# forward arm stayed green.
-#
-# WHAT THIS GATE DOES NOT DO, stated so nobody reads it as complete:
-#   - it does not check that the wired step RUNS the gate in a job that is
-#     reached. A gate wired inside a job with an `if:` that is never true, or
-#     behind `continue-on-error`, passes here.
-#   - it rules on ONE argument shape. `--self-test` alone is refused; any other
-#     argument list is accepted without being read, so a gate wired as
-#     `x_gate.sh --dry-run` would pass.
-#   - it does not rule on the e2e harnesses, which is the larger unwired
-#     population and a per-file judgement rather than a rule.
-#
-# Run the extractor's own positive/control set: this script --self-test.
-# ============================================================================
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -160,39 +16,16 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 # ---------------------------------------------------------------------------
 # THE ALLOWLIST. `<gate basename><TAB><reason>`.
 #
-# Assigned 2026-09-04 by running every unwired gate and reading what it needs.
-# Twelve gates were unwired when this file was written; eleven of them are now
-# steps in the `rust` job. This is the twelfth.
+# Each entry explains why a surviving shell gate is not invoked by CI.
 # ---------------------------------------------------------------------------
 ALLOWLIST='
-platform_migration_corpus_gate.sh	brings up its OWN postgres:17 container and needs a FRESH database per run; the rust job Postgres it would otherwise reach has the platform corpus already applied, and --static-only exits non-zero by design, so this is a job with a service of its own, not a step
-rls_binding_gate.sh	RED BY DESIGN, and the red is the deliverable: it names which row-level-security policies in db/migrations-ts/ bind a role and which bind none, as the premise for the sessions redesign. A step that must fail pins CI red and teaches everyone to ignore it. Wire it the day its verdict is all BOUND, which is the day docs/proposals/2026-09-05-auth-foundation-redesign.md step 5 lands - and note this reason is a different KIND from the row above, which is about infrastructure a step cannot bring
-organization_authority_gate.sh	SAME SHAPE AS THE CORPUS GATE ABOVE, and for the same reason rather than by analogy: it applies the committed migration corpus to an EMPTY database and then drives escalation and narrowing cases through it, so the rust job Postgres - which already carries that corpus - is the one database it cannot use. It brings up its own postgres:17 on a port range of its own. That makes it a job with a service, not a step, and until such a job exists it runs by hand
+rls_binding_gate.sh	Reports unbound row-level-security policies as input to the sessions redesign; enable it in CI when the authority model provides a passing invariant.
 '
 
-# ---------------------------------------------------------------------------
-# THE RESIDUE. Non-gate `tests/*.sh` that match no family rule, each with what
-# it is. `<basename><TAB><classification>`.
-#
-# NO LINE NUMBERS IN THESE ROWS, on purpose. Every one of them would point into
-# ci.yml, and adding thirteen steps to that file while writing this gate moved
-# four of the four I had first written down. A citation that rots on the commit
-# introducing it is worse than none; the JOB a step lives in is stable and is
-# what a reader needs anyway.
-#
-# THREE OF THESE WERE GATES IN SUBSTANCE, invisible to the population rule
-# because it reads names, and they are gone from this list as of 2026-09-04:
-# `source_citation_scan.sh`, `zship_artifact_contract.sh` and
-# `verdaccio_config_guard.sh` were renamed to `*_gate.sh` and are now ruled on
-# by this gate and by `gate_arm_census.sh` like every other. Two were already
-# wired; the third, verdaccio, was WIRED NOWHERE, and the rename is what made
-# that a failure here rather than a note in a comment nobody runs.
-# ---------------------------------------------------------------------------
 RESIDUE='
 config_check_e2e.sh	e2e harness whose name puts the suffix at the wrong end; wired in the rust job
 create_demo_invoices.sh	operator utility that seeds Stripe demo data; produces no verdict
 external_chain.sh	manual probe of an outbound request chain; produces no verdict
-gate_arm_census.sh	the arm-declaration meta-gate; wired in the rust job and rules on the same population this gate does
 golden_path.sh	the build-locally-then-deploy e2e harness; owns the golden-path job
 health_endpoints.sh	manual liveness probe against a running stack
 metering_rowlock_pgbench.sh	pgbench load generator; a measurement, not a verdict
@@ -242,22 +75,6 @@ run_commands() {
   ' "$@" | sed -E ':a; /\\$/{N; s/\\\n[[:space:]]*/ /; ba}'
 }
 
-# invoked_scripts: `<path><TAB><arguments>` for every repo-relative `.sh` that
-# is the COMMAND WORD of some command in the stream above. Reads stdin.
-#
-# Segments are split on the shell operators, then leading keywords, `VAR=value`
-# prefixes and interpreter words are stripped until the command word is bare.
-# A token that is not a path (no slash) or not a `.sh` is dropped, which is the
-# same shape tests/ci_invocable_gate.sh needed after its first draft reported
-# `--exclude=source_citation_gate.sh` as an invocation.
-#
-# THE ARGUMENTS ARE KEPT because `--self-test` is not wiring. Every gate here
-# with a self-test is wired as two steps - the self-test proves the instrument
-# discriminates, the bare run rules on the tree - and a gate reduced to the
-# first one alone is checked and the TREE IS NOT. That is this repo's founding
-# bug wearing a different hat, and it was found by writing the RED control for
-# this gate: deleting `run: tests/vendor_embedding_gate.sh` while leaving
-# `run: tests/vendor_embedding_gate.sh --self-test` left the gate GREEN.
 invoked_scripts() {
   awk '
     {
@@ -502,9 +319,6 @@ jobs:
 YML
   check "a --self-test step plus the real run IS wiring" 1
 
-  # POSITIVE: an argument that is not --self-test. `gate_arm_census.sh tests`
-  # and `commit_msg_gate.sh --range ...` are both wired this way, so the rule
-  # is "not only its self-test", never "no arguments".
   cat > "$tmp/wf.yml" <<'YML'
 jobs:
   rust:
@@ -573,58 +387,6 @@ gate_arms_init ci_wiring
 
 echo "ci wiring gate"
 
-# --- the maxdepth-1 blind spot, checked rather than assumed ----------------
-#
-# The enumeration below is `find -maxdepth 1 -name '*_gate.sh'`, and
-# tests/gate_arm_census.sh uses the same two keys. A gate one directory down is
-# invisible to both, which is what this check is for.
-#
-# IT USED TO ASK FOR `*_gate.sh` - THE VERY NAME IT EXISTS TO DISTRUST. A gate
-# one directory down under any other name was invisible to the enumeration for
-# being nested AND invisible to this check for being differently named. Two
-# blind spots with the same shape do not cross-check each other; they agree.
-#
-# So this asks TWO questions, blind differently. The first is the old name key,
-# kept because a nested file called `*_gate.sh` is a gate whoever wrote it.
-# The second is structural, and comes from gate_arms.sh's own contract rather
-# than from a filename: a gate is a script that CALLS `gate_arms_init`. That
-# key does not care what the file is called or whether it ends in `.sh`.
-#
-# tests/lib/gate_arms.sh is excluded BY PATH, not by pattern. It DEFINES that
-# function, and an exclusion written as a pattern would also hide a real caller
-# whose name happened to match it.
-#
-# node_modules is pruned: tests/e2e-browser/node_modules is vendored third-party
-# JavaScript, and nothing in it is one of our gates.
-#
-# THE ARM COUNTS THE FILES SCANNED, NOT THE GATES FOUND, and that is the only
-# honest count here: the finders return the empty set against this tree and are
-# meant to. An arm keyed on hits would have to declare a floor of zero, which
-# the contract refuses and rightly - "found nothing" and "looked at nothing"
-# would print identically. So the number is the population ruled on: 77 files at
-# mindepth 2 after the prune, measured 2026-09-04 over six subdirectories.
-#
-# FLOOR 60, AND IT WAS 25 UNTIL AN ADVERSARIAL RE-MEASUREMENT THE SAME DAY. The
-# comment here used to say 25 was "far over the handful a collapsed find
-# produces". That is true of a TOTAL collapse and false of the collapse that
-# actually happens, which is one step: re-measured with this arm's own predicate,
-# mindepth 3 walks 27 files and mindepth 4 walks 4. So `-mindepth 2` drifting to
-# `-mindepth 3` - one character - cleared the old floor by two while 50 of the 77
-# files, 65% of the population, silently dropped out. A floor is only worth its
-# margin against the SMALLEST plausible collapse, not against zero.
-#
-# 60 refuses the one-step collapse and still leaves room for ordinary editing:
-# six subdirectories would have to lose a quarter of their contents to reach it.
-# Do not lower it to accommodate a shrinking tests/ tree; re-measure and say why.
-#
-# That the finders can find anything AT ALL is proved by --self-test, which is
-# where the planted nested gates live; this arm only says they were pointed at a
-# real population. The self-test DOES catch the one-step collapse independently
-# (case B goes red with "found=0"), so this floor is the second of two keys, not
-# the only one - but an arm that needs its sibling to cover a collapse it counts
-# is not self-sufficient, which is why the floor moved rather than the comment.
-# Arm run_commands below is still the first thing to read on a multi-arm failure
-# - it is the one every OTHER arm's input derives from.
 N_NESTED_SCANNED="$(nested_scanned "$TESTS_DIR")"
 if ! gate_arm nested_scan "$N_NESTED_SCANNED" 60; then
   fail "the nested-gate scan walked $N_NESTED_SCANNED file(s) below tests/ depth
@@ -633,10 +395,10 @@ if ! gate_arm nested_scan "$N_NESTED_SCANNED" 60; then
 fi
 NESTED="$(nested_gates "$TESTS_DIR")"
 if [ -n "$NESTED" ]; then
-  fail "these gates live below tests/ depth 1, where neither this gate's
-       enumeration nor tests/gate_arm_census.sh's can see them:
+  fail "these gates live below tests/ depth 1, where this gate's
+       enumeration can see them:
 $(printf '%s\n' "$NESTED" | sed 's|^|         |')
-       Move them to tests/, or both meta-gates are blind to them."
+       Move them to tests/ so CI discovery can find them."
 elif [ "$N_NESTED_SCANNED" -ge 25 ]; then
   pass "no gate hides below tests/ depth 1 ($N_NESTED_SCANNED file(s) scanned, by name AND by arm declaration)"
 fi
@@ -669,14 +431,6 @@ fi
 
 INVOKED="$(printf '%s\n' "$CMDS" | invoked_scripts)"
 
-# --- Arm 2: every gate is wired, or allowlisted with a reason --------------
-#
-# FLOOR 24 against 38 gates today, and DELIBERATELY SLACK where
-# tests/gate_arm_census.sh pins the identical glob at its exact count. Two
-# exact pins on one population is two places to update for every added gate,
-# and the second one to be forgotten becomes the stale census both scripts
-# warn about. That gate owns the exact count; this floor guards only against
-# the glob itself collapsing.
 GATES=()
 while IFS= read -r g; do
   [ -n "$g" ] && GATES+=("$g")
@@ -723,7 +477,7 @@ else
            the rust job already runs the full workspace suite against a
            provisioned Postgres.
        Do not rename the gate to dodge the glob: that also hides it from
-       tests/gate_arm_census.sh."
+       CI discovery."
 fi
 
 # --- Arm 3: every allowlist row still names a gate -------------------------

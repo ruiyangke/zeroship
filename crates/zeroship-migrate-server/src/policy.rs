@@ -28,16 +28,21 @@ use std::collections::BTreeMap;
 
 use uuid::Uuid;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
-use zeroship_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy};
+use zeroship_id::AppId;
+use zeroship_migrate::{
+    effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy,
+};
 use zeroship_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
+#[cfg(test)]
+use zeroship_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_SCHEMA;
 use zeroship_migrate_ir::policy_registry::{
     builtin_registry, KEY_CODE_EXTENSION, KEY_SAFETY_DESTRUCTIVE_OPS, KEY_SAFETY_REQUIRE_RLS,
-    KEY_SCHEMA_CREATE_SCHEMA, KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
+    KEY_SCHEMA_CREATE_TABLE, KEY_SCHEMA_CROSS_SCHEMA, KEY_SCHEMA_RENAME,
 };
+
 use zeroship_migrate_policy::{
-    admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext,
-    LoadError, ObjectName, PolicyDoc, RootCharter,
+    admit, ComposeError, EffectivePolicy as PdpPolicy, KnobKey, KnobValue, LoadContext, LoadError,
+    ObjectName, PolicyDoc, RootCharter,
 };
 
 /// The seal binding: the scope matcher folds Postgres identifiers under this dialect
@@ -61,8 +66,7 @@ pub const CONFINED_CEILING_TOML: &str = concat!(
 );
 /// The monorepo-owned no-inject charter used only to guard DDL rendered by managed
 /// lowering. Its grants mirror [`CONFINED_CEILING_TOML`]; its inject block is omitted.
-const CONFINED_GUARD_CHARTER_TOML: &str =
-    include_str!("../policies/confined-guard.policy.toml");
+const CONFINED_GUARD_CHARTER_TOML: &str = include_str!("../policies/confined-guard.policy.toml");
 /// The monorepo-owned PLATFORM ceiling — the operator-internal (author-owned,
 /// no-inject) posture (the successor to `PolicyProfile::platform()`).
 pub const PLATFORM_CEILING_TOML: &str = include_str!("../policies/platform.policy.toml");
@@ -109,7 +113,10 @@ impl ManagedPolicyConfig {
     /// authors `[[require]] key = "safety.require_approval"` like any other knob; there is
     /// no managed-only overlay to strip. The engine's `deny_unknown_fields` loader
     /// validates the whole draft.
-    pub fn parse_draft(&self, draft: &CreatorPolicyDraft<'_>) -> Result<ParsedDraft, ManagedPolicyError> {
+    pub fn parse_draft(
+        &self,
+        draft: &CreatorPolicyDraft<'_>,
+    ) -> Result<ParsedDraft, ManagedPolicyError> {
         if draft.filename != MIGRATE_POLICY_FILENAME {
             return Err(ManagedPolicyError::InvalidDraftFilename {
                 filename: draft.filename.to_string(),
@@ -164,7 +171,10 @@ impl ManagedPolicyConfig {
         tier: Option<&str>,
         draft: Option<CreatorPolicyDraft<'_>>,
     ) -> Result<SealedManagedPolicy, ManagedPolicyError> {
-        let parsed_draft = draft.as_ref().map(|draft| self.parse_draft(draft)).transpose()?;
+        let parsed_draft = draft
+            .as_ref()
+            .map(|draft| self.parse_draft(draft))
+            .transpose()?;
         let effective = self.compose_effective_for_app(app_id, tier, parsed_draft.as_ref())?;
         self.seal_effective_for_app(effective)
     }
@@ -222,7 +232,12 @@ pub struct EffectivePolicy {
 impl EffectivePolicy {
     fn new(ceiling_id: String, ceiling_version: u64, policy: PdpPolicy) -> Self {
         let managed = ManagedPosture::from_policy(&policy);
-        Self { ceiling_id, ceiling_version, policy, managed }
+        Self {
+            ceiling_id,
+            ceiling_version,
+            policy,
+            managed,
+        }
     }
 
     /// The effective `safety.require_approval` obligation level for this app's schema —
@@ -234,7 +249,6 @@ impl EffectivePolicy {
     pub fn approval_level(&self, app_schema: &str) -> ApprovalLevel {
         require_approval_level(&self.policy, &schema_object(app_schema))
     }
-
 }
 
 /// The managed knobs read from the composed engine policy for approval decisions and
@@ -257,25 +271,26 @@ impl ManagedPosture {
     /// [`EffectivePolicy::approval_level`]) — it is not folded into this posture.
     fn from_policy(policy: &PdpPolicy) -> Self {
         let all = ObjectName::table(b"any".to_vec(), b"any".to_vec());
-        let destructive_ops = match policy
-            .grants(&key(KEY_SAFETY_DESTRUCTIVE_OPS), &all)
-        {
+        let destructive_ops = match policy.grants(&key(KEY_SAFETY_DESTRUCTIVE_OPS), &all) {
             Some(KnobValue::Str(v)) if v == "allow" => DestructiveOps::Allow,
             Some(KnobValue::Str(v)) if v == "warn" => DestructiveOps::Warn,
             // `forbid` (the tightest) or any unexpected shape → fail closed to Forbid.
             _ => DestructiveOps::Forbid,
         };
-        let require_rls = policy
-            .obligations(&all)
-            .into_iter()
-            .any(|(k, v)| k.as_str() == KEY_SAFETY_REQUIRE_RLS && matches!(v, KnobValue::Bool(true)));
+        let require_rls = policy.obligations(&all).into_iter().any(|(k, v)| {
+            k.as_str() == KEY_SAFETY_REQUIRE_RLS && matches!(v, KnobValue::Bool(true))
+        });
         // `code.extension` is a Global StrSet grant (the allowlist IS the capability);
         // query it at any in-scope object.
         let extensions = match policy.grants(&key(KEY_CODE_EXTENSION), &all) {
             Some(KnobValue::StrSet(names)) => names,
             _ => Vec::new(),
         };
-        Self { require_rls, destructive_ops, extensions }
+        Self {
+            require_rls,
+            destructive_ops,
+            extensions,
+        }
     }
 }
 
@@ -370,15 +385,24 @@ impl ManagedCeiling {
 
     /// The monorepo-owned confined default ceiling.
     pub fn confined(ceiling_version: u64) -> Result<Self, ManagedPolicyError> {
-        let mut ceiling =
-            Self::from_toml("confined-default", None, ceiling_version, CONFINED_CEILING_TOML)?;
+        let mut ceiling = Self::from_toml(
+            "confined-default",
+            None,
+            ceiling_version,
+            CONFINED_CEILING_TOML,
+        )?;
         ceiling.bind_app_schema = true;
         Ok(ceiling)
     }
 
     /// The monorepo-owned platform (author-owned) ceiling.
     pub fn platform(ceiling_version: u64) -> Result<Self, ManagedPolicyError> {
-        Self::from_toml("platform-default", None, ceiling_version, PLATFORM_CEILING_TOML)
+        Self::from_toml(
+            "platform-default",
+            None,
+            ceiling_version,
+            PLATFORM_CEILING_TOML,
+        )
     }
 
     #[must_use]
@@ -463,10 +487,7 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
                 }
             }
             KEY_SCHEMA_CROSS_SCHEMA => {
-                return Err(
-                    "confined charter must not carry schema.cross_schema before app binding"
-                        .to_string(),
-                );
+                return Err("confined charter must not grant foreign-schema access".to_string());
             }
             // Any OTHER schema-scoped grant is refused rather than passed through.
             // This arm used to be `_ => {}`, which let a grant this function does not
@@ -499,15 +520,6 @@ fn bind_confined_charter_to_schema(source: &str, schema: &str) -> Result<String,
         ));
     }
 
-    let mut cross_schema = toml::map::Map::new();
-    cross_schema.insert(
-        "key".to_string(),
-        toml::Value::String(KEY_SCHEMA_CROSS_SCHEMA.to_string()),
-    );
-    cross_schema.insert("value".to_string(), toml::Value::Boolean(true));
-    cross_schema.insert("scope".to_string(), schema_scope_value(schema));
-    grants.push(toml::Value::Table(cross_schema));
-
     toml::to_string(&doc).map_err(|error| format!("serialize app-bound charter: {error}"))
 }
 
@@ -531,11 +543,12 @@ pub struct ParsedDraft {
 /// re-hydration (`AppPolicyRecord::parsed_policy_draft`). The whole body is a PDP
 /// document — the engine `deny_unknown_fields` loader validates it directly.
 pub fn parse_draft_body(body: &str, filename: &str) -> Result<ParsedDraft, ManagedPolicyError> {
-    let doc = PolicyDoc::parse_toml(body, &builtin_registry(), LoadContext::NonRootLayer)
-        .map_err(|source| ManagedPolicyError::MalformedDraft {
+    let doc = PolicyDoc::parse_toml(body, &builtin_registry(), LoadContext::NonRootLayer).map_err(
+        |source| ManagedPolicyError::MalformedDraft {
             filename: filename.to_string(),
             message: format!("{source:?}"),
-        })?;
+        },
+    )?;
     Ok(ParsedDraft { doc })
 }
 
@@ -597,13 +610,11 @@ impl ManagedPolicyError {
         match self {
             // A bad draft filename, a malformed draft, or a draft that escalates
             // beyond the operator ceiling are all the creator's fault.
-            Self::InvalidDraftFilename { .. }
-            | Self::MalformedDraft { .. }
-            | Self::Compose(_) => true,
-            // A malformed OPERATOR ceiling is an operator/infra fault, not the creator's.
-            Self::SealKeyTooShort { .. } | Self::CeilingLoad(_) | Self::CeilingCompose(_) => {
-                false
+            Self::InvalidDraftFilename { .. } | Self::MalformedDraft { .. } | Self::Compose(_) => {
+                true
             }
+            // A malformed OPERATOR ceiling is an operator/infra fault, not the creator's.
+            Self::SealKeyTooShort { .. } | Self::CeilingLoad(_) | Self::CeilingCompose(_) => false,
         }
     }
 }
@@ -689,7 +700,8 @@ scope = {{ include = ["{schema}.secret"] }}
             })
             .expect("draft parses");
         assert!(
-            cfg.compose_effective_for_app(&app_id, Some("probe"), Some(&draft)).is_ok(),
+            cfg.compose_effective_for_app(&app_id, Some("probe"), Some(&draft))
+                .is_ok(),
             "a `value = false` rule in the SAME layer is expected to be inert; if this \
              now REFUSES, the engine gained within-layer masking and the warning in \
              this test (and any charter relying on it) needs rewriting"
@@ -729,8 +741,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             );
         }
 
-        ManagedPolicyConfig::new(vec![0; 32], catalog)
-            .expect("32-byte MAC key must be accepted");
+        ManagedPolicyConfig::new(vec![0; 32], catalog).expect("32-byte MAC key must be accepted");
     }
 
     /// RED AS OF THE TYPED APP ID, AND THE FIX IS NOT HERE. Do NOT repair the
@@ -755,18 +766,23 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
         // No `safety.require_approval` obligation on the default confined ceiling.
         assert_eq!(
-            effective.approval_level(&app_derivation::schema_name(&app_id)),
+            effective.approval_level(app_id.as_str()),
             ApprovalLevel::Never
         );
-        let app_schema = app_derivation::schema_name(&app_id);
-        // `from_policy`, not the removed `confined_with_effective(schema, policy)`:
-        // the schema is no longer passed alongside the policy because
-        // `schema_scope()` derives it from the policy itself
-        // (`owned_schemas_from_effective`). The assertion below is what proves the
-        // derivation still yields this app's schema.
+        let app_schema = app_id.as_str().to_owned();
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             effective.policy.clone(),
             zeroship_migrate_postgres::DIALECT,
+            &app_schema,
+        );
+        assert!(guard.permits_schema(&app_schema));
+        assert_ne!(
+            guard.effective().grants(
+                &key(KEY_SCHEMA_CROSS_SCHEMA),
+                &ObjectName::schema(app_schema.as_bytes().to_vec())
+            ),
+            Some(KnobValue::Bool(true)),
+            "the confined host must not synthesize a foreign-schema grant for its own target"
         );
         assert_eq!(
             guard.schema_scope(),
@@ -778,14 +794,11 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     /// App binding must refuse a schema-scoped grant it cannot confine.
     ///
     /// `bind_confined_charter_to_schema` rewrites `schema.create_table` and
-    /// `schema.rename` from `scope = "all"` to this app's schema, and appends a bound
-    /// `schema.cross_schema`. Every other key fell to `_ => {}` and passed through
-    /// untouched. For a non-schema key (`safety.*`, `runtime.*`) that is right. For a
-    /// schema-scoped one it is the exact opposite of the function's purpose: the grant
-    /// reaches the composed charter still saying `scope = "all"`.
+    /// `schema.rename` from `scope = "all"` to this app's schema. Global keys such
+    /// as `safety.*` and `runtime.*` can pass through unchanged. An unhandled
+    /// schema-scoped key must be refused so its grant cannot retain `scope = "all"`.
     ///
-    /// The registry defines three such keys today that this function does not handle,
-    /// so the case below uses a real one (`schema.create_schema`, PerSchema) rather
+    /// The case below uses a registered key (`schema.create_schema`, PerSchema) rather
     /// than an invented key - a made-up key would prove the arm fires without proving
     /// it fires on anything that can actually appear.
     #[test]
@@ -813,39 +826,8 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             .expect("the shipped guard charter must still bind");
     }
 
-    /// RED AS OF THE TYPED APP ID. The failure is real, it is not this test's,
-    /// and lowercasing the expectation would convert a loud total outage into a
-    /// silent one.
-    ///
-    /// # What was measured
-    ///
-    /// An app schema is now the printed app id, which is mixed-case base62. The
-    /// policy language folds an UNQUOTED identifier to lowercase
-    /// (`zeroship_migrate_policy::scope::pattern::normalize_object_name`, "an
-    /// unquoted segment lowercases, a quoted one is verbatim"), while the object
-    /// the grant is looked up at is built from RAW bytes
-    /// (`zeroship_migrate_core::model::table_shape::object_for_create`). Driving
-    /// one charter binding at both spellings of the same id:
-    ///
-    /// - `app_034LP3yi4rdoa3amFkeBYL` - `schema.create_table` grants `false`
-    /// - `app_034lp3yi4rdoa3amfkebyl` - `schema.create_table` grants `true`
-    ///
-    /// So under a mixed-case tenant id EVERY creator `createTable` is denied.
-    /// The `injects_for` assertions below stay green throughout, because the
-    /// mandatory system-shape inject is authored at `scope = all`; the scope
-    /// equality at the end of this function is the only thing here that sees it.
-    ///
-    /// # Why the fix is not in this crate
-    ///
-    /// Quoting the schema in `schema_scope_value` restores the grant - measured
-    /// - but it then refuses every creator draft, because a draft authors its
-    /// scope unquoted and an unquoted pattern is not covered by a verbatim one.
-    /// Measured across the four combinations of quoted/unquoted ceiling and
-    /// draft: only matching spellings admit. Making creators quote is a change
-    /// to the creator-facing `migrate-policy.toml` contract, and the two
-    /// alternatives - a lowercase-only id body in `zeroship_core::typed_id`, or
-    /// a non-folding scope in `zeroship-migrate-policy` - are both outside this
-    /// crate. Whichever is chosen, this assertion is the one that says it worked.
+    /// Lowercase typed app ids keep an unquoted policy scope aligned with the
+    /// physical schema name after policy normalization.
     #[test]
     fn confined_guard_preserves_schema_bound_grants_without_inject() {
         let app_schema = app_derivation::schema_name(&AppId::mint());
@@ -857,8 +839,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             .expect("fixed confined ceiling composes");
 
         let owned_schema = ObjectName::schema(app_schema.as_bytes().to_vec());
-        let owned_table =
-            ObjectName::table(app_schema.as_bytes().to_vec(), b"widgets".to_vec());
+        let owned_table = ObjectName::table(app_schema.as_bytes().to_vec(), b"widgets".to_vec());
         let foreign_table = ObjectName::table(b"other_app".to_vec(), b"widgets".to_vec());
         let objects = [&owned_schema, &owned_table, &foreign_table];
         // `runtime.lock_timeout_ms` / `runtime.statement_timeout_ms` used to be in
@@ -895,6 +876,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         let guard = zeroship_migrate::guard::GuardConfig::from_policy(
             guard_policy,
             zeroship_migrate_postgres::DIALECT,
+            &app_schema,
         );
         assert_eq!(
             guard.schema_scope(),
@@ -917,7 +899,10 @@ value = "always"
 scope = "all"
 "#;
         let draft = cfg
-            .parse_draft(&CreatorPolicyDraft { filename: MIGRATE_POLICY_FILENAME, body: draft_toml })
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: draft_toml,
+            })
             .expect("approval obligation draft parses");
         let effective = cfg
             .compose_effective_for_app(&app_id, None, Some(&draft))
@@ -951,7 +936,10 @@ value = "forbid"
 scope = "all"
 "#;
         let draft = cfg
-            .parse_draft(&CreatorPolicyDraft { filename: MIGRATE_POLICY_FILENAME, body: draft_toml })
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: draft_toml,
+            })
             .expect("tightening draft parses");
 
         let effective = cfg
@@ -975,7 +963,10 @@ value = true
 scope = "all"
 "#;
         let draft = cfg
-            .parse_draft(&CreatorPolicyDraft { filename: MIGRATE_POLICY_FILENAME, body: draft_toml })
+            .parse_draft(&CreatorPolicyDraft {
+                filename: MIGRATE_POLICY_FILENAME,
+                body: draft_toml,
+            })
             .expect("escalating draft still parses (rejected at compose)");
 
         let err = cfg
@@ -1158,9 +1149,11 @@ scope = {{ include = ["{app_schema}*"] }}
         let all = ObjectName::table(b"any".to_vec(), b"any".to_vec());
         // access.role is granted (privileged posture) — proves the platform grants loaded.
         assert!(matches!(
-            policy.grants(&key(zeroship_migrate_ir::policy_registry::KEY_ACCESS_ROLE), &all),
+            policy.grants(
+                &key(zeroship_migrate_ir::policy_registry::KEY_ACCESS_ROLE),
+                &all
+            ),
             Some(KnobValue::Bool(true))
         ));
     }
 }
-

@@ -31,18 +31,16 @@
 //! fails these tests on the INSERT in [`Fixture::new`] - loudly, and before any
 //! assertion.
 
-mod common;
-
-use zeroship_core::user_id::UserId;
 use common::live_dsn;
 use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
-use uuid::Uuid;
 use zeroship_authz::{
     authority, enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext,
     AuthzDecision, Resource,
 };
-use zeroship_core::app_id::AppId;
+use zeroship_id::{AppId, UserId};
+
+mod common;
 
 /// The whole chain, in one request: `Resource::App` carries the typed id, the
 /// resolve binds its printed form, joins `apps -> projects ->
@@ -108,32 +106,6 @@ fn an_unknown_app_denies_without_erroring() {
     });
 }
 
-// WHAT USED TO BE HERE: `a_malformed_app_id_is_refused_rather_than_denied`.
-//
-// The bug it pinned is worth keeping written down. The resolve parsed a uuid
-// and, on failure, fell through to the UNRANKED read, so the canonical
-// `app_<base62>` rendering resolved to rank zero and 403'd as "you hold no seat
-// on this app". Two very different things - an id we cannot read, and an id
-// naming an app the caller cannot reach - produced one indistinguishable
-// answer, in the response and in `zeroship.authz_decisions` alike.
-//
-// It is deleted rather than ported because its INPUT cannot be built.
-// `Resource::App` carries an `AppId`, so `"not-a-uuid"` is refused by
-// `AppId::parse` at the crate boundary, before a database is involved. The
-// refusal itself is bound where it now happens and where no database is needed
-// to reach it: `resource::tests::a_non_canonical_app_id_does_not_deserialize`
-// for the wire, and `zeroship_core::app_id` for the parse.
-//
-// It is NOT re-asserted here even though the assertion would be one line. This
-// target calls `process::exit` when no database is configured, so a test that
-// needs no database would race that exit and report whichever won - a green
-// that means nothing, in the one file whose whole subject is answers that look
-// like other answers.
-//
-// The half this file still owes the boundary is the other one - a well-formed
-// id naming no app must deny QUIETLY - and
-// `an_unknown_app_denies_without_erroring` above is that case.
-
 /// A principal with no `zeroship.users` row is a VALIDATION failure, never rank
 /// zero. Degrading it to a Deny would file an unknown principal as "an ordinary
 /// member with no seat" in the audit trail.
@@ -150,7 +122,8 @@ fn an_unknown_principal_is_a_validation_error_not_rank_zero() {
                 id: "org_0000000000000000000000001".to_owned(),
             },
         ] {
-            let err = authority::resolve(&pg, &UserId::mint(), &resource)
+            let unknown = UserId::mint();
+            let err = authority::resolve(&pg, &unknown, &resource)
                 .await
                 .expect_err("an unknown principal must not resolve");
             assert!(
@@ -305,7 +278,7 @@ impl Fixture {
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
             &[
                 &app_id.as_str(),
-                &format!("authz-{label}-{}", Uuid::new_v4().simple()),
+                &format!("authz-{label}-{}", app_id.as_str()),
                 &project_id,
             ],
         )
@@ -387,7 +360,10 @@ impl Fixture {
             )
             .await;
         let _ = pg
-            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&self.user_id.as_str()])
+            .execute(
+                "DELETE FROM zeroship.users WHERE id = $1",
+                &[&self.user_id.as_str()],
+            )
             .await;
     }
 }
@@ -398,5 +374,5 @@ impl Fixture {
 /// satisfying the schema's shape CHECK the moment either moves - and it fails at
 /// insert time, not at compile time.
 fn typed_id(prefix: &str) -> String {
-    zeroship_core::typed_id::generate(prefix)
+    zeroship_id::typed_id::generate(prefix)
 }

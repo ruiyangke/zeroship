@@ -1,7 +1,8 @@
 //! End-to-end Google federation flow against the in-process `crates/auth`
 //! server + an in-process mock Google provider.
 //!
-//! Skips if no test database is configured. The mock provider (see
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped. The mock provider (see
 //! `tests/common/mock_provider.rs`) is in-process so no real Google credentials
 //! are required in CI.
 //!
@@ -39,11 +40,8 @@ use common::{
 
 #[ntex::test]
 async fn google_federation_creates_new_user() {
-    // 0. Env-skip check.
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[e2e_google] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    // 0. Resolve the database, or refuse the run.
+    let db_url = crate::common::test_database_url();
 
     // 1. Boot the mock Google provider on a random port. The mock will
     //    return this canned identity through both `/token` (as ID-token
@@ -87,7 +85,7 @@ async fn google_federation_creates_new_user() {
     //    callback we drive. Since we DON'T follow the redirect to a
     //    real browser, we don't need that URL to actually resolve.
     //    We use the auth_base URL after-the-fact.
-        // Placeholder redirect — the actual value only matters for the
+    // Placeholder redirect — the actual value only matters for the
     // upstream `/authorize` redirect step, which we DON'T follow to a
     // real Google. The mock will dutifully echo whatever we sent in
     // the `redirect_uri` query param.
@@ -247,8 +245,8 @@ async fn google_federation_creates_new_user() {
         1,
         "exactly one zeroship.users row for the mock email"
     );
-    let user_id = zeroship_core::user_id::UserId::parse(user_rows[0].get::<_, &str>("id"))
-        .expect("the created user row carries a typed user id");
+    let user_id = zeroship_core::UserId::parse(&user_rows[0].get::<_, String>("id"))
+        .expect("canonical user id");
     let user_name: String = user_rows[0].get("name");
     let email_verified_at: Option<chrono::DateTime<chrono::Utc>> =
         user_rows[0].try_get("email_verified_at").ok();
@@ -270,10 +268,9 @@ async fn google_federation_creates_new_user() {
         1,
         "exactly one zeroship.federated_identities row for (google, sub)"
     );
-    let identity_user_id = zeroship_core::user_id::UserId::parse(
-        identity_rows[0].get::<_, &str>("user_id"),
-    )
-    .expect("the identity row carries a typed user id");
+    let identity_user_id =
+        zeroship_core::UserId::parse(&identity_rows[0].get::<_, String>("user_id"))
+            .expect("canonical identity user id");
     assert_eq!(identity_user_id, user_id, "identity points at the new user");
 
     // 9. Cleanup.
@@ -289,9 +286,12 @@ async fn google_federation_creates_new_user() {
     )
     .await
     .ok();
-    pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
-        .await
-        .ok();
+    pg.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user_id.as_str()],
+    )
+    .await
+    .ok();
     compio::time::sleep(Duration::from_millis(50)).await;
     drop(srv);
     drop(mock);
@@ -299,10 +299,7 @@ async fn google_federation_creates_new_user() {
 
 #[ntex::test]
 async fn google_federation_rejects_untrusted_domain_without_hd() {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[e2e_google untrusted] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db_url = crate::common::test_database_url();
 
     let test_email = format!(
         "e2e-google-untrusted-{}@example.test",
@@ -331,7 +328,7 @@ async fn google_federation_rejects_untrusted_domain_without_hd() {
     .detach();
     let pg = Arc::new(pg_client);
 
-        let mut cfg_inner = test_auth_config_with(
+    let mut cfg_inner = test_auth_config_with(
         &db_url,
         &[
             "--google-client-id",

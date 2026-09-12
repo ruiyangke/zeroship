@@ -56,8 +56,8 @@ export interface FieldDef {
   required?: boolean;
   /** Column carries a UNIQUE constraint. */
   unique?: boolean;
-  /** Present (the inner primitive `FieldDef`) when this is an encrypted wrapper. */
-  encrypted?: FieldDef;
+  /** Whether the logical field uses encrypted binary storage. */
+  encrypted?: boolean;
   /** The referenced table name for a `ref` (foreign-key) field. */
   refTarget?: string;
   /** The declared dimensionality for a `vector` (pgvector) field. */
@@ -108,7 +108,7 @@ export class TypeBuilder<
 /** Options for {@link t.encrypted}. */
 export interface EncryptedOptions {
   /** The inner primitive builder the encryption wraps. Defaults to `t.string()`. */
-  wraps?: TypeBuilder;
+  of?: TypeBuilder;
 }
 
 /** The `t.*` factory lexicon — the storage-backed subset the migrate bridge lifts,
@@ -133,8 +133,8 @@ export const t = {
   /** An encrypted wrapper over an inner primitive (default `string`). The bridge
    *  keeps the wrapped primitive in `type` and carries the encryption facet. */
   encrypted: (opts: EncryptedOptions = {}) => {
-    const inner = (opts.wraps ?? t.string()).toFieldDef();
-    return new TypeBuilder({ type: inner.type, encrypted: inner });
+    const inner = (opts.of ?? t.string()).toFieldDef();
+    return new TypeBuilder({ type: inner.type, encrypted: true });
   },
   // Non-storage / type-only shapes — the migrate bridge rejects these with a hard
   // `UnsupportedColTypeError`; provided so tests can construct the boundary cases.

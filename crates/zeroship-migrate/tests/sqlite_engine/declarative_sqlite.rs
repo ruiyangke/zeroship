@@ -94,7 +94,7 @@ fn goodies_desc() -> CollectionDescriptor {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
         ],
@@ -269,6 +269,7 @@ async fn descriptor_to_sqlite_apply_roundtrips_foreign_key() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -345,6 +346,7 @@ async fn sqlite_deferred_fk_is_typed_error() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("ghost_users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],
@@ -384,6 +386,7 @@ fn confined_sqlite_guard_rejects_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
         zeroship_migrate_sqlite::DIALECT,
+        PROJECT,
     ));
     // A perfectly benign-looking raw string is still refused — the SQLite Confined
     // path is descriptor-diff-only (no untrusted raw SQL).
@@ -407,6 +410,7 @@ fn confined_pg_guard_still_checks_raw_sql() {
     let guard = SqlGuard::new(GuardConfig::from_policy(
         support::no_inject(PROJECT),
         zeroship_migrate_postgres::DIALECT,
+        PROJECT,
     ));
     let report = guard
         .check(r#"CREATE TABLE "prj_demo"."users" (id text primary key)"#)
@@ -422,8 +426,12 @@ fn platform_fails_closed_to_confined_on_sqlite() {
     // SQLite. (The Platform constructor is operator-gated; `for_dialect` is the
     // dialect-selection seam any caller uses, and Confined→Sqlite is the same
     // fail-closed mapping Platform→Sqlite takes.)
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_postgres::DIALECT)
-        .for_dialect(zeroship_migrate_sqlite::DIALECT);
+    let cfg = GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        zeroship_migrate_postgres::DIALECT,
+        PROJECT,
+    )
+    .for_dialect(zeroship_migrate_sqlite::DIALECT);
     let guard = SqlGuard::new(cfg);
     let err = guard
         .check("SELECT 1")
@@ -439,8 +447,12 @@ fn platform_fails_closed_to_confined_on_sqlite() {
 
     // And `for_dialect(Postgres)` is identity — the PG guard still checks raw SQL.
     let pg = SqlGuard::new(
-        GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_postgres::DIALECT)
-            .for_dialect(zeroship_migrate_postgres::DIALECT),
+        GuardConfig::from_policy(
+            support::no_inject(PROJECT),
+            zeroship_migrate_postgres::DIALECT,
+            PROJECT,
+        )
+        .for_dialect(zeroship_migrate_postgres::DIALECT),
     );
     assert!(pg
         .check(r#"CREATE TABLE "prj_demo"."t" (id text primary key)"#)
@@ -758,7 +770,7 @@ fn spelling_gap_desc() -> CollectionDescriptor {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             // `double precision` (desired) vs `real` (live SQLite).
@@ -1002,7 +1014,11 @@ async fn plan_declarative_carries_sqlite_rebuild_into_the_plan() {
 
     // plan_declarative now CARRIES the rebuild (no error) — the fail-close is gone.
     let engine = MigrationEngine::new(zeroship_migrate::shipping_vendors());
-    let cfg = GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT);
+    let cfg = GuardConfig::from_policy(
+        support::no_inject(PROJECT),
+        zeroship_migrate_sqlite::DIALECT,
+        PROJECT,
+    );
     let plan = engine
         .plan_declarative(
             &desired2,
@@ -1102,13 +1118,14 @@ async fn golden_sqlite_create_table_and_index() {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
             FieldDescriptor {
                 name: "owner".into(),
                 ty: "ref".into(),
                 references: Some("users".into()),
+                reference_column: Some("id".into()),
                 ..Default::default()
             },
         ],
@@ -1147,7 +1164,7 @@ async fn golden_sqlite_create_table_and_index() {
     let accounts_mig = golden_find(&migs, "create_table_accounts");
     assert_eq!(
         accounts_mig.up,
-        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:randomised:k1:string */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
+        "CREATE TABLE \"accounts\" (\"__zs_raw__secret\" BLOB /* zero-migrate:enc:bytes */, \"__zs_raw__ssn\" TEXT, \"created_at\" TEXT NOT NULL, \"created_by\" TEXT, \"deleted_at\" TEXT, \"id\" TEXT PRIMARY KEY NOT NULL, \"owner\" TEXT COLLATE BINARY, \"secret\" TEXT /* zero-migrate:mask:kind=full,classification=pii */, \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=pii */, \"title\" TEXT NOT NULL, \"updated_at\" TEXT NOT NULL, \"updated_by\" TEXT, \"version\" INTEGER NOT NULL, CONSTRAINT \"accounts_owner_fkey\" FOREIGN KEY (owner) REFERENCES users(id));\nCREATE INDEX IF NOT EXISTS \"accounts_created_by_idx\" ON \"accounts\" (\"created_by\");\nCREATE INDEX IF NOT EXISTS \"accounts_deleted_at_idx\" ON \"accounts\" (\"deleted_at\");\nCREATE INDEX IF NOT EXISTS \"accounts_updated_at_idx\" ON \"accounts\" (\"updated_at\")",
     );
     assert_eq!(
         accounts_mig.down.as_deref(),
@@ -1195,7 +1212,7 @@ async fn golden_sqlite_add_column() {
     v2.fields.push(FieldDescriptor {
         name: "secret".into(),
         ty: "bytes".into(),
-        encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+        encrypted: Some(true),
         ..Default::default()
     });
     let (live, ownership) = golden_live(std::slice::from_ref(&v1));
@@ -1227,7 +1244,7 @@ async fn golden_sqlite_add_column() {
     assert_eq!(
         secret_raw.up,
         format!(
-            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:randomised:k1:string */"#,
+            r#"ALTER TABLE "accounts" ADD COLUMN "{}" BLOB /* zero-migrate:enc:bytes */"#,
             zeroship_migrate::schema::query::raw_column_name("secret")
         ),
     );
@@ -1462,6 +1479,7 @@ async fn second_deploy_string_to_ref_within_text_affinity_column_is_differ_noop_
             name: "owner".into(),
             ty: "ref".into(),
             references: Some("users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],

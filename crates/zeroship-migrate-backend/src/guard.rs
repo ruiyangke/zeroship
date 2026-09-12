@@ -106,6 +106,55 @@ pub mod data_security_rule {
     pub const REQUIRE_RLS: &str = "DATA_SECURITY_REQUIRE_RLS";
 }
 
+/// Stable NAMESPACE-authority policy rule ids (II.2.5 / II.2.6). These are the
+/// conservative-deny rules the policy redesign introduces on top of the deny-list:
+/// raw-SQL create/DDL classification, per-op creation-gating, and injected-shape
+/// immutability. Each fails closed with the design's named error code.
+pub mod namespace_rule {
+    /// II.2.5 - a raw create (`CREATE TABLE` / CTAS / `SELECT INTO` / `LIKE` /
+    /// `PARTITION OF` / `CREATE TABLE AS EXECUTE` / `INHERITS`) targets an object an
+    /// `inject` rule covers and its own text does not carry the injected shape.
+    /// Injection cannot rewrite raw text, so a create that does not already declare
+    /// every injected column and exactly the pinned primary key would land a table
+    /// the inject rule was supposed to shape.
+    pub const RAW_CREATE_IN_INJECT_SCOPE: &str = "RawCreateInInjectScope";
+    /// II.2.6a - a create (`CREATE TABLE`, structured or classified-raw) is not
+    /// covered by a `schema.create_table` grant (default-deny namespace anchor).
+    pub const CREATE_TABLE_NOT_GRANTED: &str = "CreateTableNotGranted";
+    /// II.2.6a - a `CREATE SCHEMA` (structured or classified-raw) is not covered by
+    /// a `schema.create_schema` grant.
+    pub const CREATE_SCHEMA_NOT_GRANTED: &str = "CreateSchemaNotGranted";
+    /// II.2.5 - a raw rename / `SET SCHEMA` moves a table INTO an inject scope; the
+    /// engine cannot re-inject over raw text, so the move is denied.
+    pub const RAW_RENAME_INTO_INJECT_SCOPE: &str = "RawRenameIntoInjectScope";
+    /// II.2.6a - a rename/move into a scope is not covered by a `schema.rename`
+    /// grant at the target.
+    pub const RENAME_INTO_NOT_GRANTED: &str = "RenameIntoNotGranted";
+    /// II.2.5 - an unqualified object reference under a non-Top `sql.raw` grant is
+    /// unattributable (no live search_path to resolve it) -> Top-only -> deny.
+    pub const UNQUALIFIED_NAME_UNDER_SCOPED_RAW_SQL: &str = "UnqualifiedNameUnderScopedRawSql";
+    /// II.2.5 - `SET search_path` (or equivalent) under a non-Top `sql.raw` grant
+    /// mutates the very name-resolution context attribution depends on -> refused.
+    pub const SEARCH_PATH_UNDER_SCOPED_RAW_SQL: &str = "SearchPathUnderScopedRawSql";
+    /// II.2.5 - an opaque-body construct (`CREATE FUNCTION`/`PROCEDURE`/`TRIGGER`/
+    /// `DO`) under a non-Top `sql.raw` grant defeats statement-level attribution.
+    pub const OPAQUE_BODY_UNDER_SCOPED_RAW_SQL: &str = "OpaqueBodyUnderScopedRawSql";
+    /// II.2.5 - a raw statement the parser cannot classify into exactly one shape,
+    /// or whose target is dynamic/unqualified, is unattributable under a non-Top grant.
+    pub const UNATTRIBUTABLE_RAW_UNDER_SCOPED_RAW_SQL: &str = "UnattributableRawUnderScopedRawSql";
+    /// II.2.6b - an `ALTER`/`DROP COLUMN`/`RENAME` touching a column the covering
+    /// inject rule contributes, without an explicit `schema.alter_injected` grant.
+    pub const INJECTED_SHAPE_IMMUTABLE: &str = "InjectedShapeImmutable";
+    /// II.2.6b - an index-mutating op on an injected index.
+    pub const INJECTED_INDEX_IMMUTABLE: &str = "InjectedIndexImmutable";
+    /// II.2.6b - a PK-replacing/dropping op on a table whose PK a covering inject
+    /// rule pins.
+    pub const INJECTED_PRIMARY_KEY_IMMUTABLE: &str = "InjectedPrimaryKeyImmutable";
+    /// II.2.6b (H3) - a rename-into where a name-matching element diverges
+    /// structurally from the injected shape (type/nullability/default/key/PK-columns).
+    pub const INJECTED_SHAPE_CONFORMANCE_MISMATCH: &str = "InjectedShapeConformanceMismatch";
+}
+
 /// Per-guard configuration.
 ///
 /// All fields are private. A caller must supply an explicitly composed
@@ -126,9 +175,11 @@ pub struct GuardConfig {
     /// - every other id - a vendor-owned guard path. An untrusted raw SQL string
     ///   presented to PostgreSQL's `SqlGuard::check` is refused.
     dialect: DialectId,
+    /// The target schema selected by the trusted host, independent of policy grants.
+    project_schema: String,
     /// PRIVATE. The unforgeable [`EffectivePolicy`] - the SINGLE source the guard's
     /// every composable decision queries. The capability gate asks `grants(key,
-    /// object)` for the statement's builtin knob key; cross-schema confinement asks
+    /// object)` for the statement's builtin knob key; references outside the target ask
     /// `grants(schema.cross_schema, schema)`; the data-security obligations read
     /// `obligations`/`grants` on the safety.* knobs. There is no separate posture/scope
     /// state for the composable knobs - the policy IS the posture.
@@ -136,16 +187,30 @@ pub struct GuardConfig {
 }
 
 impl GuardConfig {
-    /// Construct a guard directly from one composed [`EffectivePolicy`] + dialect. The
+    /// Construct a guard from the host-selected target, composed policy, and dialect. The
     /// full belt runs for every config: the effective policy is the SINGLE source for
     /// injection and every composable guard decision, and there is no separate posture
     /// that turns the belt off.
     #[must_use]
-    pub fn from_policy(effective: EffectivePolicy, dialect: DialectId) -> Self {
-        Self { dialect, effective }
+    pub fn from_policy(
+        effective: EffectivePolicy,
+        dialect: DialectId,
+        project_schema: impl Into<String>,
+    ) -> Self {
+        Self {
+            dialect,
+            effective,
+            project_schema: project_schema.into(),
+        }
     }
 
-    /// Replace the composed policy while preserving this config's dialect.
+    /// The host-selected schema unqualified migration objects resolve against.
+    #[must_use]
+    pub fn project_schema(&self) -> &str {
+        &self.project_schema
+    }
+
+    /// Replace the composed policy while preserving the host-selected target and dialect.
     #[must_use]
     pub fn with_effective_policy(mut self, effective: EffectivePolicy) -> Self {
         self.effective = effective;
@@ -159,7 +224,7 @@ impl GuardConfig {
     /// policy the caller already holds - it grants nothing that
     /// [`GuardConfig::with_effective_policy`] does not already allow, and it is what
     /// keeps the `compile_fail` struct-literal boundary below intact: an external
-    /// crate still cannot NAME either field.
+    /// crate still cannot name its private fields.
     #[must_use]
     pub const fn effective(&self) -> &EffectivePolicy {
         &self.effective
@@ -185,32 +250,33 @@ impl GuardConfig {
         &self.dialect
     }
 
-    /// The schema-confinement scope this guard config enforces, for the
-    /// validate-time cross-schema gate. Derived from the effective policy's
-    /// `schema.cross_schema` grant:
-    /// - a whole-universe grant => `Unconfined` (the unconfined operator charter);
-    /// - a finite set of owned schemas => `Single(s)` for one, `Allowlist([...])` for
-    ///   several (Confined / Platform);
-    /// - no owned schema (empty) => `Single("")` (the degenerate default).
-    ///
-    /// This is the SINGLE source of truth that maps the policy to the validator's
-    /// confinement scope, so the parse-guard cross-schema denial (line 1) and the
-    /// friendlier validate-time refusal agree on the permitted set.
+    /// The target schema together with foreign schemas admitted by policy.
+    /// A cross-schema grant never selects or replaces the target schema.
     #[must_use]
     pub fn schema_scope(&self) -> Option<SchemaScope> {
         let key = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok()?;
         if matches!(self.effective.grant_region(&key), GrantRegion::Top) {
             return Some(SchemaScope::Unconfined);
         }
-        let owned = owned_schemas_from_effective(&self.effective);
-        // The operator (Platform) posture is a schema ALLOWLIST even for a single
-        // owned schema - it grants the privileged vendor set (`access.role`); a Confined
-        // posture (no privileged caps) with one owned schema is a `Single` pin.
-        let is_operator_posture = self.grants_global_bool(policy_registry::KEY_ACCESS_ROLE);
-        Some(match owned.as_slice() {
-            [one] if !is_operator_posture => SchemaScope::Single(one.clone()),
-            [] if !is_operator_posture => SchemaScope::Single(String::new()),
-            _ => SchemaScope::Allowlist(owned),
+        let literal_schemas = self.effective.grant_literal_schema_includes(&key);
+        if matches!(self.effective.grant_region(&key), GrantRegion::Scoped)
+            && literal_schemas.is_none()
+        {
+            return Some(SchemaScope::Policy {
+                project_schema: self.project_schema.clone(),
+                effective: Box::new(self.effective.clone()),
+            });
+        }
+        let mut schemas = literal_schemas.unwrap_or_default();
+        schemas.retain(|schema| self.permits_schema(schema));
+        if !self.project_schema.is_empty() {
+            schemas.push(self.project_schema.clone());
+        }
+        schemas.sort();
+        schemas.dedup();
+        Some(match schemas.as_slice() {
+            [one] => SchemaScope::Single(one.clone()),
+            _ => SchemaScope::Allowlist(schemas),
         })
     }
 
@@ -223,9 +289,9 @@ impl GuardConfig {
 
     // --- PDP decision-query helpers ------------------------------------------
     // The guard's capability + data-security gate asks these instead of reading a
-    // raw `VendorCapabilities` bit / `require_rls` / `destructive_ops` field. All
-    // scope resolution lives inside the `EffectivePolicy`; the guard passes a
-    // concrete object and reads back a value.
+    // raw `VendorCapabilities` bit / `require_rls` / `destructive_ops` field.
+    // Composable scope decisions live inside the `EffectivePolicy`; the guard passes
+    // a concrete object and reads back a value. The host selects the target schema.
 
     /// Does the effective policy GRANT the whole-DB (Global) capability `key` at
     /// `object`? A Global Bool grant resolves the same at every object; we pass a
@@ -255,7 +321,7 @@ impl GuardConfig {
     /// targeting `object`?
     ///
     /// `None` is a statement whose target the guard cannot name: an unqualified
-    /// relation under a charter with no unique owned schema, a `CREATE SCHEMA
+    /// relation without a host-selected target, a `CREATE SCHEMA
     /// AUTHORIZATION` form carrying no schema name. Such a target is not provably
     /// inside any narrower scope, so only a whole-universe grant reaches it.
     pub fn grants_object_bool(&self, key: &str, object: Option<&ObjectName>) -> bool {
@@ -402,17 +468,10 @@ impl GuardConfig {
     // --- namespace-authority decision queries: pinned schema, creation grants,
     // covering inject shapes, and cross-schema admission ----------------------
 
-    /// The project schema an UNQUALIFIED relation resolves to under this config's
-    /// cross-schema pin - the sole schema owned by the effective policy's
-    /// `schema.cross_schema` grant. `None` when there is no unique owned schema (empty
-    /// confined default, multi-schema platform, or a whole-universe grant) - an
-    /// unqualified name
-    /// is then not uniquely attributable by the guard.
+    /// The host-selected schema for an unqualified relation. A malformed empty
+    /// target cannot attribute a relation and fails closed.
     pub fn pinned_schema(&self) -> Option<String> {
-        match owned_schemas_from_effective(&self.effective).as_slice() {
-            [one] if !one.is_empty() => Some(one.clone()),
-            _ => None,
-        }
+        (!self.project_schema.is_empty()).then(|| self.project_schema.clone())
     }
 
     /// True iff the effective policy grants Bool `key` (default-deny) at the concrete
@@ -466,14 +525,16 @@ impl GuardConfig {
         self.effective.is_injected_shape(object, element)
     }
 
-    /// Cross-schema confinement, decided directly on the PDP: is a reference to
-    /// `schema` admitted? True iff the effective policy grants `schema.cross_schema`
-    /// at the (PG-normalized) schema object - the project schema(s) a confined/
-    /// platform posture owns are granted; every other schema is a `CrossSchema`
-    /// violation (default-deny). An un-normalizable schema name (empty / malformed)
-    /// is NOT admitted (fail-closed). This replaces the derived-`SchemaScope`
-    /// `permits(schema)` read.
-    pub fn grants_cross_schema(&self, schema: &str) -> bool {
+    /// Whether a schema reference stays within the host-selected target or is
+    /// explicitly authorized by a foreign-schema grant. This does not grant any
+    /// operation capability such as table creation or rename.
+    pub fn permits_schema(&self, schema: &str) -> bool {
+        if schema.is_empty() || schema.contains('\0') {
+            return false;
+        }
+        if schema == self.project_schema {
+            return true;
+        }
         let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
             return false;
         };
@@ -500,7 +561,7 @@ impl GuardConfig {
 /// the doctests FAIL, then put the visibility back.
 ///
 /// (1) An external crate cannot write a `GuardConfig { .. }` struct literal - the
-/// fields (`dialect`, `effective`) are private, so a privileged
+/// fields (`dialect`, `effective`, `project_schema`) are private, so a privileged
 /// profile can never be forged by a literal (the `EffectivePolicy` is itself
 /// unforgeable). This MUST fail to compile:
 ///
@@ -509,6 +570,7 @@ impl GuardConfig {
 /// let _ = GuardConfig {
 ///     dialect: zeroship_migrate_ir::dialect::DialectId::new("postgres"),
 ///     effective: unimplemented!(),
+///     project_schema: "app".into(),
 /// };
 /// ```
 ///
@@ -791,7 +853,7 @@ struct RlsTableState {
 /// Does a `safety.require_rls` obligation cover the table this policy key names?
 ///
 /// [`table_key_for_policy`] yields an EMPTY schema for an unqualified table under a
-/// charter with no unique owned schema, and no `ObjectName` can be built from `.users`.
+/// config with an empty target, and no `ObjectName` can be built from `.users`.
 /// [`GuardConfig::requires_rls_at_table`] is where that fall-back-closed rule lives,
 /// so the declarative path resolves the obligation the same way this walk does.
 fn require_rls_covers(cfg: &GuardConfig, key: &(String, String)) -> bool {
@@ -804,14 +866,9 @@ fn table_key_for_policy(
     schema: &Option<String>,
     table: &str,
 ) -> (String, String) {
-    let effective_schema = schema.clone().unwrap_or_else(|| {
-        // An unqualified table resolves to the config's sole owned schema (the pinned
-        // project schema); no unique owned schema => empty.
-        match owned_schemas_from_effective(cfg.effective()).as_slice() {
-            [one] => one.clone(),
-            _ => String::new(),
-        }
-    });
+    let effective_schema = schema
+        .clone()
+        .unwrap_or_else(|| cfg.project_schema().to_string());
     (effective_schema, table.to_string())
 }
 
@@ -1079,18 +1136,6 @@ pub fn check_ir_data_security_policy(
 /// knob's object model.
 fn global_witness() -> ObjectName {
     ObjectName::schema(b"zsg".to_vec())
-}
-
-/// The literal schemas an effective policy OWNS - the `schema.cross_schema` grant's
-/// literal schema includes (the project schema(s) a confined/platform posture
-/// carries). Empty for a whole-universe, globbed or absent grant.
-pub fn owned_schemas_from_effective(effective: &EffectivePolicy) -> Vec<String> {
-    let Some(k) = KnobKey::parse(policy_registry::KEY_SCHEMA_CROSS_SCHEMA).ok() else {
-        return Vec::new();
-    };
-    effective
-        .grant_literal_schema_includes(&k)
-        .unwrap_or_default()
 }
 
 /// What one covering `inject` rule requires a create at its scope to carry, in the

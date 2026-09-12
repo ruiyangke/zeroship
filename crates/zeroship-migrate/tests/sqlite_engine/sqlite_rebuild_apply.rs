@@ -1115,7 +1115,7 @@ async fn goodie_sentinels_survive_rebuild() {
             FieldDescriptor {
                 name: "secret".into(),
                 ty: "bytes".into(),
-                encrypted: Some(serde_json::json!({ "mode": "randomized", "keyId": "k1" })),
+                encrypted: Some(true),
                 ..Default::default()
             },
         ],
@@ -2323,6 +2323,7 @@ async fn drop_foreign_key_via_rebuild_removes_the_fk() {
             name: "author".into(),
             ty: "ref".into(),
             references: Some("users".into()),
+            reference_column: Some("id".into()),
             ..Default::default()
         }],
         indexes: vec![],

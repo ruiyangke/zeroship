@@ -80,7 +80,11 @@ async fn apply_doc(
         &zeroship_migrate_mysql::DIALECT,
         &policy,
     );
-    let guard = GuardConfig::from_policy(policy.clone(), zeroship_migrate_mysql::DIALECT);
+    let guard = GuardConfig::from_policy(
+        policy.clone(),
+        zeroship_migrate_mysql::DIALECT,
+        &cfg.project_schema,
+    );
     let artifact = author
         .load_and_lower_guarded(&resolved_source, OWNER, registry, live, &guard)
         .map_err(|error| format!("load and lower guarded IR plan: {error}"))?;

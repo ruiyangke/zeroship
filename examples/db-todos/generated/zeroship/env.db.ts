@@ -10,20 +10,20 @@
 // `InferSchema`/`Row`/`Collections`/`Db`/`Id<>`/`MaskedValue<>` inference
 // chain a declared schema would.
 //
-// That equivalence is about TYPES, not about DDL, and the difference is not
-// cosmetic: feeding this file back in as a declared schema would NOT
-// reproduce the columns the migrations built. `int`, `integer`, `bigInt`,
-// `number` and `float` all render as `t.number()`, because `@zeroship/db`
-// has no integer builder — so an `int` column that the migration created as
-// INTEGER would come back as DOUBLE PRECISION.
-//
-// Read `t.number()` here as "some numeric column", not as the column's
-// type. The schema source above remains the ground truth for DDL.
+// This module reconstructs runtime types. Fixed-precision numeric facets are
+// preserved, while the migration source remains the authority for DDL.
 import { t, schema as defineSchema, type Db } from "@zeroship/db";
 
 const schema = {
   todos: defineSchema({
-    userId: t.ref("users").required(),
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
+    userId: t.ref("users", { column: "id" }).required(),
     title: t.string().required(),
     priority: t.string().required().default("medium"),
     tags: t.json(),
@@ -31,6 +31,13 @@ const schema = {
     archived: t.boolean().required().default(false),
   }).index("todos_user_idx", ["userId"]).index("todos_deleted_at_idx", ["deleted_at"]).index("todos_updated_at_idx", ["updated_at"]).index("todos_created_by_idx", ["created_by"]),
   users: defineSchema({
+    id: t.string().required().primaryKey().assigned({"by":"typedId","on":"insert"}),
+    created_at: t.timestamp().required().assigned({"by":"now","on":"insert"}),
+    updated_at: t.timestamp().required().assigned({"by":"now","on":"write"}),
+    created_by: t.string().assigned({"by":"actor","on":"insert"}),
+    updated_by: t.string().assigned({"by":"actor","on":"write"}),
+    version: t.number().required().default(1).assigned({"by":"increment(1)","on":"write"}),
+    deleted_at: t.timestamp().assigned({"by":"now","on":"delete"}),
     email: t.string().required().unique(),
     name: t.string().required(),
     handle: t.string().required().unique(),

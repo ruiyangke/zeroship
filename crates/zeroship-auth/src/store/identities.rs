@@ -7,16 +7,14 @@
 //! "already linked to another user" policy decision.
 
 use compio_postgres::Client;
-use zeroship_core::user_id::UserId;
+use uuid::Uuid;
+use zeroship_core::UserId;
 
-use crate::entity_ids;
 use crate::error::{AuthError, Result};
 
 #[derive(Debug, Clone)]
 pub struct Identity {
-    /// `zeroship.federated_identities.id` — a `uuid` surrogate key. The row is
-    /// addressed by `(provider, subject)`; this id names no platform entity.
-    pub id: uuid::Uuid,
+    pub id: Uuid,
     pub user_id: UserId,
     pub provider: String,
     pub subject: String,
@@ -78,7 +76,13 @@ pub async fn link(
             "INSERT INTO zeroship.federated_identities (user_id, provider, subject, email_at_link, raw_profile) \
              VALUES ($1, $2, $3, $4::citext, $5) \
              RETURNING id, user_id, provider, subject, email_at_link::text",
-            &[&user_id.as_str(), &provider, &subject, &email_at_link, &raw_profile],
+            &[
+                &user_id.as_str(),
+                &provider,
+                &subject,
+                &email_at_link,
+                &raw_profile,
+            ],
         )
         .await
         .map_err(|e| AuthError::Db(format!("identities link: {e}")))?;
@@ -217,7 +221,7 @@ async fn unlink_preserving_credential_locked(
 fn row_to_identity(row: &compio_postgres::Row) -> Result<Identity> {
     Ok(Identity {
         id: row.get("id"),
-        user_id: entity_ids::user_id(row, "user_id")?,
+        user_id: crate::user_id::from_row(row, "user_id", "identity row")?,
         provider: row.get("provider"),
         subject: row.get("subject"),
         email_at_link: row.try_get::<_, String>("email_at_link").ok(),

@@ -8,6 +8,7 @@ use ntex::web::types::{Path, State};
 use serde::Serialize;
 use serde_json::json;
 use zeroship_authz::{Action, Resource};
+use zeroship_core::UserId;
 
 use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
@@ -27,10 +28,7 @@ pub struct OauthGrantSummary {
 }
 
 /// GET /me/oauth-grants - list active grants for the authenticated user.
-pub async fn list_grants(
-    authz: AuthzGuard,
-    state: State<Arc<AppState>>,
-) -> web::HttpResponse {
+pub async fn list_grants(authz: AuthzGuard, state: State<Arc<AppState>>) -> web::HttpResponse {
     if let Err(resp) = authz
         .require(Action::AccountRead, Resource::Any, &state)
         .await
@@ -114,13 +112,7 @@ pub async fn revoke_grant(
     // `transaction()` needs and isolates snapshot/locks/abort-state. After
     // commit, inbound to that alias bounces (5b `revoked_at IS NULL` gate +
     // `resolve_active_alias`'s structural `EXISTS(oauth_grants)` read gate).
-    let deleted = match revoke_grant_cascade(
-        &state,
-        &authz.principal_id,
-        &client_id,
-    )
-    .await
-    {
+    let deleted = match revoke_grant_cascade(&state, &authz.principal_id, &client_id).await {
         Ok(deleted) => deleted,
         Err(err) => {
             tracing::error!(
@@ -168,7 +160,7 @@ pub async fn revoke_grant(
 /// — same single `zeroship` DB.)
 async fn revoke_grant_cascade(
     state: &AppState,
-    user_id: &zeroship_core::user_id::UserId,
+    user_id: &UserId,
     client_id: &str,
 ) -> Result<u64, crate::registry::RegistryError> {
     let mut conn = state.registry.conn().await?;

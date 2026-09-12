@@ -145,13 +145,11 @@ fn error_response(e: RegistryError) -> web::HttpResponse {
         RegistryError::InvalidInput(msg) => {
             web::HttpResponse::BadRequest().json(&serde_json::json!({ "error": msg }))
         }
-        RegistryError::Database(msg) => {
-            infrastructure_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "registry database error",
-                msg,
-            )
-        }
+        RegistryError::Database(msg) => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "registry database error",
+            msg,
+        ),
         RegistryError::FxUnresolved => infrastructure_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "pricing misconfigured",
@@ -330,10 +328,7 @@ pub(crate) mod infrastructure_error_test_support {
         (result, captured)
     }
 
-    pub(crate) fn assert_logged_trace_id(
-        events: &[HashMap<String, String>],
-        trace_id: &str,
-    ) {
+    pub(crate) fn assert_logged_trace_id(events: &[HashMap<String, String>], trace_id: &str) {
         assert_eq!(events.len(), 1, "expected one infrastructure error event");
         assert_eq!(
             events[0].get("trace_id").map(String::as_str),
@@ -556,7 +551,11 @@ pub async fn list_apps(
     // every audit of the policy set - and it returned every tenant's apps to any
     // of the four deleted staff roles. A vendor wanting a fleet-wide list builds
     // it in the portal against its own copy of the data.
-    match state.registry.list_apps_for_owner(&authz.principal_id).await {
+    match state
+        .registry
+        .list_apps_for_owner(&authz.principal_id)
+        .await
+    {
         Ok(apps) => web::HttpResponse::Ok().json(&apps),
         Err(e) => error_response(e),
     }
@@ -621,7 +620,11 @@ pub async fn archive_app(
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsArchive, Resource::App { id: uid.clone() }, &state)
+        .require(
+            Action::AppsArchive,
+            Resource::App { id: uid.clone() },
+            &state,
+        )
         .await
     {
         return resp;
@@ -656,7 +659,11 @@ pub async fn unarchive_app(
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsArchive, Resource::App { id: uid.clone() }, &state)
+        .require(
+            Action::AppsArchive,
+            Resource::App { id: uid.clone() },
+            &state,
+        )
         .await
     {
         return resp;
@@ -702,14 +709,23 @@ pub async fn delete_app(
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsArchive, Resource::App { id: uid.clone() }, &state)
+        .require(
+            Action::AppsArchive,
+            Resource::App { id: uid.clone() },
+            &state,
+        )
         .await
     {
         return resp;
     }
     let ip = crate::http_util::source_ip(&req, state.trust_proxy);
-    match crate::organizations::delete_app(&state.registry, &authz.principal_id, &uid, ip.as_deref())
-        .await
+    match crate::organizations::delete_app(
+        &state.registry,
+        &authz.principal_id,
+        &uid,
+        ip.as_deref(),
+    )
+    .await
     {
         Ok(()) => web::HttpResponse::NoContent().finish(),
         Err(e) => e.into_response(),
@@ -752,7 +768,11 @@ pub async fn deploy(
         }
     };
     if let Err(resp) = authz
-        .require(Action::AppsDeploy, Resource::App { id: uid.clone() }, &state)
+        .require(
+            Action::AppsDeploy,
+            Resource::App { id: uid.clone() },
+            &state,
+        )
         .await
     {
         return resp;
@@ -829,9 +849,10 @@ pub async fn deploy(
     // see `stream_body_to_tmp_file`. ntex's `Payload` implements
     // `Stream<Item = Result<Bytes, PayloadError>>` directly, so the
     // generic helper accepts it without an adapter.
-    let tmp_path = state
-        .deploy_tmp_dir
-        .join(format!("zeroship-deploy-{}.zship", uuid::Uuid::new_v4().simple()));
+    let tmp_path = state.deploy_tmp_dir.join(format!(
+        "zeroship-deploy-{}.zship",
+        uuid::Uuid::new_v4().simple()
+    ));
 
     match stream_body_to_tmp_file(
         &mut body,
@@ -1050,32 +1071,30 @@ fn ingest_error_to_response(e: IngestError) -> web::HttpResponse {
     match e {
         IngestError::BadRequest { error, detail } => web::HttpResponse::BadRequest()
             .json(&serde_json::json!({"error": error, "detail": detail})),
-        IngestError::TooLarge { cap_bytes, observed_bytes } => {
-            web::HttpResponse::PayloadTooLarge().json(&serde_json::json!({
-                "error": "deploy too large",
-                "cap_bytes": cap_bytes,
-                "observed_bytes": observed_bytes,
-            }))
-        }
-        IngestError::UnsupportedMediaType => web::HttpResponse::UnsupportedMediaType()
-            .json(&serde_json::json!({
+        IngestError::TooLarge {
+            cap_bytes,
+            observed_bytes,
+        } => web::HttpResponse::PayloadTooLarge().json(&serde_json::json!({
+            "error": "deploy too large",
+            "cap_bytes": cap_bytes,
+            "observed_bytes": observed_bytes,
+        })),
+        IngestError::UnsupportedMediaType => {
+            web::HttpResponse::UnsupportedMediaType().json(&serde_json::json!({
                 "error": "unsupported content type",
                 "detail": "expected application/x-zship",
-            })),
-        IngestError::BlobStoreUnavailable(detail) => {
-            infrastructure_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "deploy blob store unavailable",
-                detail,
-            )
+            }))
         }
-        IngestError::Internal(detail) => {
-            infrastructure_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "deploy ingest internal error",
-                detail,
-            )
-        }
+        IngestError::BlobStoreUnavailable(detail) => infrastructure_error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "deploy blob store unavailable",
+            detail,
+        ),
+        IngestError::Internal(detail) => infrastructure_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "deploy ingest internal error",
+            detail,
+        ),
     }
 }
 
@@ -1344,8 +1363,7 @@ pub async fn get_spend_limit(
         Err(e) => return error_response(RegistryError::Database(e.to_string())),
     };
     let Some(row) = rows.first() else {
-        return web::HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "app not found"}));
+        return web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"}));
     };
     let plan_id: String = row.get("plan_id");
     let override_cents: Option<i64> = row.get("spend_limit_cents");
@@ -1426,8 +1444,9 @@ pub struct OrganizationScopeQuery {
 async fn billing_resource(state: &AppState, app_id: &AppId) -> Result<Resource, web::HttpResponse> {
     match crate::organizations::organization_of_app(state.control_pg.as_ref(), app_id).await {
         Ok(Some(id)) => Ok(Resource::Organization { id }),
-        Ok(None) => Err(web::HttpResponse::NotFound()
-            .json(&serde_json::json!({"error": "app not found"}))),
+        Ok(None) => {
+            Err(web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"})))
+        }
         Err(e) => Err(e.into_response()),
     }
 }
@@ -1469,13 +1488,21 @@ pub async fn list_app_invoices(
     {
         return resp;
     }
-    let Resource::Organization { id: organization_id } = billing_scope_owner else {
+    let Resource::Organization {
+        id: organization_id,
+    } = billing_scope_owner
+    else {
         return web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"}));
     };
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
-    match crate::billing_read::list_invoices_for_organization(&state.registry, &organization_id, limit, offset)
-        .await
+    match crate::billing_read::list_invoices_for_organization(
+        &state.registry,
+        &organization_id,
+        limit,
+        offset,
+    )
+    .await
     {
         Ok(invoices) => web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": invoices })),
         Err(e) => error_response(e),
@@ -1570,7 +1597,9 @@ pub async fn get_projected_charge(
     .await
     {
         Ok(Some(p)) => web::HttpResponse::Ok().json(&p),
-        Ok(None) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"})),
+        Ok(None) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"}))
+        }
         Err(e) => error_response(e),
     }
 }
@@ -1636,7 +1665,9 @@ pub async fn get_billing_status(
     }
     match crate::billing_read::billing_status(&state.registry, &uid).await {
         Ok(Some(status)) => web::HttpResponse::Ok().json(&status),
-        Ok(None) => web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"})),
+        Ok(None) => {
+            web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"}))
+        }
         Err(e) => error_response(e),
     }
 }
@@ -1681,7 +1712,10 @@ async fn resolve_plan_default_cents(
 ) -> Result<Option<u64>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
+        .query(
+            "SELECT plan_id FROM zeroship.apps WHERE id = $1",
+            &[&app_id.as_str()],
+        )
         .await?;
     let Some(row) = rows.first() else {
         return Ok(None);
@@ -1693,7 +1727,6 @@ async fn resolve_plan_default_cents(
         .await?
         .map(|p| p.price.spend_limit_default_cents))
 }
-
 
 pub async fn get_usage(
     id: Path<String>,
@@ -1740,7 +1773,11 @@ pub async fn get_app_logs(
         }
     };
     if let Err(resp) = authz
-        .require(Action::DeploymentsRead, Resource::App { id: uid.clone() }, &state)
+        .require(
+            Action::DeploymentsRead,
+            Resource::App { id: uid.clone() },
+            &state,
+        )
         .await
     {
         return resp;
@@ -1839,8 +1876,7 @@ async fn fetch_worker_logs(
         ));
     }
 
-    serde_json::from_slice::<Vec<String>>(&bytes)
-        .map_err(|e| format!("parse logs JSON: {e}"))
+    serde_json::from_slice::<Vec<String>>(&bytes).map_err(|e| format!("parse logs JSON: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1935,8 +1971,7 @@ where
         // we can hand it to write_all_at. The to_vec() costs a single
         // chunk-sized alloc per chunk (typically 16-256 KiB).
         let owned: Vec<u8> = chunk_slice.to_vec();
-        let compio::BufResult(res, _returned) =
-            (&file).write_all_at(owned, written).await;
+        let compio::BufResult(res, _returned) = (&file).write_all_at(owned, written).await;
         if let Err(e) = res {
             drop(file);
             let _ = compio::fs::remove_file(tmp_path).await;
@@ -1957,8 +1992,8 @@ where
 
 #[cfg(test)]
 mod error_response_tests {
-    use super::*;
     use super::infrastructure_error_test_support::{assert_logged_trace_id, capture};
+    use super::*;
     use ntex::http::StatusCode;
     use ntex::util::{stream_recv, BytesMut};
 
@@ -2116,7 +2151,10 @@ mod stream_tmp_tests {
             .await
             .unwrap_err();
         match err {
-            StreamToTmpError::TooLarge { cap: 15, observed: 20 } => {}
+            StreamToTmpError::TooLarge {
+                cap: 15,
+                observed: 20,
+            } => {}
             other => panic!("expected TooLarge, got {other:?}"),
         }
         assert!(!path.exists(), "tmp file should be removed on cap-exceeded");
@@ -2139,7 +2177,10 @@ mod stream_tmp_tests {
             }
             other => panic!("expected PayloadError, got {other:?}"),
         }
-        assert!(!path.exists(), "tmp file should be removed on payload error");
+        assert!(
+            !path.exists(),
+            "tmp file should be removed on payload error"
+        );
     }
 
     #[compio::test]
@@ -2203,9 +2244,7 @@ mod stream_tmp_tests {
 
     #[test]
     fn proposal_keeps_app_dispatch_correlation_open() {
-        let proposal = include_str!(
-            "../../../docs/proposals/2026-08-14-error-message-quality.md"
-        );
+        let proposal = include_str!("../../../docs/proposals/2026-08-14-error-message-quality.md");
 
         for required in [
             "The control helper loop is closed; the app-dispatch loop is not.",

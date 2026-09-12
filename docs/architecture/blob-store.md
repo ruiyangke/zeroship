@@ -99,25 +99,24 @@ All three services build their store from the SAME `--blob-store` grammar via `z
 ## The other S3 consumer: `env.storage`
 
 The same `compio-s3` client and the same `s3://…` URL grammar back the
-creator-facing `env.storage` namespace (`crates/plugin-storage`). It is a
+creator-facing `env.storage` namespace ([`zeroship-storage-v8`](../../crates/zeroship-storage-v8/)). It is a
 **separate** keyspace and a **separate** flag — `--storage-url` on the worker
-(and `ZEROSHIP_WORKER_STORAGE_URL` for `zeroship serve`) — but resolves credentials
+(and `ZEROSHIP_STORAGE_URL` for `zeroship serve`) — but resolves credentials
 from the same AWS env vars (one S3 identity per process). A worker can point
 `--blob-store` and `--storage-url` at different prefixes (or different
 buckets) of the same provider.
 
-Unlike deploy blobs, `env.storage` objects are **mutable, app-authored, and
-unbounded** in size: uploads use S3 **multipart** (8 MiB parts) so a creator
-can stream an arbitrarily large object up (`putStream`) and back
-(`getStream`) with memory bounded by the part size, never the object size.
-See [plugin-system.md](../reference/plugin-system.md) for the streaming
-native surface and [docker-compose.md](../runbooks/docker-compose.md) for the
-MinIO/R2 configuration.
+App objects are mutable and stored through `zeroship-storage`. Multipart
+uploads bound working memory by part size and concurrency; scoped handles also
+enforce a total upload-size ceiling. See [Object storage](../reference/storage.md)
+for the native surface and [docker-compose.md](../runbooks/docker-compose.md)
+for MinIO/R2 configuration.
 
-End-to-end proof that both consumers work over one remote store lives in
-`tests/e2e_s3_storage.sh` (MinIO): control writes deploy blobs to S3, the
-gateway dispatches a request to the worker that loads the bundle **from S3**,
-and a > part-size multipart `env.storage` round-trip is byte-compared.
+End-to-end verification lives in `examples/storage-gallery/tests/`. Its Vitest
+fixture owns MinIO and the platform processes: control writes deploy blobs to
+S3, and gateway/worker load the deployed app from that store. Playwright checks
+the browser entry; RPC tests compare multipart checksums and verify wide stream
+lengths against the physical S3 object. Run `pnpm --dir examples/storage-gallery test`.
 
 ## Non-goals
 

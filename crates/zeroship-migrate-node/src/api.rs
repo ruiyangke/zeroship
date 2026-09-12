@@ -559,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_artifacts_from_raw_author_only_envelope_injects_system_fields_and_indexes() {
+    fn gen_artifacts_from_raw_author_only_envelope_injects_policy_columns_and_indexes() {
         // Regression: the pure-JS recorder emits RAW author-only createTable ops
         // (NO system columns). `gen_artifacts_from_envelopes` MUST resolve the confined
         // policy shape before folding - otherwise the generated descriptor is
@@ -594,7 +594,7 @@ mod tests {
         for sys in inject.columns().iter().map(|column| column.name.as_str()) {
             assert!(
                 fields.get(sys).is_some(),
-                "the RESOLVED generated descriptor must carry system field `{sys}`: {fields}"
+                "the RESOLVED generated descriptor must carry injected column `{sys}`: {fields}"
             );
         }
         assert!(

@@ -109,7 +109,7 @@ async fn family_revocation_decision(
             return RevocationDecision::Unavailable;
         }
     };
-    let conn = match pool.get().await {
+    let conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, "revocation: pg pool get failed");
@@ -2334,7 +2334,7 @@ mod tests {
     // could never match the `pws_…` subject).
 
     // Postgres is not optional for this workspace's tests (see
-    // crates/zeroship-test-support/src/lib.rs); `test_database_url()` panics with the
+    // tests/fixtures/session_keys.rs); `test_database_url()` panics with the
     // provisioning command rather than let these revocation tests report a
     // pass for a check they never ran.
     async fn connect_auth_db() -> crate::db::DbConfig {
@@ -2416,7 +2416,7 @@ mod tests {
         // same salt the arm uses), and revoke ONLY app A's family.
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool checkout");
+            let conn = pool.acquire().await.expect("pool checkout");
             zeroship_authz::wrapper_revocation::revoke_family(&conn, &client_a, &pws_a)
                 .await
                 .expect("revoke_family app A");
@@ -2465,7 +2465,7 @@ mod tests {
         );
 
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
-        let conn = pool.get().await.expect("pool checkout");
+        let conn = pool.acquire().await.expect("pool checkout");
         conn.execute(
             "DELETE FROM zeroship.token_revocations WHERE sub = ANY($1)",
             &[&vec![pws_a, pws_b]],
@@ -3543,7 +3543,7 @@ mod tests {
         // pre-revocation "not revoked" entry through its TTL.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws)
                 .await
                 .expect("revoke_family");
@@ -3567,7 +3567,7 @@ mod tests {
         // Cleanup the marker.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             conn.execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
@@ -3651,7 +3651,7 @@ mod tests {
         // forcing a DB reload.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws)
                 .await
                 .expect("revoke_family");
@@ -3669,7 +3669,7 @@ mod tests {
         // Cleanup.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             conn.execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
@@ -3709,7 +3709,7 @@ mod tests {
         // Ensure no stale marker exists for this fresh family.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             conn.execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
@@ -3774,7 +3774,7 @@ mod tests {
         // Cleanup (reconnect via the good DSN).
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             conn.execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
@@ -3827,7 +3827,7 @@ mod tests {
         // the real `/signout` writer does, R1d).
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws)
                 .await
                 .expect("revoke_family");
@@ -3845,7 +3845,7 @@ mod tests {
         // Cleanup.
         {
             let pool = crate::db::checkout(&db).await.expect("pool");
-            let conn = pool.get().await.expect("pool");
+            let conn = pool.acquire().await.expect("pool");
             conn.execute(
                 "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
                 &[&client_id, &pws],
@@ -4029,7 +4029,7 @@ mod tests {
         // revoke_family(client_id, pws_sub).
         {
             let pool = crate::db::checkout(&db).await.expect("pool checkout");
-            let conn = pool.get().await.expect("pool get");
+            let conn = pool.acquire().await.expect("pool get");
             zeroship_authz::wrapper_revocation::revoke_family(&conn, client_id, &pws_sub)
                 .await
                 .expect("signout-style revoke_family on (client_id, pws_)");
@@ -4061,7 +4061,7 @@ mod tests {
 
         // Cleanup.
         let pool = crate::db::checkout(&db).await.expect("pool checkout");
-        let conn = pool.get().await.expect("pool get");
+        let conn = pool.acquire().await.expect("pool get");
         conn.execute(
             "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
             &[&client_id, &pws_sub],

@@ -8,8 +8,7 @@
  * - `t.id("")` and `t.id("1bad")` throw (ID_INVALID_PREFIX).
  * - `t.id()` (no arg) returns `{ type: "id" }` with no idPrefix (auto-derive).
  *
- * Mirrors the Rust-side fence in `crates/zeroship-schema/src/query.rs`
- * (`validate_id_prefix`).
+ * Mirrors the ORM SQL mapping's `validate_id_prefix` fence.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

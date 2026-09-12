@@ -2,7 +2,7 @@
 # ============================================================================
 # test_config.sh - the shell half of the test overlay.
 #
-# THE LOGIC IS NOW IN RUST: crates/zeroship-testkit/src/overlay.rs, reached
+# THE LOGIC IS NOW IN RUST: tests/fixtures/platform_db/overlay.rs, reached
 # through `zs-testkit overlay`. This file is the shell BINDING - it keeps the
 # function names and the exported-variable contract that tests/run_auth_suite.sh
 # and tests/run_billing_suite.sh already source, so neither of them changed.
@@ -60,7 +60,6 @@ zs_test_config_get() {
 #   ZS_TEST_OVERLAY  path to the overlay that was read
 #   PG_HOST PG_PORT PG_USER PG_PASS PG_DB   parsed back out of the DSN
 #   ZS_TEST_PG_DSN   the server DSN as written (database = PG_DB)
-#   ZS_TEST_REDIS_URL
 #
 # The PG_* names are set for the harnesses' own database calls. They are also
 # still honoured as INPUTS by the provisioner, which is the override tier: set
@@ -89,7 +88,7 @@ zs_test_config_load() {
 
   eval "$assignments"
   export ZS_TEST_OVERLAY PG_HOST PG_PORT PG_USER PG_PASS PG_DB \
-    ZS_TEST_PG_DSN ZS_TEST_REDIS_URL
+    ZS_TEST_PG_DSN
 }
 
 # Refuse when the caller asked for one server and the overlay names another.

@@ -5,10 +5,11 @@
 > **Implemented.** This proposal has shipped, including the appended
 > "v1 Streaming & Multipart — FULL SCOPE" section (streaming both directions +
 > multipart, nothing deferred). The code lives in `libs/compio-s3`
-> (zero-tokio cyper + hand-rolled SigV4 client), `crates/bundle`
-> (`S3BlobStore`), `crates/plugin-storage` (`S3` backend + V8 streaming), and
+> (zero-tokio cyper + hand-rolled SigV4 client), `crates/zeroship-bundle`
+> (`S3BlobStore`), `crates/zeroship-storage` (S3 backend),
+> `crates/zeroship-storage-v8` (V8 binding), and
 > the gateway/control/worker `--blob-store`/`--storage-url` wiring. Verified
-> end-to-end against MinIO by `tests/e2e_s3_storage.sh` (deploy-blob dispatch
+> end-to-end against MinIO by `examples/storage-gallery/tests/` (deploy-blob dispatch
 > from S3 + a > part-size multipart `env.storage` streaming round-trip) and the
 > LocalFs-vs-S3 backend-parity suite. One runtime fix landed alongside: the
 > upload-streaming `response_forwarder` gained pause/resume backpressure so a
@@ -1140,7 +1141,7 @@ async fn get_stream(&self, coords) -> Result<Option<(ObjectMeta, impl Stream<Ite
 3. `Backend` streaming methods + `plugin-storage::S3` (multipart) + `LocalFs`
    streaming + native callbacks wired to `response_forwarder`/`StreamWriter` +
    `@zeroship/storage` SDK streaming.
-4. `tests/e2e_s3_storage.sh` (MinIO): deploy + dispatch over S3 blobs, and a
+4. `examples/storage-gallery/tests/` (MinIO): deploy + dispatch over S3 blobs, and a
    **large multipart `env.storage` streaming** round-trip (put a >part-size
    ReadableStream, get it back as a stream, byte-compare). Backend-parity tests
    (LocalFs vs S3) for both buffered and streaming. Docs.

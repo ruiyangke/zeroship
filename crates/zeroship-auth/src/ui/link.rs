@@ -35,18 +35,18 @@ use serde_json::json;
 use crate::audit::{self, AuditEvent};
 use crate::config::AuthConfig;
 use crate::csrf;
-use crate::identity::email as email_validation;
 use crate::identity::eligibility;
+use crate::identity::email as email_validation;
 use crate::identity::linker::PendingLink;
 use crate::identity::password;
 use crate::oidc::auth_request::AuthRequest;
-use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 use crate::return_to;
 use crate::sessions::login as session_cookie;
 use crate::sessions::totp_challenge::{self, FirstFactor, TotpChallenge};
 use crate::store::{identities, sessions, totp as totp_store, users};
 use crate::ui::login::render_challenge;
 use crate::ui::{ErrorPage, LinkPage, PublicErrorMessage};
+use zeroship_authn::rate_limit::{self, Quota, RateLimitDecision};
 
 /// ACR + AMR tags for the post-link `IdP` session.
 ///
@@ -83,7 +83,10 @@ pub async fn get(
     query: ntex::web::types::Query<LinkQuery>,
     cfg: ntex::web::types::State<Arc<AuthConfig>>,
 ) -> HttpResponse {
-    let Some(pending) = PendingLink::decode(&query.token, cfg.settings.stash_signing_key.expose_str().as_bytes()) else {
+    let Some(pending) = PendingLink::decode(
+        &query.token,
+        cfg.settings.stash_signing_key.expose_str().as_bytes(),
+    ) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
     if email_validation::validate_email(&pending.email).is_err() {
@@ -158,7 +161,10 @@ pub async fn post(
     }
 
     // 2. Decode + verify the pending token.
-    let Some(pending) = PendingLink::decode(&form.token, cfg.settings.stash_signing_key.expose_str().as_bytes()) else {
+    let Some(pending) = PendingLink::decode(
+        &form.token,
+        cfg.settings.stash_signing_key.expose_str().as_bytes(),
+    ) else {
         return render_error_page(PublicErrorMessage::SessionExpired);
     };
     if email_validation::validate_email(&pending.email).is_err() {
@@ -287,12 +293,7 @@ pub async fn post(
             },
         )
         .await;
-        return render_link_error(
-            &form.token,
-            &pending,
-            &cfg,
-            "invalid password",
-        );
+        return render_link_error(&form.token, &pending, &cfg, "invalid password");
     };
 
     if let Err(e) = eligibility::check_user_eligible(db.as_ref(), &u.id).await {
@@ -344,7 +345,7 @@ pub async fn post(
             return render_challenge(
                 &cfg,
                 &TotpChallenge::new(
-                    &u.id,
+                    u.id.clone(),
                     u.credential_version,
                     native_return_to.to_string(),
                     FirstFactor::OauthLink {
@@ -382,7 +383,7 @@ pub async fn post(
     let session = match sessions::create(
         db.as_ref(),
         &sessions::CreateSession {
-            user_id: &u.id,
+            user_id: u.id.clone(),
             auth_method: &pending.provider,
             // The user provided BOTH a federation assertion (oauth) AND a
             // local password to confirm the link. Both factors land in amr.
@@ -424,10 +425,7 @@ pub async fn post(
     .await;
 
     let mut resp = return_to::see_other(native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header("cache-control", "no-store");
     resp.finish()
 }
@@ -465,9 +463,7 @@ fn render_link_error_with_status(
         provider: &pending.provider,
         error: Some(err),
     };
-    let body = page
-        .render()
-        .unwrap_or_else(|_| format!("<h1>{err}</h1>"));
+    let body = page.render().unwrap_or_else(|_| format!("<h1>{err}</h1>"));
     let mut resp = HttpResponse::build(status);
     resp.content_type("text/html; charset=utf-8");
     resp.header(SET_COOKIE, csrf::set_cookie(&csrf_token));
@@ -506,7 +502,7 @@ pub(crate) async fn finish_after_second_factor(
     let session = match sessions::create(
         db,
         &sessions::CreateSession {
-            user_id: &user.id,
+            user_id: user.id.clone(),
             auth_method: provider,
             // A federation assertion, the local password, and a TOTP or backup
             // code all landed, so all three land in amr.
@@ -548,10 +544,7 @@ pub(crate) async fn finish_after_second_factor(
     .await;
 
     let mut resp = return_to::see_other(native_return_to);
-    resp.header(
-        SET_COOKIE,
-        session_cookie::set_cookie(&session.id),
-    );
+    resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header("cache-control", "no-store");
     resp.header(SET_COOKIE, totp_challenge::clear_cookie());
     resp.finish()

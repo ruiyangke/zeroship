@@ -62,7 +62,7 @@ fn lower_create_table(raw: &str, dialect: &DialectId) -> Result<Vec<String>, Str
         APP,
         &BTreeMap::new(),
         &LiveSchema::default(),
-        &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone()),
+        &GuardConfig::from_policy(support::no_inject(PROJECT), (*dialect).clone(), PROJECT),
     )
     .map_err(|e| format!("{e:?}"))?;
     Ok(artifact
@@ -198,7 +198,7 @@ async fn an_injecting_identifier_cannot_execute_a_second_statement() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT, PROJECT),
             )
         .unwrap_or_else(|e| {
             // NOT a `continue`. SQLite is the dialect that ESCAPES these, so a
@@ -306,7 +306,7 @@ async fn an_awkward_identifier_survives_a_real_database_unchanged() {
                 APP,
                 &BTreeMap::new(),
                 &LiveSchema::default(),
-                &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT),
+                &GuardConfig::from_policy(support::no_inject(PROJECT), zeroship_migrate_sqlite::DIALECT, PROJECT),
             )
             .expect("lower for apply");
 

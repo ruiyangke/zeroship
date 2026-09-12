@@ -1,6 +1,6 @@
 // The write-side twin of `raw_read_alias.rs`: a process-environment MUTATION
 // that no compiler pass in this workspace will ever see, because the cfg is
-// false in every build. `tests/clippy_gate.sh` therefore cannot report it, and
+// false in every build. Clippy therefore cannot report it, and
 // a scan of tracked SOURCE is the only thing that can.
 //
 // Two violations, by construction: the import binds `std::env::set_var` under

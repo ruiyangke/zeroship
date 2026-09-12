@@ -38,7 +38,7 @@
 
 use compio_postgres::Client;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
+use zeroship_id::AppId;
 use zeroship_migrate::ExecutorConfig;
 use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
 use zeroship_migrate_postgres::role::migrator_role_name;
@@ -268,31 +268,10 @@ pub async fn provision_migrator(
 
 /// The schema an app's durable-workflow journal tables live in.
 ///
-/// Delegates to [`app_derivation::schema_name`] rather than composing a name.
-/// `zeroship_plugin_workflow::store::pg::app_schema_for` is the READER of this
-/// schema and asks the same seam function; this crate does not depend on that
-/// one, so agreement is what
-/// `zeroship_plugin_db`'s `journal_schema_derivations_agree` module holds the two
-/// producers to, and delegating is what makes agreement structural rather than
-/// coincidental.
-///
-/// # THIS IS NOW THE APP'S DATA SCHEMA, AND THE OWNERSHIP QUESTION IS OPEN
-///
-/// The journal schema was `app_<hyphenated uuid>` while the data schema was the
-/// bare uuid, so the two were distinct objects with distinct owners: the data
-/// schema belongs to the app's migrator role (`provision_migrator` step 3), the
-/// journal schema to the narrow [`WORKFLOW_OWNER_ROLE`]
-/// ([`workflow_journal_schema_sql`]). A printed app id already carries the
-/// `app_` prefix, so the seam's one derivation now names ONE schema for both.
-///
-/// That is coherent with where the rest of the platform's per-tenant state
-/// lives - the migration journal and the unmask audit table are already
-/// `__zeroship_`-prefixed relations inside the app's own schema - but it leaves
-/// [`workflow_journal_schema_sql`]'s `ALTER SCHEMA ... OWNER TO` pointed at the
-/// app's data schema, which would move it off the migrator. Whether the narrow
-/// owner role survives the collapse is a decision spanning this crate,
-/// `zeroship-plugin-workflow` and `zeroship-core`, not one to settle inside a
-/// derivation.
+/// Distinct from the app's DATA schema, which is the bare `<uuid>`. Kept in
+/// sync with `zeroship_workflow::store::pg::app_schema_for`, which
+/// derives the same name on the read/write side; this crate does not depend on
+/// that one, so the derivation is duplicated rather than shared.
 #[must_use]
 pub fn workflow_journal_schema_name(app_id: &AppId) -> String {
     app_derivation::schema_name(app_id)
@@ -329,7 +308,8 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
 /// CREATE on the database and no authority to make a schema of their own - a
 /// process running creator code must not be able to author schemas
 /// (2a44ea8ef). So the schema has to exist first, and in production it exists
-/// because a deploy's migration apply created it.
+/// because a migration apply or the authenticated workflow provisioning route
+/// created it.
 ///
 /// Exported because callers outside the apply path need a deployed app's
 /// journal schema to exist and must get it from the production statement rather
@@ -353,89 +333,23 @@ pub async fn provision_workflow_journal_schema(
 
 /// The unqualified name of the per-app unmask audit table.
 ///
-/// The data plane's INSERT is the only writer, and its own spelling now lives
-/// in one place: `zeroship_data_engine::backend_handle::AUDIT_UNMASK_TABLE`.
-/// (This doc said `zeroship-plugin-db`'s `crud/unmask.rs` until 2026-09-04. The
-/// engine tier left that crate on 2026-09-03, and the SQL itself had already
-/// moved out of `crud/unmask.rs` into `BackendHandle::append_unmask_audit`.)
-/// The SQLite peer of this constant is
-/// `zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE`.
-///
-/// BOUND, as of 2026-09-04, by
-/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`, which holds all
-/// three against one stated literal and drives [`audit_unmask_table_sql`] to
-/// check the emitted CREATE TABLE names the relation the writer targets. Until
-/// then the citation above WAS the guard, which is to say there was none.
+/// The PostgreSQL and SQLite creators and the ORM writer are kept in sync by
+/// `crates/zeroship-data-v8/tests/audit_table_parity.rs`.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
-
-/// The name prefix reserved for platform relations inside a creator's schema.
-///
-/// Everything carrying it - the engine's six migration-journal tables, the
-/// unmask audit table - is written by a service that does NOT execute creator
-/// code, and creator-declared collections are refused from this namespace. It is
-/// therefore the exact set the app runtime role's privileges are swept from
-/// (`apply::revoke_runtime_reserved_privileges_sql`).
-///
-/// `publication.rs` fences the same namespace out of the worker-visible WAL feed
-/// with a `LIKE '\_\_zeroship\_%' ESCAPE '\'` pattern; it spells the prefix as an
-/// escaped literal because a `LIKE` pattern is not this string.
-pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 
 /// The DDL that gives an app its unmask audit table, in the app's OWN schema.
 ///
 /// # Why this is here and not in the worker
 ///
-/// It used to be in the worker. `crud/unmask.rs` called
-/// `ensure_audit_unmask_table` from `write_audit_unmask_row`, so every single
-/// `unmask()` dispatch - granted AND denied - issued this `CREATE TABLE IF NOT
-/// EXISTS` plus three `CREATE INDEX IF NOT EXISTS` before it could log anything.
-/// Eight DDL statements on the privileged read path, emitted by the process that
-/// executes creator code. Schema change belongs to `zeroship-migrate`; the data
-/// plane emits none.
-///
-/// Deleting the DDL without moving it was not an option: the audit row is where
-/// authorization and provenance for a plaintext read live, so dropping the
-/// writer's dependency while keeping the writer would have kept the call and
-/// lost the record. This function is the Postgres creator; the SQLite creator is
-/// `zeroship_migrate_sqlite::backend::audit_unmask_sql`.
-///
-/// # Placement
-///
-/// The APP'S OWN SCHEMA, beside `__zeroship_schema_migrations` and its siblings,
-/// not a platform-owned system schema. That is not a weakening: such a schema
-/// is for state a separate service WRITES and the worker only READS, and this
-/// table is the other way round. The worker is the sole writer, over ordinary
-/// parameterised SQL, with provenance enforced at the Rust call boundary rather
-/// than at the SQL boundary - the position `zeroship-plugin-db`'s `audit.rs`
-/// already argues for the sibling audit log, and the reason neither needs a
-/// `SECURITY DEFINER` wrapper. App-scoped audit data also stays queryable by an
-/// operator holding only the app's schema.
+/// The migration service owns this DDL so the creator runtime emits no schema
+/// changes. The table stays in the app schema and the runtime writes it through
+/// ordinary parameterized SQL.
 ///
 /// # Ordering against the runtime role
 ///
-/// This must run BEFORE THE LAST `apply::provision_runtime_app_role`. That
-/// function explicitly finds the audit table and its owned serial sequence,
-/// clears every additive privilege, then grants only table INSERT and sequence
-/// USAGE. Both lookups are no-ops while the table is absent, so a table created
-/// after the last call would be unreachable to the worker.
-///
-/// "THE LAST" IS THE ACCURATE READING, and this paragraph said "BEFORE
-/// `provision_runtime_app_role`" until it was measured. `apply_ir_request` calls
-/// that function TWICE - once before `apply_sealed` and once after - so a table
-/// created between the two is granted by the second call and stays
-/// reachable. The strict sentence describes a constraint the code does not
-/// actually impose. `live_audit_unmask_provisioning::
-/// the_audit_table_must_be_provisioned_before_the_runtime_role` rules on all
-/// three positions against a live catalog; its third arm is what would go red
-/// if the second call were ever removed.
-///
-/// THAT CASE PROVES THE CONSTRAINT, NOT THE CALL ORDER. It runs the two
-/// functions itself, so swapping them inside `apply_ir_request` leaves it green.
-/// The order that ships is bound by `apply_api_test::
-/// a_real_apply_leaves_the_runtime_role_able_to_write_the_unmask_audit_row_pg`,
-/// which applies through the HTTP surface and then writes an audit row by the
-/// worker's own identity chain. Both are needed and neither replaces the other:
-/// the first says WHY the order matters, the second says the code still has it.
+/// Runtime role provisioning must run after this table is created so its broad
+/// table and sequence grants include the audit objects. The apply path repeats
+/// role provisioning after migration execution for the same reason.
 ///
 /// # Idempotence
 ///
@@ -444,7 +358,9 @@ pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 #[must_use]
 pub fn audit_unmask_table_sql(app_schema: &str) -> String {
     let schema_q = quote_ident(app_schema);
+    let schema_lit = quote_lit(app_schema);
     let table_q = quote_ident(AUDIT_UNMASK_TABLE);
+    let table_lit = quote_lit(AUDIT_UNMASK_TABLE);
     format!(
         r#"CREATE TABLE IF NOT EXISTS {schema_q}.{table_q} (
             id              BIGSERIAL PRIMARY KEY,
@@ -474,7 +390,18 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
         CREATE INDEX IF NOT EXISTS "{AUDIT_UNMASK_TABLE}_actor_idx"
             ON {schema_q}.{table_q} (actor_id, ts);
         CREATE INDEX IF NOT EXISTS "{AUDIT_UNMASK_TABLE}_row_idx"
-            ON {schema_q}.{table_q} (row_pk, "column", ts);"#
+            ON {schema_q}.{table_q} (row_pk, "column", ts);
+        DO $audit_unmask_contract$
+        BEGIN
+            IF pg_get_serial_sequence(
+                format('%I.%I', '{schema_lit}', '{table_lit}'),
+                'id'
+            ) IS NULL THEN
+                RAISE EXCEPTION 'serial sequence missing for %.%.id',
+                    '{schema_lit}', '{table_lit}';
+            END IF;
+        END
+        $audit_unmask_contract$;"#
     )
 }
 
@@ -499,6 +426,8 @@ pub async fn provision_audit_unmask_table(
 #[cfg(test)]
 mod audit_unmask_tests {
     use super::*;
+    use compio_postgres::NoTls;
+    use uuid::Uuid;
 
     /// The identifier goes through `quote_ident`, which doubles embedded quotes.
     /// The app schema is a UUID in production, but this generator is exported and
@@ -537,5 +466,55 @@ mod audit_unmask_tests {
             sql.contains(&format!(r#""app"."{AUDIT_UNMASK_TABLE}""#)),
             "{sql}"
         );
+    }
+
+    #[compio::test]
+    async fn a_preexisting_audit_table_without_its_identity_sequence_is_refused() {
+        let (client, connection) =
+            compio_postgres::connect(&zeroship_core::config::test_database_url(), NoTls)
+                .await
+                .expect("connect to the migrate-server test database");
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+
+        let schema = Uuid::new_v4().to_string();
+        let schema_q = quote_ident(&schema);
+        let table_q = quote_ident(AUDIT_UNMASK_TABLE);
+        client
+            .batch_execute(&format!(
+                "CREATE SCHEMA {schema_q};
+                 CREATE TABLE {schema_q}.{table_q} (
+                    id BIGINT PRIMARY KEY,
+                    ts TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    actor_id TEXT,
+                    actor_role TEXT,
+                    claimed_actor TEXT,
+                    collection TEXT NOT NULL,
+                    row_pk TEXT NOT NULL,
+                    \"column\" TEXT NOT NULL,
+                    classification TEXT NOT NULL,
+                    reason TEXT,
+                    request_id TEXT,
+                    outcome TEXT NOT NULL CHECK (outcome IN ('granted', 'denied'))
+                 );"
+            ))
+            .await
+            .expect("create malformed audit fixture");
+
+        let error = provision_audit_unmask_table(&client, &schema)
+            .await
+            .expect_err("a missing identity sequence must fail provisioning");
+        client
+            .batch_execute(&format!("DROP SCHEMA {schema_q} CASCADE"))
+            .await
+            .expect("remove malformed audit fixture");
+
+        let message = error
+            .as_db_error()
+            .map(compio_postgres::error::DbError::message)
+            .unwrap_or_default();
+        assert!(message.contains("serial sequence missing"), "{message}");
     }
 }

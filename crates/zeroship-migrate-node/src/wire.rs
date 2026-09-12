@@ -829,8 +829,8 @@ pub struct GenArtifactsReply {
 /// One field of a collection - the `FieldDescriptor` mirror, in BOTH directions.
 ///
 /// Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
-/// The common facets are typed scalars; the rich sub-object facets (`encrypted`,
-/// `mask`, `generated`, `identity`) cross as REAL JS values ([`JsonValue`]) and
+/// The common facets are typed scalars; the rich sub-object facets
+/// `mask`, `generated`, and `identity` cross as REAL JS values ([`JsonValue`]) and
 /// deserialize into the engine `FieldDescriptor` verbatim.
 ///
 /// It was the MANUAL SOURCE only, and the four fields added since say what that cost:
@@ -886,7 +886,7 @@ pub struct FieldDescriptorDto {
     /// Enum membership (string or numeric members).
     #[cfg_attr(feature = "napi", napi(js_name = "enum"))]
     pub enum_values: Option<Vec<JsonValue>>,
-    /// A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix.
+    /// An internal `<prefix>_<25 base36 UUIDv7>` platform-ID prefix.
     pub id_prefix: Option<String>,
     /// A `t.vector(dims, ...)` dimensionality.
     pub vector_dims: Option<i64>,
@@ -921,8 +921,8 @@ pub struct FieldDescriptorDto {
     pub vector_metric: Option<String>,
     /// `t.string({ caseSensitive: false })` - only `Some(false)` is meaningful.
     pub case_sensitive: Option<bool>,
-    /// The `t.encrypted({ mode, keyId, wraps })` sub-object (verbatim).
-    pub encrypted: Option<JsonValue>,
+    /// Whether the field uses encrypted storage; `type` describes its plaintext.
+    pub encrypted: Option<bool>,
     /// The `.mask({ kind, classification })` sub-object (verbatim).
     pub mask: Option<JsonValue>,
     /// A generated/computed column facet (structured IR, never raw SQL).

@@ -1,37 +1,16 @@
+import { generatedSchema } from "./_install-helper.js";
 /**
- * P5.5 PR 8 — SDK type inference snapshot for the masking subsystem.
+ * Compile-time contracts for masked row and input inference.
  *
- * Pins the `Row<S>` shape under three schema variants so a future
- * type-system tweak (e.g. widening `InferFieldDef` to drop the
- * `MaskedValue<T>` wrap on a masked column) lands a visible
- * compile-time failure here. The test bodies are deliberately
- * thin — what matters is that the TYPE assertions resolve under
- * `tsc`. Runtime assertions only sanity-check the symbols are
- * defined.
- *
- * The three closeout invariants exercised:
- *   1. A masked column on `Row<S>` materialises as `MaskedValue<T>`,
- *      not bare `T`.
- *   2. The `<col>_masked` sibling column is NEVER part of `Row<S>` —
- *      only the parent column appears. This is the SDK-side dual to
- *      the Rust-side `validate_field_name` reserved-suffix gate.
- *   3. `t.encrypted()` without an explicit `.mask({...})` infers as
- *      `MaskedValue<T>` (default mask is `{ kind: "full", classification:
- *      "pii" }`).
- *
- * Snapshot semantics: each `assertType<T>(value)` line is a compile-
- * time check via `satisfies`. If `tsc` rejects the line, the test
- * file fails to typecheck and the test runner reports the
- * failure — exactly the gate the proposal §11 line 734 asks for.
+ * Logical masked fields materialize as `MaskedValue<T>`, descriptor-selected
+ * raw storage stays out of `Row<S>`, and default masking applies to encrypted
+ * fields without an explicit mask declaration.
  */
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "@zeroship/db";
-// **P9 PR 2** — `MaskedValue` is a type-only `declare class` (native
-// v8_class minted Rust-side). Masked-column slots below are filled with
-// `as unknown as MaskedValue<string>` casts; the load-bearing check is
-// that `tsc` accepts them (i.e. `Row<S>` infers `MaskedValue<T>`).
+// `MaskedValue` is a type-only declaration for the native V8 class.
 import type { Row, RowInput, MaskedValue } from "@zeroship/db";
 
 // Helper: compile-time assertion that `T` matches the actual value's
@@ -41,16 +20,16 @@ function assertType<T>(_v: T): void {
   /* noop */
 }
 
-describe("P5.5 PR 8 — Row<S> shape under masking", () => {
+describe("Row<S> shape under masking", () => {
   test("masked encrypted column materialises as MaskedValue<string>", () => {
     const usersSchema = {
       name: t.string().required(),
       ssn: t
-        .encrypted({ wraps: t.string() })
+        .encrypted({ of: t.string() })
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
     // The masked column is a MaskedValue<string>, NOT a bare string.
     // The build-tier `tsc` invariant: assigning a bare string to
@@ -75,11 +54,11 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
   test("the raw column is NOT part of Row<S>", () => {
     const usersSchema = {
       ssn: t
-        .encrypted({ wraps: t.string() })
+        .encrypted({ of: t.string() })
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
     // A masked field owns a second physical column, `__zs_raw__ssn`,
     // holding the real value. It must NOT be inferred into the row type:
@@ -87,10 +66,6 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     // against, so a column present at runtime but absent from the type
     // is invisible to that review.
     //
-    // This test used to exclude `"ssn_masked"`, which was the second
-    // column's name BEFORE the storage flip. After the flip no
-    // implementation can produce that key, so the assertion held for
-    // every possible outcome and proved nothing.
     type Keys = keyof UsersRow;
     type WithoutRaw = Exclude<Keys, "__zs_raw__ssn">;
 
@@ -111,9 +86,9 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
 
   test("encrypted column WITHOUT explicit .mask() still infers as MaskedValue (default full mask)", () => {
     const usersSchema = {
-      email: t.encrypted({ wraps: t.string() }).required(),
+      email: t.encrypted({ of: t.string() }).required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
 
     // No explicit .mask() — the platform's default-mask rule
     // (kind: "full", classification: "pii") applies and the type
@@ -137,15 +112,15 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
       // Explicit opt-out — column is encrypted at rest but the
       // wrapper is NOT applied on reads. This is the
       // intentional "I accept the risk" path.
-      legacy: t
-        .encrypted({ wraps: t.string() })
+      plaintext: t
+        .encrypted({ of: t.string() })
         .mask({ kind: "none", classification: "internal" })
         .required(),
     };
-    type UsersRow = Row<typeof usersSchema>;
+    type UsersRow = Row<typeof usersSchema & typeof generatedSchema>;
     const row: UsersRow = {
       id: "usr_001",
-      legacy: "raw",
+      plaintext: "raw",
       created_at: 0,
       updated_at: 0,
       created_by: null,
@@ -153,22 +128,20 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
       version: 1,
       deleted_at: null,
     };
-    // .legacy is bare string (no MaskedValue wrap).
-    assertType<string>(row.legacy);
-    assert.equal(row.legacy, "raw");
+    assertType<string>(row.plaintext);
+    assert.equal(row.plaintext, "raw");
   });
 
   test("RowInput<S> excludes auto-fields but keeps mask-wrap on inputs (creator writes the bare value)", () => {
-    // Input shape — `id`, `created_at`, `updated_at` are auto-generated
-    // and excluded from RowInput. The masked field appears in
-    // RowInput as the same MaskedValue<T>-typed slot inferred from
-    // the field definition; in practice, creators pass the bare
-    // plaintext on insert and the platform's mask pass computes the
-    // sibling before write.
+    // Generator-supplied fields are excluded from RowInput. The masked field
+    // appears in RowInput as the
+    // same MaskedValue<T>-typed slot inferred from the field definition;
+    // creators pass plaintext and the ORM maps it through descriptor-selected
+    // storage before writing.
     const usersSchema = {
       name: t.string().required(),
       ssn: t
-        .encrypted({ wraps: t.string() })
+        .encrypted({ of: t.string() })
         .mask({ kind: "last4", classification: "spi" })
         .required(),
     };
@@ -176,10 +149,8 @@ describe("P5.5 PR 8 — Row<S> shape under masking", () => {
     // `name` is bare string in the input. `id` is forbidden.
     const input: Input = {
       name: "Alice",
-      // Cast through unknown — at runtime the platform accepts the
-      // bare plaintext; the type slot mirrors the read-side mask
-      // shape (see PR 1 README: input/output symmetry through the
-      // single inferred type).
+      // Runtime accepts plaintext while the declared input slot mirrors the
+      // masked field type.
       ssn: "123-45-6789" as unknown as MaskedValue<string>,
     };
     assertType<string>(input.name);

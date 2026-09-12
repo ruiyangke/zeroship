@@ -179,7 +179,11 @@ async fn a_role_and_an_extension_fold_to_what_live_introspection_reports() {
             &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+        let guard_cfg = GuardConfig::from_policy(
+            policy.clone(),
+            zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+        );
         let base = fold_ops(
             zeroship_migrate::shipping_vendors(),
             &[],
@@ -358,7 +362,7 @@ async fn role_attributes_round_trip_and_drift_is_named() {
         .to_string();
 
         let author = IrAuthor::new(zeroship_migrate::shipping_vendors(), &cfg.project_schema, OWNER, &zeroship_migrate_postgres::DIALECT, &policy);
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT, &cfg.project_schema);
         let base = fold_ops(zeroship_migrate::shipping_vendors(), &[], &zeroship_migrate_postgres::DIALECT, &cfg.project_schema, &policy)
             .map_err(|error| format!("fold the empty base: {error}"))?;
         let live = LiveSchema::from_catalog_snapshot(base, OWNER);
@@ -538,7 +542,11 @@ async fn drop_owned_by_removes_the_role_s_objects_and_spares_everyone_else_s() {
             &zeroship_migrate_postgres::DIALECT,
             &policy,
         );
-        let guard_cfg = GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+        let guard_cfg = GuardConfig::from_policy(
+            policy.clone(),
+            zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
+        );
         let base = fold_ops(
             zeroship_migrate::shipping_vendors(),
             &[],
@@ -696,8 +704,11 @@ async fn drop_role_succeeds_refuses_while_owning_and_no_ops_under_if_exists() {
                     &zeroship_migrate_postgres::DIALECT,
                     &policy,
                 );
-                let guard_cfg =
-                    GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+                let guard_cfg = GuardConfig::from_policy(
+                    policy.clone(),
+                    zeroship_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
+                );
                 let base = fold_ops(
                     zeroship_migrate::shipping_vendors(),
                     &[],
@@ -896,8 +907,11 @@ async fn grant_and_revoke_move_exactly_the_named_privilege() {
                     &zeroship_migrate_postgres::DIALECT,
                     &policy,
                 );
-                let guard_cfg =
-                    GuardConfig::from_policy(policy.clone(), zeroship_migrate_postgres::DIALECT);
+                let guard_cfg = GuardConfig::from_policy(
+                    policy.clone(),
+                    zeroship_migrate_postgres::DIALECT,
+                    &cfg.project_schema,
+                );
                 let base = fold_ops(
                     zeroship_migrate::shipping_vendors(),
                     &[],

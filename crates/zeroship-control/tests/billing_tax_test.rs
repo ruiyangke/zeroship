@@ -376,19 +376,6 @@ async fn make_organization(state: &AppState, label: &str) -> String {
     organization_id
 }
 
-async fn make_user(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, $2) RETURNING id",
-            &[&email, &"Tax Creator".to_string()],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
-}
-
 async fn ensure_organization_billing(state: &AppState, organization: &str) {
     state
         .control_pg
@@ -986,7 +973,7 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
         .first()
         .map(|r| r.get::<_, String>("plan_id"));
     zeroship_control::proration::record_plan_change_tx(
-        &fx.state.registry, &app, &organization, from_plan.as_deref(), &plan_b, mid,
+        &fx.state.registry, &app, organization, from_plan.as_deref(), &plan_b, mid,
     )
     .await
     .expect("record plan change");

@@ -1,25 +1,14 @@
-//! Vendored typed-id subset (base36/UUIDv7 id machinery for `MigrationId`).
+//! Typed-id codec used by [`crate::migration::MigrationId`].
 //!
-//! Copied byte-identically from the upstream typed-id module so this crate can be
-//! embedded as a lean library without a runtime dependency on the upstream core.
-//! The base36/uuid encoding is a WIRE CONTRACT, and nothing in THIS repository can
-//! check it: the upstream core it was copied from is not here, so there is no second
-//! copy to compare against. An earlier version of this note promised a
-//! `tests/core_id_parity.rs` guard "while both crates coexist in-tree" - that
-//! condition is false where it was written.
-//!
-//! The guard lives where the condition holds. zeroship vendors this crate alongside
-//! its own `crates/zeroship-core/src/typed_id.rs`, so both copies coexist there, and its
-//! `crates/zeroship-migrate-server/tests/typed_id_parity.rs` cross-decodes the two encodings.
-//! Reported agreeing across a sweep that includes the all-zero, all-ones and
-//! low-bit edges, with the harness proven to fail on a planted alphabet swap.
-//!
-//! Does NOT cover the parse/validate prefix helpers - that guard is encode/decode
-//! only, and nothing covers the rest on either side.
+//! Keep this leaf implementation byte-compatible with `zeroship-id`; the
+//! migration-server parity test cross-encodes and decodes both implementations.
 
 /// Base36 alphabet - sorted so lexicographic order matches numeric order
 /// for the high bits (timestamp), preserving `UUIDv7` sort order.
 const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+
+/// Width of a base36-encoded UUID.
+pub const BODY_LEN: usize = 25;
 
 /// Reverse lookup table: ASCII byte -> base36 digit (255 = invalid)
 const fn build_decode_table() -> [u8; 128] {
@@ -34,14 +23,14 @@ const fn build_decode_table() -> [u8; 128] {
 
 const DECODE: [u8; 128] = build_decode_table();
 
-/// Encode 128-bit UUID bytes to 22-char base36 string.
+/// Encode UUID bytes as fixed-width base36.
 #[must_use]
 pub fn uuid_to_base36(uuid: &uuid::Uuid) -> String {
     let bytes = uuid.as_bytes();
-    // Treat as a 128-bit big-endian integer and repeatedly divide by 62
+    // Treat the UUID as one big-endian integer.
     let mut n = u128::from_be_bytes(*bytes);
-    let mut buf = [0u8; 25];
-    for i in (0..25).rev() {
+    let mut buf = [0u8; BODY_LEN];
+    for i in (0..BODY_LEN).rev() {
         buf[i] = BASE36[(n % 36) as usize];
         n /= 36;
     }
@@ -49,9 +38,9 @@ pub fn uuid_to_base36(uuid: &uuid::Uuid) -> String {
 }
 
 /// Encode an arbitrary byte slice as a base36 string by treating it as a
-/// big-endian integer and repeatedly dividing by 62.
+/// big-endian integer.
 ///
-/// Unlike [`uuid_to_base36`] (fixed 22-char width for a 128-bit UUID), this
+/// Unlike [`uuid_to_base36`], this
 /// handles inputs of any length, so it can encode an HMAC tag. The output
 /// length is not fixed; callers that want a bounded id should truncate the
 /// returned string (e.g. the pairwise-subject derivation takes the first 20
@@ -61,7 +50,7 @@ pub fn base36_encode_bytes(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
     }
-    // Big-endian byte-array long division by 62, collecting remainders.
+    // Big-endian byte-array long division, collecting remainders.
     let mut digits = bytes.to_vec();
     let mut out = Vec::new();
     // Strip leading zero bytes only after the loop preserves value; we loop
@@ -87,10 +76,10 @@ pub fn base36_encode_bytes(bytes: &[u8]) -> String {
     String::from_utf8(out).expect("base36 chars are valid UTF-8")
 }
 
-/// Decode 22-char base36 string to UUID bytes.
+/// Decode a fixed-width base36 string to UUID bytes.
 pub fn base36_to_uuid(s: &str) -> Result<uuid::Uuid, String> {
-    if s.len() != 25 {
-        return Err(format!("expected 25 base36 chars, got {}", s.len()));
+    if s.len() != BODY_LEN {
+        return Err(format!("expected {BODY_LEN} base36 chars, got {}", s.len()));
     }
     let mut n: u128 = 0;
     for &b in s.as_bytes() {

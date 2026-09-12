@@ -356,8 +356,8 @@ export interface CollectionDescriptorDto {
  * One field of a collection - the `FieldDescriptor` mirror, in BOTH directions.
  *
  * Mirrors the `@zeroship/db` wire `FieldDef` shape the manual evaluator produces.
- * The common facets are typed scalars; the rich sub-object facets (`encrypted`,
- * `mask`, `generated`, `identity`) cross as REAL JS values ([`JsonValue`]) and
+ * The common facets are typed scalars; the rich sub-object facets
+ * `mask`, `generated`, and `identity` cross as REAL JS values ([`JsonValue`]) and
  * deserialize into the engine `FieldDescriptor` verbatim.
  *
  * It was the MANUAL SOURCE only, and the four fields added since say what that cost:
@@ -416,7 +416,7 @@ export interface FieldDescriptorDto {
   max?: number
   /** Enum membership (string or numeric members). */
   enum?: Array<JsonValue>
-  /** A legacy internal `<prefix>_<22 base62 UUIDv7>` platform-ID prefix. */
+  /** An internal `<prefix>_<25 base36 UUIDv7>` platform-ID prefix. */
   idPrefix?: string
   /** A `t.vector(dims, ...)` dimensionality. */
   vectorDims?: number
@@ -457,8 +457,8 @@ export interface FieldDescriptorDto {
   vectorMetric?: string
   /** `t.string({ caseSensitive: false })` - only `Some(false)` is meaningful. */
   caseSensitive?: boolean
-  /** The `t.encrypted({ mode, keyId, wraps })` sub-object (verbatim). */
-  encrypted?: JsonValue
+  /** Whether the field uses encrypted storage; `type` describes its plaintext. */
+  encrypted?: boolean
   /** The `.mask({ kind, classification })` sub-object (verbatim). */
   mask?: JsonValue
   /** A generated/computed column facet (structured IR, never raw SQL). */

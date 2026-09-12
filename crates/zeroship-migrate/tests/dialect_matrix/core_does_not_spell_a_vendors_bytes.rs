@@ -509,7 +509,7 @@ fn the_membership_rule_admits_the_engine_and_nothing_that_merely_rhymes() {
         // `-` separator, so the name alone cannot exclude it and the list must.
         "zeroship-migrate-server",
         "zeroship-schema",
-        "zeroship-plugin-db",
+        "zeroship-data-v8",
         "zeroship-runtime",
     ] {
         assert!(

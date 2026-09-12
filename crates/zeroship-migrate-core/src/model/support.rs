@@ -203,7 +203,6 @@ pub enum Feature {
     TableLevelCheck,
     CompositeForeignKey,
     ForeignKeyNoLocalColumn,
-    NonIdForeignKey,
     ConstraintNotValid,
     ExclusionConstraint,
     AlterColumnUsing,
@@ -245,7 +244,6 @@ impl Feature {
             Self::TableLevelCheck => FeatureSupportKey::TableLevelCheckExpression,
             Self::CompositeForeignKey => FeatureSupportKey::CompositeForeignKey,
             Self::ForeignKeyNoLocalColumn => FeatureSupportKey::ForeignKeyNoLocalColumn,
-            Self::NonIdForeignKey => FeatureSupportKey::NonIdForeignKey,
             Self::ConstraintNotValid => FeatureSupportKey::ConstraintNotValid,
             Self::ExclusionConstraint => FeatureSupportKey::ExclusionConstraint,
             Self::AlterColumnUsing => FeatureSupportKey::AlterColumnUsing,
@@ -375,7 +373,6 @@ pub(crate) const CREATE_TABLE_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::TableLevelForeignKey, RenderMode::Offline),
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, RenderMode::Offline),
     FeatureSupport::new(Feature::CompositeForeignKey, RenderMode::Offline),
-    FeatureSupport::new(Feature::NonIdForeignKey, RenderMode::Offline),
     FeatureSupport::new(Feature::TableLevelUnique, RenderMode::Offline),
     FeatureSupport::new(Feature::ExclusionConstraint, RenderMode::Offline),
     FeatureSupport::new(Feature::ExpressionIndex, RenderMode::Offline),
@@ -426,7 +423,6 @@ pub(crate) const ADD_CONSTRAINT_FEATURES: &[FeatureSupport] = &[
     FeatureSupport::new(Feature::ExistenceGuardProbe, RenderMode::LiveResolved),
     FeatureSupport::new(Feature::ForeignKeyNoLocalColumn, RenderMode::Offline),
     FeatureSupport::new(Feature::CompositeForeignKey, RenderMode::Offline),
-    FeatureSupport::new(Feature::NonIdForeignKey, RenderMode::Offline),
     FeatureSupport::new(Feature::ConstraintNotValid, RenderMode::Offline),
     FeatureSupport::new(Feature::TableLevelCheck, RenderMode::Offline),
     FeatureSupport::new(Feature::ExclusionConstraint, RenderMode::Offline),
@@ -531,7 +527,7 @@ mod tests {
              only as wide as this"
         );
         assert!(
-            declarations.len() >= 59,
+            declarations.len() >= 57,
             "only {} feature declarations were discovered; the scan below is only \
              as wide as this set",
             declarations.len()

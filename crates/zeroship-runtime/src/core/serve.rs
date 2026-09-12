@@ -1302,7 +1302,7 @@ async fn handle_websocket_upgrade(
     response_headers: &[(String, String)],
     request_headers: &[(String, String)],
     runtime: &Runtime,
-    mut ws_pending: Vec<u8>,
+    ws_pending: Vec<u8>,
 ) -> bool {
     // Find the Sec-WebSocket-Key from request headers
     let ws_key = request_headers

@@ -149,7 +149,7 @@ async fn transport_of(url: &str) -> Result<bool, Error> {
             return Err(e);
         }
     };
-    let client = pool.get().await?;
+    let client = pool.acquire().await?;
     let (ssl, version) = server_reports_ssl(&client).await;
     if ssl {
         assert!(

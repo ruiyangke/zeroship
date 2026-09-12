@@ -2,12 +2,12 @@
 #
 # zeroship platform image - builds all service binaries:
 #   zeroship-control, zeroship-gate, zeroship-worker, zeroship-auth,
-#   zeroship (CLI), zeroship-migrate-server (the creator migration service).
+#   zeroship (CLI), zeroship-migrate-server, zeroship-data-cdc-server.
 #
 # THE PLATFORM MIGRATION ONE-SHOT IS NO LONGER A RUST BINARY IN THIS IMAGE.
 # `zeroship-platform-migrate` was deleted on 2026-08-28; the platform schema is
 # applied by the general `zero-migrate` CLI, which is a NODE program. It cannot
-# ship in the `runtime` stage: that stage is ubuntu:24.04 plus six static
+# ship in the `runtime` stage: that stage contains the native service
 # binaries and deliberately carries no Node, and adding Node there would put a
 # JavaScript runtime into the control, gateway, worker and auth containers, none
 # of which migrate anything. So the one-shot gets its OWN stage (`migrate`,
@@ -238,7 +238,8 @@ RUN cargo build --release \
     -p zeroship-worker \
     -p zeroship-auth \
     -p zeroship-cli \
-    -p zeroship-migrate-server
+    -p zeroship-migrate-server \
+    -p zeroship-data-cdc-server
 
 # ---------------------------------------------------------------------------
 # Stage 3 - runtime image.
@@ -250,6 +251,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /build/target/release/zeroship-control /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-gate /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-worker /usr/local/bin/
+COPY --from=builder /build/target/release/zeroship-data-cdc-server /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship-auth /usr/local/bin/
 COPY --from=builder /build/target/release/zeroship /usr/local/bin/
 # The CREATOR migration service. Distinct from the platform one-shot above:
@@ -319,20 +321,14 @@ COPY db/migrations-ts /db/migrations-ts
 # `/app/packages/zero-migrate` because the repo-relative layout is preserved; and
 # `db/migrations-ts/package.json` supplies `"type": "module"`.
 #
-# MEASURED 2026-08-28, and this is the first time this target has ever been
-# built. `docker build --target migrate`, then the image run against an empty
-# database on a fresh PostgreSQL 17.11: 35 of 35 files applied and exit 0,
-# producing 104 tables, 63 functions and the schemas `public`, `service_authn`,
-# `zeroship`, `zeroship_migrations` - byte-identical counts to the host apply. An
-# immediate second run of the image reported `"applied":[]` for all 35 and exited
-# 0. `tests/platform_migration_corpus_gate.sh --with-container` is that run.
+# `cargo xtask test migrations` verifies the host CLI against an owned database.
+# It does not build or run this image; image packaging needs a deployment smoke
+# test. The `--version` step below checks that the packaged CLI can load.
 #
 # Getting here took three build failures that no one had seen, because nothing had
 # ever built this: the missing Cargo workspace root, the addon's missing crate
 # closure, and `libs/`. See the `sdks` stage.
 #
-# The `--version` line below still earns its keep - it turns a resolution mistake
-# into a build failure - but it is no longer the only thing behind this target.
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm-slim AS migrate
 WORKDIR /app

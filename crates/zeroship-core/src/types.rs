@@ -3,8 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use zeroship_bundle::Manifest;
 
-use crate::app_id::AppId;
-use crate::user_id::UserId;
+use crate::{AppId, UserId};
 
 /// A registered application record.
 ///
@@ -297,10 +296,7 @@ pub struct GatewayPrincipalLifecycle {
 impl GatewayPrincipalLifecycle {
     #[must_use]
     pub fn blocks_authentication(&self) -> bool {
-        self.disabled
-            || self.anonymized
-            || self.deletion_requested
-            || self.deletion_scheduled
+        self.disabled || self.anonymized || self.deletion_requested || self.deletion_scheduled
     }
 
     #[must_use]
@@ -397,15 +393,26 @@ pub struct AppUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ControlEvent {
-    Deploy { app_id: AppId, hash: String },
-    Delete { app_id: AppId },
-    PlanChange { app_id: AppId, plan_id: String },
+    Deploy {
+        app_id: AppId,
+        hash: String,
+    },
+    Delete {
+        app_id: AppId,
+    },
+    PlanChange {
+        app_id: AppId,
+        plan_id: String,
+    },
     /// A spend-state transition for an app, emitted by the spend-reconcile
     /// cron on each tick that changes an app's [`SpendState`]. Per decision
     /// D1 this is for the audit log / future SSE fan-out ONLY — there is no
     /// live `ControlEvent` delivery path today; enforcement rides the pulled
     /// [`RouteEntry::spend_state`], not this event.
-    SpendState { app_id: AppId, state: SpendState },
+    SpendState {
+        app_id: AppId,
+        state: SpendState,
+    },
 }
 
 /// Canonical errors for zeroship-common operations.

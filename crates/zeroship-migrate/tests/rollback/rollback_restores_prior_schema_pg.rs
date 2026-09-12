@@ -130,6 +130,7 @@ async fn an_engine_rendered_down_restores_the_catalog_on_postgres() {
         let guard_cfg = GuardConfig::from_policy(
             support::no_inject(&cfg.project_schema),
             zeroship_migrate_postgres::DIALECT,
+            &cfg.project_schema,
         );
         let registry: BTreeMap<String, String> = [("t1".to_string(), OWNER.to_string())]
             .into_iter()

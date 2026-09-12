@@ -125,7 +125,7 @@ async fn stream_one_insert(logical: &str, publication: &str) -> Result<PgOutputM
 }
 
 async fn read_first_insert(slot: &str, publication: &str) -> Result<PgOutputMessage, String> {
-    let mut replication = compio_postgres::replication::connect_replication(
+    let replication = compio_postgres::replication::connect_replication(
         common::suite_tls(),
         &common::replication_config("cpg_publication_names"),
     )

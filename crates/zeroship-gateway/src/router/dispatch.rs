@@ -2741,7 +2741,7 @@ async fn handle_auth_callback(
             return render_callback_error("session create failed");
         }
     };
-    let mut conn = match pool.get().await {
+    let mut conn = match pool.acquire().await {
         Ok(c) => c,
         Err(e) => {
             tracing::error!(error = %e, "gateway: pg pool checkout failed (session create)");
@@ -3677,8 +3677,8 @@ mod tests {
         assert_eq!(json["code"], "SPEND_LIMIT");
     }
 
-    /// The exploit `tests/e2e_gateway_workflow_advance_authz.sh` drives, at the
-    /// handler.
+    /// The unauthorized request exercised by
+    /// `crates/zeroship-control/tests/workflow_advance_authz.rs`, at the handler.
     ///
     /// A caller with a reachable Host, a real `runId` and a real `appId`, and NO
     /// credential. Until the caller check landed this reached the forwarder and
@@ -6287,12 +6287,8 @@ mod tests {
     /// A route with one `idempotent: true` mutation at wire-id
     /// `todos.add`, reachable at `/__zeroship/v1/todos.add`. This is the
     /// only resource shape that reaches the step-9 idempotency capture.
-    fn idempotent_mutation_route() -> zeroship_core::types::RouteEntry {
-        idempotent_mutation_route_with_oauth(None)
-    }
-
-    /// As [`idempotent_mutation_route`], but with the app's OAuth client id
-    /// set. That id is what decides which gateway-originated response the
+    ///
+    /// The app's OAuth client id decides which gateway-originated response the
     /// worker-401-on-an-HTML-navigation branch emits: `Some` → the 302 into
     /// the OP (`start_oidc_redirect`), `None` → the 503
     /// `client_not_provisioned`.

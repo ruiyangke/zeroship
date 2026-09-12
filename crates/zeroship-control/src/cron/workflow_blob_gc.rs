@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use compio_postgres::{Client, GenericClient};
-use zeroship_core::app_id::AppId;
-use zeroship_plugin_workflow::store::pg::WorkflowTables;
+use zeroship_core::AppId;
+use zeroship_workflow::store::pg::WorkflowTables;
 
 use crate::cron::workflow_engine::SweepCoverage;
 use crate::registry::RegistryError;
@@ -66,7 +66,9 @@ pub async fn run_orphan_sweep(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control workflow_blob_orphan_gc cron starting");
     loop {
         match tick_orphan_sweep(&state).await {
-            Ok(n) if n > 0 => tracing::info!(deleted = n, "workflow_blob_orphan_gc tick deleted blobs"),
+            Ok(n) if n > 0 => {
+                tracing::info!(deleted = n, "workflow_blob_orphan_gc tick deleted blobs")
+            }
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow_blob_orphan_gc tick failed"),
         }
@@ -120,7 +122,7 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<RefSweepStats, RegistryE
             .query(
                 &super::workflow_engine::journal_sql(
                     &tables,
-            "SELECT b.hash \
+                    "SELECT b.hash \
                FROM zeroship.workflow_blobs b \
               WHERE b.refcount = 0 \
                 AND b.last_referenced_at <= $1 \
@@ -336,7 +338,7 @@ where
         .query(
             &super::workflow_engine::journal_sql(
                 tables,
-            "SELECT b.hash \
+                "SELECT b.hash \
                FROM zeroship.workflow_blobs b \
               WHERE b.hash = $1 \
                 AND b.refcount = 0 \
@@ -387,8 +389,8 @@ where
     // the race guard is the `FOR UPDATE SKIP LOCKED` above, not this count: a
     // second sweep is skipped past the locked row and returns above, and THIS
     // app taking a fresh reference is an `INSERT ... ON CONFLICT DO UPDATE SET
-    // refcount = refcount + 1` on the very row we hold (plugin-workflow
-    // store/pg.rs), so it blocks until we commit.
+    // refcount = refcount + 1` on the very row we hold (zeroship-workflow
+    // src/store/pg.rs), so it blocks until we commit.
     //
     // What that lock does NOT cover, and did not cover before this reordering
     // either: a DIFFERENT app taking its first reference to the same hash

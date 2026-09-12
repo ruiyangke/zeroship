@@ -534,7 +534,7 @@ async fn an_unchanged_decimal_table_does_not_phantom_diff_into_a_rebuild() {
                 SQLITE,
             ),
             &[],
-            &GuardConfig::from_policy(policy.clone(), SQLITE),
+            &GuardConfig::from_policy(policy.clone(), SQLITE, PROJECT),
             &policy,
         )
         .expect("the declarative plan is authored");

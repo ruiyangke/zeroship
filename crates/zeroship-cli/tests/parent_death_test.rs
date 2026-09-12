@@ -182,7 +182,7 @@ fn assert_booted(s: &Spawned) {
     let dir = s.dir.clone();
     let up = wait_until(Duration::from_secs(30), || {
         std::fs::read_to_string(dir.join("runtime.log"))
-            .map(|l| l.contains("kv plugin registered"))
+            .map(|l| l.contains("kv binding registered"))
             .unwrap_or(false)
     });
     assert!(
@@ -298,7 +298,7 @@ fn a_runtime_whose_recorded_parent_is_not_its_parent_exits_at_once() {
          'never started'. Log:\n{log}"
     );
     assert!(
-        !log.contains("kv plugin registered"),
+        !log.contains("kv binding registered"),
         "the runtime opened its state dir before deciding to exit - the guard must be armed \
          before anything is held. Log:\n{log}"
     );

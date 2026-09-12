@@ -69,7 +69,6 @@ struct SingleResult {
     total_ms: f64,
     chunk_count: usize,
     chunks_per_sec: f64,
-    chunk_latencies_us: Vec<f64>,
     p50_ms: f64,
     p99_ms: f64,
 }
@@ -123,7 +122,6 @@ fn bench_single_stream(url: &ParsedUrl) -> SingleResult {
         total_ms,
         chunk_count,
         chunks_per_sec: cps,
-        chunk_latencies_us,
         p50_ms: p50 / 1000.0,
         p99_ms: p99 / 1000.0,
     }

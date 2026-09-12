@@ -104,10 +104,8 @@ function makeMockNative(options?: { ready?: (name: string) => Promise<void> }) {
   const calls = { find: 0, openSubscription: 0, ready: 0 };
 
   const native = {
-    // P9 PR 3: native `transaction(callback)` orchestrator stub. The
-    // bootstrap wrapper bumps `_txDepth` before invoking this, so the
-    // callback (run synchronously here) sees the in-tx state that makes
-    // `db.live(...)` throw `LIVE_IN_TRANSACTION`.
+    // The bootstrap callback context makes db.live reject without sharing
+    // transaction state with sibling continuations.
     transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
     collection(name: string) {
       return {
@@ -376,6 +374,7 @@ describe("db.live — reactive query layer", () => {
     );
     let caught: unknown = null;
     const { error } = await db.transaction(async (_tx) => {
+      await Promise.resolve();
       try {
         db.live(() => db.todos.find({}));
       } catch (e) {
@@ -513,11 +512,7 @@ describe("db.live — reactive query layer", () => {
     // same as a real caller would.
     const { data: alice } = await db.users.insert({ name: "Alice" });
     if (!alice) throw new Error("insert(users) failed");
-    // `SystemFields.id` (src/types.ts) is a bare `string`, not
-    // parameterized per collection - only `t.ref(target)` fields carry
-    // the branded `Id<target>`. A freshly-read row's own id is
-    // genuinely a `users` id here; the cast supplies the brand the
-    // type layer has no way to infer on its own.
+    // The fixture declares an unbranded string key; the reference expects a users ID.
     const aliceId = alice.id as Id<"users">;
     await db.todos.insert({ userId: aliceId, title: "buy milk" });
 

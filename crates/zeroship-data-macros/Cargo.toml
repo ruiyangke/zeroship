@@ -1,0 +1,18 @@
+[package]
+name = "zeroship-data-macros"
+version = "0.1.0"
+edition = "2021"
+description = "Migration-derived Rust collection metadata and native ORM mappings"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+serde_json = { workspace = true }
+proc-macro-crate = "3.5"
+
+[lints]
+workspace = true

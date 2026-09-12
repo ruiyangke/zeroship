@@ -48,12 +48,17 @@
 // for the same pattern.
 export {};
 
+// Private bootstrap-module binding emitted by the Rust host. Creator globals
+// cannot turn a production runtime into a deferred dev entry.
+declare const __zsAllowDeferredSchemaInstall: boolean;
+declare const __zsInstallDbMaskPolicy: (
+  policy: Record<string, readonly string[]>,
+) => Promise<void>;
+
 declare const globalThis: {
   __zs_env?: () => { db?: unknown } | undefined;
-  // **P9 §8** — the capability-handle resolver the runtime installs.
-  // `runtime-entry` is the sole legitimate caller: it resolves the
-  // `__platform` handle for the mask-policy flush, then DELETES this
-  // global so no creator handler can reach it.
+  // The internal runtime bridge consumes this before creator evaluation.
+  // It remains declared here only for unconditional defensive cleanup.
   __zsDbPlatform?: (db: unknown) => unknown;
   // Schema-readiness promise, set here for the mask-policy flush and
   // awaited by the shared dispatcher (`dispatcher.ts`) before running any
@@ -72,6 +77,11 @@ declare const globalThis: {
 // v2 carries per-collection fields/options/indexes, each field additionally naming
 // the physical columns it occupies (`storage`) and its read-surface capabilities.
 const descriptor = globalThis.__zsRuntimeDescriptor;
+// Vite's dev entry captured the private platform resolver during evaluation
+// and owns installation after importing the creator module. Sealing here would
+// freeze the default policy before the app could declare its startup policy.
+const deferredInstall = __zsAllowDeferredSchemaInstall && globalThis.__zsDeferSchemaInstall === true;
+delete globalThis.__zsDeferSchemaInstall;
 const hasDescriptor =
   descriptor != null &&
   typeof descriptor === "object" &&
@@ -85,7 +95,7 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
     typeof (value as { collections?: unknown }).collections === "object" &&
     !Array.isArray((value as { collections?: unknown }).collections)
   ) {
-    const out: Record<string, unknown> = {};
+    const out = Object.create(null) as Record<string, unknown>;
     for (const [name, collection] of Object.entries(
       (value as { collections: Record<string, unknown> }).collections,
     )) {
@@ -118,7 +128,7 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
 // map. If the descriptor is present but not v2-shaped, throw: corrupt
 // descriptors must never degrade to schema-less boots.
 const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
-if (hasDescriptor && schema && typeof schema === "object") {
+if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
   // object. `__zs_env()` is the bootstrap-visible helper
   // (`crates/zeroship-runtime/src/core/init.rs::zs_env_callback`) that returns
@@ -140,14 +150,6 @@ if (hasDescriptor && schema && typeof schema === "object") {
       ) => { collections: unknown };
     };
     if (typeof sdk.installSchema === "function") {
-      // **P9 §8** — resolve the platform capability handle via the
-      // runtime resolver, BEFORE we delete the global below. The handle
-      // carries `setMaskPolicy`, which moved off `env.db`; the local
-      // reference keeps the flush working after the resolver is gone.
-      const plat = (typeof globalThis.__zsDbPlatform === "function" && envDb)
-        ? globalThis.__zsDbPlatform(envDb)
-        : undefined;
-
       // `installSchema` plants the Collection wrappers synchronously.
       sdk.installSchema(schema, envDb, {
         // **P5 S3** — the descriptor is the source of truth; _installSchemaInner
@@ -159,57 +161,24 @@ if (hasDescriptor && schema && typeof schema === "object") {
       // critical path. The shared dispatcher awaits it before the first
       // procedure runs.
       globalThis.__zsSchemaReady = (async () => {
-        // **P5.5 PR 5** — flush the pending mask policy (declared via
-        // `defineMaskPolicy()` at app top-level) through the native
-        // `setMaskPolicy` op. Single shot at boot — re-declares after
-        // this point do not propagate to the platform until the next
-        // worker cold start. A failure here rejects `__zsSchemaReady`, so
-        // a creator's typo in `defineMaskPolicy({...})` surfaces on the
-        // first dispatch (loud, not silent).
-        //
-        // **P9 §8** — `setMaskPolicy` moved off `env.db` to the
-        // `__platform` handle. Call it on `plat` (resolved above), not on
-        // `envDb`.
+        // Seal the app declaration before dispatch. Install an empty policy
+        // when none was declared so runtime code cannot add one later.
         const policyMod = await import("@zeroship/db/internal") as {
           _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
         };
         const pending = typeof policyMod._flushPendingMaskPolicy === "function"
           ? policyMod._flushPendingMaskPolicy()
           : null;
-        if (pending) {
-          const setMaskPolicy = (plat as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
-          if (typeof setMaskPolicy === "function") {
-            // Call via `.call(plat, ...)` so the v8_class brand check
-            // sees the right receiver.
-            await (setMaskPolicy as (
-              this: typeof plat,
-              p: Record<string, readonly string[]>,
-            ) => Promise<unknown>).call(plat, pending);
-          }
-        }
+        await __zsInstallDbMaskPolicy(pending ?? {});
       })();
     }
   }
 }
 
-// **P9 §8** — capability boundary close-out. The platform handle has
-// been used to start the mask flush; the resolver global is no longer
-// needed. Delete it so no creator `fetch` /
-// `rpc` handler — which runs only AFTER this module evaluation
-// completes — can call `globalThis.__zsDbPlatform(env.db)` to fish the
-// handle out of the private slot. The handle itself remains live (held
-// by `env.db`'s private symbol); only the JS-reachable resolver is
-// removed.
-//
-// Runs UNCONDITIONALLY (outside the `env.db` / schema guards):
-// the runtime installs `__zsDbPlatform` on every isolate, so it must be
-// cleared even on RPC-only / fetch-only apps that skipped the schema
-// install above. Idempotent: a no-op if the runtime never installed it
-// or a re-evaluation already cleared it.
+// The internal bridge already removes the resolver before creator evaluation
+// in production. Keep this unconditional cleanup for schema-less and dev boots.
 try {
   delete globalThis.__zsDbPlatform;
 } catch {
-  // A non-configurable global (shouldn't happen — the runtime installs
-  // it as a plain property) would throw in strict mode; swallow so the
-  // boot doesn't fail on the cleanup step.
+  // The runtime installs a configurable property; cleanup stays best-effort.
 }

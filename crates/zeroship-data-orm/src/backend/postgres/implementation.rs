@@ -1,0 +1,692 @@
+//! PostgreSQL adapter state and database operations.
+//!
+//! Composes the pool with catalog, key and extension state. The sibling
+//! `driver` module owns physical leases, `executor` applies authority, and
+//! `search` plans search operations. Schema creation belongs to migrations.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use zeroship_data_orm::error::{BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult};
+
+#[cfg(test)]
+use super::PgLockManager;
+use super::{pg_autocommit, pg_error};
+use zeroship_data_orm::storage::LockManager;
+
+/// PostgreSQL adapter backed by an owned compio pool.
+///
+/// Holds the local pool, keys and catalog state for the configured URL.
+/// The ORM connection factory constructs this backend on its compio thread.
+pub struct PostgresBackend {
+    pool: Rc<compio_postgres::Pool>,
+    /// Configured URL, retained for backend configuration accessors.
+    url: String,
+    session_authority: crate::connection::SessionAuthority,
+    /// Project encryption keys supplied by the trusted host.
+    key_store: zeroship_data_orm::encryption::KeyStore,
+    /// Cached pgvector extension presence probe.
+    ///
+    /// `None` before the first [`crate::search::Search::vector_search`] call;
+    /// `Some(true)` / `Some(false)`
+    /// after the first `SELECT 1 FROM pg_extension WHERE extname='vector'`
+    /// round-trip. The probe is per-backend (so per-isolate, since each
+    /// isolate carries its own `PostgresBackend` Rc) and stays cached
+    /// for the life of the backend — pgvector is provisioned at admin
+    /// time and never disappears mid-process. `RefCell` (not `Mutex`)
+    /// because every `PostgresBackend` is owned by a single
+    /// compio thread.
+    pub(super) pgvector_available: RefCell<Option<bool>>,
+    /// Cached PostGIS extension presence probe.
+    ///
+    /// Same shape and lifetime semantics as [`Self::pgvector_available`]:
+    /// `None` until the first `SpatialIndex::spatial_near` call probes
+    /// `pg_extension WHERE
+    /// extname='postgis'`; `Some(true)` / `Some(false)` after. Cached
+    /// for the life of the backend (PostGIS is provisioned at admin
+    /// time and stays present). Absence surfaces as
+    /// `DbError::Configuration { code: "postgis_extension_missing", … }`
+    /// from both entry points so the SDK can branch on `.code`.
+    pub(super) postgis_available: RefCell<Option<bool>>,
+}
+
+impl std::fmt::Debug for PostgresBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PostgresBackend").finish()
+    }
+}
+
+impl PostgresBackend {
+    /// Construct a backend from an initialized pool and host-supplied project keys.
+    pub fn new(
+        pool: Rc<compio_postgres::Pool>,
+        url: String,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
+    ) -> Self {
+        Self::new_with_session_authority(
+            pool,
+            url,
+            key_source,
+            crate::connection::SessionAuthority::PerAppRole,
+        )
+    }
+
+    fn new_with_session_authority(
+        pool: Rc<compio_postgres::Pool>,
+        url: String,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
+        session_authority: crate::connection::SessionAuthority,
+    ) -> Self {
+        Self {
+            pool,
+            url,
+            session_authority,
+            pgvector_available: RefCell::new(None),
+            postgis_available: RefCell::new(None),
+            key_store: zeroship_data_orm::encryption::KeyStore::new(key_source),
+        }
+    }
+
+    /// Connect a pool and wrap it, in one call.
+    ///
+    /// Pool construction stays in the PostgreSQL adapter so higher layers do
+    /// not expose the vendor pool type. The trusted host supplies project keys.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::config`] with code `db_connect_failed`, carrying the driver's
+    /// whole `source` chain. The chain walk is here rather than at the call site
+    /// because the root cause - `ECONNREFUSED`, a TLS handshake failure - is
+    /// otherwise hidden behind the driver's generic wrapper by the time a caller
+    /// sees it.
+    pub async fn connect(
+        url: &str,
+        max_size: usize,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
+    ) -> Result<Self, DbError> {
+        Self::connect_with_session_authority(
+            url,
+            max_size,
+            key_source,
+            crate::connection::SessionAuthority::PerAppRole,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_session_authority(
+        url: &str,
+        max_size: usize,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
+        session_authority: crate::connection::SessionAuthority,
+    ) -> Result<Self, DbError> {
+        let pool = compio_postgres::Pool::connect(url, max_size)
+            .await
+            .map_err(|e| {
+                let mut msg = format!("db: failed to connect: {e}");
+                let mut cur: &dyn std::error::Error = &e;
+                while let Some(src) = std::error::Error::source(cur) {
+                    msg.push_str(&format!(" - caused by: {src}"));
+                    cur = src;
+                }
+                DbError::config("db_connect_failed", msg)
+            })?;
+        Ok(Self::new_with_session_authority(
+            Rc::new(pool),
+            url.to_string(),
+            key_source,
+            session_authority,
+        ))
+    }
+
+    /// Borrow the inner pool. Provided for the few places that still
+    /// need the raw `Pool` (e.g. the v8_classes layer's `ensure_pool`
+    /// shim until the consumer migration completes).
+    pub fn pool(&self) -> &Rc<compio_postgres::Pool> {
+        &self.pool
+    }
+
+    /// Borrow the configured URL.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub(crate) fn session_authority(&self) -> crate::connection::SessionAuthority {
+        self.session_authority
+    }
+}
+
+/// Pooled execution under the authority fixed when this backend was opened.
+impl PostgresBackend {
+    /// Run `sql` and decode its rows as native values.
+    ///
+    /// # Errors
+    ///
+    /// Propagates pool checkout, session setup, statement and COMMIT failures.
+    pub(crate) async fn query_scoped_values(
+        &self,
+        schema: &crate::sql::SchemaName,
+        sql: &str,
+        params: &[crate::value::Value],
+    ) -> Result<Vec<crate::value::Value>, DbError> {
+        pg_autocommit::scoped_json(&self.pool, schema, self.session_authority, sql, params).await
+    }
+
+}
+
+// Runtime access to tenant data must use a roled session. Unrestricted fixture
+// access is available only to test hosts.
+
+#[cfg(test)]
+impl crate::tests::fixtures::DatabaseFixture for PostgresBackend {
+    type Client = compio_postgres::PoolConnection;
+
+    async fn fixture_session(&self, _app_id: &str) -> Result<Self::Client, DbError> {
+        self.pool
+            .acquire()
+            .await
+            .map_err(|error| pg_error::classify(&error))
+    }
+
+    async fn execute_fixture(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
+        let client = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| pg_error::classify(&e))?;
+        if params.is_empty() {
+            let tag = client
+                .batch_execute_reporting_tag(sql)
+                .await
+                .map_err(|e| pg_error::classify(&e))?;
+            Ok(tag
+                .and_then(|tag| tag.split_whitespace().last()?.parse().ok())
+                .unwrap_or(0))
+        } else {
+            super::params::execute(&client, sql, params).await
+        }
+    }
+
+    async fn execute_fixture_on(
+        &self,
+        client: &Self::Client,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<u64, DbError> {
+        super::params::execute(client, sql, params).await
+    }
+}
+
+impl LockManager for PostgresBackend {
+    type Client = compio_postgres::PoolConnection;
+    async fn acquire_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<(), DbError> {
+        // Two-key advisory lock on `(hashtext(key1)::int4,
+        // hashtext(key2)::int4)`. Session-scoped — held until the
+        // backend session ends or `release_advisory_lock` runs.
+        let sql = "SELECT pg_advisory_lock(hashtext($1)::int4, hashtext($2)::int4)";
+        client
+            .query_text_params(sql, &[key1, key2])
+            .await
+            .map_err(|e| {
+                let mut err = pg_error::classify(&e);
+                // Decorate the message so operators can see which key
+                // failed (the bare SQLSTATE message often doesn't show
+                // the hash inputs).
+                if let DbError::Internal { message }
+                | DbError::Transient { message }
+                | DbError::LockContention { message } = &mut err
+                {
+                    *message = format!("db: pg_advisory_lock({key1}, {key2}) failed: {message}");
+                }
+                err
+            })?;
+        Ok(())
+    }
+
+    async fn try_acquire_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<bool, DbError> {
+        let sql = "SELECT pg_try_advisory_lock(hashtext($1)::int4, hashtext($2)::int4) AS got";
+        let rows = client
+            .query_text_params(sql, &[key1, key2])
+            .await
+            .map_err(|e| pg_error::classify(&e))?;
+        let got: bool = rows
+            .first()
+            .map(|r| r.try_get::<_, bool>("got").unwrap_or(false))
+            .unwrap_or(false);
+        Ok(got)
+    }
+
+    async fn release_advisory_lock(
+        &self,
+        client: &Self::Client,
+        key1: &str,
+        key2: &str,
+    ) -> Result<(), DbError> {
+        let sql = "SELECT pg_advisory_unlock(hashtext($1)::int4, hashtext($2)::int4)";
+        client
+            .query_text_params(sql, &[key1, key2])
+            .await
+            .map_err(|e| pg_error::classify(&e))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl PgLockManager for PostgresBackend {
+    async fn acquire_pooled_client_for_lock(
+        &self,
+    ) -> Result<compio_postgres::PoolConnection, DbError> {
+        // Keep one typed pool-checkout error so operator log lines stay
+        // grep-able across test-helper callers.
+        self.pool.acquire().await.map_err(|e| DbError::Transient {
+            message: format!("db: failed to acquire orchestrator client: {e}"),
+        })
+    }
+}
+
+impl PostgresBackend {
+    /// Borrow this isolate's column-encryption key store.
+    ///
+    /// This is all that remains of the `EncryptedColumn` impl deleted on
+    /// 2026-09-02: key SOURCING was the only part of column encryption a
+    /// backend ever contributed, and PG stopped differing from SQLite on it
+    /// when the admin-schema `get_column_key` getter went on 2026-08-27. The
+    /// AEAD is `zeroship_data_orm::encryption::aead` for both, so the CRUD passes call it
+    /// directly rather than through a per-vendor trait.
+    pub fn key_store(&self) -> &zeroship_data_orm::encryption::KeyStore {
+        &self.key_store
+    }
+}
+
+// ===========================================================================
+#[cfg(test)]
+#[path = "snapshot_fixture.rs"]
+mod snapshot_fixture;
+
+/// Render SC-1's [`BeginIntent`] as PostgreSQL's `BEGIN` statement.
+///
+/// The dialect lives here, not in the protocol. PostgreSQL spells the ANSI
+/// levels verbatim, so this is a `format!` today; a backend that did not would
+/// still only have to change its own renderer.
+pub fn render_begin(intent: BeginIntent) -> String {
+    match intent {
+        BeginIntent::Default => "BEGIN".to_string(),
+        BeginIntent::Isolation(level) => {
+            format!("BEGIN ISOLATION LEVEL {}", level.ansi_name())
+        }
+    }
+}
+
+/// Apply the backend's immutable authority and transaction limits.
+pub(crate) async fn apply_session_authority(
+    client: &compio_postgres::Client,
+    schema: &crate::sql::SchemaName,
+    authority: crate::connection::SessionAuthority,
+) -> Result<(), zeroship_data_orm::error::SessionSetupError> {
+    let sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(schema, authority)
+        .map_err(zeroship_data_orm::error::SessionSetupError::failed)?;
+    client.simple_query(&sql).await.map_err(|e| {
+        let mut classified = match authority {
+            crate::connection::SessionAuthority::PerAppRole => {
+                crate::backend::postgres::pg_error::classify_pg_per_app_session_setup(&e, schema)
+            }
+            crate::connection::SessionAuthority::Connection => {
+                zeroship_data_orm::error::SessionSetupError::failed(
+                    crate::backend::postgres::pg_error::classify(&e),
+                )
+            }
+        };
+        zeroship_data_orm::error::prefix_message(
+            classified.error_mut(),
+            "db: transaction session setup: ",
+        );
+        classified
+    })?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SC-1 terminal projection
+// ---------------------------------------------------------------------------
+//
+// What PostgreSQL did, in the protocol's vocabulary. The vendor decides what
+// happened; SC-1 decides what it means. Both are pure functions of what the
+// server answered, so they are testable without a connection - which is the
+// whole reason they are functions rather than arms inlined in the driver.
+
+/// Project PostgreSQL's command tag onto SC-1's terminal result.
+///
+/// **L8: a `COMMIT` answered `ROLLBACK` is a FAILED transaction.** PostgreSQL
+/// replies with the tag `ROLLBACK` when the transaction is in the failed state,
+/// and a driver reading only "did it error" reports a discarded transaction as
+/// committed - which is what published change events for writes that never
+/// landed. The check is deliberately scoped to the `Commit` arm: `RELEASE`
+/// answers with the tag `RELEASE`, so "anything but COMMIT is a failure" would
+/// reject every healthy nested commit.
+pub fn terminal_from_tag(intent: SettleIntent, tag: Option<&str>) -> TerminalResult {
+    match (intent, tag) {
+        (SettleIntent::Commit, Some("ROLLBACK")) => TerminalResult::RolledBack,
+        (SettleIntent::Commit, _) => TerminalResult::Committed,
+        (SettleIntent::Rollback, _) => TerminalResult::RolledBack,
+    }
+}
+
+/// **Cleanup `ROLLBACK` first, health oracle second.**
+///
+/// `transaction_status()` returns `None` whenever a request is in flight, and a
+/// failed statement's trailing `ReadyForQuery` is not consumed when its `await`
+/// returns. Inside a poisoned block every data statement fails with `25P02`, so
+/// no retry makes the oracle answer - and `None` is indeterminate, which
+/// withdraws. Sampling on entry to `Cancelling` therefore destroys a healthy
+/// connection on **every** forced cleanup of a poisoned transaction.
+///
+/// `ROLLBACK` is accepted from a poisoned block, and answering it resolves the
+/// status byte. That is why the two lines below are in this order and must stay
+/// in it.
+pub async fn cleanup(client: &compio_postgres::Client) -> CleanupAck {
+    let rolled_back = client.batch_execute("ROLLBACK").await;
+    match client.transaction_status() {
+        Some(compio_postgres::TransactionStatus::Idle) => {
+            if rolled_back.is_ok() {
+                CleanupAck::RolledBack
+            } else {
+                // The statement errored but the session is provably out of any
+                // transaction block. Nothing is open; report the weaker proof.
+                CleanupAck::NoOpenTransaction
+            }
+        }
+        // Still in a block, or the oracle cannot say. Either way the cleanup is
+        // unproved.
+        Some(
+            compio_postgres::TransactionStatus::InTransaction
+            | compio_postgres::TransactionStatus::Failed,
+        )
+        | None => CleanupAck::Indeterminate,
+    }
+}
+
+/// Project the post-failure transaction status onto SC-1's terminal result.
+///
+/// Reached only when the terminal statement itself failed, where the tag never
+/// arrived. `Idle` means the server ended the transaction, so the outcome is
+/// known: rolled back. Anything else - still in a transaction, in a FAILED
+/// transaction, or a status that could not be read at all - is DBR-03
+/// territory: not knowing is not the same as knowing it ended, so it settles
+/// `Indeterminate` and the session is withdrawn.
+pub const fn terminal_from_status(
+    status: Option<compio_postgres::TransactionStatus>,
+) -> TerminalResult {
+    match status {
+        Some(compio_postgres::TransactionStatus::Idle) => TerminalResult::RolledBack,
+        _ => TerminalResult::Indeterminate,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for [`PostgresBackend`].
+    //!
+    //! ## What this layer can — and cannot — test in isolation
+    //!
+    //! `PostgresBackend` is, by design, a thin facade: every method in
+    //! its per-capability impls (`DatabaseFixture` / `LockManager` /
+    //! `Catalog`) either calls the `Rc<Pool>` directly or
+    //! forwards into [`crate::backend::postgres::diff`] / [`crate::backend::postgres::query`] free functions.
+    //! `impl Backend for PostgresBackend` is a one-line composition
+    //! marker -- every method body lives on a sub-trait impl. The only
+    //! non-async logic in this file is:
+    //!
+    //! * [`PostgresBackend::new`] — captures the `pool` + `url` fields.
+    //! * [`PostgresBackend::pool`] / [`PostgresBackend::url`] — getters.
+    //! * The [`std::fmt::Debug`] impl — deliberately opaque
+    //!   ("PostgresBackend").
+    //!
+    //! Even those need an `Rc<compio_postgres::Pool>` to construct, and
+    //! `Pool::connect` requires a live Postgres listener. There is no
+    //! stub / no-IO constructor. The async methods need both a Pool
+    //! AND a real `Client`; they're exercised by `crates/zeroship-data-orm/src/tests/postgres/schema.rs`.
+    //!
+    //! That leaves *compile-time* tests as the highest-signal coverage
+    //! we can add in `--lib`:
+    //!
+    //! 1. `PostgresBackend: Backend` — proves the trait impl is wired
+    //!    up so any future bound change to `Backend` (adding a method,
+    //!    tightening a lifetime, swapping an associated type) fails
+    //!    compilation here, not at a distant call site.
+    //! 2. Associated-type identities — pin `Client = compio_postgres::PoolConnection`
+    //!    and `LiveSchema = crate::sql::catalog::LiveSchema` so a refactor that
+    //!    accidentally swaps either is caught here.
+    //! 3. The `Backend: 'static` bound on the trait — re-asserted at
+    //!    the impl site.
+    //!
+    //! These are runtime no-ops (the bodies never execute) — they exist
+    //! so `cargo build -p zeroship-data-v8 --tests` fails fast on a
+    //! seam break.
+
+    use super::*;
+    use crate::backend::postgres::PgLockManager;
+    use crate::tests::fixtures::DatabaseFixture;
+    use zeroship_data_orm::protection::Catalog;
+    use zeroship_data_orm::storage::LockManager;
+
+    // The `Backend` conformance assertion is NOT here: that trait is the
+    // adapter's own marker, so both `impl Backend for PostgresBackend` and the
+    // assertion pinning it live in `zeroship-data-v8`.
+
+    /// Compile-time: each carved capability trait is impl'd directly on
+    /// `PostgresBackend` (not just visible through the
+    /// `Backend` super-bound). A regression that pulls one back onto
+    /// the omnibus trait or detaches the impl block fails here at
+    /// build time.
+    fn assert_postgres_backend_impls_sub_traits() {
+        fn impls_sql_executor<T: DatabaseFixture<Client = compio_postgres::PoolConnection>>() {}
+        fn impls_lock_manager<T: LockManager<Client = compio_postgres::PoolConnection>>() {}
+        fn impls_schema_introspect<T: Catalog>() {}
+        fn impls_pg_lock_manager<T: PgLockManager>() {}
+        impls_sql_executor::<PostgresBackend>();
+        impls_lock_manager::<PostgresBackend>();
+        impls_schema_introspect::<PostgresBackend>();
+        impls_pg_lock_manager::<PostgresBackend>();
+    }
+
+    // ---------------------------------------------------------------------
+    // PgDialect hook unit tests. ZST has no I/O -- each test
+    // is a string-compare against the expected SQL fragment.
+    // ---------------------------------------------------------------------
+
+    /// Compile-time: the associated types must remain wired to the
+    /// concrete `compio_postgres` / `crate::backend::postgres::diff` types. Swapping
+    /// either accidentally would silently change the `B::Client` /
+    /// `B::LiveSchema` shape every consumer sees. `LiveSchema` is owned
+    /// by [`Catalog`] -- the `Backend` super-bound
+    /// `Catalog<LiveSchema = LiveSchema>` re-anchors it so
+    /// `Backend<LiveSchema = …>` still resolves here.
+    // `assert_postgres_backend_assoc_types` is not here: it is stated in terms
+    // of `Backend`, which this crate cannot name. `zeroship-data-v8`'s
+    // `assert_associated_types_pinned` pins the same two associated types.
+    fn assert_postgres_backend_assoc_types() {}
+
+    /// Compile-time: the `Backend: 'static` bound carries through to
+    /// the impl. The per-isolate context relies on this to park
+    /// `Rc<PostgresBackend>` in a thread-local without explicit lifetime
+    /// gymnastics.
+    fn assert_postgres_backend_is_static() {
+        fn assert_static<T: 'static>() {}
+        assert_static::<PostgresBackend>();
+    }
+
+    // Runtime side: the only Pool-free observation we can make is on
+    // the `Debug` impl shape. It must remain opaque ("PostgresBackend")
+    // so accidentally adding a field that exposes the URL or pool
+    // internals via #[derive(Debug)] would be caught here.
+
+    #[test]
+    fn debug_impl_is_opaque_source_check() {
+        // We can't construct a real `PostgresBackend` without a Pool
+        // (Pool::connect needs a live Postgres listener). Instead we
+        // verify the *source* of the Debug impl: it must render a
+        // bare struct name with no fields, so the URL (which may
+        // carry credentials) is never printed.
+        //
+        // Regression guard: if someone switches to `#[derive(Debug)]`,
+        // the rendered string would include
+        // `pool: Rc { ... }, url: "postgres://..."` and break the
+        // assertion below.
+        let src = include_str!("implementation.rs");
+        let debug_block = src
+            .split("impl std::fmt::Debug for PostgresBackend")
+            .nth(1)
+            .expect("Debug impl present");
+        // First `}` that closes the impl block (the impl body has only
+        // one inner `fn fmt` whose own braces match).
+        let body_end = debug_block
+            .find("\n}\n")
+            .expect("Debug impl block has a closing brace");
+        let body = &debug_block[..body_end];
+        assert!(
+            body.contains("debug_struct(\"PostgresBackend\")"),
+            "Debug impl must use a `debug_struct(\"PostgresBackend\")` builder"
+        );
+        assert!(
+            body.contains(".finish()"),
+            "Debug impl must close with `.finish()` (no fields)"
+        );
+        assert!(
+            !body.contains(".field("),
+            "Debug impl must NOT expose internal fields — `url` may contain secrets"
+        );
+    }
+
+    #[test]
+    fn compile_time_trait_assertions_link() {
+        // Calling the asserter functions ensures rustc keeps them
+        // alive and the `unused` lints don't fire. The compile-time
+        // checks happen at type-check time on the function body
+        // regardless of whether we call them, but the explicit
+        // `_ = ...` documents intent and silences `dead_code`.
+        let _ = assert_postgres_backend_impls_sub_traits as fn();
+        let _ = assert_postgres_backend_assoc_types as fn();
+        let _ = assert_postgres_backend_is_static as fn();
+    }
+}
+#[cfg(test)]
+mod begin_render_tests {
+    use super::render_begin;
+    use zeroship_data_orm::error::{BeginIntent, IsolationLevel};
+
+    /// The dialect half of what `build_begin_sql` used to do in the engine.
+    /// Its validation half is now `IsolationLevel::parse`, tested in data-core -
+    /// the split is the point: a typo cannot reach here, because the only way
+    /// in is a variant.
+    #[test]
+    fn every_intent_renders_its_postgres_statement() {
+        assert_eq!(render_begin(BeginIntent::Default), "BEGIN");
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::Serializable)),
+            "BEGIN ISOLATION LEVEL SERIALIZABLE"
+        );
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::ReadCommitted)),
+            "BEGIN ISOLATION LEVEL READ COMMITTED"
+        );
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::ReadUncommitted)),
+            "BEGIN ISOLATION LEVEL READ UNCOMMITTED"
+        );
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::RepeatableRead)),
+            "BEGIN ISOLATION LEVEL REPEATABLE READ"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_projection_tests {
+    use super::{terminal_from_status, terminal_from_tag};
+    use compio_postgres::TransactionStatus;
+    use zeroship_data_orm::error::{SettleIntent, TerminalResult};
+
+    /// PostgreSQL answers `COMMIT` with the tag
+    /// `ROLLBACK` when the transaction is in the failed state, and reading that
+    /// as success reports discarded writes as durable.
+    #[test]
+    fn a_commit_answered_rollback_is_a_rollback() {
+        assert_eq!(
+            terminal_from_tag(SettleIntent::Commit, Some("ROLLBACK")),
+            TerminalResult::RolledBack
+        );
+    }
+
+    /// The control the L8 rule needs: a healthy commit differs from the case
+    /// above in the TAG ALONE, and must not be swept up by it.
+    #[test]
+    fn a_commit_answered_commit_is_a_commit() {
+        assert_eq!(
+            terminal_from_tag(SettleIntent::Commit, Some("COMMIT")),
+            TerminalResult::Committed
+        );
+    }
+
+    /// **The scoping that keeps nested commits working.** `RELEASE` answers with
+    /// the tag `RELEASE`, so a rule shaped "anything but COMMIT is a failure"
+    /// would reject every healthy savepoint release. Only the literal `ROLLBACK`
+    /// tag means failure.
+    #[test]
+    fn a_commit_answered_release_is_not_treated_as_failure() {
+        assert_eq!(
+            terminal_from_tag(SettleIntent::Commit, Some("RELEASE")),
+            TerminalResult::Committed
+        );
+        assert_eq!(
+            terminal_from_tag(SettleIntent::Commit, None),
+            TerminalResult::Committed
+        );
+    }
+
+    /// A rollback is a rollback whatever the server called it - including when
+    /// the server says `COMMIT`, which `outcome_error` then reports as a
+    /// `settle_result_mismatch` rather than quietly accepting.
+    #[test]
+    fn a_rollback_is_a_rollback_for_every_tag() {
+        for tag in [Some("ROLLBACK"), Some("COMMIT"), Some("RELEASE"), None] {
+            assert_eq!(
+                terminal_from_tag(SettleIntent::Rollback, tag),
+                TerminalResult::RolledBack,
+                "rollback misclassified for tag {tag:?}"
+            );
+        }
+    }
+
+    /// **DBR-03: not knowing is not the same as knowing it ended.** Only an
+    /// `Idle` status proves the server ended the transaction. Every other
+    /// reading - still in a transaction, in a failed transaction, or a status we
+    /// could not read at all - settles indeterminate and withdraws the session.
+    #[test]
+    fn only_idle_proves_a_failed_terminal_actually_rolled_back() {
+        assert_eq!(
+            terminal_from_status(Some(TransactionStatus::Idle)),
+            TerminalResult::RolledBack
+        );
+        assert_eq!(
+            terminal_from_status(Some(TransactionStatus::InTransaction)),
+            TerminalResult::Indeterminate
+        );
+        assert_eq!(
+            terminal_from_status(Some(TransactionStatus::Failed)),
+            TerminalResult::Indeterminate
+        );
+        assert_eq!(terminal_from_status(None), TerminalResult::Indeterminate);
+    }
+}
+
+#[cfg(test)]
+use crate::value::Value;

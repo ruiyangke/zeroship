@@ -3,23 +3,22 @@
 pub mod authz_fixture;
 pub mod stripe_mock;
 
+use std::sync::OnceLock;
 use std::sync::mpsc;
 use std::sync::{Arc, RwLock};
-use std::sync::OnceLock;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use ed25519_dalek::pkcs8::EncodePrivateKey;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use ed25519_dalek::SigningKey;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use ed25519_dalek::pkcs8::EncodePrivateKey;
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use ntex::web::{self, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
-use zeroship_core::app_id::AppId;
-use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
-use zeroship_core::user_id::UserId;
 use zeroship_control::Registry;
+use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
+use zeroship_core::{AppId, UserId};
 
 pub const PLATFORM_ISSUER: &str = "https://auth.zeroship.test/oauth2";
 const PLATFORM_KID: &str = "platform-control-test-kid";
@@ -83,7 +82,7 @@ pub async fn drain_pg() {
 /// named tests FAILING with a database error -- which is what a real regression
 /// looks like. It cost two people an evening.
 ///
-/// [`zeroship_testkit::live_db::require`] ends the process with one block
+/// [`platform_fixture::live_db::require`] ends the process with one block
 /// instead. See its header for why exiting beats panicking here.
 ///
 /// MEMOISED, so the probe costs one connection per test binary rather than one
@@ -92,16 +91,53 @@ pub fn require_control_db() -> String {
     static CHECKED: OnceLock<String> = OnceLock::new();
     CHECKED
         .get_or_init(|| {
-            // The pair is `zeroship_testkit::live_db::PLATFORM_SCHEMAS`, whose
+            // The pair is `platform_fixture::live_db::PLATFORM_SCHEMAS`, whose
             // doc comment carries what each half separates and why naming the
             // journal also asks whether the journal is CURRENT. It was spelled
             // out here, and in two other places, until it became one constant.
-            zeroship_testkit::live_db::require_configured(
+            platform_fixture::live_db::require_configured(
                 zeroship_core::config::test_database_url_opt(),
-                zeroship_testkit::live_db::PLATFORM_SCHEMAS,
+                platform_fixture::live_db::PLATFORM_SCHEMAS,
             )
         })
         .clone()
+}
+
+/// Refuse the calling test because a backend it requires is not there.
+///
+/// THE NON-DATABASE PEER OF [`require_control_db`], and deliberately the same
+/// vocabulary: a run with no backend is a REFUSAL - the statement that no
+/// verdict was reachable - not a skip, which cargo counts as a pass. Every
+/// caller below used to announce a skip instead, so a checkout without a
+/// broker, or without the durable-workflows harness, reported those targets
+/// green while running none of their subjects.
+///
+/// It PANICS rather than ending the process, which is where it parts company
+/// with `platform_fixture::live_db`. That module exits because an unmigrated
+/// database voids EVERY module in a target and hundreds of FAILED lines are
+/// the presentation it exists to remove. These backends void a handful of
+/// tests in a target whose other modules need nothing from them, so the
+/// per-test verdict is the informative one and the siblings must still run.
+///
+/// A refusal names the REMEDY, not just the gap: `remedy` is the command to
+/// run and what it does, so a first encounter needs no source dive.
+#[track_caller]
+pub fn refuse_missing_backend(backend: &str, problem: &str, remedy: &str) -> ! {
+    panic!(
+        "REFUSED: this test requires {backend}, and it is not there.\n\
+         \n\
+         \x20   backend   {backend}\n\
+         \x20   problem   {problem}\n\
+         \n\
+         \x20   NO VERDICT WAS REACHABLE. The subject never ran, so this\n\
+         \x20   failure says nothing about the code.\n\
+         \n\
+         \x20   {remedy}\n\
+         \n\
+         \x20   There is no environment variable that makes this a skip. A\n\
+         \x20   backend this suite cannot reach is a failed run, not a green\n\
+         \x20   one."
+    )
 }
 
 pub struct PlatformJwks {
@@ -195,7 +231,7 @@ pub fn platform_auth_provider(jwks_url: String) -> Arc<AuthProvider> {
 /// control intersects with the principal's live `zeroship.principal_grants`
 /// rows, so a token minted here carries at most
 /// `PLATFORM_CLI_ISSUABLE_SCOPES` unless the test seeds grants of its own.
-pub fn platform_token(subject: Uuid, scope: &str) -> String {
+pub fn platform_token(subject: &UserId, scope: &str) -> String {
     platform_token_for_client(subject, scope, "zeroship-cli")
 }
 
@@ -206,14 +242,14 @@ pub fn platform_token(subject: Uuid, scope: &str) -> String {
 /// CLI's issuable set.
 pub const CONSOLE_CLIENT_ID: &str = "zeroship-console";
 
-pub fn platform_token_for_client(subject: Uuid, scope: &str, client_id: &str) -> String {
+pub fn platform_token_for_client(subject: &UserId, scope: &str, client_id: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
     let claims = json!({
         "iss": PLATFORM_ISSUER,
-        "sub": subject.to_string(),
+        "sub": subject.as_str(),
         "aud": "control.zeroship.ai",
         "exp": now + 3600,
         "iat": now,
@@ -228,11 +264,11 @@ pub fn platform_token_for_client(subject: Uuid, scope: &str, client_id: &str) ->
     encode(&header, &claims, &platform_encoding_key()).expect("platform token")
 }
 
-pub fn platform_bearer(subject: Uuid, scope: &str) -> String {
+pub fn platform_bearer(subject: &UserId, scope: &str) -> String {
     format!("Bearer {}", platform_token(subject, scope))
 }
 
-pub fn console_bearer(subject: Uuid, scope: &str) -> String {
+pub fn console_bearer(subject: &UserId, scope: &str) -> String {
     format!(
         "Bearer {}",
         platform_token_for_client(subject, scope, CONSOLE_CLIENT_ID)
@@ -364,11 +400,7 @@ pub async fn seed_organization(pg: &compio_postgres::Client) -> String {
     pg.execute(
         "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
          VALUES ($1, $2, 'Fixture Organization', $3)",
-        &[
-            &organization_id,
-            &slug,
-            &format!("{slug}@zeroship.test"),
-        ],
+        &[&organization_id, &slug, &format!("{slug}@zeroship.test")],
     )
     .await
     .expect("seed fixture organization");
@@ -378,10 +410,7 @@ pub async fn seed_organization(pg: &compio_postgres::Client) -> String {
 /// A project inside an organization the caller already has, for a test that
 /// needs several apps to share ONE billing subject.
 #[allow(dead_code)]
-pub async fn unowned_project_in(
-    pg: &compio_postgres::Client,
-    organization_id: &str,
-) -> String {
+pub async fn unowned_project_in(pg: &compio_postgres::Client, organization_id: &str) -> String {
     let project_id = zeroship_core::typed_id::generate("prj");
     let slug = format!("prj-{}", Uuid::new_v4().simple());
     pg.execute(
@@ -414,7 +443,7 @@ pub async fn unowned_project_in(
 /// See [`unowned_project`] for which tests a member-less organization is right
 /// for, and for what to do instead when the placement IS the thing under test.
 #[allow(dead_code)]
-pub async fn seed_app(pg: &compio_postgres::Client, name: &str, plan_id: &str) -> Uuid {
+pub async fn seed_app(pg: &compio_postgres::Client, name: &str, plan_id: &str) -> AppId {
     let organization_id = seed_organization(pg).await;
     seed_app_in_organization(pg, name, plan_id, &organization_id).await
 }
@@ -432,7 +461,7 @@ pub async fn seed_app_in_organization(
     name: &str,
     plan_id: &str,
     organization_id: &str,
-) -> Uuid {
+) -> AppId {
     let project_id = unowned_project_in(pg, organization_id).await;
     let rows = pg
         .query(
@@ -442,7 +471,7 @@ pub async fn seed_app_in_organization(
         )
         .await
         .expect("seed fixture app");
-    rows[0].get("id")
+    AppId::parse(rows[0].get("id")).expect("fixture app id")
 }
 
 /// Seat `user` directly in `organization` at `role`.
@@ -455,14 +484,14 @@ pub async fn seed_app_in_organization(
 pub async fn seat_organization_member(
     pg: &compio_postgres::Client,
     organization_id: &str,
-    user: &Uuid,
+    user: &UserId,
     role: &str,
 ) {
     pg.execute(
         "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
          VALUES ($1, $2, $3) \
          ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        &[&organization_id, user, &role],
+        &[&organization_id, &user.as_str(), &role],
     )
     .await
     .expect("seat organization member");
@@ -470,10 +499,10 @@ pub async fn seat_organization_member(
 
 /// The organization one fixture app bills, read back off the app row.
 #[allow(dead_code)]
-pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> String {
+pub async fn app_organization(pg: &compio_postgres::Client, app: &AppId) -> String {
     pg.query(
         "SELECT organization_id FROM zeroship.apps WHERE id = $1",
-        &[app],
+        &[&app.as_str()],
     )
     .await
     .expect("read app organization")
@@ -505,8 +534,8 @@ pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> Strin
 #[allow(dead_code)]
 pub async fn seat_app_organization_member(
     pg: &compio_postgres::Client,
-    app: &Uuid,
-    user: &Uuid,
+    app: &AppId,
+    user: &UserId,
     role: &str,
 ) {
     let seated = pg
@@ -515,23 +544,25 @@ pub async fn seat_app_organization_member(
              SELECT p.organization_id, $2, $3 FROM zeroship.apps a \
                JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
              ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[app, user, &role],
+            &[&app.as_str(), &user.as_str(), &role],
         )
         .await
         .expect("seat organization member for fixture app");
     assert_eq!(
         seated, 1,
-        "seating {user} as '{role}' on app {app} affected {seated} row(s). The \
+        "seating {} as '{role}' on app {} affected {seated} row(s). The \
          INSERT ... SELECT matched no app reaching an organization through \
          apps.project_id -> projects.organization_id, which is a SUCCESSFUL \
-         statement that seats nobody. Create the app before seating it."
+         statement that seats nobody. Create the app before seating it.",
+        user.as_str(),
+        app.as_str()
     );
 }
 
 #[allow(dead_code)]
 pub async fn seed_usage_total(
     pg: &compio_postgres::Client,
-    app: Uuid,
+    app: &AppId,
     period_start_unix: i64,
     metric: &str,
     total: i64,
@@ -542,7 +573,7 @@ pub async fn seed_usage_total(
          VALUES ($1, $2::date, $3, $4, NOW()) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET \
            total = EXCLUDED.total, updated_at = NOW()",
-        &[&app, &period_date(period_start_unix), &metric, &total],
+        &[&app.as_str(), &period_date(period_start_unix), &metric, &total],
     )
     .await
     .expect("seed usage total");
@@ -551,7 +582,7 @@ pub async fn seed_usage_total(
 #[allow(dead_code)]
 pub async fn seed_usage_delta(
     pg: &compio_postgres::Client,
-    app: Uuid,
+    app: &AppId,
     period_start_unix: i64,
     metric: &str,
     delta: i64,
@@ -562,7 +593,7 @@ pub async fn seed_usage_delta(
          VALUES ($1, $2::date, $3, $4, NOW()) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET \
            total = u.total + EXCLUDED.total, updated_at = NOW()",
-        &[&app, &period_date(period_start_unix), &metric, &delta],
+        &[&app.as_str(), &period_date(period_start_unix), &metric, &delta],
     )
     .await
     .expect("seed usage delta");
@@ -620,8 +651,7 @@ pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
         .timestamp_opt(period_start_unix, 0)
         .single()
         .unwrap_or_else(chrono::Utc::now);
-    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
-        .expect("valid first-of-month period")
+    chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).expect("valid first-of-month period")
 }
 
 /// Months per caller. See "THE CONTRACT FOR CALLERS" on `next_isolated_period`.
@@ -833,7 +863,8 @@ pub async fn resolve_run_band_base() -> u32 {
         // than splicing it into SQL and hoping.
         for name in [&table, &column] {
             assert!(
-                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                name.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
                 "refusing to splice the catalog name {name:?} into SQL"
             );
         }
@@ -953,3 +984,6 @@ pub fn lite_billing_stack(
         invoicer: provider,
     })
 }
+
+#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
+mod platform_fixture;

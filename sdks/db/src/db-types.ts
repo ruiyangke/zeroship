@@ -3,13 +3,8 @@
  * to annotate handlers (`env.db.users` is a `Collection<...>`, the
  * transaction callback receives a `TxCollection`, etc).
  *
- * Stage 7 of the refactor moved the runtime helpers (`installSchema`,
- * `model`, `normalizeSchema`, `validateRefTargets`)
- * into `@zeroship/bootstrap`. Only the types stay here — `@zeroship/db`
- * is now purely user-facing. The bootstrap package consumes these
- * types via `@zeroship/db/internal` (one-way dependency: bootstrap →
- * db) so the API users see in autocomplete is decoupled from the
- * coordination internals.
+ * Runtime installation belongs to `@zeroship/bootstrap`; this package
+ * exposes the creator-facing database API and types.
  *
  * Usage in user code (typical):
  *   import { t, schema } from "@zeroship/db";
@@ -49,13 +44,27 @@
  */
 
 import type { Collection } from "./collection";
+import type { NativeCollection } from "./native";
+import type { AliasedCollection, ReadFrom } from "./read";
 import type { LiveOptions, LiveQuery } from "./live";
+import type { PaginationResult } from "./query";
 import type {
   PlainObject,
+  Actor,
+  DistinctField,
+  ExactWithSpec,
+  GeoField,
   Result,
   Row,
+  RowId,
   RowInput,
+  SelectableField,
+  SelectSpec,
+  SortSpec,
+  SortInput,
+  UpsertOptions,
   UpdateExpression,
+  VectorField,
   Filter,
   IsolationLevel,
   WithSpec,
@@ -87,12 +96,6 @@ export type SchemaInput =
 // Transaction surface — TxCollection / TxQuery / TransactionOptions
 // ---------------------------------------------------------------------------
 
-type TxPaginationResult<P> = {
-  page: P[];
-  continueCursor: string;
-  isDone: boolean;
-};
-
 /**
  * A typed collection inside a transaction — same API as Collection but
  * throws on error instead of returning Result. Generic over schema
@@ -105,53 +108,86 @@ type TxPaginationResult<P> = {
  * consumers compiling (joined fields degrade to `PlainObject`).
  */
 export type TxCollection<S = PlainObject, AllSchemas extends Record<string, unknown> = Record<string, unknown>> = {
+  as<const A extends string>(alias: A): AliasedCollection<Row<S>, A>;
   insert(row: RowInput<S>): Promise<Row<S>>;
   insertMany(rows: RowInput<S>[]): Promise<Row<S>[]>;
   get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Filter<S>,
-    opts: { select: K[]; orderBy?: Record<string, 1 | -1> },
+    idOrFilter: RowId<S> | Filter<S>,
+    opts: {
+      select: K[];
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<Pick<Row<S>, K> | null>;
-  get<W extends WithSpec>(
-    idOrFilter: string | Filter<S>,
-    opts: { with: W; orderBy?: Record<string, 1 | -1> },
+  get<const W extends WithSpec<S>>(
+    idOrFilter: RowId<S> | Filter<S>,
+    opts: {
+      with: ExactWithSpec<S, W>;
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>;
   get(
-    idOrFilter: string | Filter<S>,
-    opts?: { orderBy?: Record<string, 1 | -1> },
+    idOrFilter: RowId<S> | Filter<S>,
+    opts?: {
+      orderBy?: SortSpec<S>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
   ): Promise<Row<S> | null>;
   exists(filter: Filter<S>): Promise<boolean>;
-  find<W extends WithSpec>(filter: Filter<S>, opts: { with: W }): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
-  find(filter?: Filter<S>): TxQuery<S, Row<S>, AllSchemas>;
-  upsert(row: RowInput<S>, options: { conflictFields: (string & keyof Row<S>)[] }): Promise<Row<S>>;
-  update(idOrFilter: string | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
+  find<const W extends WithSpec<S>>(
+    filter: Filter<S>,
+    opts: {
+      with: ExactWithSpec<S, W>;
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
+  ): TxQuery<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  find(
+    filter?: Filter<S>,
+    opts?: {
+      actor?: Actor;
+      unmask?: (string & keyof Row<S>)[];
+      unmaskReason?: string;
+    },
+  ): TxQuery<S, Row<S>, AllSchemas>;
+  upsert(row: RowInput<S>, options: UpsertOptions<S>): Promise<Row<S>>;
+  update(idOrFilter: RowId<S> | Filter<S>, patch: UpdateExpression<S>): Promise<Row<S> | null>;
   updateMany(filter: Filter<S>, patch: UpdateExpression<S>): Promise<{ count: number }>;
-  delete(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  delete(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   deleteMany(filter: Filter<S>): Promise<{ deletedCount: number }>;
-  purge(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  purge(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   purgeMany(filter?: Filter<S>): Promise<{ purgedCount: number }>;
-  restore(idOrFilter: string | Filter<S>): Promise<Row<S> | null>;
+  restore(idOrFilter: RowId<S> | Filter<S>): Promise<Row<S> | null>;
   restoreMany(filter?: Filter<S>): Promise<{ restoredCount: number }>;
   count(filter?: Filter<S>): Promise<number>;
-  distinct(field: string & keyof Row<S>, filter?: Filter<S>): Promise<(string | number | boolean | null)[]>;
+  distinct<K extends DistinctField<S> & keyof Row<S>>(field: K, filter?: Filter<S>): Promise<Exclude<Row<S>[K], undefined>[]>;
   aggregate(pipeline: ZeroshipDbAggregateStage[]): Promise<PlainObject[]>;
   bulkUnmask(
     items: ReadonlyArray<{
-      id: string;
+      id: RowId<S>;
       columns: readonly (string & keyof Row<S>)[];
     }>,
     opts: { actor: import("./types").Actor; reason?: string },
-  ): Promise<Map<string, Record<string, unknown>>>;
+  ): Promise<Map<RowId<S>, Record<string, unknown>>>;
   search(
     args: {
       vector: number[];
       k?: number;
       metric?: import("./types").VectorMetric;
-      column?: string;
+      column?: VectorField<S>;
       filter?: Filter<S>;
     },
   ): Promise<(Row<S> & { _distance?: number })[]>;
   near(args: {
-    field: keyof S & string;
+    field: GeoField<S>;
     point: { lat: number; lng: number };
     radius: number;
     filter?: Filter<S>;
@@ -165,25 +201,25 @@ export type TxQuery<
   P = Row<S>,
   AllSchemas extends Record<string, unknown> = Record<string, unknown>,
 > = {
-  sort(s: Record<string, number> | string): TxQuery<S, P, AllSchemas>;
+  sort(s: SortInput<S>): TxQuery<S, P, AllSchemas>;
   limit(n: number): TxQuery<S, P, AllSchemas>;
   skip(n: number): TxQuery<S, P, AllSchemas>;
-  select<K extends keyof Row<S> & string>(fields: K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
-  select(s: string | string[] | Record<string, number | boolean>): TxQuery<S, P, AllSchemas>;
-  after(id: string): TxQuery<S, P, AllSchemas>;
-  with<W extends WithSpec>(spec: W): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  select<K extends SelectableField<S>>(field: K): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
+  select<K extends SelectableField<S>>(fields: readonly K[]): TxQuery<S, Pick<Row<S>, K>, AllSchemas>;
+  select<const Selection extends SelectSpec<S>>(
+    fields: Selection,
+  ): TxQuery<S, Pick<Row<S>, keyof Selection & keyof Row<S>>, AllSchemas>;
+  after(id: RowId<S>): TxQuery<S, P, AllSchemas>;
+  with<const W extends WithSpec<S>>(spec: ExactWithSpec<S, W>): TxQuery<S, Omit<P, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   paginate(opts: {
     cursor?: string | null;
     numItems: number;
-  }): Promise<TxPaginationResult<P>>;
-  /** **P9 PR 1** — terminal: first matching row or `null`. Throws inside
-   *  the tx callback on a native error (tx unwraps Result). */
+  }): Promise<PaginationResult<P>>;
+  /** First matching row or `null`. */
   first(): Promise<P | null>;
-  /** **P9 PR 1** — strict terminal: exactly one match. Throws
-   *  `NotFoundError` on 0 matches and `NotUniqueError` on >1. */
+  /** Exactly one match; throws when none or multiple rows match. */
   unique(): Promise<P>;
-  /** **P9 PR 1** — last matching row in the current sort, or `null`.
-   *  Throws `InvalidOperationError` if no sort was set. */
+  /** Last matching row in the current sort, or `null`. */
   last(): Promise<P | null>;
   then<TResult1 = P[], TResult2 = never>(
     resolve?: ((value: P[]) => TResult1 | PromiseLike<TResult1>) | null,
@@ -233,22 +269,43 @@ export type Collections<T extends Record<string, SchemaInput>> = {
   [K in keyof T]: Collection<UnwrapSchema<T[K]>, K & string, T>;
 };
 
+type DbMethodName = keyof Object
+  | "__platform"
+  | "__proto__"
+  | "collection"
+  | "from"
+  | "live"
+  | "transaction";
+
+type DirectCollections<T extends Record<string, SchemaInput>> = {
+  [K in keyof T as K extends DbMethodName ? never : K]: Collection<UnwrapSchema<T[K]>, K & string, T>;
+};
+
+/** Collections available inside a transaction, including names that collide
+ * with transaction-view methods. */
+export type TransactionDb<T extends Record<string, SchemaInput>> = {
+  [K in keyof T as K extends "collection" | "from" ? never : K]: TxCollection<UnwrapSchema<T[K]>, T>;
+} & {
+  collection<K extends string & keyof T>(name: K): TxCollection<UnwrapSchema<T[K]>, T>;
+  from: ReadFrom<true>;
+};
+
 /**
  * The shape `installSchema` plants on `env.db` (the native handle) on
  * top of the per-collection wrappers. `transaction` is a thin
- * `Result`-wrapping shim over the native `env.db.transaction(fn)`
- * orchestrator (begin / commit / rollback / nested-savepoint all live in
- * Rust as of P9 PR 3); `live` wraps the subscription primitives.
+ * `Result`-wrapping shim over the native transaction orchestrator;
+ * `live` wraps the subscription primitives.
  */
 export type DbExtensions<T extends Record<string, SchemaInput>> = {
-  transaction: <R>(fn: (tx: { [K in keyof T]: TxCollection<UnwrapSchema<T[K]>, T> }) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
+  collection<K extends string & keyof T>(name: K): NativeCollection;
+  from: ReadFrom;
+  transaction: <R>(fn: (tx: TransactionDb<T>) => Promise<R>, options?: TransactionOptions) => Promise<Result<R>>;
   /**
    * Reactive query layer. Runs `queryFn`, yields the initial result,
    * then re-runs and yields a fresh result on every change to any
    * table the `queryFn` reads.
    *
-   * v1 is coarse-grained: every change to a watched table fires a
-   * rerun (no row-level filter narrowing). The tables are auto-detected
+   * Every change to a watched table fires a rerun. The tables are auto-detected
    * by observing which `Collection.find/get/...` methods the
    * `queryFn` calls during its first execution. Pass `{ tables: [...] }`
    * to bypass auto-detection (e.g. when the queryFn doesn't go through
@@ -273,4 +330,4 @@ export type DbExtensions<T extends Record<string, SchemaInput>> = {
  * planted on `env.db`); the type describes the union users observe
  * when they read off `env.db`.
  */
-export type Db<T extends Record<string, SchemaInput>> = Collections<T> & DbExtensions<T>;
+export type Db<T extends Record<string, SchemaInput>> = DirectCollections<T> & DbExtensions<T>;

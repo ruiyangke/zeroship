@@ -1,15 +1,20 @@
 //! Single-connection Redis client. Owns a TcpStream + a reusable read
 //! buffer. One command in flight at a time.
 
+#[cfg(test)]
 use std::net::IpAddr;
 use std::time::Duration;
 
+use crate::{
+    ConnectionConfig,
+    config::parse_endpoint,
+    transport::{Transport, encrypt},
+};
 use bytes::BytesMut;
-use compio::io::{AsyncRead, AsyncWriteExt};
+use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use compio::net::TcpStream;
 use compio::time::timeout;
 use redis_protocol::resp2::types::OwnedFrame;
-use url::Url;
 
 use crate::error::{Error, Result};
 use crate::protocol::{
@@ -18,7 +23,9 @@ use crate::protocol::{
 };
 
 const READ_CHUNK: usize = 4096;
+#[cfg(test)]
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Maximum single-reply size the client will accept, in bytes. Mirrors the
@@ -59,7 +66,7 @@ fn peek_declared_len(buf: &[u8]) -> Option<u64> {
 
 /// A Redis client owning one TCP connection.
 pub struct Client {
-    stream: TcpStream,
+    stream: Transport,
     /// Accumulating read buffer — holds partial frames between reads so a
     /// reply split across syscalls still decodes cleanly.
     rx: BytesMut,
@@ -87,55 +94,84 @@ pub struct Client {
     dirty: bool,
 }
 
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client")
+            .field("buffered_bytes", &self.rx.len())
+            .field("cmd_timeout", &self.cmd_timeout)
+            .field("dirty", &self.dirty)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Client {
-    /// Parse a `redis://[:password@]host[:port][/db]` URL and connect.
-    pub async fn connect(url_str: &str) -> Result<Self> {
-        let url = Url::parse(url_str)
-            .map_err(|e| Error::Config(format!("bad URL '{url_str}': {e}")))?;
-        if url.scheme() != "redis" {
-            return Err(Error::Config(format!(
-                "unsupported scheme '{}' (expected redis://)", url.scheme()
-            )));
+    /// Connect using a direct Redis URL.
+    pub async fn connect(url: &str) -> Result<Self> {
+        Self::connect_config(&ConnectionConfig::from_url(url)?).await
+    }
+
+    pub async fn connect_config(config: &ConnectionConfig) -> Result<Self> {
+        let (host, port) = parse_endpoint(&config.endpoint)?;
+        if config.timeouts.connect_ms == 0 || config.timeouts.command_ms == 0 {
+            return Err(Error::Config("connection timeouts must be positive".into()));
         }
+        timeout(Duration::from_millis(config.timeouts.connect_ms), async {
+            let socket = TcpStream::connect((host.as_str(), port)).await?;
+            socket.set_nodelay(true)?;
+            let stream = match &config.tls {
+                Some(tls) => encrypt(socket, &host, tls).await?,
+                None => Transport::Plain(socket),
+            };
+            let mut client = Self {
+                stream,
+                rx: BytesMut::with_capacity(READ_CHUNK),
+                read_scratch: vec![0u8; READ_CHUNK],
+                decoder: ReplyDecoder::new(MAX_REPLY_SIZE),
+                cmd_timeout: Duration::from_millis(config.timeouts.command_ms),
+                dirty: false,
+            };
+            if let Some(password) = &config.auth.password {
+                let frame = if let Some(username) = &config.auth.username {
+                    client
+                        .send_recv(build_cmd(&[
+                            b"AUTH",
+                            username.as_bytes(),
+                            password.as_bytes(),
+                        ]))
+                        .await?
+                } else {
+                    client
+                        .send_recv(build_cmd(&[b"AUTH", password.as_bytes()]))
+                        .await?
+                };
+                expect_ok(frame).map_err(|_| Error::Auth("authentication rejected".into()))?;
+            } else if config.auth.username.is_some() {
+                return Err(Error::Config("an ACL username requires a password".into()));
+            }
+            if config.database != 0 {
+                client.select(i64::from(config.database)).await?;
+            }
+            Ok(client)
+        })
+        .await
+        .map_err(|_| {
+            Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "connection setup timed out",
+            ))
+        })?
+    }
 
-        let host = url.host_str()
-            .ok_or_else(|| Error::Config("missing host".into()))?;
-        let port = url.port().unwrap_or(6379);
-        let password = url.password().map(str::to_string);
-        let db: Option<i64> = url
-            .path()
-            .trim_start_matches('/')
-            .parse()
-            .ok();
-
-        let ip: IpAddr = host
-            .parse()
-            .map_err(|_| Error::Config(format!("expected ip, got hostname '{host}' — DNS not implemented")))?;
-
-        let stream = timeout(DEFAULT_CONNECT_TIMEOUT, TcpStream::connect((ip, port)))
-            .await
-            .map_err(|_| Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut, "connect timed out",
-            )))?
-            .map_err(Error::Io)?;
-        stream.set_nodelay(true).map_err(Error::Io)?;
-
-        let mut client = Client {
-            stream,
-            rx: BytesMut::with_capacity(READ_CHUNK),
-            read_scratch: vec![0u8; READ_CHUNK],
-            decoder: ReplyDecoder::new(MAX_REPLY_SIZE),
-            cmd_timeout: DEFAULT_CMD_TIMEOUT,
-            dirty: false,
-        };
-
-        if let Some(pw) = password {
-            client.auth(&pw).await?;
+    pub(crate) async fn require_primary(&mut self) -> Result<()> {
+        let items = expect_array(self.send_recv(build_cmd(&[b"ROLE"])).await?)?;
+        let role = items
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Protocol("ROLE reply is empty".into()))?;
+        if expect_bulk_or_null(role)?.as_deref() != Some(b"master") {
+            return Err(Error::Server("READONLY endpoint is not a primary".into()));
         }
-        if let Some(db) = db {
-            client.select(db).await?;
-        }
-        Ok(client)
+        Ok(())
     }
 
     /// In-crate test constructor — connects WITHOUT running AUTH/SELECT (it
@@ -155,7 +191,7 @@ impl Client {
             .map_err(Error::Io)?;
         stream.set_nodelay(true).map_err(Error::Io)?;
         Ok(Client {
-            stream,
+            stream: Transport::Plain(stream),
             rx: BytesMut::with_capacity(READ_CHUNK),
             read_scratch: vec![0u8; READ_CHUNK],
             decoder: ReplyDecoder::new(MAX_REPLY_SIZE),
@@ -328,7 +364,7 @@ impl Client {
     /// EVAL a Lua script, returning the integer reply. `keys` are the
     /// `KEYS[1..]` arguments (slot-routed by Redis) and `args` are the
     /// `ARGV[1..]` arguments. Only the integer reply is decoded —
-    /// sufficient for the atomic incr-with-TTL script (see plugin-kv).
+    /// sufficient for the atomic incr-with-TTL script (see zeroship-kv).
     pub async fn eval(&mut self, script: &str, keys: &[&str], args: &[&str]) -> Result<i64> {
         let nkeys = keys.len().to_string();
         let mut parts: Vec<&[u8]> = Vec::with_capacity(3 + keys.len() + args.len());
@@ -421,7 +457,7 @@ impl Client {
     // -----------------------------------------------------------------
 
     /// Write a command frame, read until a full reply decodes, return it.
-    pub(crate) async fn send_recv(&mut self, cmd: OwnedFrame) -> Result<OwnedFrame> {
+    pub async fn send_recv(&mut self, cmd: OwnedFrame) -> Result<OwnedFrame> {
         // Mark the connection dirty SYNCHRONOUSLY, before the write/await.
         // This is the only state observable at `PooledConn::drop` time after
         // the future is cancelled or times out mid-reply — so the pool (R2)
@@ -445,8 +481,7 @@ impl Client {
         let wire = encode_frame(&cmd)?;
         let compio::BufResult(res, _buf) = self.stream.write_all(wire).await;
         res.map_err(Error::Io)?;
-        // No flush — compio's TcpStream writes directly to the kernel; no
-        // userspace buffering to drain. `nodelay` already prevents Nagle.
+        self.stream.flush().await?;
 
         loop {
             // OOM guard (early rejection): if the buffered reply begins with

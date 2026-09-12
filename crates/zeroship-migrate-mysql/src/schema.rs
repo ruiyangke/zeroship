@@ -747,7 +747,7 @@ fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 /// Snapshot rendering no longer calls this JSON carrier. It remains vendor-owned
 /// while the remaining SDK-definition producers lower to neutral snapshots.
 pub fn mysql_base_column_type_for_def(def: &serde_json::Value) -> String {
-    if def.get("encrypted").is_some() {
+    if def.get("encrypted").and_then(serde_json::Value::as_bool) == Some(true) {
         return "LONGBLOB".to_string();
     }
 

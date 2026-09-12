@@ -9,6 +9,15 @@ were repointed at the files that MOVED, because the file is still the evidence.
 DELETED (`ccda4bb42`), so it keeps its old spelling: a measurement recorded
 against a deleted file cannot be repointed without falsifying it.
 
+**The instrument this session used is itself gone.** The skip announcer, the
+`ZEROSHIP-TEST-SKIPPED` marker it wrote and the shell census that counted the
+marker in a suite log were all deleted on 2026-09-08, by an operator decision
+that a test which cannot reach its backend FAILS. Every reading below that
+counts markers, and every sentence written in the present tense about a census
+reporting or an allowlist excusing one, describes that instrument as it stood
+on the day it was read. None of it describes the tree now: there is no marker
+to count, no census to report it and no allowlist to excuse it.
+
 ## Instrument
 
 - `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` turned a self-skip into a hard failure.
@@ -18,7 +27,12 @@ against a deleted file cannot be repointed without falsifying it.
   required unconditionally: `tests/provision_test_backends.sh` stands them up,
   the driver suites fail with the address they dialled, and the suite gates fail
   on any announced skip they do not allowlist.
-- Skip announcements carry `ZEROSHIP-TEST-SKIPPED` (tests/lib/skip_census.sh:38).
+- Skip announcements carried `ZEROSHIP-TEST-SKIPPED`, written straight to the
+  stderr handle by a shared announcer and counted by a shell census under
+  `tests/`. The marker is spelled out here because the readings further down are
+  counts of it; the announcer, the census and the allowlist are deleted, so
+  neither the file that defined the marker nor the one that counted it exists to
+  cite.
 - Live PG confirmed on 127.0.0.1:5440 (PostgreSQL 16.14, `wal_level=replica`).
   That server was `zs-auth-pg-5440`, started by hand and owned by no file in
   this tree, squatting the port `deploy/compose`'s own postgres publishes. The
@@ -43,7 +57,7 @@ at the time and `docker rm` would have destroyed a live run. Whoever does it
 should check nothing is mid-suite first.
 
 WHAT IT BUYS, measured 2026-08-18 on two servers differing in nothing but
-`wal_level`, running `cargo test -p zeroship-plugin-db --features test-helpers
+`wal_level`, running `cargo test -p zeroship-data-v8 --features test-helpers
 --test integration`:
 
     replica  11 ZEROSHIP-TEST-SKIPPED markers (10 wal-guarded + 1 postgis)
@@ -57,7 +71,7 @@ pgvector, one needs the platform migrations for `zeroship_workflow_owner`, and
 pinned 119.)
 
 The compose service comment says the cost of `replica` is "12 plugin-db
-integration tests"; `tests/run_plugin_db_live_suite.sh` and ci.yml both say
+integration tests"; `tests/run_data_v8_live_suite.sh` and ci.yml both say (DELETED; current runner: `cargo xtask test data`.)
 eleven. The guard `pg_has_logical_wal` has TEN call sites, and ten is what the
 run announces.
 
@@ -66,7 +80,7 @@ run announces.
 Source: the `[[test]]` blocks in the three Cargo.toml files.
 
 - crates/zeroship-control/Cargo.toml   -> 43 targets (lines 164-375)
-- crates/zeroship-plugin-db/Cargo.toml -> 1 target (`distributed_live`, line 205)
+- crates/zeroship-data-v8/Cargo.toml -> 1 target (`distributed_live`, line 205)
 - crates/zeroship-migrate-server/Cargo.toml  -> 1 target (`apply_api_test`, line 83)
 
 Note: ci.yml:519 and ci.yml:604 both say "44 zeroship-control integration
@@ -105,7 +119,7 @@ provider_conformance, trusted_clients_test
   whose required-features are met. Same at :227 for zeroship-migrated.
   Exports CONTROL_TEST_DB / AUTH_DB_URL / MIGRATED_TEST_DB, all one DSN.
   Invoked by ci.yml `billing-gate`.
-- tests/run_plugin_db_live_suite.sh:129 names `distributed_live` explicitly and
+- tests/run_data_v8_live_suite.sh names `distributed_live` explicitly and (DELETED; current runner: `cargo xtask test data`.)
   exports LIVE_DB_TEST_URL. Invoked by ci.yml `plugin-db-live-gate`.
 - tests/e2e_durable_workflows.sh:745 also runs `workflow_engine_test`.
 
@@ -126,7 +140,7 @@ than by a name list:
   `postgresql://postgres:zeroship@localhost:5440/zeroship_billing_test` and
   PANICS if nothing answers - it cannot report a hollow pass.
 - Same for zeroship-migrated (`MIGRATED_TEST_DB`, exported at :118).
-- plugin-db's `distributed_live` is named at run_plugin_db_live_suite.sh:129
+- plugin-db's `distributed_live` is named at run_data_v8_live_suite.sh (DELETED; current runner: `cargo xtask test data`.)
   with `LIVE_DB_TEST_URL` exported at :66.
 
 The brief's premise -- "authz_guard_oauth_test ... no gate runs it" -- does not
@@ -167,7 +181,7 @@ Evidence for "NOBODY", each an independent grep over tests/ .github/ deploy/:
 
 Control on the pattern (an empty grep is not proof): the same search DOES find
 the covered ones - `zeroship-gateway:oidc_rp_e2e` at run_auth_suite.sh:158,
-`distributed_live` at run_plugin_db_live_suite.sh:129 - so the pattern finds
+`distributed_live` at run_data_v8_live_suite.sh - so the pattern finds (DELETED; current runner: `cargo xtask test data`.)
 binaries that are gated, and the misses above are real misses.
 
 ## MEASURED: tests/run_billing_suite.sh is RED on main, 50 failures
@@ -334,7 +348,7 @@ tests/run_billing_suite.sh (commit 344c9db12)
 
     A  no DSN, no REQUIRE   6 x ZEROSHIP-TEST-SKIPPED
                             test result: ok. 6 passed ... in 0.00s
-    B  no DSN, REQUIRE=1    6 panics at crates/zeroship-test-support/src/lib.rs:102
+    B  no DSN, REQUIRE=1    6 panics at tests/fixtures/session_keys.rs:102
     C  inside the gate      test result: ok. 6 passed ... in 1.12s, no skip line
 
 A and C differ ONLY in the clock and the announcement; B is what tells them

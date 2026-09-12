@@ -109,7 +109,7 @@ use std::time::Duration;
 
 use compio_postgres::{Client, GenericClient};
 use serde_json::json;
-use zeroship_core::user_id::UserId;
+use zeroship_core::UserId;
 
 use crate::advisory_lock::{self, ACCOUNT_REAPER_SWEEP_LOCK};
 use crate::audit::{self, AuditEvent};
@@ -185,7 +185,7 @@ pub async fn run(refresh_pool: crate::oidc::refresh::RefreshSessionPool, control
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper pool: {e}")))?;
             let mut conn = pool
-                .get()
+                .acquire()
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper checkout: {e}")))?;
             if !advisory_lock::try_acquire_advisory_lock(&conn, ACCOUNT_REAPER_SWEEP_LOCK).await? {
@@ -368,7 +368,9 @@ async fn find_due(db: &Client) -> Result<Vec<UserId>> {
         )
         .await
         .map_err(|e| AuthError::Db(format!("account_reaper find_due: {e}")))?;
-    rows.iter().map(|r| crate::entity_ids::user_id(r, "id")).collect()
+    rows.iter()
+        .map(|row| crate::user_id::from_row(row, "id", "account reaper user_id is invalid"))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,7 +412,10 @@ async fn erase_one(conn: &mut Client, user_id: &UserId) -> Result<EraseOutcome> 
     }
 }
 
-async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: &UserId) -> Result<EraseOutcome> {
+async fn erase_one_tx(
+    conn: &(impl GenericClient + Sync),
+    user_id: &UserId,
+) -> Result<EraseOutcome> {
     // Serialize against cancellation and recheck the complete erasure
     // authority after the due scan. The row lock makes cancellation either
     // win first (this returns Skipped) or wait for the committed erasure.
@@ -553,21 +558,22 @@ async fn refuse_if_it_strands_an_organization(
 /// `23514` are what a newly-added blocking reference looks like, and the
 /// constraint name in them is the only thing that says which one.
 async fn hard_delete_user(conn: &(impl GenericClient + Sync), user_id: &UserId) -> Result<()> {
-    conn.execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
-        .await
-        .map_err(|e| {
-            if let Some(db_err) = e.as_db_error() {
-                let constraint = db_err.constraint().unwrap_or("<unnamed>");
-                let table = db_err.table().unwrap_or("<unknown>");
-                return AuthError::DbCode {
-                    code: db_err.code().code().to_string(),
-                    message: format!(
-                        "account_reaper hard delete blocked by {table}.{constraint}: {e}"
-                    ),
-                };
-            }
-            AuthError::Db(format!("account_reaper hard delete: {e}"))
-        })?;
+    conn.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&user_id.as_str()],
+    )
+    .await
+    .map_err(|e| {
+        if let Some(db_err) = e.as_db_error() {
+            let constraint = db_err.constraint().unwrap_or("<unnamed>");
+            let table = db_err.table().unwrap_or("<unknown>");
+            return AuthError::DbCode {
+                code: db_err.code().code().to_string(),
+                message: format!("account_reaper hard delete blocked by {table}.{constraint}: {e}"),
+            };
+        }
+        AuthError::Db(format!("account_reaper hard delete: {e}"))
+    })?;
     Ok(())
 }
 

@@ -1255,7 +1255,7 @@ pub struct IrAuthor {
     /// backend rather than derived from the id in core.
     backend: &'static dyn crate::render::renderer::DmlRenderer,
     /// The exact composed policy whose inject rules shaped resolved create-table
-    /// IR. Lowering never consults an ambient system-field profile.
+    /// IR. Lowering never consults an ambient injected-column profile.
     effective: EffectivePolicy,
     /// the connection/CLI-level DEFAULT schema (search_path-like), used
     /// when an op omits its own `schema` qualifier. `None` => the dialect
@@ -3164,8 +3164,7 @@ impl IrAuthor {
                 ));
             }
 
-            let local_column =
-                self.authored_reference_column_snapshot(schema, site.table, site.column)?;
+            let local_column = self.authored_reference_column_snapshot(site.table, site.column)?;
             let reference_policy =
                 crate::render::backends::vendor(self.vendors, &self.dialect).catalog_fold;
             // PostgreSQL's catalog exposes the base storage family separately
@@ -3246,22 +3245,19 @@ impl IrAuthor {
 
     fn authored_reference_column_snapshot(
         &self,
-        effective_schema: &str,
         table: &str,
         column: &IrColumn,
     ) -> Result<ColumnSnapshot, IrLowerError> {
-        let mut snapshot = self.add_column_snapshot(
-            effective_schema,
-            table,
-            &column.name,
-            &column.ty,
-            column.nullable,
-            None,
-            column.vector_metric,
-            column.case_sensitive,
-            None,
-            None,
-            None,
+        // Catalog compatibility needs the column shape, without emitting its foreign key.
+        let mut field = ir_column_to_field(column);
+        field.default = None;
+        field.generated = None;
+        field.identity = None;
+        let mut snapshot = crate::render::declarative::column_snapshot_for_field(
+            self.vendors,
+            &field,
+            &self.dialect,
+            false,
         )?;
         apply_author_type_override_to_column(
             self.vendors,
@@ -3294,13 +3290,11 @@ impl IrAuthor {
     /// target merely supplies the other side of the positional physical check.
     fn authored_logical_reference_column_snapshot(
         &self,
-        effective_schema: &str,
         table: &str,
         column: &str,
         contract: &crate::model::validate::LogicalColumnContract,
     ) -> Result<ColumnSnapshot, IrLowerError> {
         self.authored_reference_column_snapshot(
-            effective_schema,
             table,
             &IrColumn {
                 name: column.to_string(),
@@ -3415,7 +3409,6 @@ impl IrAuthor {
                         )
                     })?;
                     Some(self.authored_logical_reference_column_snapshot(
-                        schema,
                         references_table,
                         target_name,
                         contract,
@@ -3447,9 +3440,7 @@ impl IrAuthor {
                     Op::CreateTable { columns, .. } => columns
                         .iter()
                         .find(|column| column.name == *local_name)
-                        .map(|column| {
-                            self.authored_reference_column_snapshot(schema, site.table, column)
-                        })
+                        .map(|column| self.authored_reference_column_snapshot(site.table, column))
                         .transpose()?,
                     _ => {
                         let local_key = crate::model::validate::LogicalColumnKey {
@@ -3461,7 +3452,7 @@ impl IrAuthor {
                             .get(&local_key)
                             .map(|contract| {
                                 self.authored_logical_reference_column_snapshot(
-                                    schema, site.table, local_name, contract,
+                                    site.table, local_name, contract,
                                 )
                             })
                             .transpose()?
@@ -6661,6 +6652,43 @@ impl IrAuthor {
         *plan_index += 1;
         let step_start = steps.len();
         let op_kind = op_kind_tag(op);
+        // Schema admission and permission to create or rename within it are
+        // independent. Descriptor-only SQL guards cannot enforce these IR grants.
+        let namespace = match op {
+            Op::CreateTable { name, .. } => Some((
+                zeroship_migrate_ir::policy_registry::KEY_SCHEMA_CREATE_TABLE,
+                crate::guard::namespace_rule::CREATE_TABLE_NOT_GRANTED,
+                name,
+            )),
+            Op::RenameTable { table, to, .. } if table != to => Some((
+                zeroship_migrate_ir::policy_registry::KEY_SCHEMA_RENAME,
+                crate::guard::namespace_rule::RENAME_INTO_NOT_GRANTED,
+                to,
+            )),
+            _ => None,
+        };
+        if let Some((key, rule, table)) = namespace {
+            let object = zeroship_migrate_policy::ObjectName::table(
+                self.effective_schema(op).as_bytes().to_vec(),
+                table.as_bytes().to_vec(),
+            );
+            let key = zeroship_migrate_policy::KnobKey::parse(key)
+                .expect("the builtin namespace grant key is valid");
+            if !matches!(
+                self.effective.grants(&key, &object),
+                Some(zeroship_migrate_policy::KnobValue::Bool(true))
+            ) {
+                return Err(FragmentGuardDenied {
+                    op_index,
+                    op_kind,
+                    source: GuardError::NamespacePolicy {
+                        rule,
+                        statement: format!("{op_kind} on {}.{table}", self.effective_schema(op)),
+                    },
+                }
+                .into());
+            }
+        }
         enforce_vendor_capability_at_lower(op, &self.effective, self.effective_schema(op))?;
         // Lower this op (advancing `live_tables` for intra-IR FK inlining). A
         // lower failure aborts before any guarding - nothing applied. Each unit
@@ -9505,7 +9533,7 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     let (ty, legacy_references) = col_type_to_token(&c.ty);
     // A genuine unbounded `t.text()` column (`ColType::Text`, no value-format /
     // id-prefix facet) renders as MySQL `TEXT`. Typed-ids carry a facet and bounded
-    // system columns are `String`, so neither is flagged here.
+    // injected columns are `String`, so neither is flagged here.
     let unbounded_text =
         matches!(c.ty, ColType::Text) && c.value_format.is_none() && c.id_prefix.is_none();
     let references = c
@@ -9525,29 +9553,13 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     // facet - the shared builder reads the facet to pick BYTEA + the `zero-migrate:enc`
     // sentinel (built by the shared kernel, never re-spelled here).
     //
-    // The op.* `ColType::Encrypted`
-    // is the DEFAULT-mode encrypted shape (no mode/keyId on the carrier - the DDL
-    // note: non-default encrypted-via-op.* stays fail-closed). Recovery therefore
-    // restores the KERNEL DEFAULTS the SDK's `t.encrypted()` stamps
-    // (`{ mode: "randomised", keyId: "default", wraps: <inner> }`) and the FAIL-SAFE
-    // AUTO-MASK (`{ kind: "full", classification: "pii" }`) - BYTE-IDENTICAL to what
-    // `descriptor_to_sdk_schema` emits for an authored `t.encrypted()` and to what the
-    // runtime recovers from the `zero-migrate:enc`/`zero-migrate:mask` sentinels (`introspect_schema.rs`).
-    // A bare `{}` would DROP both, drifting the round-trip (the prior bug).
+    // Encryption is a flag; `ty` already describes the plaintext. Apply the
+    // same default mask as the SDK builder.
     let (encrypted, encrypted_mask) = match &c.ty {
-        ColType::Encrypted { of } => {
-            let wraps = encrypted_wraps_token(of);
-            (
-                Some(serde_json::json!({
-                    "mode": "randomised",
-                    "keyId": "default",
-                    "wraps": wraps,
-                })),
-                // The fail-safe auto-mask every `t.encrypted()` column gets at builder
-                // time when no `.mask(...)` is chained (SDK `types.ts` `t.encrypted`).
-                Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
-            )
-        }
+        ColType::Encrypted { .. } => (
+            Some(true),
+            Some(serde_json::json!({ "kind": "full", "classification": "pii" })),
+        ),
         _ => (None, None),
     };
     // A `vector(N)` column carries its dimensionality N (the `vector` facet on the
@@ -9583,8 +9595,8 @@ pub(crate) fn ir_column_to_field(c: &IrColumn) -> FieldDescriptor {
     };
     // Thread the two DECLARED-ONLY, uncatalogable
     // facets the runtime/gen-types lose if the IR doesn't carry them:
-    //   - legacy internal `id_prefix` -> the descriptor's `id_prefix` so the
-    //     shared kernel keeps the base62-UUIDv7 platform brand on the `id` column;
+    //   - internal `id_prefix` -> the descriptor's `id_prefix` so the shared
+    //     kernel keeps the base36-UUIDv7 platform brand on the `id` column;
     //   - `vector_metric` (`t.vector(n, {metric})`) -> the descriptor's
     //     `vector_metric` (camelCase token) so the ivfflat/hnsw opclass renders the
     //     declared metric instead of defaulting.
@@ -9764,24 +9776,6 @@ pub(crate) fn rendered_column_default(
     snapshot.default
 }
 
-/// The `wraps` token (`"string"` | `"number"` | `"bytes"`) an encrypted column's
-/// inner [`ColType`] maps to - the SDK's `t.encrypted({ wraps })` domain (only those
-/// three are admissible; everything else folds to `"string"`, the kernel default).
-/// Used by [`ir_column_to_field`] to recover the encrypted facet's `wraps` BYTE-EXACT
-/// to what `t.encrypted()` stamps for the same inner type.
-fn encrypted_wraps_token(of: &ColType) -> &'static str {
-    match of {
-        ColType::SmallInt
-        | ColType::Int
-        | ColType::BigInt
-        | ColType::Double
-        | ColType::Real
-        | ColType::Decimal { .. } => "number",
-        ColType::Bytes => "bytes",
-        _ => "string",
-    }
-}
-
 /// Walk a domain name to the first base type that is not itself a domain.
 ///
 /// `None` when the name is not registered, when the walk leaves the registry, or when
@@ -9825,18 +9819,12 @@ pub(crate) fn resolve_domain_base_type<'a>(
 /// rendered type IS `"schema"."domain_name"`, so resolving it here would change the
 /// DDL. An ENCRYPTED column's physical type is `BYTEA`/`BLOB`/`LONGBLOB` regardless of
 /// what it wraps, so the inner type reaches the catalog through exactly one channel -
-/// the `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel - and through the runtime
+/// the `zero-migrate:enc:<wraps>` sentinel - and through the runtime
 /// descriptor's type token. Both are DESCRIPTIONS of the plaintext, and both were
 /// describing a domain over `int` as `string`.
 ///
-/// # Why the normalisation is applied to the TYPE, not patched onto the descriptor
-///
-/// `wraps` and the descriptor's `ty` are derived from the inner type by two different
-/// functions ([`encrypted_wraps_token`] and [`col_type_to_token`]) reached through the
-/// single shared [`ir_column_to_field`]. Resolving the inner type BEFORE it enters that
-/// bridge makes both derivations agree by construction, on every caller, instead of
-/// leaving a second site that has to remember to patch the facet afterwards. That
-/// forgotten second site is the defect this fixes.
+/// Resolve the inner type before building the descriptor. The runtime codec
+/// and catalog sentinel then derive from the same logical type.
 ///
 /// An unresolvable name, a cycle, or a base that is itself an ENUM all return the
 /// column unchanged: the sentinel is not optional, so "absent beats wrong" is
@@ -9909,7 +9897,11 @@ pub(crate) fn col_type_to_token(ty: &ColType) -> (String, Option<String>) {
         // facet to pick BYTEA + the sentinel). The inner token drives the masked
         // sibling's plaintext shape.
         ColType::Encrypted { of } => {
-            let (inner, _) = col_type_to_token(of);
+            let inner = match of.as_ref() {
+                ColType::SmallInt | ColType::Int | ColType::BigInt | ColType::Double
+                | ColType::Real | ColType::Decimal { .. } => "number".into(),
+                _ => col_type_to_token(of).0,
+            };
             (inner, None)
         }
     }
@@ -11476,7 +11468,7 @@ mod tests {
     }
 
     fn platform_guard() -> GuardConfig {
-        GuardConfig::from_policy(platform_policy(), POSTGRES)
+        GuardConfig::from_policy(platform_policy(), POSTGRES, "zero_migrate")
     }
 
     /// The author composes the SAME charter the Platform guard does: a vendor op's
@@ -13218,8 +13210,11 @@ mod tests {
     fn guarded_forward_fk_keeps_fragment_and_noncontiguous_span_on_child_op() {
         let ir = child_before_parent_composite_ir(true);
         for dialect in [POSTGRES, MYSQL] {
-            let guard =
-                GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), dialect.clone());
+            let guard = GuardConfig::from_policy(
+                crate::test_fixtures::no_inject("app"),
+                dialect.clone(),
+                "app",
+            );
             let (steps, fragments, spans) = test_ir_author("app", "app_a", dialect.clone())
                 .lower_guarded_with_op_spans(&ir, &guard, &LiveSchema::default())
                 .unwrap_or_else(|error| panic!("{dialect:?} guarded forward FK lowers: {error}"));
@@ -13343,7 +13338,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("guarded lower of a clean createTable passes");
@@ -13409,7 +13405,7 @@ mod tests {
         // Guard confined to "other" - the rendered `CREATE TABLE "app"....` is then a
         // cross-schema reference the Confined guard denies.
         let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES);
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES, "other");
         let err = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect_err("a fragment outside the confined schema must be denied");
@@ -13447,7 +13443,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", SQLITE);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SQLITE);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), SQLITE, "app");
         let (steps, frags) = author
             .lower_guarded(&ir, &guard_cfg, &LiveSchema::default())
             .expect("SQLite guarded lower passes (descriptor guard trusts IR DDL)");
@@ -13502,7 +13499,8 @@ mod tests {
             }],
         );
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
 
         // The whole-up `lower` is the canonical reference (the parity leg).
         let whole = author
@@ -13690,7 +13688,7 @@ mod tests {
                 .expect("ir add_column_snapshot");
 
             // The differ's snapshot for the SAME field, via the SAME shared builder
-            // fed from a `t.encrypted(...)`-shaped descriptor (`encrypted: {}` selects
+            // fed from a `t.encrypted(...)`-shaped descriptor (`encrypted: true` selects
             // the kernel defaults - the shape `ir_column_to_field` emits).
             let desc = CollectionDescriptor {
                 name: "vault".into(),
@@ -13698,7 +13696,7 @@ mod tests {
                 fields: vec![FieldDescriptor {
                     name: "secret".into(),
                     ty: "string".into(),
-                    encrypted: Some(serde_json::json!({})),
+                    encrypted: Some(true),
                     ..Default::default()
                 }],
                 indexes: vec![],
@@ -13808,9 +13806,9 @@ columns = [
     // resolves the confined policy's injected columns + indexes BYTE-EQUAL to the
     // differ's `desired_snapshot` TableSnapshot. Pinned at the snapshot layer,
     // independent of the render golden - so a future fork of IrAuthor's
-    // descriptor mapping that drops/renames a system field or index is caught here.
+    // descriptor mapping that drops/renames an injected column or index is caught here.
     #[test]
-    fn ir_author_createtable_snapshot_injects_system_fields_byte_equal_to_differ() {
+    fn ir_author_createtable_snapshot_injects_injected_columns_byte_equal_to_differ() {
         for dialect in [POSTGRES, SQLITE] {
             let author = test_ir_author("app", "app_a", dialect.clone());
             let effective = crate::test_fixtures::confined_charter();
@@ -13866,12 +13864,12 @@ columns = [
             .expect("differ snapshot");
 
             // The full TableSnapshot (columns + indexes + constraints) is byte-equal
-            // - system fields injected identically. `TableSnapshot`'s `==` covers
+            // - injected columns injected identically. `TableSnapshot`'s `==` covers
             // columns/indexes/constraints; the per-column sentinels of the (non-
-            // encrypted) system fields are all `None`, so `==` is exact here.
+            // encrypted) injected columns are all `None`, so `==` is exact here.
             assert_eq!(
                 ir_snap.columns, differ_snap.columns,
-                "{dialect:?}: createTable columns (incl. injected system fields) must be byte-equal"
+                "{dialect:?}: createTable columns (incl. injected columns) must be byte-equal"
             );
             assert_eq!(
                 ir_snap.indexes, differ_snap.indexes,
@@ -13888,7 +13886,7 @@ columns = [
             for sys in inject.columns().iter().map(|column| column.name.as_str()) {
                 assert!(
                     ir_snap.columns.iter().any(|c| c.name == sys),
-                    "{dialect:?}: system field {sys:?} must be injected by createTable"
+                    "{dialect:?}: injected column {sys:?} must be injected by createTable"
                 );
             }
         }
@@ -14635,7 +14633,7 @@ columns = [
         // Guard confined to "other" - the rendered `"app"....` DDL is a cross-schema
         // reference the Confined guard denies, attributed to op #0.
         let guard_cfg =
-            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES);
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("other"), POSTGRES, "other");
         let err = author
             .load_and_lower_guarded(
                 bytes,
@@ -14667,7 +14665,8 @@ columns = [
             {"op":"createTable","name":"__zeroship_probe","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
         let err = author
             .load_and_lower_guarded(
                 bytes,
@@ -14696,7 +14695,8 @@ columns = [
             {"op":"createTable","name":"fresh","columns":[{"name":"title","type":"text"}]}
         ]}"#;
         let author = test_ir_author("app", "app_a", POSTGRES);
-        let guard_cfg = GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES);
+        let guard_cfg =
+            GuardConfig::from_policy(crate::test_fixtures::no_inject("app"), POSTGRES, "app");
         let out = author
             .load_and_lower_guarded(
                 bytes,

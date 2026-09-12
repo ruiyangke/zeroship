@@ -90,7 +90,10 @@ pub async fn is_family_revoked_since(
     sub: &str,
     iat: i64,
 ) -> Result<bool, Error> {
-    Ok(family_revoked_at(revoked_after_for(db, client_id, sub).await?, iat))
+    Ok(family_revoked_at(
+        revoked_after_for(db, client_id, sub).await?,
+        iat,
+    ))
 }
 
 /// The local revocation decision: a family marked `revoked_after` (epoch
@@ -251,7 +254,13 @@ impl RevocationCache {
                 guard.remove(&victim);
             }
         }
-        guard.insert(key, CacheEntry { revoked_after, cached_at: now });
+        guard.insert(
+            key,
+            CacheEntry {
+                revoked_after,
+                cached_at: now,
+            },
+        );
     }
 
     /// SAME-NODE write-side bust: drop the cached entry for `(client_id, sub)`
@@ -296,7 +305,9 @@ mod cache_tests {
         cache.store("oac_a", "pws_x", None, now);
         // A fresh hit returns the cached marker (None); the caller decides
         // `> iat` locally — never revoked for a None marker.
-        let hit = cache.get("oac_a", "pws_x", now).expect("fresh negative hit");
+        let hit = cache
+            .get("oac_a", "pws_x", now)
+            .expect("fresh negative hit");
         assert_eq!(hit, None);
         assert!(!family_revoked_at(hit, 1_700_000_000));
     }
@@ -307,7 +318,9 @@ mod cache_tests {
         let now = Instant::now();
         // Family revoked at epoch 1000.
         cache.store("oac_a", "pws_x", Some(1000), now);
-        let hit = cache.get("oac_a", "pws_x", now).expect("fresh positive hit");
+        let hit = cache
+            .get("oac_a", "pws_x", now)
+            .expect("fresh positive hit");
         assert_eq!(hit, Some(1000));
         // A token minted BEFORE the marker (iat=900) is revoked.
         assert!(family_revoked_at(hit, 900));
@@ -353,9 +366,15 @@ mod cache_tests {
         cache.store("oac", "c", None, t0 + Duration::from_millis(2));
         assert_eq!(cache.len(), 2, "cache must not exceed max_entries");
         // The oldest (a) was evicted; b and c remain.
-        assert!(cache.get("oac", "a", t0 + Duration::from_millis(2)).is_none());
-        assert!(cache.get("oac", "b", t0 + Duration::from_millis(2)).is_some());
-        assert!(cache.get("oac", "c", t0 + Duration::from_millis(2)).is_some());
+        assert!(cache
+            .get("oac", "a", t0 + Duration::from_millis(2))
+            .is_none());
+        assert!(cache
+            .get("oac", "b", t0 + Duration::from_millis(2))
+            .is_some());
+        assert!(cache
+            .get("oac", "c", t0 + Duration::from_millis(2))
+            .is_some());
     }
 
     #[test]

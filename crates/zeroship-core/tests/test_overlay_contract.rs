@@ -1,8 +1,8 @@
 //! The generated test overlay is held to the real config contract.
 //!
 //! `deploy/ops/zeroship.test.toml` is written by
-//! `tests/provision_test_backends.sh` and names the PostgreSQL and Redis every
-//! suite in this workspace dials. It replaced eight environment variables that
+//! `tests/provision_test_backends.sh` and names the shared PostgreSQL used by
+//! suites that consume this overlay. It replaced eight environment variables that
 //! all meant "the test database", and the whole reason a file is better than
 //! eight names is that a file can be VALIDATED. A test topology in a document
 //! nothing parses is the same sprawl with fewer places to look.
@@ -20,13 +20,9 @@ use zeroship_core::config::file::FileConfig;
 use zeroship_core::config::test_overlay::{overlay_path, PROVISION_COMMAND};
 
 /// The exact shape `tests/provision_test_backends.sh` writes.
-const GENERATED_SHAPE: &str = "\
-[control]
-database_url = \"postgres://postgres:zeroship@127.0.0.1:5440/zeroship\"
-
-[worker]
-kv_url = \"redis://127.0.0.1:6390\"
-";
+const GENERATED_SHAPE: &str = r#"[control]
+database_url = "postgres://postgres:zeroship@127.0.0.1:5440/zeroship"
+"#;
 
 fn write_temp(name: &str, contents: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -53,10 +49,7 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
         parsed.control.database_url.as_deref(),
         Some("postgres://postgres:zeroship@127.0.0.1:5440/zeroship")
     );
-    assert_eq!(
-        parsed.worker.kv_url.as_deref(),
-        Some("redis://127.0.0.1:6390")
-    );
+    assert!(parsed.worker.kv_config.is_none());
     let _ = std::fs::remove_file(good.as_path());
 
     // One character, in one key, in the same document.
@@ -73,25 +66,37 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
 }
 
 /// When the overlay HAS been generated, it must satisfy the same contract and
-/// carry the two values every suite resolves from it.
+/// carry the PostgreSQL DSN its consumers resolve from it.
 ///
-/// Skipped rather than failed when absent, and that is the one skip in this
-/// file: `cargo test -p zeroship-core` is run constantly on checkouts that have
-/// no docker and never provisioned a backend, and failing it there would say
-/// "the config is wrong" when the truth is "there is no config yet". The suites
-/// themselves cannot skip this way - `zeroship_core::config::test_overlay::load`
-/// panics with the provisioning command, because a suite that runs without a
-/// database is the thing this workspace stopped tolerating.
+/// AN ABSENT OVERLAY FAILS. It used to announce a skip here - the argument
+/// being that `cargo test -p zeroship-core` runs constantly on checkouts that
+/// never provisioned a backend, and that failing there would say "the config is
+/// wrong" when the truth is "there is no config yet". That distinction is real
+/// and is now made in the message rather than in the exit status: the refusal
+/// says the overlay has not been generated and names the one command that
+/// generates it. The status stays red, because a skip here is indistinguishable
+/// from a pass, and this is the only test that rules on the shape every suite
+/// resolves its backends from.
 #[test]
-fn the_generated_overlay_parses_and_names_both_backends() {
+fn the_generated_overlay_parses_and_names_postgres() {
     let path = overlay_path();
-    if !path.exists() {
-        eprintln!(
-            "ZEROSHIP-TEST-SKIPPED: no {} yet; run {PROVISION_COMMAND}",
-            path.display()
-        );
-        return;
-    }
+    assert!(
+        path.exists(),
+        "The generated test overlay does not exist, and this test rules on it.\n\
+         \n\
+         \x20 wanted: {path}\n\
+         \n\
+         NOTHING IS WRONG WITH YOUR CONFIGURATION - there is not one yet. This\n\
+         file is generated, never hand-written. Generate it:\n\
+         \x20 {PROVISION_COMMAND}\n\
+         \n\
+         Both forms of that script write the overlay; `--check` adopts servers\n\
+         that are already running instead of starting its own.\n\
+         \n\
+         There is no environment variable that makes this a skip. Suites that use this\n\
+         overlay require it to name their shared PostgreSQL server.",
+        path = path.display()
+    );
 
     let parsed = FileConfig::load(Some(path.as_path())).unwrap_or_else(|error| {
         panic!(
@@ -108,14 +113,5 @@ fn the_generated_overlay_parses_and_names_both_backends() {
     assert!(
         dsn.starts_with("postgres://") || dsn.starts_with("postgresql://"),
         "[control] database_url is not a PostgreSQL DSN: {dsn}"
-    );
-
-    let kv = parsed
-        .worker
-        .kv_url
-        .expect("the generated overlay must carry [worker] kv_url");
-    assert!(
-        kv.starts_with("redis://") || kv.starts_with("rediss://"),
-        "[worker] kv_url is not a Redis URL: {kv}"
     );
 }

@@ -202,6 +202,7 @@ for _ in $(seq 1 30); do curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 && break
 curl -sf "$CONTROL_URL/readyz" >/dev/null 2>&1 \
   && pass "control ready" || { fail "control not ready"; tail -30 "$WORK/control.log"; exit 1; }
 
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 # The migration service, so this harness can drive `zeroship migrate` on the
 # SAME credential the login flow just produced. Every other harness that
 # migrates mints its bearer itself from a JWKS it serves; this one carries a
@@ -602,7 +603,7 @@ step "Migrate the same app with the same login credential"
 # BORROWED from `examples/db-todos`. The tables it creates are incidental; only
 # the successful explicit database creation and apply are the claim. If you are
 # looking for "a deployed app's env.db works after migrating", that is
-# `tests/e2e_db_app_end_to_end.sh`, which drives the app's own migrations and
+# `examples/db-hitcounter/tests/deployed.test.ts`, which drives the app's own migrations and
 # then reads a row back.
 BORROWED_IR="$ROOT/examples/db-todos/generated/zeroship/migrations.ir.json"
 if [ ! -f "$BORROWED_IR" ]; then

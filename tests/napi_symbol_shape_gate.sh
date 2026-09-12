@@ -266,7 +266,7 @@ while IFS=$'\t' read -r pkg target feats; do
       echo "    pointer table IN THE SHIPPED .node. It is for test binaries" >&2
       echo "    only. Declare it on the [dev-dependencies] napi entry; do NOT" >&2
       echo "    add it to [dependencies] and do NOT route it through this" >&2
-      echo "    crate's [features] (tests/dev_dep_feature_route_gate.sh)." >&2
+      echo "    crate's [features] (xtask/tests/repository_architecture.rs)." >&2
       fail=1
       ;;
   esac

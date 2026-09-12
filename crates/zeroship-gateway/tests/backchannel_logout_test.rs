@@ -1,6 +1,6 @@
 // This test target is its own crate ROOT and overflows rustc's layout query.
 // `recursion_limit` is per crate root, so the gateway's lib and its sibling
-// test targets do not cover this one. Caught by `tests/clippy_gate.sh`, which
+// test targets do not cover this one. Caught by `cargo clippy --workspace --all-targets --all-features`, which
 // lints `--all-targets`; a bare `cargo test -p zeroship-gateway --lib` never
 // builds this file, which is why it compiled clean until the gate ran.
 #![recursion_limit = "256"]
@@ -9,9 +9,10 @@
 //! the per-app, RLS-scoped session-revocation path used by the OIDC
 //! Back-Channel Logout 1.0 handler.
 //!
-//! Skipped silently when there is no test database (same convention as
-//! the rest of the gateway PG smoke tests, e.g. `sessions_test.rs`; set
-//! `PG_TEST_URL`).
+//! REFUSES when there is no test database, naming
+//! `tests/provision_test_backends.sh`, rather than skipping into a green -
+//! the same convention as the rest of the gateway PG tests, e.g.
+//! `sessions_test.rs`.
 //!
 //! Coverage:
 //!   - Seed two live sessions for the same user_id (different app_ids)
@@ -79,10 +80,7 @@ async fn is_live(client: &compio_postgres::Client, id: Uuid, app_id: &AppId) -> 
 
 #[compio::test]
 async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (mut client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -529,10 +527,7 @@ async fn audit_count(client: &Client, jti: &str) -> i64 {
 
 #[ntex::test]
 async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -669,10 +664,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
 
 #[ntex::test]
 async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -821,10 +813,7 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
 
 #[ntex::test]
 async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -1003,10 +992,7 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
 
 #[ntex::test]
 async fn handler_valid_logout_token_revokes_matching_sid_only() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -1145,10 +1131,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
 
 #[ntex::test]
 async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -1312,10 +1295,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
 
 #[ntex::test]
 async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succeeds() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -1461,10 +1441,7 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
 
 #[ntex::test]
 async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
@@ -1698,10 +1675,7 @@ fn build_handler_state_with_route(
 /// auth arms key it — reports a still-live token as revoked. PG-gated.
 #[ntex::test]
 async fn per_app_bcl_writes_token_family_marker() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
@@ -1835,7 +1809,10 @@ async fn per_app_bcl_writes_token_family_marker() {
     )
     .await
     .ok();
-    db.execute("DELETE FROM zeroship.users WHERE id = $1", &[&target_user.as_str()])
+    db.execute(
+        "DELETE FROM zeroship.users WHERE id = $1",
+        &[&target_user.as_str()],
+    )
         .await
         .ok();
 }
@@ -1860,10 +1837,7 @@ async fn per_app_bcl_writes_token_family_marker() {
 /// to read. Pre-fix this assertion FAILS (the anchor survives). PG-gated.
 #[ntex::test]
 async fn per_app_bcl_deletes_reload_recovery_anchor() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
@@ -1959,7 +1933,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     // anchor survives and this fails — "sign out everywhere" stays resurrectable.
     {
         let pool = db::checkout(&db_cfg).await.expect("checkout");
-        let mut conn = pool.get().await.expect("conn");
+        let mut conn = pool.acquire().await.expect("conn");
         assert!(
             anchors::read_live(&mut conn, &app_id, anchor_id)
                 .await

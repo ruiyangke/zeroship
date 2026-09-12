@@ -1,7 +1,7 @@
 {
   "name": "@zeroship/db",
   "version": "0.1.0",
-  "description": "Mongoose-compatible database SDK for zeroship",
+  "description": "Typed database ORM SDK for zeroship",
   "type": "module",
   "license": "MIT",
   "publishConfig": {

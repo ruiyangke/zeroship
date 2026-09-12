@@ -1,0 +1,26 @@
+[package]
+name = "zeroship-workflow"
+version = "0.1.0"
+edition = "2021"
+description = "Durable workflow engine, journal, and Rust client"
+
+[dependencies]
+zeroship-core = { workspace = true }
+async-trait = { workspace = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
+compio = { workspace = true }
+compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"] }
+cyper = { workspace = true }
+percent-encoding = { workspace = true }
+rusqlite = { workspace = true, features = ["bundled"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

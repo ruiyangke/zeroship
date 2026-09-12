@@ -43,7 +43,7 @@ async fn stream_until_commit(
     slot: &str,
     options: StartReplicationOptions<'_>,
 ) -> Vec<PgOutputMessage> {
-    let mut replication = compio_postgres::replication::connect_replication(
+    let replication = compio_postgres::replication::connect_replication(
         common::suite_tls(),
         &common::replication_config("cpg_pgoutput_options"),
     )

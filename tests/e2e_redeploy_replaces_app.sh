@@ -55,7 +55,7 @@ DB_URL="${DATABASE_URL:-postgres://postgres:zeroship@localhost:5440/$PG_DB}"
 # zs_scratch_db_cleanup reaches the server through `run_psql`; without it the
 # generated database is leaked and the library says so rather than pretending.
 run_psql() { docker exec "$PG_CONTAINER" psql -U "$PG_USER" "$@"; }
-# Distinct from golden_path.sh and e2e_dev_vs_deployed_kv.sh.
+# Distinct from golden_path.sh; the native KV deployment test allocates its ports.
 ZEROSHIP_CONTROL_PORT="${ZEROSHIP_CONTROL_PORT:-9393}"
 ZEROSHIP_WORKER_PORT="${ZEROSHIP_WORKER_PORT:-8393}"
 ZEROSHIP_GATEWAY_PORT="${ZEROSHIP_GATEWAY_PORT:-8303}"
@@ -115,11 +115,15 @@ zs_platform_migrate "$DB_URL" --migrations-dir "$ROOT/db/migrations-ts" \
 ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
 e2e_export_runtime_secrets "$WORK" || exit 1
 e2e_export_database_urls "$DB_URL"
+e2e_start_cdc_relay "$BIN/zeroship-data-cdc-server" || exit 1
 "$BIN/zeroship-control" --port "$ZEROSHIP_CONTROL_PORT" --blob-store "$WORK/bundles" \
   > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
-# env.kv is absent without ZEROSHIP_WORKER_KV_URL by design, and kv-dashboard needs it.
-ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
+# env.kv is absent without ZEROSHIP_WORKER_KV_CONFIG by design, and kv-dashboard needs it.
+ZEROSHIP_WORKER_KV_CONFIG="backend = \"redis\"
+[redis.topology]
+mode = \"standalone\"
+endpoint = \"127.0.0.1:$REDIS_PORT\"" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \
  --blob-store "$WORK/bundles" --poll-interval 2 \
  > "$WORK/worker.log" 2>&1 & PIDS+=($!)

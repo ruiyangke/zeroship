@@ -40,6 +40,50 @@ instead, and the workspace enforces that (see the "The environment" section of
 | `src/passfile.rs` | `~/.pgpass` lookup: the file consulted when no password is set. Its matching rules were derived by probing libpq, not read off the format description - see the note on `match_field`. |
 | `src/service.rs` | `pg_service.conf` lookup: a named section supplying connection parameters. Explicitly given parameters win over the service's, in any order. Its whitespace, comment, header and duplicate-key rules were probed out of libpq rather than read off the format description, which describes none of them - `docs/runbooks/compio-postgres-libpq-parameter-probing.md`. |
 
+## Pool ownership and lifecycle
+
+`Pool::acquire()` returns an owned `PoolConnection`. The lease keeps the pool
+alive across callbacks and can outlive the handle that acquired it. Ordinary
+queries and transactions use this same lease type.
+
+`Pool` is a cloneable handle over private `Rc` state. Clones share capacity,
+the FIFO queue, acquisition settings, metrics, and shutdown. Handles and leases
+stay on their compio thread. `Pool::metrics()` exposes the shared counters.
+
+The FIFO queue has no tenant identity. Long-held transaction leases can occupy
+capacity needed by ordinary queries; tenant admission policy belongs above the
+pool.
+
+```text
+pool -> acquire -> lease -> drop -> cleanup if needed -> reuse
+                     |
+                     +---- discard -> close socket -> release capacity
+```
+
+`PoolConfig::acquire_timeout` bounds asynchronous warm-up, including retries and
+hooks, and each checkout, including waiting and validation. Use
+`Error::is_pool_timeout()` and `Error::is_pool_closed()` to classify acquisition
+failures; command deadlines and transport failures retain their own meanings.
+
+`discard()` consumes the lease, closes its physical connection, and
+releases capacity without running a reuse hook. Use it when cleanup cannot be
+confirmed. Ordinary return rolls back an unfinished transaction before reuse;
+it preserves session settings and prepared statements.
+
+`Pool::close()` rejects new acquisitions and wakes pending acquisitions even
+inside connection setup or hooks. Their next poll cancels the pending work and
+drops its candidate. Close waits for checked-out leases to return; it does not
+depend on acquisition futures being polled again. Checked-out clients remain
+usable during that drain.
+
+Dropping the last pool handle or lease closes idle connections and cancels the
+housekeeper. Closing any handle explicitly starts shutdown for every clone.
+
+These ownership and lifecycle boundaries follow the patterns described by
+[SQLx's pool](https://docs.rs/sqlx/latest/sqlx/struct.Pool.html) and
+[connection leases](https://docs.rs/sqlx/latest/sqlx/pool/struct.PoolConnection.html).
+The executor and socket lifecycle remain compio-native.
+
 ## Running the tests
 
 Everything needs a live server; nothing skips. A missing database is a FAILED
@@ -159,9 +203,7 @@ leans on things that can disagree with it:
 ## Before you push
 
 ```bash
-./tests/clippy_gate.sh    # the workspace lint authority; a bare cargo clippy
-                          # stops at the first failing crate and prints what a
-                          # clean crate prints
+cargo clippy --workspace --all-targets --all-features
 ```
 
 Note it does NOT deny `unused_imports`; a plain `cargo build --tests` is the

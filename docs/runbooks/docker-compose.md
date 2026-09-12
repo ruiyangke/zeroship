@@ -11,9 +11,10 @@ the `-f` from every call):
 ```bash
 # Provision strong, stable local secrets once. Reruns keep existing values.
 zeroship dev init
+deploy/ops/init-cdc-tls.sh
 
 # Build everything ahead (so `up` never builds): the single shared image
-# (control/gateway/worker/auth/platform-migrate + the `zeroship` CLI) plus the external
+# (control/gateway/worker/auth/migrate-server/CDC relay + the CLI) plus the external
 # images (postgres, caddy, verdaccio, redpanda).
 docker compose -f deploy/compose/docker-compose.yml build   # all Dockerfile-based services
 docker compose -f deploy/compose/docker-compose.yml pull     # external images
@@ -255,13 +256,13 @@ Provider-specific URL parameters:
 non-loopback host). R2 must use `region=auto` and `checksum=none` (it rejects
 the AWS checksum headers); the parser enforces these.
 
-A self-contained MinIO smoke is available at `tests/e2e_s3_storage.sh`: it
-brings up a MinIO container, creates a bucket, boots control/worker/gateway
-with `--blob-store s3://...` and the worker with `--storage-url s3://...`, deploys
-a real app whose blobs now live in S3, asserts gateway->worker dispatch reading
-the bundle from S3, and byte-compares a large (> 8 MiB part size) multipart
-`env.storage` streaming round-trip. It skips cleanly when Docker is
-unavailable.
+The example-owned suites in `examples/storage-gallery/tests/` and
+`examples/storage-probe/tests/` provision MinIO, Postgres and their test issuer
+through Testcontainers. They boot control, gateway and worker with S3-backed
+deploy blobs and object storage, deploy the built examples, and check browser
+loading, RPC operations, multipart transfers and LocalFs/S3 parity. Docker is
+required; unavailable dependencies fail setup. Run `cargo xtask test storage`
+for the Rust suites and the examples' Vitest/Playwright tests.
 
 ### Console / AI builder
 
@@ -340,17 +341,17 @@ zeroship-<bin> --check-config --config <file> <normal required flags>
 
 ## Redis cluster test stack
 
-`deploy/compose/cluster.yml` is separate. It does **not** boot the platform stack; it only starts a 3-node Dragonfly cluster for `compio-redis` integration tests:
+Redis driver integration tests start their own Redis and Dragonfly containers
+through Testcontainers. Docker must be running; Compose provisioning and backend
+environment variables are unnecessary:
 
 ```bash
-docker compose -f deploy/compose/cluster.yml up -d
-./deploy/scripts/bootstrap-dragonfly-cluster.sh
-DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \
-  cargo test -p compio-redis --test cluster -- --nocapture
-docker compose -f deploy/compose/cluster.yml down -v
+cargo test -p compio-redis --tests
 ```
 
-The cluster file exposes `dragonfly-0`, `dragonfly-1`, and `dragonfly-2` on host ports `7000`, `7001`, and `7002`. These use `network_mode: host` (not a `ports:` mapping), so the ports can't be remapped and must be free on the host before you start the stack.
+The fixtures allocate mapped ports, configure cluster slots, and remove their
+containers when tests finish. The same fixtures support the KV and V8 binding
+suites; see [KV test commands](../../crates/zeroship-kv/README.md).
 
 ## OpenMeter metering-export test stack
 
@@ -390,45 +391,19 @@ divergences from the mock") for what this e2e catches that the in-test mock cann
 
 ## Postgres connections a worker holds
 
-`--scale worker=10` scales Postgres backends, not just containers, and the
-cluster's `max_connections` is what runs out first. Two pools per worker
-container are worth knowing about before sizing it.
+Worker data pools are thread-local and open lazily when a thread first uses
+`env.db`. Their `PoolConfig` bounds connection acquisition and idle retention;
+scaling worker processes or threads multiplies those pools.
 
-| Pool | Where | Opened | Size | Released |
-| --- | --- | --- | --- | --- |
-| `env.db` data plane | per worker THREAD (`--threads N`) | lazily, on that thread's first `env.db` operation | `max_size` 8, `min_idle` 2 | never; it is the app's database handle |
-| operator lifecycle | the worker's ONE version-poller thread | lazily, when an app first disappears from this process's version feed | 2, and all 2 are held - see below | when the poller's pending-deprovision set drains |
-
-The floor a worker sits at is therefore `2 x (threads that have served an
-`env.db` op)`, plus 2 more while it is reconciling apps removed from the
-runtime feed. Nothing here
-is a ceiling an operator sets: there is no connection-budget flag, and the two
-sizes are compile-time constants (`Pool::connect(&url, 8)` in
-`zeroship-plugin-db`'s `init_pool_async`, `OPERATOR_POOL_SIZE` in its
-`service.rs`).
-
-"All 2 are held" is not a rounding-up. `Pool::connect(url, 2)` sets `min_idle`
-to `min(2, max_size)` = 2 and opens that many upfront, and the driver evicts an
-idle connection only while the idle count EXCEEDS `min_idle` - so an operator
-pool never shrinks below two while it is installed, however long it sits unused.
-
-The operator pool is the one to watch, because it is the one that is easy to
-mis-model as free. It exists so that reconciling a batch of apps removed from
-the version feed costs one pool rather than one pool per app; the version
-poller runs on a thread that hosts no isolate, so it has no data-plane pool to
-borrow. Archive deliberately retains the version-feed entry and does not open
-this pool. It used to have no release path at all, which meant a container that
-had ever deprovisioned an app held two extra backends until it exited. It is now
-closed when the poller has nothing left pending, so a steady-state worker holds
-none.
-
-If `max_connections` is the constraint, the lever is `--threads`, not a pool
-setting: the data-plane pool is per thread.
+CDC adds no worker database pool. Workers connect to the relay over TLS, and the
+relay shares capture for each app across workers. Its database pool and logical
+replication sessions have separate capacity settings. See
+`docs/runbooks/cdc-relay.md` for sizing and deployment.
 
 ## Service health
 
-Every platform service (`control`, `gateway`, `worker`, `migrate-server`, `auth`)
-exposes the SAME pair, and compose gives each one a `healthcheck` pointed at
+The HTTP services (`control`, `gateway`, `worker`, `migrate-server`, `auth`)
+expose the same pair, and Compose gives each a `healthcheck` pointed at
 `/readyz`:
 
 | Endpoint | Meaning | Checks |

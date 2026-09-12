@@ -64,27 +64,6 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
-# Per-arm anti-vacuity accounting. This gate already had an anti-hollow floor on
-# nearly every extraction below, plus a gate-level one on the total pass count;
-# they are all expressed through the shared contract now, which changes two
-# things. A refusal NAMES the extraction that collapsed rather than only the
-# gate, and each count is emitted in a fixed format so the meta-gate can rule on
-# it - the compose-secret failure of 2026-08-20 was one program regexing
-# another's prose, and this is the same relationship one level up.
-#
-# EACH CHECK FUNCTION TAKES ITS ARM ID AS ITS FIRST ARGUMENT, because every one
-# of them is called more than once: --self-test runs each against a planted
-# violation AND against the real input, and check_ops_toml runs over two files.
-# Two arms sharing an id would let one vouch for the other's count, which the
-# library refuses outright.
-#
-# EACH FUNCTION NAMES THAT PARAMETER DIFFERENTLY - compose_arm, alias_arm,
-# argv_arm, ops_arm, secret_arm - and that is not style. `gate_arm_census.sh` reads
-# this file as TEXT and cannot evaluate a variable, so five functions all
-# spelling `gate_arm "$arm"` are five occurrences of one token to it, and it
-# fails the file for declaring the same arm five times. Distinct spellings are
-# what let the static half of the contract see five distinct arms.
-# shellcheck source=tests/lib/gate_arms.sh
 . "$ROOT/tests/lib/gate_arms.sh"
 gate_arms_init config_name_alignment
 
@@ -643,8 +622,8 @@ compose_superuser_role() {
 #     INPUT this arm derives the superuser's identity from, and it carries no
 #     URL grammar - check 8's header records the same value as undetectable by
 #     any registry-driven means. Refusing it would need a name heuristic.
-#   - compose files other than the one passed in. `deploy/compose/cluster.yml`
-#     and the two backing-service overlays are not walked by any check here.
+#   - compose files other than the one passed in. Backing-service overlays
+#     are not walked by any check here.
 #   - what a container does after parsing. This is a text check on a deploy file.
 check_compose_env_superuser() {
     local env_arm="$1" compose="$2" label="$3"
