@@ -12,7 +12,11 @@ use crate::{
 use chrono::DateTime;
 use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
-use zeroship_data_orm::sql::Predicate;
+use zeroship_data_orm::{
+    orm::{Entity, FindOptions, Operation},
+    sql::{Predicate, RowLimit},
+    value,
+};
 
 pub(crate) async fn invocation(
     tx: &mut Transaction,
@@ -192,8 +196,10 @@ pub(crate) async fn apply(
                 now,
             )
             .await?;
-            let generations = tx.table("generations");
-            tx.execute(&format!("UPDATE {generations} SET output_ref=$4 WHERE app_id=$1 AND run_id=$2 AND generation=$3"), &[app.as_str().into(),run.text("id")?.into(),run.integer("generation")?.into(),encode(reference)?.into()]).await?;
+            tx.database().collection(models::generations::Entity::COLLECTION)?.update(
+                value!({"app_id":app.as_str(), "run_id":run.text("id")?, "generation":run.integer("generation")?}),
+                value!({"output_ref":encode(reference)?}),
+            ).await?;
         }
         if journal::load(tx, app, &run.text("id")?, run.integer("generation")?)
             .await?
@@ -270,8 +276,13 @@ pub(crate) async fn apply(
                 now,
             )
             .await?;
-            let generations = tx.table("generations");
-            tx.execute(&format!("UPDATE {generations} SET input_ref=$3 WHERE app_id=$1 AND run_id=$2 AND generation=0"), &[app.as_str().into(),id.clone().into(),encode(&reference)?.into()]).await?;
+            tx.database()
+                .collection(models::generations::Entity::COLLECTION)?
+                .update(
+                    value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":0}),
+                    value!({"input_ref":encode(&reference)?}),
+                )
+                .await?;
         }
         link_continuation(tx, app, run, &id).await?;
         return Ok(RunState::Completed);
@@ -312,17 +323,13 @@ async fn suspend(
             .filter_map(|step| step.wake_at.map(|time| time.timestamp_millis()))
             .min()
     };
-    let runs = tx.table("runs");
-    tx.execute(
-        &format!("UPDATE {runs} SET state=$3,due_at=$4,task_id=NULL WHERE app_id=$1 AND id=$2"),
-        &[
-            app.as_str().into(),
-            id.into(),
-            state.as_str().into(),
-            due.into(),
-        ],
-    )
-    .await?;
+    tx.database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .update(
+            value!({"app_id":app.as_str(), "id":id}),
+            value!({"state":state.as_str(), "due_at":due, "task_id":null}),
+        )
+        .await?;
     Ok(state)
 }
 pub(crate) async fn park(
@@ -330,14 +337,13 @@ pub(crate) async fn park(
     app: &AppId,
     run: &Row,
 ) -> Result<(), WorkflowServiceError> {
-    let runs = tx.table("runs");
-    tx.execute(
-        &format!(
-            "UPDATE {runs} SET state='paused',due_at=NULL,task_id=NULL WHERE app_id=$1 AND id=$2"
-        ),
-        &[app.as_str().into(), run.text("id")?.into()],
-    )
-    .await?;
+    tx.database()
+        .collection(models::runs::Entity::COLLECTION)?
+        .update(
+            value!({"app_id":app.as_str(), "id":run.text("id")?}),
+            value!({"state":"paused", "due_at":null, "task_id":null}),
+        )
+        .await?;
     Ok(())
 }
 async fn has_compensation(
@@ -365,28 +371,23 @@ async fn settle(
 ) -> Result<RunState, WorkflowServiceError> {
     let id = run.text("id")?;
     let target = parse_state(update.state())?;
-    let runs = tx.table("runs");
+    let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
     // Child cancellation remains durable while a child owns an accepted task.
-    tx.execute(&format!("UPDATE {runs} SET control='cancel',due_at=CASE WHEN task_id IS NULL THEN $4 ELSE due_at END WHERE app_id=$1 AND parent_id=$2 AND parent_generation=$3 AND cascade=1 AND state NOT IN ('completed','failed','cancelled')"), &[app.as_str().into(),id.clone().into(),run.integer("generation")?.into(),now.into()]).await?;
+    for leased in [true, false] {
+        runs.execute(Operation::Update {
+            filter:value!({"app_id":app.as_str(), "parent_id":id.clone(), "parent_generation":run.integer("generation")?,
+                "cascade":1, "state":{"$nin":["completed","failed","cancelled"]}, "task_id":{"$exists":leased}}),
+            patch:if leased { value!({"control":"cancel"}) } else { value!({"control":"cancel", "due_at":now}) },
+            many:true,
+        }).await?;
+    }
     if has_compensation(tx, app, run).await? {
-        let generations = tx.table("generations");
-        tx.execute(
-            &format!(
-                "UPDATE {generations} SET error=$4 WHERE app_id=$1 AND run_id=$2 AND generation=$3"
-            ),
-            &[
-                app.as_str().into(),
-                id.clone().into(),
-                run.integer("generation")?.into(),
-                update
-                    .error()
-                    .map(|value| encode(&value))
-                    .transpose()?
-                    .into(),
-            ],
-        )
-        .await?;
-        tx.execute(&format!("UPDATE {runs} SET state='compensating',compensation_target=$3,control='none',due_at=$4,task_id=NULL WHERE app_id=$1 AND id=$2"), &[app.as_str().into(),id.into(),target.as_str().into(),now.into()]).await?;
+        tx.database().collection(models::generations::Entity::COLLECTION)?.update(
+            value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":run.integer("generation")?}),
+            value!({"error":update.error().map(|value|encode(&value)).transpose()?}),
+        ).await?;
+        runs.update(value!({"app_id":app.as_str(), "id":id}),
+            value!({"state":"compensating", "compensation_target":target.as_str(), "control":"none", "due_at":now, "task_id":null})).await?;
         Ok(RunState::Compensating)
     } else {
         finish(tx, app, run, target, None, update.error(), now).await
@@ -411,18 +412,18 @@ async fn compensation_ready(
         .ok_or_else(|| {
             WorkflowServiceError::Internal("compensating workflow has no pending operation".into())
         })?;
-    let steps = tx.table("steps");
-    let rows=tx.query(&format!("SELECT compensation_due_at FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"), &[app.as_str().into(),id.clone().into(),run.integer("generation")?.into(),i64::from(pending.ordinal).into()]).await?;
-    let due = rows[0]
-        .optional_integer("compensation_due_at")?
+    let due = compensation_record(tx, app, &id, run.integer("generation")?, pending.ordinal)
+        .await?
+        .compensation_due_at
         .unwrap_or(now);
     if due > now {
-        let runs = tx.table("runs");
-        tx.execute(
-            &format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND id=$2"),
-            &[app.as_str().into(), id.into(), due.into()],
-        )
-        .await?;
+        tx.database()
+            .collection(models::runs::Entity::COLLECTION)?
+            .update(
+                value!({"app_id":app.as_str(), "id":id}),
+                value!({"due_at":due}),
+            )
+            .await?;
         return Ok(false);
     }
     Ok(true)
@@ -467,10 +468,9 @@ async fn compensate(
     {
         return journal::invalid("compensation outcome does not match the pending operation");
     }
-    let steps = tx.table("steps");
-    let rows=tx.query(&format!("SELECT compensation_attempts,compensation_retry_ms FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"), &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(ordinal).into()]).await?;
-    let attempts = rows[0]
-        .integer("compensation_attempts")?
+    let record = compensation_record(tx, app, &id, generation, ordinal).await?;
+    let attempts = record
+        .compensation_attempts
         .checked_add(1)
         .ok_or_else(|| WorkflowServiceError::Internal("compensation attempt overflow".into()))?;
     let retry = error.is_some() && attempts < i64::from(pending.compensation_max_attempts);
@@ -486,43 +486,50 @@ async fn compensate(
     );
     journal::update(tx, app, &id, generation, &pending).await?;
     let due = if retry {
-        Some(deadline(now, rows[0].integer("compensation_retry_ms")?)?)
+        Some(deadline(now, record.compensation_retry_ms)?)
     } else {
         None
     };
-    tx.execute(&format!("UPDATE {steps} SET compensation_attempts=$5,compensation_due_at=$6,compensation_error=$7 WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND ordinal=$4"),
-        &[app.as_str().into(),id.clone().into(),generation.into(),i64::from(ordinal).into(),attempts.into(),due.into(),error.map(|value|encode(&value)).transpose()?.into()]).await?;
+    tx.database().collection(models::steps::Entity::COLLECTION)?.update(
+        value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation, "ordinal":i64::from(ordinal)}),
+        value!({"compensation_attempts":attempts, "compensation_due_at":due, "compensation_error":error.map(|value|encode(&value)).transpose()?}),
+    ).await?;
     if has_compensation(tx, app, run).await? {
         if ControlIntent::parse(&run.text("control")?)? == ControlIntent::Pause {
             park(tx, app, run).await?;
             return Ok(RunState::Paused);
         }
-        let runs = tx.table("runs");
-        tx.execute(
-            &format!("UPDATE {runs} SET task_id=NULL,due_at=$3 WHERE app_id=$1 AND id=$2"),
-            &[
-                app.as_str().into(),
-                id.clone().into(),
-                due.unwrap_or(now).into(),
-            ],
-        )
-        .await?;
+        tx.database()
+            .collection(models::runs::Entity::COLLECTION)?
+            .update(
+                value!({"app_id":app.as_str(), "id":id.clone()}),
+                value!({"task_id":null, "due_at":due.unwrap_or(now)}),
+            )
+            .await?;
         return Ok(RunState::Compensating);
     }
-    let generations = tx.table("generations");
     let rows = tx
-        .query(
-            &format!(
-                "SELECT error FROM {generations} WHERE app_id=$1 AND run_id=$2 AND generation=$3"
-            ),
-            &[app.as_str().into(), id.clone().into(), generation.into()],
+        .database()
+        .entity::<models::generations::Entity>()?
+        .find::<models::GenerationOutcome>(
+            models::generations::app_id
+                .eq(app.as_str())?
+                .and(models::generations::run_id.eq(id.as_str())?)
+                .and(models::generations::generation.eq(generation)?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
         )
         .await?;
-    let original: Option<Value> = rows[0]
-        .optional_text("error")?
-        .map(|value| decode(&value))
+    let original: Option<Value> = rows
+        .first()
+        .ok_or_else(|| WorkflowServiceError::Internal("workflow generation is missing".into()))?
+        .error
+        .as_deref()
+        .map(decode)
         .transpose()?;
-    let failures=tx.query(&format!("SELECT ordinal,compensation_error FROM {steps} WHERE app_id=$1 AND run_id=$2 AND generation=$3 AND compensation_error IS NOT NULL ORDER BY ordinal DESC"), &[app.as_str().into(),id.into(),generation.into()]).await?;
+    let failures = compensation_failures(tx, app, &id, generation).await?;
     if failures.is_empty() {
         return finish(
             tx,
@@ -535,7 +542,6 @@ async fn compensate(
         )
         .await;
     }
-    let failures:Vec<Value>=failures.iter().map(|row|Ok(json!({"ordinal":row.integer("ordinal")?,"error":decode::<Value>(&row.text("compensation_error")?)?}))).collect::<Result<_,WorkflowServiceError>>()?;
     finish(tx,app,run,RunState::Failed,None,Some(json!({"name":"WorkflowCompensationError","message":"workflow compensation did not fully succeed","cause":original,"failures":failures})),now).await
 }
 pub(crate) async fn finish(
@@ -550,16 +556,25 @@ pub(crate) async fn finish(
     let id = run.text("id")?;
     let generation = run.integer("generation")?;
     let runs = tx.table("runs");
-    let generations = tx.table("generations");
-    tx.execute(&format!("UPDATE {runs} SET state=$3,control='none',task_id=NULL,due_at=NULL,key=NULL,terminal_at=$4 WHERE app_id=$1 AND id=$2"), &[app.as_str().into(),id.clone().into(),state.as_str().into(),now.into()]).await?;
-    tx.execute(&format!("UPDATE {generations} SET state=$4,output=$5,error=$6,terminal_at=$7 WHERE app_id=$1 AND run_id=$2 AND generation=$3"), &[app.as_str().into(),id.clone().into(),generation.into(),state.as_str().into(),output.map(|value|encode(&value)).transpose()?.into(),error.map(|value|encode(&value)).transpose()?.into(),now.into()]).await?;
-    for table in ["waits", "subscriptions"] {
-        let table = tx.table(table);
-        tx.execute(
-            &format!("DELETE FROM {table} WHERE app_id=$1 AND run_id=$2 AND generation=$3"),
-            &[app.as_str().into(), id.clone().into(), generation.into()],
+    tx.database().collection(models::runs::Entity::COLLECTION)?.update(
+        value!({"app_id":app.as_str(), "id":id.clone()}),
+        value!({"state":state.as_str(), "control":"none", "task_id":null, "due_at":null, "key":null, "terminal_at":now}),
+    ).await?;
+    tx.database()
+        .collection(models::generations::Entity::COLLECTION)?
+        .update(
+            value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation}),
+            value!({"state":state.as_str(), "output":output.map(|value|encode(&value)).transpose()?,
+            "error":error.map(|value|encode(&value)).transpose()?, "terminal_at":now}),
         )
         .await?;
+    for table in [
+        models::waits::Entity::COLLECTION,
+        models::subscriptions::Entity::COLLECTION,
+    ] {
+        tx.database().collection(table)?.execute(Operation::Purge {
+            filter:value!({"app_id":app.as_str(), "run_id":id.clone(), "generation":generation}), many:true,
+        }).await?;
     }
     let waits = tx.table("waits");
     tx.execute(&format!("UPDATE {runs} SET due_at=$3 WHERE app_id=$1 AND task_id IS NULL AND control='none' AND state IN ('waiting','sleeping','queued') AND EXISTS (SELECT 1 FROM {waits} w WHERE w.app_id=$1 AND w.run_id={runs}.id AND w.generation={runs}.generation AND w.child_id=$2)"), &[app.as_str().into(),id.clone().into(),now.into()]).await?;
@@ -582,35 +597,170 @@ async fn link_continuation(
     successor: &str,
 ) -> Result<(), WorkflowServiceError> {
     let id = run.text("id")?;
-    let runs = tx.table("runs");
-    tx.execute(
-        &format!("UPDATE {runs} SET continued_to_id=$3 WHERE app_id=$1 AND id=$2"),
-        &[app.as_str().into(), id.clone().into(), successor.into()],
+    let runs = tx.database().collection(models::runs::Entity::COLLECTION)?;
+    runs.update(
+        value!({"app_id":app.as_str(), "id":id.clone()}),
+        value!({"continued_to_id":successor}),
     )
     .await?;
-    tx.execute(&format!("UPDATE {runs} SET continued_from_id=$3,parent_id=$4,parent_generation=$5,parent_ordinal=$6,cascade=$7,depth=$8,schedule_id=$9 WHERE app_id=$1 AND id=$2"),
-        &[app.as_str().into(),successor.into(),id.clone().into(),run.optional_text("parent_id")?.into(),run.optional_integer("parent_generation")?.into(),run.optional_integer("parent_ordinal")?.into(),run.integer("cascade")?.into(),run.integer("depth")?.into(),run.optional_text("schedule_id")?.into()]).await?;
+    runs.update(value!({"app_id":app.as_str(), "id":successor}), value!({
+        "continued_from_id":id.clone(), "parent_id":run.optional_text("parent_id")?,
+        "parent_generation":run.optional_integer("parent_generation")?, "parent_ordinal":run.optional_integer("parent_ordinal")?,
+        "cascade":run.integer("cascade")?, "depth":run.integer("depth")?, "schedule_id":run.optional_text("schedule_id")?,
+    })).await?;
     // A parent's durable wait follows the continuation. It must not observe the
     // intermediate run's terminal acknowledgement as the child's final result.
-    let waits = tx.table("waits");
-    let steps = tx.table("steps");
-    let parents=tx.query(&format!("SELECT s.run_id,s.generation,s.record FROM {steps} s JOIN {waits} w ON w.app_id=s.app_id AND w.run_id=s.run_id AND w.generation=s.generation AND w.ordinal=s.ordinal WHERE w.app_id=$1 AND w.child_id=$2 ORDER BY s.run_id,s.ordinal"), &[app.as_str().into(),id.clone().into()]).await?;
-    for parent in parents {
-        let mut step: crate::engine::StepCheckpoint = decode(&parent.text("record")?)?;
-        step.child_run_id = Some(successor.into());
-        journal::update(
-            tx,
-            app,
-            &parent.text("run_id")?,
-            parent.integer("generation")?,
-            &step,
-        )
+    retarget_parent_steps(tx, app, &id, successor).await?;
+    tx.database()
+        .collection(models::waits::Entity::COLLECTION)?
+        .execute(Operation::Update {
+            filter: value!({"app_id":app.as_str(), "child_id":id}),
+            patch: value!({"child_id":successor}),
+            many: true,
+        })
         .await?;
+    Ok(())
+}
+
+async fn compensation_record(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+    generation: i64,
+    ordinal: i32,
+) -> Result<models::CompensationRecord, WorkflowServiceError> {
+    tx.database()
+        .entity::<models::steps::Entity>()?
+        .find::<models::CompensationRecord>(
+            models::steps::app_id
+                .eq(app.as_str())?
+                .and(models::steps::run_id.eq(id)?)
+                .and(models::steps::generation.eq(generation)?)
+                .and(models::steps::ordinal.eq(i64::from(ordinal))?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            WorkflowServiceError::Internal("workflow compensation record is missing".into())
+        })
+}
+
+async fn compensation_failures(
+    tx: &Transaction,
+    app: &AppId,
+    id: &str,
+    generation: i64,
+) -> Result<Vec<Value>, WorkflowServiceError> {
+    let db = tx.database();
+    let source = db.entity::<models::steps::Entity>()?.alias("s")?;
+    let page_limit = RowLimit::default().get();
+    let mut after = None;
+    let mut failures = Vec::new();
+    loop {
+        let mut filter = vec![
+            source.column(models::steps::app_id).eq(app.as_str())?,
+            source.column(models::steps::run_id).eq(id)?,
+            source.column(models::steps::generation).eq(generation)?,
+            Predicate::Not(Box::new(
+                source
+                    .column(models::steps::compensation_error)
+                    .eq(None::<String>)?,
+            )),
+        ];
+        if let Some(after) = after {
+            filter.push(source.column(models::steps::ordinal).lt(after)?);
+        }
+        let page = db
+            .from(&source)
+            .filter(Predicate::And(filter))
+            .order_by(source.column(models::steps::ordinal).desc())
+            .select(source.row::<models::CompensationFailure>())?
+            .limit(page_limit)?
+            .all()
+            .await?;
+        let count = page.len();
+        for row in page {
+            after = Some(row.ordinal);
+            let error = row.compensation_error.as_deref().ok_or_else(|| {
+                WorkflowServiceError::Internal("workflow compensation failure has no error".into())
+            })?;
+            failures.push(json!({"ordinal":row.ordinal, "error":decode::<Value>(error)?}));
+        }
+        if count < page_limit as usize {
+            break;
+        }
     }
-    tx.execute(
-        &format!("UPDATE {waits} SET child_id=$3 WHERE app_id=$1 AND child_id=$2"),
-        &[app.as_str().into(), id.into(), successor.into()],
-    )
-    .await?;
+    Ok(failures)
+}
+
+async fn retarget_parent_steps(
+    tx: &mut Transaction,
+    app: &AppId,
+    id: &str,
+    successor: &str,
+) -> Result<(), WorkflowServiceError> {
+    let db = tx.database().clone();
+    let step = db.entity::<models::steps::Entity>()?.alias("s")?;
+    let wait = db.entity::<models::waits::Entity>()?.alias("w")?;
+    let page_limit = RowLimit::default().get();
+    let mut after: Option<(String, i64, i64)> = None;
+    loop {
+        let mut filter = vec![
+            wait.column(models::waits::app_id).eq(app.as_str())?,
+            wait.column(models::waits::child_id).eq(Some(id))?,
+        ];
+        if let Some((run_id, generation, ordinal)) = &after {
+            filter.push(Predicate::Or(vec![
+                step.column(models::steps::run_id).gt(run_id.as_str())?,
+                Predicate::And(vec![
+                    step.column(models::steps::run_id).eq(run_id.as_str())?,
+                    step.column(models::steps::generation).gt(*generation)?,
+                ]),
+                Predicate::And(vec![
+                    step.column(models::steps::run_id).eq(run_id.as_str())?,
+                    step.column(models::steps::generation).eq(*generation)?,
+                    step.column(models::steps::ordinal).gt(*ordinal)?,
+                ]),
+            ]));
+        }
+        let page = db
+            .from(&step)
+            .inner_join(
+                &wait,
+                Predicate::And(vec![
+                    step.column(models::steps::app_id)
+                        .eq_column(wait.column(models::waits::app_id))?,
+                    step.column(models::steps::run_id)
+                        .eq_column(wait.column(models::waits::run_id))?,
+                    step.column(models::steps::generation)
+                        .eq_column(wait.column(models::waits::generation))?,
+                    step.column(models::steps::ordinal)
+                        .eq_column(wait.column(models::waits::ordinal))?,
+                ]),
+            )?
+            .filter(Predicate::And(filter))
+            .order_by(step.column(models::steps::run_id).asc())
+            .order_by(step.column(models::steps::generation).asc())
+            .order_by(step.column(models::steps::ordinal).asc())
+            .select(step.row::<models::ParentStep>())?
+            .limit(page_limit)?
+            .all()
+            .await?;
+        let count = page.len();
+        for parent in page {
+            let mut record: crate::engine::StepCheckpoint = decode(&parent.record)?;
+            record.child_run_id = Some(successor.into());
+            journal::update(tx, app, &parent.run_id, parent.generation, &record).await?;
+            after = Some((parent.run_id, parent.generation, parent.ordinal));
+        }
+        if count < page_limit as usize {
+            break;
+        }
+    }
     Ok(())
 }
