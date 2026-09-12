@@ -19,6 +19,7 @@ mod json;
 mod lifecycle;
 mod nested_temporal;
 mod native_tables;
+mod owned_transactions;
 mod protected_updates;
 mod protected_projections;
 mod schema_updates;
