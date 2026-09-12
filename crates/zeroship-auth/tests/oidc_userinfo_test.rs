@@ -187,13 +187,13 @@ async fn userinfo_rejects_missing_and_bad_tokens() {
         let garbage = userinfo_get_with_authorization(&fx, "Bearer not-a-jwt")
             .await
             .expect("garbage bearer");
-        assert_invalid_token(garbage).await;
+        assert_invalid_token(garbage);
 
         let token = issue_token(&fx, "openid").await;
         let tampered = userinfo_get(&fx, Some(&tamper_token(&token.access_token)))
             .await
             .expect("tampered bearer");
-        assert_invalid_token(tampered).await;
+        assert_invalid_token(tampered);
 
         let alg_none = userinfo_get(
             &fx,
@@ -201,17 +201,17 @@ async fn userinfo_rejects_missing_and_bad_tokens() {
         )
         .await
         .expect("alg none bearer");
-        assert_invalid_token(alg_none).await;
+        assert_invalid_token(alg_none);
 
         let expired = userinfo_get(&fx, Some(&expired_access_token(&fx)))
             .await
             .expect("expired bearer");
-        assert_invalid_token(expired).await;
+        assert_invalid_token(expired);
 
         let wrong_issuer = userinfo_get(&fx, Some(&wrong_issuer_access_token(&fx)))
             .await
             .expect("wrong issuer bearer");
-        assert_invalid_token(wrong_issuer).await;
+        assert_invalid_token(wrong_issuer);
     })
     .await;
 }
@@ -226,7 +226,7 @@ async fn userinfo_rejects_id_token_used_as_access_token() {
         let resp = userinfo_get(&fx, Some(&token.id_token))
             .await
             .expect("id token as bearer");
-        assert_invalid_token(resp).await;
+        assert_invalid_token(resp);
     })
     .await;
 }
@@ -269,7 +269,7 @@ async fn userinfo_rejects_disabled_user() {
         let resp = userinfo_get(&fx, Some(&token.access_token))
             .await
             .expect("disabled-user bearer");
-        assert_invalid_token(resp).await;
+        assert_invalid_token(resp);
     })
     .await;
 }
@@ -494,7 +494,7 @@ async fn userinfo_post(fx: &Fixture, token: &str) -> Result<cyper::Response, cyp
         .await
 }
 
-async fn assert_invalid_token(resp: cyper::Response) {
+fn assert_invalid_token(resp: cyper::Response) {
     assert_eq!(resp.status().as_u16(), 401);
     assert_eq!(
         resp.headers()
@@ -518,7 +518,7 @@ fn assert_missing_token(resp: &cyper::Response) {
     assert_eq!(www_authenticate(resp).as_deref(), Some("Bearer"));
 }
 
-/// A valid access token that lacks the `openid` scope → 403 insufficient_scope.
+/// A valid access token that lacks the `openid` scope → 403 `insufficient_scope`.
 fn assert_insufficient_scope(resp: &cyper::Response) {
     assert_eq!(resp.status().as_u16(), 403);
     assert_eq!(
@@ -624,9 +624,9 @@ fn issue_access_token_with_issuer(fx: &Fixture, issuer: &Issuer, ttl_secs: Optio
     access_token_with_scopes(fx, issuer, &["openid"], ttl_secs)
 }
 
-/// Mint a signed OP access token with an arbitrary scope set — used to build
-/// tokens the real `/token` flow won't return (e.g. no `openid`, so no paired
-/// id_token). `issuer` both signs and supplies the pairwise sub.
+/// Sign explicit claims with the fixture key, including scope sets that the
+/// real `/token` flow cannot return. The supplied issuer sets the identity
+/// claim and key identifier; the subject comes from the fixture's person.
 fn access_token_with_scopes(
     fx: &Fixture,
     issuer: &Issuer,
