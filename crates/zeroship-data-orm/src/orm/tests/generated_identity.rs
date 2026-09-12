@@ -40,6 +40,17 @@ fn rows(output: Output) -> Vec<Value> {
 async fn generated_insert(postgres: bool, batch: bool) {
     let owner = fixture(postgres).await;
     let records = owner.database.collection("records").unwrap();
+    let supplied = records
+        .insert(value!({"id": 42, "label": "caller_supplied"}))
+        .await
+        .expect_err("database-generated identities reject caller input");
+    assert!(matches!(
+        supplied,
+        DbError::ValidationFailed {
+            code: "platform_assigned_field",
+            ..
+        }
+    ));
     let plain = rows(records.insert(value!({"label":"plain"})).await.unwrap()).remove(0);
     assert!(plain["id"].as_i64().is_some());
     let inserted = if batch {
