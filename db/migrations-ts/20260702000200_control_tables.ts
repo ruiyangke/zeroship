@@ -1,5 +1,19 @@
 import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  app_audit: ["creator_id", "actor_user_id"],
+  app_members: ["user_id", "added_by"],
+  app_net_grants: ["granted_by"],
+  app_schema_applies: ["submitted_by"],
+  creator_account_history: ["creator_id"],
+  creator_accounts: ["creator_id"],
+  net_policy_catalog: ["updated_by"],
+  payouts: ["creator_id"],
+  permission_tokens: ["owner_id"],
+  platform_admin_roles: ["user_id", "granted_by"],
+  platform_policies: ["updated_by"],
+};
+
 export default {
   name: "control_tables",
   schema() {
@@ -7,8 +21,8 @@ export default {
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
         app_id: t.uuid(),
-        creator_id: t.uuid(),
-        actor_user_id: t.uuid(),
+        creator_id: t.text(),
+        actor_user_id: t.text(),
         actor_token_id: t.uuid(),
         action: t.text().notNull(),
         resource: t.text(),
@@ -29,10 +43,10 @@ export default {
     table("app_members", { schema: "zeroship" }).create({
       columns: {
         app_id: t.uuid().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
-        added_by: t.uuid(),
+        added_by: t.text(),
       },
       primaryKey: ["app_id", "user_id"],
     });
@@ -94,7 +108,7 @@ export default {
         descriptor_sha256: t.text().notNull(),
         // The engine's own `outcome.applied` for this request.
         applied_versions: t.json().notNull().default([]),
-        submitted_by: t.uuid().notNull(),
+        submitted_by: t.text().notNull(),
         submitted_at: t.timestamp().notNull().default(now()),
         applied_at: t.timestamp(),
         last_error: t.text(),
@@ -169,7 +183,7 @@ export default {
     table("creator_account_history", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        creator_id: t.uuid().notNull(),
+        creator_id: t.text().notNull(),
         stripe_account_id: t.text().notNull(),
         linked_at: t.timestamp().notNull().default(now()),
         unlinked_at: t.timestamp(),
@@ -178,7 +192,7 @@ export default {
     });
     table("creator_accounts", { schema: "zeroship" }).create({
       columns: {
-        creator_id: t.uuid().notNull(),
+        creator_id: t.text().notNull(),
         stripe_account_id: t.text().notNull(),
         onboarded_at: t.timestamp().notNull().default(now()),
         unlinked_at: t.timestamp(),
@@ -200,7 +214,7 @@ export default {
     table("payouts", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        creator_id: t.uuid().notNull(),
+        creator_id: t.text().notNull(),
         event_id: t.text().notNull(),
         event_type: t.text().notNull(),
         gross_amount: t.bigInt().notNull(),
@@ -222,7 +236,7 @@ export default {
     table("permission_tokens", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull(),
-        owner_id: t.uuid().notNull(),
+        owner_id: t.text().notNull(),
         kind: t.text().notNull(),
         client_id: t.text(),
         name: t.text().notNull(),
@@ -238,10 +252,10 @@ export default {
     table("permission_tokens", { schema: "zeroship" }).check("permission_tokens_kind_check").add({ expr: (col) => col("kind").in(["pat", "oauth_grant"]) });
     table("platform_admin_roles", { schema: "zeroship" }).create({
       columns: {
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         role: t.text().notNull(),
         granted_at: t.timestamp().notNull().default(now()),
-        granted_by: t.uuid(),
+        granted_by: t.text(),
       },
       primaryKey: ["user_id"],
     });
@@ -252,9 +266,16 @@ export default {
         cedar_source: t.text().notNull(),
         enabled: t.boolean().notNull().default(true),
         updated_at: t.timestamp().notNull().default(now()),
-        updated_by: t.uuid(),
+        updated_by: t.text(),
       },
       primaryKey: ["id"],
     });
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
+    }
   },
 };

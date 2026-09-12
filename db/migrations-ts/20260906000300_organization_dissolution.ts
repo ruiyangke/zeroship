@@ -30,7 +30,7 @@ import { table, t } from "@zeroship/migrate";
 //
 // `organizations_personal_owner_key` is the same defect with teeth. A personal
 // organization is where `zeroship deploy` lands on a fresh account, resolved
-// through that pointer, and its slug is derived from the owner's uuid so it can
+// through that pointer, and its slug is derived from the owner's user id so it can
 // never be re-derived differently. Left global, closing one would answer the
 // creator's next deploy with a refusal they could not clear by any route: the
 // pointer would still resolve to the closed row, and the unique index would

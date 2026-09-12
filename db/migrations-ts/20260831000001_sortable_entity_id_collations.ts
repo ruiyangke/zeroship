@@ -2,7 +2,7 @@ import { raw } from "@zeroship/migrate";
 
 // These are the platform columns whose entire semantic domain is a canonical
 // case-sensitive typed id or a storage copy of one. PostgreSQL's locale
-// collation does not keep the base62 alphabet in numeric order, so sortable
+// collation does not keep the base36 alphabet in numeric order, so sortable
 // entity ids need bytewise ordering. Their foreign-key and denormalized copies
 // need the same collation even when they are never ordered: otherwise a join
 // against the collated entity id cannot use the copy's ordinary index.
@@ -16,21 +16,31 @@ import { raw } from "@zeroship/migrate";
 // UUID-derived rather than UUIDv7; bytewise comparison is still the canonical
 // identity-domain rule, but those particular values do not encode creation time.
 const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-  // Control and billing: 28 columns.
+  // Control and billing.
+  app_audit: ["creator_id", "actor_user_id"],
+  app_egress_rules: ["created_by"],
+  app_members: ["user_id", "added_by"],
+  app_schema_applies: ["submitted_by"],
   apps: ["plan_id"],
+  billing_customer_refs: ["creator_id"],
   billing_disputes: ["id", "invoice_id"],
   billing_line_provider_refs: ["invoice_id"],
-  billing_notifications: ["transition_id"],
+  billing_notifications: ["creator_id", "transition_id"],
   billing_provider_refs: ["invoice_id"],
   billing_reconciliation_findings: ["id"],
-  connect_checkout_failures: ["id"],
-  creator_billing_status_history: ["id"],
-  creator_billing_status: ["failed_invoice_id"],
-  credit_ledger: ["id", "applied_invoice_id", "consumed_from_grant_id"],
+  connect_checkout_failures: ["id", "creator_id"],
+  creator_account_history: ["creator_id"],
+  creator_accounts: ["creator_id"],
+  creator_billing: ["creator_id"],
+  creator_billing_status_history: ["id", "creator_id"],
+  creator_billing_status: ["creator_id", "failed_invoice_id"],
+  creator_fee_policy: ["creator_id"],
+  credit_ledger: ["id", "creator_id", "applied_invoice_id", "consumed_from_grant_id"],
   invoice_lines: ["invoice_id", "plan_id"],
   invoice_payments: ["id", "invoice_id"],
-  invoices: ["id"],
-  payout_failures: ["id"],
+  invoices: ["id", "creator_id"],
+  payout_failures: ["id", "creator_id"],
+  payouts: ["creator_id"],
   plan_change_events: ["id", "from_plan_id", "to_plan_id"],
   plans: ["id"],
   provider_dead_letter: ["id"],
@@ -38,11 +48,29 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   refunds: ["id", "invoice_id"],
   spend_state_history: ["id"],
 
-  // Auth refresh-family identity: 2 columns.
-  app_session_anchors: ["refresh_family_id"],
-  oauth_refresh_tokens: ["refresh_family_id"],
+  // Auth identity.
+  app_session_anchors: ["global_user_id", "refresh_family_id"],
+  app_user_identities: ["global_user_id"],
+  audit_events: ["actor_user_id"],
+  authz_decisions: ["actor_user_id"],
+  device_grants: ["principal_id"],
+  email_verifications: ["user_id"],
+  federated_identities: ["user_id"],
+  gateway_sessions: ["user_id"],
+  identity_links: ["principal_id"],
+  idp_sessions: ["user_id"],
+  magic_links: ["user_id"],
+  oauth_authorization_codes: ["user_id"],
+  oauth_clients: ["created_by"],
+  oauth_grants: ["user_id"],
+  oauth_refresh_tokens: ["user_id", "refresh_family_id"],
+  oidc_session_clients: ["user_id"],
+  principal_grants: ["principal_id"],
+  totp_backup_codes: ["user_id"],
+  totp_credentials: ["user_id"],
+  users: ["id"],
 
-  // Durable workflows: 19 columns.
+  // Durable workflows.
   workflow_broadcasts: ["id"],
   workflow_runs: ["id", "dispatch_nonce", "parent_run_id"],
   workflow_schedules: ["id"],
@@ -59,8 +87,8 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   ],
   workflow_subscriptions: ["id", "run_id"],
 
-  // Sandbox typed-id world: 14 columns. Partition children inherit the
-  // sandbox_events column collations from the partitioned parent.
+  // Sandbox typed-id world. Partition children inherit the sandbox_events
+  // column collations from the partitioned parent.
   deleted_sandboxes: ["sandbox_id", "user_id"],
   hosts: ["host_id"],
   sandbox_events: ["event_id", "sandbox_id", "user_id"],
