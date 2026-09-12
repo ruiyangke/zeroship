@@ -38,6 +38,7 @@ use std::convert::TryFrom;
 use compio_postgres::{Client, NoTls};
 use serde_json::Value;
 use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::policy::ManagedPosture;
 
@@ -101,9 +102,8 @@ impl SchemaApplyStore {
         &self,
         input: SchemaApplyInput<'_>,
     ) -> Result<(), SchemaApplyStoreError> {
-        let ceiling_version = i64::try_from(input.ceiling_version).map_err(|_| {
-            SchemaApplyStoreError::CeilingVersionOverflow(input.ceiling_version)
-        })?;
+        let ceiling_version = i64::try_from(input.ceiling_version)
+            .map_err(|_| SchemaApplyStoreError::CeilingVersionOverflow(input.ceiling_version))?;
         let effective_profile = input.effective_profile.to_audit_json();
         let client = self.connect().await?;
         client
@@ -120,7 +120,7 @@ impl SchemaApplyStore {
                     &input.ceiling_id,
                     &ceiling_version,
                     &input.descriptor_sha256,
-                    &input.principal_id,
+                    &input.principal_id.as_str(),
                 ],
             )
             .await
@@ -225,7 +225,7 @@ impl SchemaApplyStore {
 pub struct SchemaApplyInput<'a> {
     pub app_id: Uuid,
     pub migration_id: Uuid,
-    pub principal_id: Uuid,
+    pub principal_id: &'a UserId,
     pub request_body: Value,
     pub effective_profile: &'a ManagedPosture,
     pub ceiling_id: &'a str,
@@ -283,8 +283,7 @@ mod tests {
     /// passed against a shape the corpus does not produce, so a column the corpus
     /// declares `NOT NULL` could be nullable here and nothing would notice. The
     /// suite now REQUIRES a migrated database for the table under test as well.
-    const REQUIRED_PLATFORM_TABLES: [&str; 4] =
-        ["plans", "users", "apps", "app_schema_applies"];
+    const REQUIRED_PLATFORM_TABLES: [&str; 4] = ["plans", "users", "apps", "app_schema_applies"];
 
     /// Fail with an actionable message when the target database has no platform schema.
     async fn assert_platform_schema_present(client: &Client) {
@@ -322,7 +321,7 @@ mod tests {
         client: &Client,
         app_id: Uuid,
         migration_id: Uuid,
-        principal_id: Uuid,
+        principal_id: &UserId,
         status: &str,
     ) {
         client
@@ -338,13 +337,13 @@ mod tests {
                          CASE WHEN $3 = 'applied' \
                               THEN TIMESTAMPTZ '2026-08-01 03:04:05+00' END, \
                          CASE WHEN $3 = 'failed' THEN 'original failure' END)",
-                &[&app_id, &migration_id, &status, &principal_id],
+                &[&app_id, &migration_id, &status, &principal_id.as_str()],
             )
             .await
             .expect("insert transition test row");
     }
 
-    async fn seed_transition_dependencies(client: &Client, app_id: Uuid, principal_id: Uuid) {
+    async fn seed_transition_dependencies(client: &Client, app_id: Uuid, principal_id: &UserId) {
         let plan_id = "pln_schema_apply_transition_test";
         client
             .execute(
@@ -357,12 +356,12 @@ mod tests {
             )
             .await
             .expect("seed transition test plan");
-        let email = format!("schema-apply-{principal_id}@zeroship.test");
+        let email = format!("schema-apply-{}@zeroship.test", principal_id.as_str());
         client
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, 'Schema Apply Test User', NOW())",
-                &[&principal_id, &email],
+                &[&principal_id.as_str(), &email],
             )
             .await
             .expect("seed transition test user");
@@ -418,13 +417,13 @@ mod tests {
         let client = test_client().await;
         let store = SchemaApplyStore::new(test_dsn());
         let app_id = Uuid::now_v7();
-        let principal_id = Uuid::new_v4();
+        let principal_id = UserId::mint();
         let applied_id = Uuid::now_v7();
         let failed_id = Uuid::now_v7();
 
-        seed_transition_dependencies(&client, app_id, principal_id).await;
-        insert_transition_row(&client, app_id, applied_id, principal_id, "applied").await;
-        insert_transition_row(&client, app_id, failed_id, principal_id, "failed").await;
+        seed_transition_dependencies(&client, app_id, &principal_id).await;
+        insert_transition_row(&client, app_id, applied_id, &principal_id, "applied").await;
+        insert_transition_row(&client, app_id, failed_id, &principal_id, "failed").await;
 
         // An error path firing after a successful apply must not erase it.
         let outcome = store
@@ -479,7 +478,7 @@ mod tests {
         // discarded row count was. A transition that WINS must say `Recorded`, or
         // `Lost` carries no information.
         let winning_id = Uuid::now_v7();
-        insert_transition_row(&client, app_id, winning_id, principal_id, "submitted").await;
+        insert_transition_row(&client, app_id, winning_id, &principal_id, "submitted").await;
         let outcome = store
             .mark_applied(app_id, winning_id, &["mig_winner".to_string()])
             .await
@@ -521,11 +520,11 @@ mod tests {
         let client = test_client().await;
         let store = SchemaApplyStore::new(test_dsn());
         let app_id = Uuid::now_v7();
-        let principal_id = Uuid::new_v4();
+        let principal_id = UserId::mint();
         let migration_id = Uuid::now_v7();
 
-        seed_transition_dependencies(&client, app_id, principal_id).await;
-        insert_transition_row(&client, app_id, migration_id, principal_id, "submitted").await;
+        seed_transition_dependencies(&client, app_id, &principal_id).await;
+        insert_transition_row(&client, app_id, migration_id, &principal_id, "submitted").await;
 
         let outcome = store
             .mark_applied(app_id, migration_id, &[])
