@@ -1,436 +1,417 @@
-use crate::SharedState;
+//! Authenticated metadata operations for the workflow coordinator.
+#![allow(
+    clippy::future_not_send,
+    reason = "HTTP handlers and compio pools stay on their runtime thread"
+)]
+
+use crate::{coordinator::Error, SharedState};
 use ntex::{
     http::StatusCode,
     web::{
         self,
-        types::{Json, Path, State},
+        types::{Json, State},
     },
 };
-use serde::Serialize;
-use zeroship_core::{app_id::AppId, service_identity::endpoints};
-use zeroship_workflow::{
-    operations::{RestartOptions, RunOperation, SignalOptions, StartOptions},
-    service::{
-        capability::{AppOperation, SignalTarget},
-        wire::{CompleteTask, Failure, Mutation, PollTask, TaskCredential},
-        SignalTokenRequest,
+use serde::{de::DeserializeOwned, Serialize};
+use std::time::Duration;
+use zeroship_core::{
+    service_identity::endpoints,
+    workflow_coordination::{
+        AcknowledgeManagement, AssignScope, AssignedScope, Failure, FailureCode, ManageRun,
+        ManagementStatus, PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage, WorkerPage,
     },
-    WorkflowServiceError,
 };
 
-mod payloads;
-
+pub const DEFAULT_MAX_REQUEST_BYTES: usize = 64 * 1024;
 pub fn configure(config: &mut web::ServiceConfig) {
-    configure_with_limit(config, 64 * 1024 * 1024);
+    configure_with_limit(config, DEFAULT_MAX_REQUEST_BYTES);
 }
-
-pub fn configure_with_limit(config: &mut web::ServiceConfig, max_request_bytes: usize) {
-    payloads::configure(config);
+pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
     config
-        .state(web::types::JsonConfig::default().limit(max_request_bytes))
+        .state(web::types::JsonConfig::default().limit(limit))
         .service(web::resource("/healthz").route(web::get().to(health)))
         .service(web::resource("/readyz").route(web::get().to(ready)))
         .service(
-            web::resource("/v1/apps/{app_id}/workflows/{name}/runs").route(web::post().to(start)),
+            web::resource(endpoints::WORKFLOW_WORKERS.path_template())
+                .route(web::post().to(workers)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-runs/{run_id}").route(web::get().to(status)),
+            web::resource(endpoints::WORKFLOW_ASSIGN.path_template()).route(web::post().to(assign)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-runs/{run_id}/signals")
-                .route(web::post().to(signal)),
+            web::resource(endpoints::WORKFLOW_RECOVERY.path_template())
+                .route(web::post().to(recovery)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-runs/{run_id}/transition")
-                .route(web::post().to(transition)),
+            web::resource(endpoints::WORKFLOW_MANAGE.path_template()).route(web::post().to(manage)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-runs/{run_id}/restart")
-                .route(web::post().to(restart)),
+            web::resource(endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template())
+                .route(web::post().to(management_status)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-topics/{topic}")
-                .route(web::post().to(broadcast)),
+            web::resource(endpoints::WORKFLOW_REGISTER.path_template())
+                .route(web::post().to(register)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-signal-tokens")
-                .route(web::post().to(issue_signal_token)),
+            web::resource(endpoints::WORKFLOW_ASSIGNMENTS.path_template())
+                .route(web::post().to(assignments)),
         )
         .service(
-            web::resource("/v1/apps/{app_id}/workflow-signal-tokens/revoke")
-                .route(web::post().to(revoke_signal_tokens)),
+            web::resource(endpoints::WORKFLOW_RENEW.path_template()).route(web::post().to(renew)),
         )
         .service(
-            web::resource(endpoints::WORKFLOW_DEPLOY.path_template())
-                .route(web::post().to(reconcile_deploy)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_TASK_POLL.path_template())
-                .route(web::post().to(poll)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_TASK_HEARTBEAT.path_template())
-                .route(web::post().to(heartbeat)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_TASK_COMPLETE.path_template())
-                .route(web::post().to(complete)),
-        )
-        .service(
-            web::resource(endpoints::WORKFLOW_TASK_RELEASE.path_template())
+            web::resource(endpoints::WORKFLOW_RELEASE.path_template())
                 .route(web::post().to(release)),
-        );
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_WAKE.path_template()).route(web::post().to(wake)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_MANAGEMENT_POLL.path_template())
+                .route(web::post().to(management_poll)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_MANAGEMENT_ACK.path_template())
+                .route(web::post().to(management_ack)),
+        )
+        .service(web::resource("/{path:.*}").route(web::route().to(not_found)));
 }
-
 fn authorization(request: &web::HttpRequest) -> Option<&str> {
     request
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok())
 }
-fn app_id(id: &str) -> Result<AppId, WorkflowServiceError> {
-    AppId::parse(id)
-        .map_err(|_| WorkflowServiceError::InvalidRequest("invalid workflow app identity".into()))
-}
-pub(crate) fn respond<T: Serialize>(result: Result<T, WorkflowServiceError>) -> web::HttpResponse {
+fn respond<T: Serialize>(result: Result<T, Error>) -> web::HttpResponse {
     match result {
         Ok(value) => web::HttpResponse::Ok().json(&value),
-        Err(error) => failure(error),
+        Err(error) => {
+            let (status, code) = match error {
+                Error::Invalid => (StatusCode::BAD_REQUEST, FailureCode::Invalid),
+                Error::Unauthenticated => (StatusCode::UNAUTHORIZED, FailureCode::Unauthenticated),
+                Error::RequestTooLarge => {
+                    (StatusCode::PAYLOAD_TOO_LARGE, FailureCode::RequestTooLarge)
+                }
+                Error::Denied => (StatusCode::FORBIDDEN, FailureCode::Denied),
+                Error::Conflict => (StatusCode::CONFLICT, FailureCode::Conflict),
+                Error::Capacity => (StatusCode::TOO_MANY_REQUESTS, FailureCode::Capacity),
+                Error::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, FailureCode::Unavailable),
+            };
+            // Authentication and body-limit errors can leave request bytes
+            // unread. Advertise closure so clients cannot reuse that socket.
+            web::HttpResponse::build(status)
+                .force_close()
+                .json(&Failure { code })
+        }
     }
-}
-pub(crate) fn failure(error: WorkflowServiceError) -> web::HttpResponse {
-    let status = match &error {
-        WorkflowServiceError::InvalidRequest(_) => StatusCode::BAD_REQUEST,
-        WorkflowServiceError::Unauthenticated => StatusCode::UNAUTHORIZED,
-        WorkflowServiceError::PermissionDenied => StatusCode::FORBIDDEN,
-        WorkflowServiceError::NotFound(_) => StatusCode::NOT_FOUND,
-        WorkflowServiceError::Conflict(_) => StatusCode::CONFLICT,
-        WorkflowServiceError::ResourceExhausted(_) => StatusCode::TOO_MANY_REQUESTS,
-        WorkflowServiceError::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-        WorkflowServiceError::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
-        WorkflowServiceError::Timeout => StatusCode::GATEWAY_TIMEOUT,
-        WorkflowServiceError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    if status.is_server_error() {
-        tracing::warn!(code = error.code(), "workflow request failed");
-    }
-    web::HttpResponse::build(status).json(&Failure::from_error(&error))
 }
 async fn health() -> web::HttpResponse {
     web::HttpResponse::Ok().finish()
 }
-
+async fn not_found() -> web::HttpResponse {
+    web::HttpResponse::NotFound().force_close().finish()
+}
 async fn ready(state: State<SharedState>) -> web::HttpResponse {
-    let ready = compio::time::timeout(std::time::Duration::from_secs(5), async {
-        state.service.verify().await?;
-        state.auth.ready().await
-    })
-    .await;
-    match ready {
+    match compio::time::timeout(
+        Duration::from_secs(5),
+        Box::pin(async {
+            state.service.verify().await?;
+            state.auth.ready().await
+        }),
+    )
+    .await
+    {
         Ok(Ok(())) => web::HttpResponse::Ok().finish(),
         _ => web::HttpResponse::ServiceUnavailable().finish(),
     }
 }
+async fn read_json<T: DeserializeOwned + 'static>(
+    request: &web::HttpRequest,
+    body: web::types::Payload,
+) -> Result<T, Error> {
+    // Authenticate before allocating the buffered metadata body.
+    let mut body = body.into_inner();
+    compio::time::timeout(
+        Duration::from_secs(5),
+        <Json<T> as web::FromRequest<web::error::DefaultError>>::from_request(request, &mut body),
+    )
+    .await
+    .map_err(|_| Error::Invalid)?
+    .map(Json::into_inner)
+    .map_err(|error| match error {
+        web::error::JsonPayloadError::Overflow => Error::RequestTooLarge,
+        _ => Error::Invalid,
+    })
+}
 
-async fn start(
+async fn workers(
     request: web::HttpRequest,
     state: State<SharedState>,
-    path: Path<(String, String)>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
-            let (app, name) = path.into_inner();
-            let app = app_id(&app)?;
-            state
-                .auth
-                .app(authorization(&request), &app, AppOperation::Start)?;
-            let body: Mutation<StartOptions> = read_json(&request, body).await?;
+            let _actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .peer(authorization(&request), endpoints::WORKFLOW_WORKERS),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: WorkerPage = read_json(&request, body).await?;
+            state.service.ready_workers(command.after.as_ref()).await
+        }
+        .await,
+    )
+}
+
+async fn assign(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let _actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .peer(authorization(&request), endpoints::WORKFLOW_ASSIGN),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: AssignScope = read_json(&request, body).await?;
+            state.service.assign(&command).await
+        }
+        .await,
+    )
+}
+
+async fn recovery(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let _actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .peer(authorization(&request), endpoints::WORKFLOW_RECOVERY),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: ScopePage = read_json(&request, body).await?;
+            state.service.recovery_scopes(command.after.as_ref()).await
+        }
+        .await,
+    )
+}
+
+async fn manage(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .peer(authorization(&request), endpoints::WORKFLOW_MANAGE),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: ManageRun = read_json(&request, body).await?;
+            state.service.manage(&actor, &command).await
+        }
+        .await,
+    )
+}
+
+async fn management_status(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let _actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state.auth.peer(
+                    authorization(&request),
+                    endpoints::WORKFLOW_MANAGEMENT_STATUS,
+                ),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: ManagementStatus = read_json(&request, body).await?;
             state
                 .service
-                .for_app(app)
-                .start(&body.request_id, &name, body.options)
+                .management_receipt(&command.app_id, &command.request_id)
                 .await
         }
         .await,
     )
 }
-async fn status(
+
+async fn register(
     request: web::HttpRequest,
     state: State<SharedState>,
-    path: Path<(String, String)>,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let (app, run) = path.into_inner();
-            let app = app_id(&app)?;
-            state
-                .auth
-                .app(authorization(&request), &app, AppOperation::Status)?;
-            state.service.for_app(app).status(&run).await
-        }
-        .await,
-    )
-}
-async fn signal(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<(String, String)>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
-            let (app, run) = path.into_inner();
-            let app = app_id(&app)?;
-            state
-                .auth
-                .app(authorization(&request), &app, AppOperation::Signal)?;
-            let body: Mutation<SignalOptions> = read_json(&request, body).await?;
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_REGISTER),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: RegisterWorker = read_json(&request, body).await?;
+            state.service.register(&actor, &command).await
+        }
+        .await,
+    )
+}
+
+async fn assignments(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_ASSIGNMENTS),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: ScopePage = read_json(&request, body).await?;
             state
                 .service
-                .for_app(app)
-                .signal(&body.request_id, &run, body.options)
+                .assignments(&actor, command.after.as_ref())
                 .await
         }
         .await,
     )
 }
-async fn transition(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<(String, String)>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let (app, run) = path.into_inner();
-            let app = app_id(&app)?;
-            state
-                .auth
-                .app(authorization(&request), &app, AppOperation::Control)?;
-            let body: Mutation<RunOperation> = read_json(&request, body).await?;
-            state
-                .service
-                .for_app(app)
-                .transition(&body.request_id, &run, body.options)
-                .await
-        }
-        .await,
-    )
-}
-async fn restart(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<(String, String)>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let (app, run) = path.into_inner();
-            let app = app_id(&app)?;
-            state
-                .auth
-                .app(authorization(&request), &app, AppOperation::Restart)?;
-            let body: Mutation<RestartOptions> = read_json(&request, body).await?;
-            state
-                .service
-                .for_app(app)
-                .restart(&body.request_id, &run, body.options)
-                .await
-        }
-        .await,
-    )
-}
-async fn broadcast(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<(String, String)>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let (app, topic) = path.into_inner();
-            let app = app_id(&app)?;
-            state
-                .auth
-                .app(authorization(&request), &app, AppOperation::Broadcast)?;
-            let body: Mutation<SignalOptions> = read_json(&request, body).await?;
-            state
-                .service
-                .for_app(app)
-                .broadcast(&body.request_id, &topic, body.options)
-                .await
-        }
-        .await,
-    )
-}
-async fn issue_signal_token(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<String>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let app = app_id(&path.into_inner())?;
-            state.auth.app(
-                authorization(&request),
-                &app,
-                AppOperation::IssueSignalToken,
-            )?;
-            let body: Mutation<SignalTokenRequest> = read_json(&request, body).await?;
-            state
-                .service
-                .for_app(app)
-                .issue_signal_token(&body.request_id, body.options)
-                .await
-        }
-        .await,
-    )
-}
-async fn revoke_signal_tokens(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<String>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let app = app_id(&path.into_inner())?;
-            state.auth.app(
-                authorization(&request),
-                &app,
-                AppOperation::RevokeSignalTokens,
-            )?;
-            let body: Mutation<Option<SignalTarget>> = read_json(&request, body).await?;
-            state
-                .service
-                .for_app(app)
-                .revoke_signal_tokens(&body.request_id, body.options)
-                .await
-        }
-        .await,
-    )
-}
-async fn reconcile_deploy(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<String>,
-) -> web::HttpResponse {
-    respond(
-        async {
-            state
-                .auth
-                .peer(authorization(&request), endpoints::WORKFLOW_DEPLOY)
-                .await?;
-            let app = app_id(&path.into_inner())?;
-            state.service.reconcile_deploy(&app).await
-        }
-        .await,
-    )
-}
-async fn poll(
+
+async fn renew(
     request: web::HttpRequest,
     state: State<SharedState>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
-            let worker = state
-                .auth
-                .worker(authorization(&request), endpoints::WORKFLOW_TASK_POLL)
-                .await?;
-            read_json::<PollTask>(&request, body).await?;
-            state.service.poll(&worker).await
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_RENEW),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: AssignedScope = read_json(&request, body).await?;
+            state.service.renew(&actor, &command).await
         }
         .await,
     )
 }
-async fn heartbeat(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<String>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let worker = state
-                .auth
-                .worker(authorization(&request), endpoints::WORKFLOW_TASK_HEARTBEAT)
-                .await?;
-            let body: TaskCredential = read_json(&request, body).await?;
-            state
-                .service
-                .heartbeat(&worker, &path.into_inner(), &body.token)
-                .await
-        }
-        .await,
-    )
-}
-async fn complete(
-    request: web::HttpRequest,
-    state: State<SharedState>,
-    path: Path<String>,
-    body: web::types::Payload,
-) -> web::HttpResponse {
-    respond(
-        async {
-            let worker = state
-                .auth
-                .worker(authorization(&request), endpoints::WORKFLOW_TASK_COMPLETE)
-                .await?;
-            let body: CompleteTask = read_json(&request, body).await?;
-            state
-                .service
-                .complete(&worker, &path.into_inner(), &body.token, body.execution)
-                .await
-        }
-        .await,
-    )
-}
+
 async fn release(
     request: web::HttpRequest,
     state: State<SharedState>,
-    path: Path<String>,
     body: web::types::Payload,
 ) -> web::HttpResponse {
     respond(
         async {
-            let worker = state
-                .auth
-                .worker(authorization(&request), endpoints::WORKFLOW_TASK_RELEASE)
-                .await?;
-            let body: TaskCredential = read_json(&request, body).await?;
-            state
-                .service
-                .release(&worker, &path.into_inner(), &body.token)
-                .await
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_RELEASE),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: ReleaseScope = read_json(&request, body).await?;
+            state.service.release(&actor, &command).await
         }
         .await,
     )
 }
 
-async fn read_json<T: serde::de::DeserializeOwned + 'static>(
-    request: &web::HttpRequest,
+async fn wake(
+    request: web::HttpRequest,
+    state: State<SharedState>,
     body: web::types::Payload,
-) -> Result<T, WorkflowServiceError> {
-    // Handlers authenticate before invoking the buffered JSON extractor.
-    let mut payload = body.into_inner();
-    compio::time::timeout(
-        std::time::Duration::from_secs(30),
-        <Json<T> as web::FromRequest<web::error::DefaultError>>::from_request(
-            request,
-            &mut payload,
-        ),
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_WAKE),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: PublishWakeHint = read_json(&request, body).await?;
+            state.service.publish_wake(&actor, &command).await
+        }
+        .await,
     )
-    .await
-    .map_err(|_| WorkflowServiceError::InvalidRequest("workflow request body timed out".into()))?
-    .map(Json::into_inner)
-    .map_err(json_error)
 }
-fn json_error(error: web::error::JsonPayloadError) -> WorkflowServiceError {
-    match error {
-        web::error::JsonPayloadError::Overflow => WorkflowServiceError::PayloadTooLarge,
-        _ => WorkflowServiceError::InvalidRequest("invalid workflow JSON request".into()),
-    }
+
+async fn management_poll(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_MANAGEMENT_POLL),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: AssignedScope = read_json(&request, body).await?;
+            state.service.pending_management(&actor, &command).await
+        }
+        .await,
+    )
+}
+
+async fn management_ack(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state
+                    .auth
+                    .worker(authorization(&request), endpoints::WORKFLOW_MANAGEMENT_ACK),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: AcknowledgeManagement = read_json(&request, body).await?;
+            state.service.acknowledge_management(&actor, &command).await
+        }
+        .await,
+    )
 }

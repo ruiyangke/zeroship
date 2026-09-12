@@ -27,6 +27,8 @@ const FINGERPRINT: &str = include_str!("../schema/fingerprint.txt");
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Invalid,
+    Unauthenticated,
+    RequestTooLarge,
     Denied,
     Conflict,
     Capacity,
@@ -36,6 +38,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Self::Invalid => "invalid coordination request",
+            Self::Unauthenticated => "coordination authentication required",
+            Self::RequestTooLarge => "coordination request exceeds metadata limit",
             Self::Denied => "coordination assignment denied",
             Self::Conflict => "coordination revision or request conflict",
             Self::Capacity => "coordination capacity exhausted",
@@ -119,8 +123,57 @@ impl Coordinator {
     }
 
     /// # Errors
-    /// Returns `Unavailable` if metadata tables cannot be read or their fingerprint differs.
+    /// Returns `Unavailable` for incompatible metadata or elevated runtime authority.
     pub async fn verify(&self) -> Result<(), Error> {
+        let roles = self
+            .pool
+            .query(
+                "SELECT rolsuper OR rolcreaterole OR rolcreatedb OR rolreplication OR rolbypassrls
+               OR EXISTS(SELECT 1 FROM pg_roles other WHERE other.rolname<>current_user
+                         AND pg_has_role(current_user,other.oid,'MEMBER')) AS privileged
+             FROM pg_roles WHERE rolname=current_user",
+                &[],
+            )
+            .await?;
+        let [role] = roles.as_slice() else {
+            return Err(Error::Unavailable);
+        };
+        if get::<bool>(role, "privileged")? {
+            return Err(Error::Unavailable);
+        }
+        let permissions = self
+            .pool
+            .query(
+                "SELECT has_schema_privilege(current_user,'workflow_coordination','CREATE')
+                 OR has_table_privilege(current_user,'workflow_coordination.schema_version',
+                    'INSERT,UPDATE,DELETE,TRUNCATE,TRIGGER,REFERENCES') AS privileged",
+                &[],
+            )
+            .await?;
+        if get::<bool>(&permissions[0], "privileged")? {
+            return Err(Error::Unavailable);
+        }
+        for table in [
+            "workers",
+            "scopes",
+            "assignments",
+            "placement_receipts",
+            "management",
+        ] {
+            let name = format!("workflow_coordination.{table}");
+            let rows = self
+                .pool
+                .query(
+                    "SELECT bool_and(has_table_privilege(current_user,$1,p)) AS writable,
+                    has_table_privilege(current_user,$1,'TRUNCATE,TRIGGER,REFERENCES') AS privileged
+                 FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE']) AS p",
+                    &[&name],
+                )
+                .await?;
+            if !get::<bool>(&rows[0], "writable")? || get::<bool>(&rows[0], "privileged")? {
+                return Err(Error::Unavailable);
+            }
+        }
         let rows = self.pool.query(
             "SELECT fingerprint FROM workflow_coordination.schema_version WHERE id='coordination'",
             &[],

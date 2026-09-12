@@ -1,563 +1,426 @@
+//! Real coordinator processes share metadata and assertion replay state.
+#![allow(
+    clippy::future_not_send,
+    reason = "native HTTP clients run on the ntex compio test runtime"
+)]
+
+#[path = "support/platform.rs"]
+mod platform;
+#[path = "support/server_process.rs"]
+mod server_process;
+
 use compio::io::{AsyncRead, AsyncWriteExt};
-use ntex::{http::StatusCode, web};
-use serde_json::json;
-use sha2::{Digest, Sha256};
-use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use testcontainers::{
-    core::{IntoContainerPort, WaitFor},
-    runners::SyncRunner,
-    GenericImage, ImageExt,
-};
+use ntex::{client::Client, http::StatusCode};
+use serde_json::{json, Value};
+use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
-    service_assertion::{
-        InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
-        ServiceTrustBundle,
+    service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
+    service_identity::endpoints,
+    service_peers::{service_issuer, CONTROL_SERVICE_NAME},
+    workflow_coordination::{
+        Assignment, ManageRun, ManagementOperation, RequestId, RunId, RunOperation, WorkerId,
+        AUDIENCE,
     },
-    service_peers::{ServiceAuth, ServiceKeyring},
-    typed_id,
-};
-use zeroship_workflow::{
-    operations::{RunOperation, RunState, SignalOptions, StartOptions},
-    service::{
-        capability::{mint_app_capability, AppGrant, AppOperation, WORKFLOW_AUDIENCE},
-        schema,
-        store::PostgresStore,
-        AppPolicy, DeployRegistration, RequestId, WorkflowEndpoint, WorkflowService,
-    },
-    WorkflowExecution, WorkflowServiceError,
-};
-use zeroship_workflow_server::{
-    auth::{PostgresWorkerRegistry, WorkflowAuth},
-    WorkflowHttpState,
 };
 
-#[path = "http/capability_refresh.rs"]
-mod capability_refresh;
-#[path = "http/runner.rs"]
-mod runner;
-
-fn peer(issuer: &str, key: ServiceSigningKey, keys: ServiceTrustBundle) -> ServiceAuth {
-    let issuer = ServiceIssuer::parse(issuer).unwrap();
-    let mut keyring = ServiceKeyring::from_parts(issuer, key, keys).unwrap();
-    let verifier = ServiceAssertionVerifier::new(
-        keyring.take_bundle().unwrap(),
-        Arc::new(InMemoryReplayStore::new()),
-    );
-    ServiceAuth::new(keyring, Arc::new(verifier))
+fn assertion(issuer: &ServiceIssuer, key: &ServiceSigningKey) -> String {
+    format!(
+        "Bearer {}",
+        ServiceAssertionMinter::new(issuer.clone(), key.key_id(), key)
+            .unwrap()
+            .mint(&ServiceIssuer::parse(AUDIENCE).unwrap())
+            .unwrap()
+    )
 }
-
-async fn rejects_before_reading_body(address: std::net::SocketAddr, path: &str) {
-    compio::time::timeout(std::time::Duration::from_secs(5), async {
+async fn post(
+    client: &Client,
+    url: &str,
+    path: &str,
+    token: &str,
+    body: &Value,
+) -> (StatusCode, Value) {
+    let response = client
+        .post(format!("{url}{path}"))
+        .header("authorization", token)
+        .send_json(body)
+        .await
+        .unwrap();
+    let status = response.status();
+    let body = response.body().await.unwrap();
+    (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+}
+async fn rejects_before_body(address: std::net::SocketAddr, path: &str) {
+    compio::time::timeout(Duration::from_secs(5),async {
         let mut stream = compio::net::TcpStream::connect(address).await.unwrap();
-        let headers = format!(
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n"
-        );
-        stream.write_all(headers.into_bytes()).await.0.unwrap();
-        // Deliberately withhold the declared body. Authentication must finish
-        // without waiting for the buffered JSON extractor.
+        stream.write_all(format!("POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 1024\r\nConnection: close\r\n\r\n").into_bytes()).await.0.unwrap();
         let mut response = Vec::new();
         loop {
-            let compio::BufResult(read, bytes) = stream.read(vec![0; 1024]).await;
+            let compio::BufResult(read, bytes) = stream.read(vec![0;1024]).await;
             let read = read.unwrap();
-            assert_ne!(read, 0, "connection closed without an HTTP status");
+            assert_ne!(read,0,"connection ended without an HTTP status");
             response.extend_from_slice(&bytes[..read]);
-            if response.windows(2).any(|window| window == b"\r\n") {
-                break;
-            }
+            if response.windows(2).any(|value| value==b"\r\n") { break; }
         }
-        assert!(response.starts_with(b"HTTP/1.1 401 "), "{response:?}");
-    })
-    .await
-    .expect("unauthenticated request waited for its body");
+        assert!(response.starts_with(b"HTTP/1.1 401 "),"{response:?}");
+    }).await.expect("authentication waited for the withheld body");
 }
 
 #[ntex::test]
-async fn remote_clients_obey_app_capabilities_and_registered_task_ownership() {
-    let container = GenericImage::new("postgres", "18")
-        .with_exposed_port(5432.tcp())
-        .with_wait_for(WaitFor::message_on_stderr(
-            "database system is ready to accept connections",
-        ))
-        .with_env_var("POSTGRES_HOST_AUTH_METHOD", "trust")
-        .start()
-        .unwrap();
-    let dsn = format!(
-        "postgres://postgres@{}:{}/postgres",
-        container.get_host().unwrap(),
-        container.get_host_port_ipv4(5432).unwrap()
-    );
-    let (pg, connection) = compio_postgres::connect(&dsn, compio_postgres::NoTls)
-        .await
-        .unwrap();
-    compio::runtime::spawn(async move {
-        connection.run().await.unwrap();
-    })
-    .detach();
-    pg.batch_execute("CREATE SCHEMA workflow; CREATE SCHEMA zeroship; CREATE TABLE zeroship.worker_instances (id TEXT PRIMARY KEY, public_key BYTEA NOT NULL, status TEXT NOT NULL)").await.unwrap();
-    pg.batch_execute(schema::POSTGRES_SQL).await.unwrap();
-    let pg = Arc::new(pg);
-    let service = WorkflowService::open(Arc::new(PostgresStore::new(dsn)))
-        .await
-        .unwrap();
-    let objects = tempfile::tempdir().unwrap();
-    let storage = zeroship_storage::StorageStore::from_backend(Arc::new(
-        zeroship_storage::LocalFs::new(objects.path()),
-    ));
-    let service = service.with_payload_storage(storage.clone()).unwrap();
-    let a = AppId::mint();
-    let b = AppId::mint();
-    for app in [&a, &b] {
-        service
-            .register_app(app, &AppPolicy::default())
-            .await
-            .unwrap();
-        service
-            .activate_deploy(
-                app,
-                &DeployRegistration {
-                    id: typed_id::generate("dep"),
-                    hash: "a".repeat(64),
-                    workflows: ["Example".into()].into(),
-                    schedules: Vec::new(),
-                },
-            )
-            .await
-            .unwrap();
-    }
+async fn replicas_authenticate_metadata_and_keep_customer_execution_off_the_protocol() {
+    let fixture = platform::Platform::new().await;
+    let control = service_issuer(CONTROL_SERVICE_NAME).unwrap();
     let control_key = ServiceSigningKey::generate();
-    let mut keys = ServiceTrustBundle::new();
-    keys.trust_signing_key(
-        &ServiceIssuer::parse("spiffe://zeroship.ai/svc/control").unwrap(),
-        control_key.key_id(),
-        &control_key,
-    )
-    .unwrap();
-    let mut peer_keys = ServiceTrustBundle::new();
-    peer_keys
-        .trust_signing_key(
-            &ServiceIssuer::parse("spiffe://zeroship.ai/svc/control").unwrap(),
-            control_key.key_id(),
-            &control_key,
+    let peers = fixture.work.path().join("peers.json");
+    platform::write_private(
+        &peers,
+        serde_json::to_vec(
+            &json!({"keys":[{"iss":control.as_str(),"x":control_key.public_jwk_x()}]}),
         )
-        .unwrap();
-    let server_identity = Arc::new(ServiceAssertionVerifier::new(
-        peer_keys,
-        Arc::new(InMemoryReplayStore::new()),
-    ));
-    let state = Arc::new(WorkflowHttpState {
-        service,
-        auth: WorkflowAuth::new(
-            keys,
-            server_identity,
-            Arc::new(PostgresWorkerRegistry::new(pg.clone())),
-            Arc::new(InMemoryReplayStore::new()),
-        ),
-    });
-    let state_a = state.clone();
-    let server = web::test::server(move || {
-        let state = state_a.clone();
-        async move {
-            web::App::new()
-                .state(state)
-                .configure(zeroship_workflow_server::configure)
-        }
-    })
-    .await;
-    let state_b = state.clone();
-    let replica = web::test::server(move || {
-        let state = state_b.clone();
-        async move {
-            web::App::new()
-                .state(state)
-                .configure(zeroship_workflow_server::configure)
-        }
-    })
-    .await;
-    let endpoint = WorkflowEndpoint::new(&server.url("")).unwrap();
-    let other_endpoint = WorkflowEndpoint::new(&replica.url("")).unwrap();
-    for path in [
-        format!("/v1/apps/{}/workflows/Example/runs", a.as_str()),
-        format!("/v1/apps/{}/workflow-runs/pending/step-output", a.as_str()),
-        zeroship_core::service_identity::endpoints::WORKFLOW_TASK_POLL
-            .path_template()
-            .to_owned(),
-    ] {
-        rejects_before_reading_body(server.addr(), &path).await;
-    }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
-    let token = mint_app_capability(
-        &control_key,
-        AppGrant {
-            app_id: a.clone(),
-            operations: [
-                AppOperation::Start,
-                AppOperation::Status,
-                AppOperation::Signal,
-                AppOperation::Control,
-                AppOperation::ReadOutput,
-            ]
-            .into(),
-        },
-        now,
-        120,
-    )
-    .unwrap();
-    let app = endpoint.for_app(a.clone(), token.clone());
-    let other_replica = other_endpoint.for_app(a.clone(), token.clone());
-    let foreign = endpoint.for_app(b, token.clone());
-    let request = RequestId::mint();
-    let run = app
-        .start(&request, "Example", StartOptions::default())
-        .await
-        .unwrap();
-    assert_eq!(
-        run,
-        other_replica
-            .start(&request, "Example", StartOptions::default())
-            .await
-            .unwrap()
+        .unwrap(),
     );
-    assert!(matches!(
-        foreign.status(&run.id).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    assert!(matches!(
-        foreign
-            .start(&RequestId::mint(), "Example", StartOptions::default())
-            .await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    assert!(matches!(
-        app.broadcast(
-            &RequestId::mint(),
-            "news",
-            SignalOptions {
-                signal_type: "ready".into(),
-                payload: json!(null)
-            }
+    let client = Client::new().await;
+    let mut first = server_process::ServerProcess::start(
+        &fixture.runtime_url,
+        &peers,
+        fixture.work.path(),
+        "first",
+        &client,
+    )
+    .await;
+    let mut second = server_process::ServerProcess::start(
+        &fixture.runtime_url,
+        &peers,
+        fixture.work.path(),
+        "second",
+        &client,
+    )
+    .await;
+    for endpoint in [
+        endpoints::WORKFLOW_WORKERS,
+        endpoints::WORKFLOW_ASSIGN,
+        endpoints::WORKFLOW_RECOVERY,
+        endpoints::WORKFLOW_MANAGE,
+        endpoints::WORKFLOW_MANAGEMENT_STATUS,
+        endpoints::WORKFLOW_REGISTER,
+        endpoints::WORKFLOW_ASSIGNMENTS,
+        endpoints::WORKFLOW_RENEW,
+        endpoints::WORKFLOW_RELEASE,
+        endpoints::WORKFLOW_WAKE,
+        endpoints::WORKFLOW_MANAGEMENT_POLL,
+        endpoints::WORKFLOW_MANAGEMENT_ACK,
+    ] {
+        rejects_before_body(first.address, endpoint.path_template()).await;
+    }
+
+    let worker = WorkerId::mint();
+    let worker_key = ServiceSigningKey::generate();
+    let worker_issuer = ServiceIssuer::parse(&format!(
+        "spiffe://zeroship.ai/svc/worker/{}",
+        worker.as_str()
+    ))
+    .unwrap();
+    let registration = json!({"capacity":4,"state":"ready"});
+    let register = endpoints::WORKFLOW_REGISTER.path_template();
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            register,
+            &assertion(&worker_issuer, &worker_key),
+            &registration
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    fixture.admin.execute("INSERT INTO zeroship.worker_instances(id,ring_key,public_key,advertise_host,advertise_port,status) VALUES($1,$2,$3,'127.0.0.1',8080,'active')",
+        &[&worker.as_str(),&vec![1u8],&worker_key.verifying_key_bytes().to_vec()]).await.unwrap();
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            register,
+            &assertion(&worker_issuer, &control_key),
+            &registration
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            register,
+            &assertion(&control, &control_key),
+            &registration
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let token = assertion(&worker_issuer, &worker_key);
+    let (status, registered) = post(&client, &first.url, register, &token, &registration).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(registered["workerId"], json!(worker));
+    assert_eq!(
+        post(&client, &second.url, register, &token, &registration)
+            .await
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut injected = registration.clone();
+    injected["workerId"] = json!(WorkerId::mint());
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            register,
+            &assertion(&worker_issuer, &worker_key),
+            &injected
         )
         .await,
-        Err(WorkflowServiceError::PermissionDenied)
-    ));
-    let anonymous = server
-        .get(format!("/v1/apps/{}/workflow-runs/{}", a.as_str(), run.id))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
+    );
 
-    let worker_key = ServiceSigningKey::generate();
-    let instance = typed_id::generate(typed_id::WORKER_INSTANCE_PREFIX);
-    let worker_issuer = format!("spiffe://zeroship.ai/svc/worker/{instance}");
-    let public = worker_key.verifying_key_bytes().to_vec();
-    let worker_auth = Arc::new(peer(&worker_issuer, worker_key, ServiceTrustBundle::new()));
-    let tasks = endpoint.tasks(worker_auth.clone());
-    let replica_tasks = other_endpoint.tasks(worker_auth.clone());
-    assert!(matches!(
-        tasks.poll().await,
-        Err(WorkflowServiceError::Unauthenticated)
-    ));
-    pg.execute(
-        "INSERT INTO zeroship.worker_instances (id,public_key,status) VALUES ($1,$2,'active')",
-        &[&instance, &public],
-    )
-    .await
-    .unwrap();
-    let scoped_poll = server
-        .post("/v1/tasks/poll")
-        .header(
-            "authorization",
-            worker_auth
-                .authorization_for(&ServiceIssuer::parse(WORKFLOW_AUDIENCE).unwrap())
-                .unwrap(),
-        )
-        .send_json(&json!({"appId":a,"runId":run.id}))
-        .await
-        .unwrap();
-    assert_eq!(scoped_poll.status(), StatusCode::BAD_REQUEST);
-    let task = tasks.poll().await.unwrap().unwrap();
-    assert_eq!(task.invocation.run_id, run.id);
-    let other_key = ServiceSigningKey::generate();
-    let other_id = typed_id::generate(typed_id::WORKER_INSTANCE_PREFIX);
-    let other_public = other_key.verifying_key_bytes().to_vec();
-    pg.execute(
-        "INSERT INTO zeroship.worker_instances (id,public_key,status) VALUES ($1,$2,'active')",
-        &[&other_id, &other_public],
-    )
-    .await
-    .unwrap();
-    let stranger = endpoint.tasks(Arc::new(peer(
-        &format!("spiffe://zeroship.ai/svc/worker/{other_id}"),
-        other_key,
-        ServiceTrustBundle::new(),
-    )));
-    assert!(matches!(
-        stranger.heartbeat(&task.id, &task.token).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    let role_worker = endpoint.tasks(Arc::new(peer(
-        "spiffe://zeroship.ai/svc/worker",
-        ServiceSigningKey::generate(),
-        ServiceTrustBundle::new(),
-    )));
-    assert!(matches!(
-        role_worker.poll().await,
-        Err(WorkflowServiceError::Unauthenticated)
-    ));
-    let auth = worker_auth
-        .authorization_for(&ServiceIssuer::parse(WORKFLOW_AUDIENCE).unwrap())
-        .unwrap();
-    let first = server
-        .post("/v1/tasks/poll")
-        .header("authorization", auth.clone())
-        .send_json(&json!({}))
-        .await
-        .unwrap();
-    assert_eq!(first.status(), StatusCode::OK);
-    let replay = replica
-        .post("/v1/tasks/poll")
-        .header("authorization", auth)
-        .send_json(&json!({}))
-        .await
-        .unwrap();
-    assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
-    app.transition(&RequestId::mint(), &run.id, RunOperation::Pause)
-        .await
-        .unwrap();
+    let app = AppId::mint();
+    let assign = json!({"requestId":RequestId::mint(),"appId":app,"workerId":worker,"expectedRevision":null});
+    let path = endpoints::WORKFLOW_ASSIGN.path_template();
     assert_eq!(
-        tasks
-            .heartbeat(&task.id, &task.token)
-            .await
-            .unwrap()
-            .control,
-        zeroship_workflow::service::ControlIntent::Pause
-    );
-    tasks.release(&task.id, &task.token).await.unwrap();
-    assert!(tasks.poll().await.unwrap().is_none());
-    app.transition(&RequestId::mint(), &run.id, RunOperation::Resume)
-        .await
-        .unwrap();
-    let task = tasks.poll().await.unwrap().unwrap();
-    pg.execute(
-        "UPDATE zeroship.worker_instances SET status='draining' WHERE id=$1",
-        &[&instance],
-    )
-    .await
-    .unwrap();
-    assert!(matches!(
-        tasks.heartbeat(&task.id, &task.token).await,
-        Err(WorkflowServiceError::Unauthenticated)
-    ));
-    pg.execute(
-        "UPDATE zeroship.worker_instances SET status='active' WHERE id=$1",
-        &[&instance],
-    )
-    .await
-    .unwrap();
-    let execution: WorkflowExecution = serde_json::from_value(
-        json!({"outcomes":[{"kind":"RunCompleted","output":{"done":true}}]}),
-    )
-    .unwrap();
-    let completed = tasks
-        .complete(&task.id, &task.token, execution.clone())
-        .await
-        .unwrap();
-    assert_eq!(
-        completed,
-        replica_tasks
-            .complete(&task.id, &task.token, execution)
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        app.status(&run.id).await.unwrap().state,
-        RunState::Completed
-    );
-    assert_eq!(
-        app.status(&run.id).await.unwrap().output,
-        Some(json!({"done":true}))
-    );
-    assert!(!format!("{app:?}").contains(token.as_str()));
-
-    let run = app
-        .start(&RequestId::mint(), "Example", StartOptions::default())
-        .await
-        .unwrap();
-    let task = tasks.poll().await.unwrap().unwrap();
-    let data = bytes::Bytes::from(vec![42; 128 * 1024]);
-    let reference = zeroship_workflow::engine::WorkflowOutputRef {
-        hash: format!("{:x}", Sha256::digest(&data)),
-        size: data.len() as i64,
-        content_type: Some("application/octet-stream".into()),
-    };
-    let request = RequestId::mint();
-    let staged = tasks
-        .stage_payload(
-            &task.id,
-            &task.token,
-            &request,
-            reference.clone(),
-            Box::new(zeroship_storage::backend::OnceChunk::new(data.clone())),
+        post(
+            &client,
+            &first.url,
+            path,
+            &assertion(&worker_issuer, &worker_key),
+            &assign
         )
         .await
-        .unwrap();
-    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let retry = compio::time::timeout(
-        std::time::Duration::from_secs(5),
-        replica_tasks.stage_payload(
-            &task.id,
-            &task.token,
-            &request,
-            reference.clone(),
-            Box::new(NeverSource(dropped.clone())),
-        ),
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, value) = post(
+        &client,
+        &first.url,
+        path,
+        &assertion(&control, &control_key),
+        &assign,
     )
-    .await
-    .unwrap()
-    .unwrap();
-    assert_eq!(retry, staged);
-    compio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !dropped.load(std::sync::atomic::Ordering::SeqCst) {
-            compio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(matches!(
-        stranger
-            .read_payload(&task.id, &task.token, &reference)
-            .await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    let mut download = tasks
-        .read_payload(&task.id, &task.token, &reference)
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let assignment: Assignment = serde_json::from_value(value.clone()).unwrap();
+    assert_eq!(
+        post(
+            &client,
+            &second.url,
+            path,
+            &assertion(&control, &control_key),
+            &assign
+        )
+        .await,
+        (StatusCode::OK, value)
+    );
+    let scope = json!({"appId":app,"assignmentRevision":assignment.revision});
+    assert_eq!(
+        post(
+            &client,
+            &second.url,
+            endpoints::WORKFLOW_RENEW.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &scope
+        )
         .await
-        .unwrap();
-    let mut received = Vec::new();
-    while let Some(chunk) = download.body.next_chunk().await {
-        received.extend_from_slice(&chunk.unwrap());
-    }
-    assert_eq!(received, data);
-    let done: WorkflowExecution = serde_json::from_value(json!({"outcomes":[
-        {"kind":"StepCompleted","ordinal":0,"name":"payload","outputRef":reference}
-    ]}))
-    .unwrap();
-    tasks.complete(&task.id, &task.token, done).await.unwrap();
-    let task = tasks.poll().await.unwrap().unwrap();
-    let reader = zeroship_workflow::service::runner::TaskPayloadReader::new(std::rc::Rc::new(replica_tasks.clone()), &task, data.len()).unwrap();
-    assert_eq!(reader.read_step_output("payload", 0).await.unwrap(), data);
-    tasks.complete(&task.id, &task.token, serde_json::from_value(json!({"outcomes":[
-        {"kind":"RunCompleted","outputRef":reference}
-    ]})).unwrap()).await.unwrap();
-    assert!(reader.read_step_output("payload", 0).await.is_err());
-    {
-        use zeroship_workflow::backend::WorkflowBackend;
-        let backend = app.clone().into_backend(data.len()).unwrap();
-        assert_eq!(backend.app_id(), &a);
+        .0,
+        StatusCode::OK
+    );
+    let foreign = json!({"appId":AppId::mint(),"assignmentRevision":assignment.revision});
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGEMENT_POLL.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &foreign
+        )
+        .await,
+        (StatusCode::FORBIDDEN, json!({"code":"denied"}))
+    );
+    for field in ["input", "history", "databaseUrl", "payloadUrl", "taskToken"] {
+        let mut injected = scope.clone();
+        injected[field] = json!("private-customer-data");
         assert_eq!(
-            backend
-                .read_step_output(run.id.clone(), "payload".into(), 0)
-                .await
-                .unwrap(),
-            data
+            post(
+                &client,
+                &first.url,
+                endpoints::WORKFLOW_RENEW.path_template(),
+                &assertion(&worker_issuer, &worker_key),
+                &injected
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
         );
-        let limited = app.clone().into_backend(1).unwrap();
-        assert!(matches!(
-            limited
-                .read_step_output(run.id.clone(), "payload".into(), 0)
-                .await,
-            Err(WorkflowServiceError::PayloadTooLarge)
-        ));
     }
-    assert!(matches!(
-        foreign.read_step_output(&run.id, "payload", 0).await,
-        Err(WorkflowServiceError::NotFound(_))
-    ));
-    let no_read_token = mint_app_capability(
-        &control_key,
-        AppGrant {
-            app_id: a.clone(),
-            operations: [AppOperation::Status].into(),
-        },
-        now,
-        120,
-    )
-    .unwrap();
-    assert!(matches!(
-        endpoint
-            .for_app(a.clone(), no_read_token)
-            .read_step_output(&run.id, "payload", 0)
-            .await,
-        Err(WorkflowServiceError::PermissionDenied)
-    ));
-    let mut download = app
-        .read_payload(
-            &run.id,
-            task.generation,
-            zeroship_workflow::service::PayloadSlot::Output,
+    let oversized = json!({"capacity":1,"state":"ready","input":"x".repeat(2048)});
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            register,
+            &assertion(&worker_issuer, &worker_key),
+            &oversized
         )
-        .await
-        .unwrap();
-    let mut received = Vec::new();
-    while let Some(chunk) = download.body.next_chunk().await {
-        received.extend_from_slice(&chunk.unwrap());
-    }
-    assert_eq!(received, data);
-    assert!(matches!(
-        tasks.read_payload(&task.id, &task.token, &reference).await,
-        Err(WorkflowServiceError::Conflict(_))
-    ));
-    runner::check(tasks.clone(), &app).await;
-    capability_refresh::check(&endpoint, &a, &control_key, worker_auth, &task, &data).await;
-    // A Content-Length response may finish before the server can report a
-    // trailing stream error. The client independently checks the digest.
-    let objects = storage.namespace(zeroship_storage::Namespace::platform("workflow").unwrap());
-    objects
-        .put(
-            a.as_str(),
-            &staged.id,
-            &vec![43; data.len()],
-            Some("application/octet-stream"),
+        .await,
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"code":"request_too_large"})
         )
-        .await
-        .unwrap();
-    let mut corrupt = app
-        .read_payload(
-            &run.id,
-            task.generation,
-            zeroship_workflow::service::PayloadSlot::Output,
-        )
-        .await
-        .unwrap();
-    let mut rejected = false;
-    while let Some(chunk) = corrupt.body.next_chunk().await {
-        if chunk.is_err() {
-            rejected = true;
-            break;
-        }
-    }
-    assert!(
-        rejected,
-        "corrupt bytes must not finish as a verified payload"
     );
-}
 
-struct NeverSource(Arc<std::sync::atomic::AtomicBool>);
-impl Drop for NeverSource {
-    fn drop(&mut self) {
-        self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    let request = ManageRun {
+        request_id: RequestId::mint(),
+        app_id: app.clone(),
+        run_id: RunId::mint(),
+        command: ManagementOperation::Transition {
+            operation: RunOperation::Pause,
+        },
+    };
+    let management = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGE.path_template(),
+            &assertion(&control, &control_key),
+            &management
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    first.restart(&client).await;
+    let (status, pending) = post(
+        &client,
+        &first.url,
+        endpoints::WORKFLOW_MANAGEMENT_POLL.path_template(),
+        &assertion(&worker_issuer, &worker_key),
+        &scope,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pending, json!([request]));
+    let ack = json!({"appId":app,"requestId":request.request_id,"assignmentRevision":assignment.revision,"outcome":{"kind":"applied","state":"paused"}});
+    let (status, receipt) = post(
+        &client,
+        &second.url,
+        endpoints::WORKFLOW_MANAGEMENT_ACK.path_template(),
+        &assertion(&worker_issuer, &worker_key),
+        &ack,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGE.path_template(),
+            &assertion(&control, &control_key),
+            &management
+        )
+        .await,
+        (StatusCode::OK, receipt.clone())
+    );
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template(),
+            &assertion(&control, &control_key),
+            &json!({"appId":app,"requestId":request.request_id})
+        )
+        .await,
+        (StatusCode::OK, receipt)
+    );
+    let hint =
+        json!({"appId":app,"assignmentRevision":assignment.revision,"revision":1,"nextDueAt":null});
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_WAKE.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &hint
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let release = json!({"appId":app,"requestId":RequestId::mint(),"assignmentRevision":assignment.revision,"wakeRevision":1});
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_RELEASE.path_template(),
+            &assertion(&worker_issuer, &worker_key),
+            &release
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    for path in [
+        "/v1/tasks/poll".into(),
+        format!("/v1/apps/{}/workflows/Example/runs", app.as_str()),
+        format!("/v1/apps/{}/workflow-deploy", app.as_str()),
+    ] {
+        assert_eq!(
+            post(
+                &client,
+                &first.url,
+                &path,
+                &assertion(&control, &control_key),
+                &json!({"input":"private"})
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
     }
-}
-#[async_trait::async_trait(?Send)]
-impl zeroship_storage::backend::ChunkSource for NeverSource {
-    async fn next_chunk(&mut self) -> Option<zeroship_storage::backend::ChunkResult> {
-        std::future::pending().await
-    }
+    fixture
+        .admin
+        .execute(
+            "UPDATE zeroship.worker_instances SET status='draining' WHERE id=$1",
+            &[&worker.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        post(
+            &client,
+            &second.url,
+            register,
+            &assertion(&worker_issuer, &worker_key),
+            &registration
+        )
+        .await
+        .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    fixture.admin.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename='zeroship_workflow'",&[]).await.unwrap();
+    first.expect_failure().await;
+    second.expect_failure().await;
+    first.restart(&client).await;
+    assert_eq!(
+        post(
+            &client,
+            &first.url,
+            endpoints::WORKFLOW_MANAGEMENT_STATUS.path_template(),
+            &assertion(&control, &control_key),
+            &json!({"appId":app,"requestId":request.request_id})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
 }

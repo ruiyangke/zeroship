@@ -43,7 +43,7 @@ pub struct WorkflowBinding {
 }
 
 impl WorkflowBinding {
-    /// Bind an embedded or remote shared service to its authorized app.
+    /// Bind the embedded workflow engine to its authorized app.
     #[must_use]
     pub fn service(backend: zeroship_workflow::service::AppBackend) -> Self {
         Self {

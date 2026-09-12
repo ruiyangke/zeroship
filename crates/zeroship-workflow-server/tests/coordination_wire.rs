@@ -4,10 +4,10 @@ use std::fmt::Debug;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{
-        AcknowledgeManagement, AssignScope, AssignedScope, Assignment, ManageRun,
-        ManagementOperation, ManagementOutcome, ManagementReceipt, PublishWakeHint, RegisterWorker,
-        RegisteredWorker, ReleaseScope, RequestId, Revision, RunId, UnixMillis, WakeHintReceipt,
-        WorkerId,
+        AcknowledgeManagement, AssignScope, AssignedScope, Assignment, Failure, ManageRun,
+        ManagementOperation, ManagementOutcome, ManagementReceipt, ManagementStatus,
+        PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope, RequestId, Revision,
+        RunId, ScopePage, UnixMillis, WakeHintReceipt, WorkerId, WorkerPage,
     },
 };
 
@@ -43,6 +43,10 @@ fn registry_and_placement_contracts_reject_customer_data() {
     let app = AppId::mint();
     let worker = WorkerId::mint();
     let request = RequestId::mint();
+    rejects_customer_fields::<WorkerPage>(&json!({"after":null}));
+    rejects_customer_fields::<ScopePage>(&json!({"after":app}));
+    rejects_customer_fields::<ManagementStatus>(&json!({"appId":app,"requestId":request}));
+    rejects_customer_fields::<Failure>(&json!({"code":"denied"}));
     rejects_customer_fields::<RegisterWorker>(&json!({"capacity":4,"state":"ready"}));
     rejects_customer_fields::<RegisteredWorker>(&json!({
         "workerId":worker,"capacity":4,"state":"ready","expiresAt":1000

@@ -1,4 +1,4 @@
-//! Execution slots shared by embedded and remote worker hosts.
+//! Execution slots for customer workers and local development.
 
 mod budget;
 pub use budget::{ExecutionBudget, ExecutionGuard};
@@ -8,7 +8,7 @@ mod outputs;
 pub use outputs::{PreparedExecution, TaskPayloadLimits};
 
 use super::{
-    CompletionReceipt, ControlIntent, Heartbeat, RemoteTasks, TaskAssignment, TaskToken,
+    CompletionReceipt, ControlIntent, Heartbeat, TaskAssignment, TaskToken,
     WorkerIdentity, WorkflowService,
 };
 use crate::{WorkflowExecution, WorkflowServiceError};
@@ -38,32 +38,7 @@ pub trait TaskTransport {
     async fn release(&self, task: &str, token: &TaskToken) -> Result<(), WorkflowServiceError>;
 }
 
-#[async_trait(?Send)]
-impl TaskTransport for RemoteTasks {
-    async fn poll(&self) -> Result<Option<TaskAssignment>, WorkflowServiceError> {
-        self.poll().await
-    }
-    async fn heartbeat(
-        &self,
-        task: &str,
-        token: &TaskToken,
-    ) -> Result<Heartbeat, WorkflowServiceError> {
-        self.heartbeat(task, token).await
-    }
-    async fn complete(
-        &self,
-        task: &str,
-        token: &TaskToken,
-        execution: WorkflowExecution,
-    ) -> Result<CompletionReceipt, WorkflowServiceError> {
-        self.complete(task, token, execution).await
-    }
-    async fn release(&self, task: &str, token: &TaskToken) -> Result<(), WorkflowServiceError> {
-        self.release(task, token).await
-    }
-}
-
-/// Local development supplies the host identity directly, without HTTP auth.
+/// The worker or CLI supplies its trusted identity to the embedded engine.
 #[derive(Debug, Clone)]
 pub struct EmbeddedTasks {
     service: WorkflowService,

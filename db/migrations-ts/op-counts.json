@@ -50,6 +50,6 @@
   { "file": "20260908000000_auth_organization_ownership_fence.ts", "name": "auth_organization_ownership_fence", "opCount": 2 },
   { "file": "20260908000100_delete_apps.ts", "name": "delete_apps", "opCount": 4 },
   { "file": "20260910000100_cdc_relay_authority.ts", "name": "cdc_relay_authority", "opCount": 5 },
-  { "file": "20260911000000_workflow_service.ts", "name": "workflow_service", "opCount": 107 },
+  { "file": "20260911000000_workflow_coordination.ts", "name": "workflow_coordination", "opCount": 31 },
   { "file": "20260911000100_project_data_keys.ts", "name": "project_data_keys", "opCount": 4 }
 ]

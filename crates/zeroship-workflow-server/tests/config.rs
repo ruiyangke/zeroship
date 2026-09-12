@@ -9,15 +9,13 @@ use zeroship_workflow_server::{
 #[test]
 fn config_check_validates_toml_and_flags_without_opening_dependencies() {
     let dir = tempfile::tempdir().unwrap();
-    let payload = dir.path().join("uncreated-payloads");
     let config = dir.path().join("zeroship.toml");
     std::fs::write(
         &config,
         toml::to_string(&serde_json::json!({"workflow":{
             "database_url":"postgres://unused:private-workflow-password@127.0.0.1:1/unreachable",
-            "service_key_file":dir.path().join("unread-key"),
             "service_peers_file":dir.path().join("unread-peers"),
-            "payload_url":payload,"max_running":3,
+            "batch_limit":3,
         }}))
         .unwrap(),
     )
@@ -32,7 +30,7 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
             "--config",
         ])
         .arg(&config)
-        .args(["--max-running", "2"])
+        .args(["--batch-limit", "2"])
         .output()
         .unwrap();
     assert!(
@@ -43,21 +41,20 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
     let output = String::from_utf8(result.stdout).unwrap();
     assert!(!output.contains("private-workflow-password"));
     assert!(output.contains("database_configured"));
-    assert!(!payload.exists());
 
     let overlay: toml::Value = toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
     let settings = WorkflowSettings::resolve_config(
         WorkflowSettingsSources::try_parse_from([
             "zeroship-workflow-server",
             "--check-config",
-            "--max-running",
+            "--batch-limit",
             "2",
         ])
         .unwrap(),
         Some(&overlay),
     )
     .unwrap();
-    assert_eq!(*settings.max_running.get(), 2);
+    assert_eq!(*settings.batch_limit.get(), 2);
     ServerOptions::resolve(&settings).unwrap();
 
     let missing = Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
@@ -76,8 +73,21 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         .env_clear()
         .args(["--check-config", "--config"])
         .arg(&config)
-        .args(["--lease-ms", "0"])
+        .args(["--assignment-ttl-ms", "0"])
         .output()
         .unwrap();
     assert!(!invalid.status.success());
+    for flag in [
+        "--payload-url",
+        "--service-key-file",
+        "--max-running",
+        "--lease-ms",
+    ] {
+        assert!(WorkflowSettingsSources::try_parse_from([
+            "zeroship-workflow-server",
+            flag,
+            "unused"
+        ])
+        .is_err());
+    }
 }

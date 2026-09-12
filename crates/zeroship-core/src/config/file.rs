@@ -358,65 +358,37 @@ pub struct SchedulerSection {
     pub inflight_ttl_ms: Option<i64>,
 }
 
-/// Workflow authority values supplied by the shared overlay.
+/// Workflow coordinator metadata values supplied by the shared overlay.
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowSection {
     /// HTTP listener address.
     pub listen: Option<String>,
-    /// Private workflow signing key file.
-    pub service_key_file: Option<PathBuf>,
     /// Issuer-bound peer verification keys.
     pub service_peers_file: Option<PathBuf>,
-    /// Workflow payload storage location.
-    pub payload_url: Option<String>,
     /// HTTP worker threads.
     pub http_threads: Option<usize>,
     /// Maximum connections per HTTP thread.
     pub max_connections: Option<usize>,
-    /// Maximum JSON request size; payload uploads stream separately.
+    /// Maximum metadata JSON request size.
     pub max_request_bytes: Option<usize>,
-    /// Interval between durable maintenance sweeps.
-    pub tick_interval_ms: Option<u64>,
-    /// Maximum items in each deployment or payload maintenance sweep.
-    pub maintenance_batch: Option<usize>,
-    /// Maximum live runs per app.
-    pub max_live_runs: Option<i64>,
-    /// Maximum child workflow depth.
-    pub max_child_depth: Option<i64>,
-    /// Maximum concurrent tasks per app.
-    pub max_running: Option<i64>,
-    /// Maximum inline input or signal size.
-    pub max_input_bytes: Option<usize>,
-    /// Maximum operations accepted in a task completion.
-    pub max_frontier: Option<usize>,
-    /// Maximum retained journal size per generation.
-    pub max_journal_bytes: Option<usize>,
-    /// Maximum size of a payload object.
-    pub max_payload_bytes: Option<i64>,
-    /// Maximum payload objects per app.
-    pub max_payload_objects: Option<i64>,
-    /// Maximum retained payload storage per app.
-    pub max_payload_storage_bytes: Option<i64>,
-    /// Retention window for unreferenced uploads.
-    pub payload_staging_retention_ms: Option<i64>,
-    /// Maximum attempts for a compensator.
-    pub max_compensation_attempts: Option<i32>,
-    /// Delay between compensation attempts.
-    pub compensation_retry_ms: Option<i64>,
-    /// Maximum active schedules per app.
-    pub max_schedules: Option<usize>,
-    /// Maximum occurrences replayed in a schedule sweep.
-    pub max_schedule_backfill: Option<usize>,
-    /// Minimum fixed schedule interval.
-    pub min_schedule_interval_ms: Option<i64>,
-    /// Maximum public signal capability lifetime.
-    pub max_signal_token_lifetime_seconds: Option<i64>,
-    /// Task lease duration.
-    pub lease_ms: Option<i64>,
-    /// Retention window for mutation receipts.
-    pub request_retention_ms: Option<i64>,
-    /// Workflow database login.
+    /// Metadata database connections per HTTP thread.
+    pub database_connections: Option<usize>,
+    /// Maximum wait to acquire a metadata connection.
+    pub database_acquire_timeout_ms: Option<u64>,
+    /// Deadline for a complete metadata transaction.
+    pub database_command_timeout_ms: Option<u64>,
+    /// Worker registration lifetime between heartbeats.
+    pub worker_ttl_ms: Option<u64>,
+    /// Placement lifetime between authorized renewals.
+    pub assignment_ttl_ms: Option<u64>,
+    /// Maximum records in a metadata response page.
+    pub batch_limit: Option<usize>,
+    /// Maximum pending lifecycle commands per app.
+    pub max_pending_management: Option<usize>,
+    /// Interval between expired service-assertion cleanup sweeps.
+    pub replay_sweep_ms: Option<u64>,
+    /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
 }
 

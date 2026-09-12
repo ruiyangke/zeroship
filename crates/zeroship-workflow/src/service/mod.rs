@@ -1,4 +1,4 @@
-//! Shared workflow service for embedded and remote hosts.
+//! Workflow engine embedded in customer workers and local development.
 
 mod app;
 mod backend;
@@ -16,8 +16,6 @@ mod payloads;
 mod policy;
 pub use policy::PlatformPolicy;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
-mod remote;
-pub use remote::{RemoteAppWorkflows, RemoteTasks, WorkflowEndpoint};
 pub mod runner;
 mod schedules;
 mod signals;
@@ -30,7 +28,6 @@ pub use app::{AppWorkflows, WorkflowService};
 pub mod schema;
 pub mod store;
 mod types;
-pub mod wire;
 pub use types::*;
 
 #[cfg(test)]

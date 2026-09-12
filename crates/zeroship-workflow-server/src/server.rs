@@ -1,24 +1,22 @@
-//! Production composition. This process executes no creator code.
+//! Production host for platform coordination metadata.
+#![allow(
+    clippy::future_not_send,
+    reason = "compio database and HTTP tasks run on their owning threads"
+)]
 
 use crate::{
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
+    coordinator::{Coordinator, Options},
     WorkflowHttpState,
 };
+use futures::future::{select, Either};
 use ntex::web;
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, rc::Rc, sync::Arc, time::Duration};
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_core::{
-    service_assertion::{ServiceAssertionVerifier, ServiceIssuer},
-    service_peers::{load_peer_bundle, load_signing_key, service_issuer, CONTROL_SERVICE_NAME},
-};
-use zeroship_storage::{
-    config::{build_backend, StorageBackendConfig},
-    StorageStore,
-};
-use zeroship_workflow::service::{
-    capability::WORKFLOW_AUDIENCE, store::PostgresStore, PlatformPolicy, SignalAuthority,
-    WorkflowService,
+    service_assertion::ServiceAssertionVerifier,
+    service_peers::{load_peer_bundle, service_issuer, CONTROL_SERVICE_NAME},
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -29,147 +27,130 @@ pub struct ServerOptions {
     pub http_threads: usize,
     pub max_connections: usize,
     pub max_request_bytes: usize,
-    pub storage: StorageBackendConfig,
-    tick_interval: Duration,
-    maintenance_batch: usize,
-    policy: PlatformPolicy,
+    pub coordinator: Options,
+    replay_sweep: Duration,
 }
 impl ServerOptions {
-    /// Pure configuration validation, also used by the read-only CLI check.
+    /// Pure validation used by the read-only configuration check.
+    ///
+    /// # Errors
+    /// Rejects invalid listeners, empty limits and missing metadata credentials.
     pub fn resolve(settings: &WorkflowSettings) -> Result<Self, Error> {
         let listen = settings.listen.get().parse()?;
         let http_threads = *settings.http_threads.get();
         let max_connections = *settings.max_connections.get();
         let max_request_bytes = *settings.max_request_bytes.get();
-        let tick_ms = *settings.tick_interval_ms.get();
-        let maintenance_batch = *settings.maintenance_batch.get();
+        let replay_sweep = Duration::from_millis(*settings.replay_sweep_ms.get());
         if http_threads == 0
             || max_connections == 0
             || max_request_bytes == 0
-            || tick_ms == 0
-            || maintenance_batch == 0
+            || replay_sweep.is_zero()
         {
-            return Err(
-                "workflow concurrency, request and maintenance limits must be positive".into(),
-            );
+            return Err("workflow HTTP and maintenance limits must be positive".into());
         }
         if !settings.database_url.is_configured() {
-            return Err("workflow.database_url is required".into());
+            return Err("workflow.database_url is required for coordination metadata".into());
         }
-        if settings.service_key_file.get().as_os_str().is_empty()
-            || settings.service_peers_file.get().as_os_str().is_empty()
-        {
-            return Err("workflow service key and peer files are required".into());
+        if settings.service_peers_file.get().as_os_str().is_empty() {
+            return Err("workflow.service_peers_file is required".into());
         }
+        let coordinator = Options {
+            connections: *settings.database_connections.get(),
+            acquire_timeout: Duration::from_millis(*settings.database_acquire_timeout_ms.get()),
+            command_timeout: Duration::from_millis(*settings.database_command_timeout_ms.get()),
+            worker_ttl: Duration::from_millis(*settings.worker_ttl_ms.get()),
+            assignment_ttl: Duration::from_millis(*settings.assignment_ttl_ms.get()),
+            batch_limit: *settings.batch_limit.get(),
+            max_pending_management: *settings.max_pending_management.get(),
+        };
+        coordinator.validate()?;
         Ok(Self {
             listen,
             http_threads,
             max_connections,
             max_request_bytes,
-            storage: StorageBackendConfig::parse(settings.payload_url.get())?,
-            tick_interval: Duration::from_millis(tick_ms),
-            maintenance_batch,
-            policy: settings.policy()?,
+            coordinator,
+            replay_sweep,
         })
     }
 }
 
+/// # Errors
+/// Refuses unavailable metadata/identity stores or invalid peer keys. Loss of
+/// the shared authentication connection stops this process for supervisor recovery.
 pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(), Error> {
-    let key = Arc::new(load_signing_key(settings.service_key_file.get())?);
     let peers = load_peer_bundle(settings.service_peers_file.get())?;
-    let issuer = ServiceIssuer::parse(WORKFLOW_AUDIENCE)?;
     if peers
         .public_keys_for(&service_issuer(CONTROL_SERVICE_NAME)?)
         .is_empty()
     {
         return Err("workflow peer bundle must contain Control's verification key".into());
     }
-    if !peers
-        .public_keys_for(&issuer)
-        .iter()
-        .any(|(_, public)| public == &key.verifying_key_bytes())
-    {
-        return Err(
-            "publish the workflow signing key in the peer bundle before activating it".into(),
-        );
-    }
-    // Load key material once. Every verifier and the signal signer use the same
-    // immutable snapshot even if an operator replaces files during startup.
-    let authority = Arc::new(SignalAuthority::new(key, peers.clone())?);
-    let storage = StorageStore::from_backend(build_backend(&options.storage)?);
     let url = settings.database_url.expose_str().to_owned();
-    let service = WorkflowService::open(Arc::new(PostgresStore::platform(
-        url.clone(),
-        options.policy,
-    )))
+    // Verify migration readiness before accepting connections. Each HTTP thread
+    // subsequently constructs its own bounded pool through the state factory.
+    Coordinator::connect(&url, options.coordinator).await?;
+    let (client, connection) = compio::time::timeout(
+        options.coordinator.acquire_timeout,
+        compio_postgres::connect(&url, compio_postgres::NoTls),
+    )
     .await?
-    .with_signal_authority(authority)
-    .with_payload_storage(storage)?;
-    let (client, connection) = compio_postgres::connect(&url, compio_postgres::NoTls).await?;
+    .map_err(|_| "workflow authentication database unavailable")?;
+    let (closed, disconnected) = futures::channel::oneshot::channel();
     compio::runtime::spawn(async move {
-        if let Err(error) = connection.run().await {
-            tracing::error!(%error, "workflow authentication database connection ended");
-        }
+        let _ = connection.run().await;
+        let _ = closed.send(());
     })
     .detach();
     let client = Arc::new(client);
     let replay = Arc::new(SharedClientReplayStore::new(client.clone()));
-    let verifier = Arc::new(ServiceAssertionVerifier::new(peers.clone(), replay.clone()));
-    // This also checks the assertion replay table before a listener is opened.
-    replay.purge_expired().await?;
-    let state = Arc::new(WorkflowHttpState {
-        service: service.clone(),
-        auth: WorkflowAuth::new(
-            peers,
-            verifier,
-            Arc::new(PostgresWorkerRegistry::new(client.clone())),
-            replay.clone(),
-        ),
-    });
-    let mut deploy_cursor = service
-        .reconcile_pending_deploys(None, options.maintenance_batch)
-        .await?
-        .next;
+    let verifier = Arc::new(ServiceAssertionVerifier::new(peers, replay.clone()));
+    compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
+    let auth = Arc::new(WorkflowAuth::new(
+        verifier,
+        Arc::new(PostgresWorkerRegistry::new(client)),
+        replay.clone(),
+    ));
+    compio::time::timeout(options.coordinator.command_timeout, auth.ready()).await??;
     let maintenance = compio::runtime::spawn(async move {
         loop {
-            match service
-                .reconcile_pending_deploys(deploy_cursor.clone(), options.maintenance_batch)
-                .await
-            {
-                Ok(batch) => deploy_cursor = batch.next,
-                Err(error) => tracing::error!(%error, "workflow deployment sweep failed"),
+            if !matches!(
+                compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired())
+                    .await,
+                Ok(Ok(_))
+            ) {
+                tracing::warn!("workflow assertion replay cleanup unavailable");
             }
-            if let Err(error) = service.tick_schedules().await {
-                tracing::error!(%error, "workflow schedule sweep failed");
-            }
-            if let Err(error) = service.tick_broadcasts().await {
-                tracing::error!(%error, "workflow broadcast sweep failed");
-            }
-            if let Err(error) = service.collect_payloads(options.maintenance_batch).await {
-                tracing::error!(%error, "workflow payload sweep failed");
-            }
-            if let Err(error) = replay.purge_expired().await {
-                tracing::error!(%error, "workflow replay sweep failed");
-            }
-            compio::time::sleep(options.tick_interval).await;
+            compio::time::sleep(options.replay_sweep).await;
         }
     });
+    let coordinator = options.coordinator;
     let max_request_bytes = options.max_request_bytes;
     let server = web::HttpServer::new(move || {
-        let state = state.clone();
+        let url = url.clone();
+        let auth = auth.clone();
         async move {
-            web::App::new().state(state).configure(move |config| {
-                crate::api::configure_with_limit(config, max_request_bytes)
-            })
+            web::App::new()
+                .state_factory(async move || {
+                    Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
+                        service: Coordinator::connect(&url, coordinator).await?,
+                        auth,
+                    }))
+                })
+                .configure(move |config| {
+                    crate::api::configure_with_limit(config, max_request_bytes);
+                })
         }
     })
     .workers(options.http_threads)
     .maxconn(options.max_connections)
     .bind(options.listen)?
     .run();
-    tracing::info!(listen = %options.listen, "workflow server listening");
-    let result = server.await;
+    tracing::info!(listen = %options.listen, "workflow coordinator listening");
+    let result = match select(Box::pin(server), disconnected).await {
+        Either::Left((result, _)) => result.map_err(Into::into),
+        Either::Right(_) => Err("workflow authentication database disconnected".into()),
+    };
     drop(maintenance);
-    result?;
-    Ok(())
+    result
 }

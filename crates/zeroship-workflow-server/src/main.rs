@@ -31,10 +31,6 @@ fn main() {
             "database_configured",
             CheckValue::Secret(settings.database_url.is_configured()),
         );
-        report.field(
-            "payload_backend",
-            CheckValue::Plain(options.storage.kind().into()),
-        );
         report.field("http_threads", CheckValue::Count(options.http_threads));
         report.field(
             "max_connections",

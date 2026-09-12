@@ -36,9 +36,10 @@ The replacement engine is under construction and is not yet composed into the
 worker, Control or CLI. The [revised ownership design](../../docs/proposals/2026-09-11-workflow-worker.md)
 embeds it in the customer's worker with customer-bound persistence; a lightweight
 server coordinates metadata and does not own the journal or payloads. The
-central persistence and remote task adapters below are refactor code awaiting
-that correction. The engine's native contracts exercise app isolation, retry
-receipts, expired leases, lifecycle changes, child execution, retained restart
+engine store still needs its customer-schema binding and trusted host policy
+composition. The obsolete central task transport has been removed. The engine's
+native contracts exercise app isolation, retry receipts, expired leases,
+lifecycle changes, child execution, retained restart
 history and scheduled occurrences against both database adapters. PostgreSQL
 fixtures use Testcontainers.
 The replacement capability codecs use the platform's service signing keys.
@@ -50,16 +51,16 @@ Replay generations, child results and continuation inputs retain explicit
 reference edges. Collection fences uploads and retries failed deletions;
 tombstones remain discoverable when an interrupted remote write arrives late.
 Payload contracts run against local storage and Testcontainers S3.
-Embedded and remote app handles expose `read_step_output` for a completed
+Embedded app handles expose `read_step_output` for a completed
 named occurrence in the run's current generation. The service resolves that
 generation under the restart fence and checks reference ownership before
 opening storage. `PayloadRead::into_bytes` verifies the stream within a host
-memory limit. `into_backend` adapts either app handle to `WorkflowBackend`;
+memory limit. `into_backend` adapts the app handle to `WorkflowBackend`;
 its bound identity cannot change between operations.
 Task hosts instead use `runner::TaskPayloadReader`: it captures the assignment's
 journal, resolves named occurrences in that snapshot and reads referenced
-objects through the live task lease. `EmbeddedTasks` and `RemoteTasks` implement
-the same payload read/write contract alongside their shared task protocol.
+objects through the live task lease. `EmbeddedTasks` implements the
+payload read/write contract alongside the local task protocol.
 `runner::PreparedExecution` decodes runtime outcomes, leaves small values inline
 and prepares task-scoped uploads for large or explicitly referenced results.
 It retains upload request identities across retries, checks returned descriptors

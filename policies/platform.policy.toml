@@ -21,9 +21,9 @@
 #
 # The cross-schema peers have distinct authorities. `public` holds extensions.
 # `service_authn` holds assertion replay state shared by verifying services.
-# `workflow` holds the workflow server's journal under a migration-only owner;
-# workers, Gateway and app roles cannot access it. `zeroship` holds platform
-# policy, which the workflow server reads through narrow column grants.
+# `workflow_coordination` holds registry, placement and management metadata under
+# a migration owner. `zeroship` holds platform records; the coordinator reads
+# only enrolled worker identity columns. Customer journals are worker-owned.
 #
 # Widening this list widens what a platform migration may create. THE COUNTERWEIGHT
 # THAT SAT BESIDE IT IS GONE: `crates/zeroship-migrate-adapter/tests/platform_migrate.rs`
@@ -104,17 +104,17 @@ scope = "all"
 [[grant]]
 key = "schema.cross_schema"
 value = true
-scope = { include = ["zeroship", "public", "service_authn", "workflow"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination"] }
 
 [[grant]]
 key = "schema.create_table"
 value = true
-scope = { include = ["zeroship", "public", "service_authn", "workflow"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination"] }
 
 [[grant]]
 key = "schema.rename"
 value = true
-scope = { include = ["zeroship", "public", "service_authn", "workflow"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination"] }
 
 [[grant]]
 key = "safety.destructive_ops"

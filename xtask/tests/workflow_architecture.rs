@@ -33,7 +33,11 @@ fn rust_workflow_crates_do_not_depend_on_the_v8_runtime() {
         .iter()
         .map(|node| (node["id"].as_str().unwrap(), node))
         .collect();
-    for name in ["zeroship-workflow", "zeroship-workflow-scheduler"] {
+    for name in [
+        "zeroship-workflow",
+        "zeroship-workflow-scheduler",
+        "zeroship-workflow-server",
+    ] {
         let id = *packages
             .iter()
             .find(|(_, package)| **package == name)
@@ -46,6 +50,13 @@ fn rust_workflow_crates_do_not_depend_on_the_v8_runtime() {
                 continue;
             }
             let dependency = packages[id];
+            if name == "zeroship-workflow-server" {
+                assert!(
+                    !["zeroship-workflow", "zeroship-storage", "zeroship-data-orm"]
+                        .contains(&dependency),
+                    "coordinator reaches customer engine or storage through {dependency}"
+                );
+            }
             assert!(
                 ![
                     "v8",

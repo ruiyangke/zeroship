@@ -32,7 +32,7 @@ storage credentials never enter V8.
 The worker uses `WorkflowBinding::new` for control-plane-backed workflows.
 The CLI uses `WorkflowBinding::dev_sqlite` for the local development engine.
 The replacement shared service binds through `WorkflowBinding::service`, using
-an embedded or remote `AppBackend`. Before evaluating app code, the binding
+an embedded `AppBackend`. Before evaluating app code, the binding
 checks its scope against `RuntimeBuilder::app_id`; an environment variable
 cannot supply or override that identity. Native binding tests cover lifecycle
 operations, output reads and rejection of foreign app access.
