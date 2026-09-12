@@ -48,7 +48,7 @@ use crate::v8_bridge::decode_native;
 use crate::v8_classes::collection::mint_collection;
 use crate::v8_classes::db_platform::mint_db_platform;
 use crate::v8_classes::transaction::transaction_dispatch;
-use zeroship_data_orm::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
+use zeroship_data_orm::binding::{DbBinding, COLD_START_DEPLOY_TOKEN};
 use zeroship_data_orm::error::IsolationLevel;
 
 // ---------------------------------------------------------------------------
@@ -227,6 +227,23 @@ impl Db {
         }
         .to_op_error())
     }
+}
+
+pub(crate) fn collection_for_namespace<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    namespace: v8::Local<'s, v8::Object>,
+    name: &str,
+) -> Result<v8::Local<'s, v8::Object>, String> {
+    let external: v8::Local<v8::External> = namespace
+        .get_internal_field(scope, 0)
+        .ok_or_else(|| "native env.db state is missing".to_string())?
+        .try_into()
+        .map_err(|_| "native env.db state has an invalid type".to_string())?;
+    // SAFETY: DbPlugin supplies the namespace from `mint_db`, which stores a
+    // live `Box<Db>` in this internal field for the wrapper's lifetime.
+    let db = unsafe { &*(external.value() as *const Db) };
+    db.collection(scope, name.to_string())
+        .map_err(|error| error.to_string())
 }
 
 /// Cheap JS-side type label for error messages. Matches the labels
