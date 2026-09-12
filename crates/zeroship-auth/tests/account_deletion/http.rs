@@ -240,23 +240,27 @@ impl DeletionServer {
         control: &MockControl,
         keyring: Arc<ServiceKeyring>,
     ) -> Self {
-        let dsn = database.url();
+        let dsn = database.auth_url().to_string();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve auth listener");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mut settings =
-            common::test_auth_config_with(dsn, &["--control-url", &control.base]).settings;
+            common::test_auth_config_with(&dsn, &["--control-url", &control.base]).settings;
         settings.public_url = zeroship_core::config::Operational::new(base.clone());
         let cfg = Arc::new(zeroship_auth::config::AuthConfig::from_resolved(settings).unwrap());
-        let db = Arc::new(database.connect().await);
-        let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(dsn.to_owned(), 2);
+        let db = Arc::new(database.connect_as_auth().await);
+        let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(dsn, 2);
         let issuer = Arc::new(
             zeroship_auth::oidc::Issuer::from_signing_key(
-                &common::op_signing_key(),
+                &ed25519_dalek::SigningKey::from_bytes(&[22; 32]),
                 zeroship_core::auth::derive_pairwise_salt(b"deletion-http-fixture"),
                 format!("{base}/oauth2"),
             )
             .unwrap(),
         );
+        issuer
+            .publish_active_key(&db)
+            .await
+            .expect("publish fixture signing key");
         let mailer = Arc::new(common::CapturingMailer::default());
         let mailer_state: Arc<dyn zeroship_mailer::Mailer> = mailer.clone();
         let srv =
