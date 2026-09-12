@@ -12,7 +12,9 @@ worker thread
   -> return response, stream, websocket upgrade, or pending receiver
 ```
 
-The worker is responsible for fetching the worker-entry blob from `BlobStore` and building the `Vec<ModuleEntry>` passed into `Runtime::builder()`.
+The worker loads the complete module graph and runtime descriptor through
+`zeroship_bundle::LoadedWorker`, then passes the entry module first to
+`Runtime::builder()`.
 
 ## Layout
 
@@ -75,9 +77,19 @@ Stream responses are pumped by [response_forwarder.rs](../../crates/zeroship-run
 
 See `docs/reference/runtime-limits.md` for the operator-facing contract.
 
-## Current bundle shape
+## Module loading
 
-The runtime accepts many `ModuleEntry` values, but the current worker path still loads a single `index.js` module from `manifest.worker.modules[manifest.worker.entry]`. Multi-module manifests are represented on the wire and can be passed through once the worker-side loader starts materializing them.
+Active and pinned worker isolates load the manifest's module graph with its
+original paths. The host prepends its bootstrap without renaming creator modules.
+Relative imports resolve against the importing module, including imports back
+to the entry. An absent relative dependency does not fall back to a similarly
+named module at the bundle root.
+
+The runtime compiles static dependencies before instantiation. Dynamic imports
+compile their dependency closure on demand from the retained bundle sources and
+share module records with static imports. Import promises settle after module
+evaluation, including top-level await, completes. Unknown imports cannot fetch
+code outside the bundle.
 
 ## Where to start
 

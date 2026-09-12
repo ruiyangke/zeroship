@@ -3,7 +3,7 @@
 //! # Why this exists (ISS-63)
 //!
 //! The runtime splices `runtime-entry.js` into the bootstrap `index.js`
-//! it wraps every app with (see `core::init::BOOTSTRAP_JS`). During module
+//! it wraps every app with (see `core::init::bootstrap_js`). During module
 //! evaluation that entry runs for any app carrying a runtime schema descriptor:
 //!
 //! ```js

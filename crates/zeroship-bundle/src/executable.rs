@@ -1,5 +1,10 @@
 //! Executable loading from the normal app manifest and content-addressed blobs.
 
+#![expect(
+    clippy::future_not_send,
+    reason = "executable I/O stays on its compio thread"
+)]
+
 use crate::{sha256_hex, validate_hash_format, BlobError, BlobStore, Manifest};
 use compio::io::AsyncReadAtExt;
 use std::collections::BTreeMap;
@@ -118,7 +123,7 @@ impl LoadedWorker {
     }
 
     #[must_use]
-    pub fn modules(&self) -> &BTreeMap<String, String> {
+    pub const fn modules(&self) -> &BTreeMap<String, String> {
         &self.modules
     }
 

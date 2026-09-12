@@ -18,7 +18,7 @@
 //!
 //! These tests drive the REAL runtime module loader + the REAL
 //! dynamic-import host callback (no shim) via the `dispatch` harness,
-//! which builds a `Runtime` exactly as the worker does (BOOTSTRAP_JS
+//! which builds a `Runtime` exactly as the worker does (bootstrap_js
 //! injection included). The user source below mirrors the runtime-entry's
 //! import so the assertion exercises the same resolution path.
 

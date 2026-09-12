@@ -36,6 +36,13 @@ missing or oversized sources. The workflow-specific content hash has been
 removed. Durable deployment holds and replacement of executable snapshot
 persistence remain pending.
 
+Active, reloaded and pinned production worker isolates now load the complete
+module graph through the shared bundle loader. Pinned manifest reads verify
+their canonical content hash. Runtime bootstrap preserves creator module paths;
+static and dynamic imports resolve relative to their importer and share module
+records. Native tests exercise an original pinned deployment beside its active
+replacement, lazy dependencies, import failures and top-level await.
+
 The replacement service now uses a shared `OrmStore`; its workflow-owned
 PostgreSQL and SQLite adapters have been removed. The CLI supplies its normal
 database binding and object storage. Transaction ownership stays on the engine's
