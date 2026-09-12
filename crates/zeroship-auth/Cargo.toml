@@ -79,6 +79,8 @@ jsonwebtoken = { workspace = true }
 askama = "0.12"
 
 [dev-dependencies]
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+tempfile = { workspace = true }
 # Auth unit tests include `#[compio::test]` live-PG tests. The polling fallback
 # keeps them runnable in sandboxes that block io_uring; production builds use
 # the normal workspace compio dependency above the dev-dependency boundary.

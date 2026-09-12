@@ -1,5 +1,5 @@
-use super::{cleanup, open};
 use crate::common;
+use crate::common::database::Database;
 use crate::common::mock_control::{untrusted_auth_keyring, Answer, MockControl};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -11,10 +11,10 @@ use zeroship_core::service_peers::ServiceKeyring;
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_emailed_link_cancels_deletion_without_a_session() {
-    let dsn = common::test_database_url();
-    let db = open(&dsn).await;
+    Database::run(async |database| {
+    let db = database.connect().await;
     let control = MockControl::start(Answer::Clear).await;
-    let fixture = DeletionServer::start(&dsn, &control, control.keyring()).await;
+    let fixture = DeletionServer::start(database, &control, control.keyring()).await;
     let (user, session) = signed_in_user(&db).await;
 
     let requested = fixture.request_deletion(session.id).await;
@@ -87,49 +87,50 @@ async fn the_emailed_link_cancels_deletion_without_a_session() {
         400,
         "the mailed token is single-use"
     );
-    cleanup(&db, &[user.id]).await;
+    }).await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_cancel_route_refuses_a_token_it_never_issued() {
-    let dsn = common::test_database_url();
-    let mut db = open(&dsn).await;
-    let control = MockControl::start(Answer::Clear).await;
-    let fixture = DeletionServer::start(&dsn, &control, control.keyring()).await;
-    let (user, _) = signed_in_user(&db).await;
-    users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
-        .await
-        .unwrap()
-        .unwrap();
+    Database::run(async |database| {
+        let mut db = database.connect().await;
+        let control = MockControl::start(Answer::Clear).await;
+        let fixture = DeletionServer::start(database, &control, control.keyring()).await;
+        let (user, _) = signed_in_user(&db).await;
+        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+            .await
+            .unwrap()
+            .unwrap();
 
-    let forged = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    let get = cyper::Client::new()
-        .get(format!("{}/me/delete/cancel?token={forged}", fixture.base))
-        .unwrap()
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(get.status().as_u16(), 200);
-    let csrf = common::read_set_cookie(&get, "__Host-zsidp_csrf").expect("csrf cookie");
-    assert_eq!(fixture.cancel(&csrf, forged).await.status().as_u16(), 400);
-    let pending: bool = db
-        .query_one(
-            "SELECT deletion_requested_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-            &[&user.id],
-        )
-        .await
-        .unwrap()
-        .get(0);
-    assert!(pending, "the pending deletion survives a forged token");
-    cleanup(&db, &[user.id]).await;
+        let forged = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let get = cyper::Client::new()
+            .get(format!("{}/me/delete/cancel?token={forged}", fixture.base))
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(get.status().as_u16(), 200);
+        let csrf = common::read_set_cookie(&get, "__Host-zsidp_csrf").expect("csrf cookie");
+        assert_eq!(fixture.cancel(&csrf, forged).await.status().as_u16(), 400);
+        let pending: bool = db
+            .query_one(
+                "SELECT deletion_requested_at IS NOT NULL FROM zeroship.users WHERE id = $1",
+                &[&user.id],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(pending, "the pending deletion survives a forged token");
+    })
+    .await;
 }
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_refused_preflight_leaves_the_account_and_session_active() {
-    let dsn = common::test_database_url();
-    let db = open(&dsn).await;
+    Database::run(async |database| {
+    let db = database.connect().await;
     for (answer, trusted, status) in [
         (
             Answer::SoleOwnerOf {
@@ -155,7 +156,7 @@ async fn a_refused_preflight_leaves_the_account_and_session_active() {
         } else {
             untrusted_auth_keyring()
         };
-        let fixture = DeletionServer::start(&dsn, &control, keyring).await;
+        let fixture = DeletionServer::start(database, &control, keyring).await;
         let (user, session) = signed_in_user(&db).await;
         let response = fixture.request_deletion(session.id).await;
         assert_eq!(
@@ -195,8 +196,8 @@ async fn a_refused_preflight_leaves_the_account_and_session_active() {
             "a refusal cannot issue an undo token"
         );
         assert!(sessions::validate(&db, session.id).await.unwrap().is_some());
-        cleanup(&db, &[user.id]).await;
     }
+    }).await;
 }
 
 #[allow(clippy::future_not_send)]
@@ -234,14 +235,19 @@ struct DeletionServer {
 
 impl DeletionServer {
     #[allow(clippy::future_not_send)]
-    async fn start(dsn: &str, control: &MockControl, keyring: Arc<ServiceKeyring>) -> Self {
+    async fn start(
+        database: &Database,
+        control: &MockControl,
+        keyring: Arc<ServiceKeyring>,
+    ) -> Self {
+        let dsn = database.url();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve auth listener");
         let base = format!("http://{}", listener.local_addr().unwrap());
         let mut settings =
             common::test_auth_config_with(dsn, &["--control-url", &control.base]).settings;
         settings.public_url = zeroship_core::config::Operational::new(base.clone());
         let cfg = Arc::new(zeroship_auth::config::AuthConfig::from_resolved(settings).unwrap());
-        let db = Arc::new(open(dsn).await);
+        let db = Arc::new(database.connect().await);
         let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(dsn.to_owned(), 2);
         let issuer = Arc::new(
             zeroship_auth::oidc::Issuer::from_signing_key(
