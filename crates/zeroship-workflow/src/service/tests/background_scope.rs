@@ -6,7 +6,10 @@
 use super::*;
 use crate::{
     engine::WorkflowOutputRef,
-    service::{IntervalAnchor, ScheduleRegistration, ScheduleTiming, WorkerIdentity},
+    service::{
+        IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
+        WorkerIdentity,
+    },
 };
 use std::time::Instant;
 use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
@@ -42,8 +45,8 @@ async fn seed_app(service: &WorkflowService, app: &AppId, worker: &WorkerIdentit
                         anchor: IntervalAnchor::Deploy,
                     },
                     input: json!(null),
-                    overlap: Default::default(),
-                    catch_up: Default::default(),
+                    overlap: ScheduleOverlap::default(),
+                    catch_up: ScheduleCatchUp::default(),
                 }],
             },
             &test_snapshot(),

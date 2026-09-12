@@ -69,6 +69,7 @@ impl Backend for OwnedFiles {
 }
 
 mod failures;
+mod schedules;
 
 fn image(value: &str) -> ExecutableSnapshot {
     ExecutableSnapshot::new(
