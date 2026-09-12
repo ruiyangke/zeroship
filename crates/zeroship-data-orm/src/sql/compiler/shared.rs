@@ -1,7 +1,10 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
-    statement::{Column, Expression, Statement, StorageType, Table},
-    CompareOp,
+    statement::{
+        ArithmeticOperator, ArrayOperator, Column, Expression, MutationScope, ResolvedPredicate,
+        Statement, StorageType, Table,
+    },
+    CompareOp, MembershipOp, PatternOp,
 };
 use crate::value::Value;
 
@@ -62,7 +65,50 @@ impl Requirements {
                         + usize::from(parts.condition.is_some()),
                 }
             }
+            Statement::Update(update) => {
+                let parts = update.parts();
+                Self {
+                    returning: !parts.returning.is_empty(),
+                    bind_parameters: parts
+                        .assignments
+                        .iter()
+                        .map(|assignment| expression_binds(&assignment.value))
+                        .sum::<usize>()
+                        + predicate_binds(&parts.predicate),
+                    ..Self::default()
+                }
+            }
+            Statement::Delete(delete) => {
+                let parts = delete.parts();
+                Self {
+                    returning: !parts.returning.is_empty(),
+                    bind_parameters: predicate_binds(&parts.predicate),
+                    ..Self::default()
+                }
+            }
         }
+    }
+}
+
+fn expression_binds(expression: &Expression) -> usize {
+    usize::from(matches!(
+        expression,
+        Expression::Bind(_)
+            | Expression::Increment { .. }
+            | Expression::Arithmetic { .. }
+            | Expression::ArrayMutation { .. }
+    ))
+}
+
+fn predicate_binds(predicate: &ResolvedPredicate) -> usize {
+    match predicate {
+        ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
+            children.iter().map(predicate_binds).sum()
+        }
+        ResolvedPredicate::Not(child) => predicate_binds(child),
+        ResolvedPredicate::Compare { .. } | ResolvedPredicate::Pattern { .. } => 1,
+        ResolvedPredicate::Membership { values, .. } => values.len(),
+        ResolvedPredicate::IsNull { .. } | ResolvedPredicate::Const(_) => 0,
     }
 }
 
@@ -107,6 +153,16 @@ pub(crate) struct Syntax {
     pub(crate) generated_identity_override: Option<&'static str>,
     pub(crate) timestamp_cast: &'static str,
     pub(crate) vector_cast: &'static str,
+    pub(crate) numeric_cast: &'static str,
+    pub(crate) first_row_lock: &'static str,
+    pub(crate) insensitive_like: &'static str,
+    pub(crate) insensitive_like_suffix: &'static str,
+    pub(crate) array_mutation: fn(
+        &mut SqlWriter,
+        &Column,
+        ArrayOperator,
+        super::ParameterSlot,
+    ) -> Result<(), CompileError>,
 }
 
 pub(crate) fn check(
@@ -281,7 +337,206 @@ pub(crate) fn compile(
             write_returning(&mut writer, &parts.returning);
             Ok(writer.finish())
         }
+        Statement::Update(update) => {
+            update.validate()?;
+            let parts = update.into_parts();
+            let mut writer = SqlWriter::new(effective.max_bind_parameters);
+            writer.sql.push_str("UPDATE ");
+            write_table(&mut writer, &parts.table);
+            writer.sql.push_str(" SET ");
+            for (index, assignment) in parts.assignments.into_iter().enumerate() {
+                comma(&mut writer, index);
+                writer.identifier(assignment.column.name().as_str());
+                writer.sql.push_str(" = ");
+                write_update_expression(&mut writer, syntax, assignment.column, assignment.value)?;
+            }
+            write_mutation_predicate(
+                &mut writer,
+                syntax,
+                &parts.table,
+                parts.scope,
+                parts.predicate,
+            )?;
+            write_returning(&mut writer, &parts.returning);
+            Ok(writer.finish())
+        }
+        Statement::Delete(delete) => {
+            delete.validate()?;
+            let parts = delete.into_parts();
+            let mut writer = SqlWriter::new(effective.max_bind_parameters);
+            writer.sql.push_str("DELETE FROM ");
+            write_table(&mut writer, &parts.table);
+            write_mutation_predicate(
+                &mut writer,
+                syntax,
+                &parts.table,
+                parts.scope,
+                parts.predicate,
+            )?;
+            write_returning(&mut writer, &parts.returning);
+            Ok(writer.finish())
+        }
     }
+}
+
+fn write_mutation_predicate(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    table: &Table,
+    scope: MutationScope,
+    predicate: ResolvedPredicate,
+) -> Result<(), CompileError> {
+    match scope {
+        MutationScope::Matching => {
+            if !matches!(predicate, ResolvedPredicate::Const(true)) {
+                writer.sql.push_str(" WHERE ");
+                write_predicate(writer, syntax, predicate)?;
+            }
+        }
+        MutationScope::First { target } => {
+            writer.sql.push_str(" WHERE ");
+            writer.identifier(target.name().as_str());
+            writer.sql.push_str(" = (SELECT ");
+            writer.identifier(target.name().as_str());
+            writer.sql.push_str(" FROM ");
+            write_table(writer, table);
+            if !matches!(predicate, ResolvedPredicate::Const(true)) {
+                writer.sql.push_str(" WHERE ");
+                write_predicate(writer, syntax, predicate)?;
+            }
+            writer.sql.push_str(" LIMIT 1");
+            writer.sql.push_str(syntax.first_row_lock);
+            writer.sql.push(')');
+        }
+    }
+    Ok(())
+}
+
+fn write_predicate(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    predicate: ResolvedPredicate,
+) -> Result<(), CompileError> {
+    match predicate {
+        ResolvedPredicate::Const(value) => {
+            writer.sql.push_str(if value { "TRUE" } else { "FALSE" })
+        }
+        ResolvedPredicate::And(children) => {
+            write_connective(writer, syntax, children, true)?;
+        }
+        ResolvedPredicate::Or(children) => {
+            write_connective(writer, syntax, children, false)?;
+        }
+        ResolvedPredicate::Not(child) => {
+            writer.sql.push_str("NOT (");
+            write_predicate(writer, syntax, *child)?;
+            writer.sql.push(')');
+        }
+        ResolvedPredicate::Compare { column, op, value } => {
+            writer.identifier(column.name().as_str());
+            writer.sql.push_str(match op {
+                CompareOp::Eq => " = ",
+                CompareOp::Ne => " != ",
+                CompareOp::Lt => " < ",
+                CompareOp::Lte => " <= ",
+                CompareOp::Gt => " > ",
+                CompareOp::Gte => " >= ",
+            });
+            write_bind(writer, syntax, column.storage(), value)?;
+        }
+        ResolvedPredicate::Membership { column, op, values } => {
+            writer.identifier(column.name().as_str());
+            writer.sql.push_str(if op == MembershipOp::In {
+                " IN ("
+            } else {
+                " NOT IN ("
+            });
+            for (index, value) in values.into_iter().enumerate() {
+                comma(writer, index);
+                write_bind(writer, syntax, column.storage(), value)?;
+            }
+            writer.sql.push(')');
+        }
+        ResolvedPredicate::Pattern { column, op, value } => {
+            writer.identifier(column.name().as_str());
+            let insensitive = matches!(op, PatternOp::ILike | PatternOp::NotILike);
+            let negated = matches!(op, PatternOp::NotLike | PatternOp::NotILike);
+            if negated {
+                writer.sql.push_str(" NOT");
+            }
+            writer.sql.push(' ');
+            writer.sql.push_str(if insensitive {
+                syntax.insensitive_like
+            } else {
+                "LIKE"
+            });
+            writer.sql.push(' ');
+            writer.write_param(Value::from(value))?;
+            if insensitive {
+                writer.sql.push_str(syntax.insensitive_like_suffix);
+            }
+        }
+        ResolvedPredicate::IsNull { column, negated } => {
+            writer.identifier(column.name().as_str());
+            writer
+                .sql
+                .push_str(if negated { " IS NOT NULL" } else { " IS NULL" });
+        }
+    }
+    Ok(())
+}
+
+fn write_connective(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    children: Vec<ResolvedPredicate>,
+    conjunction: bool,
+) -> Result<(), CompileError> {
+    writer.sql.push('(');
+    for (index, child) in children.into_iter().enumerate() {
+        if index > 0 {
+            writer
+                .sql
+                .push_str(if conjunction { " AND " } else { " OR " });
+        }
+        write_predicate(writer, syntax, child)?;
+    }
+    writer.sql.push(')');
+    Ok(())
+}
+
+fn write_update_expression(
+    writer: &mut SqlWriter,
+    syntax: Syntax,
+    column: Column,
+    expression: Expression,
+) -> Result<(), CompileError> {
+    match expression {
+        Expression::Arithmetic {
+            column,
+            operator,
+            operand,
+        } => {
+            writer.identifier(column.name().as_str());
+            writer.sql.push_str(match operator {
+                ArithmeticOperator::Add => " + ",
+                ArithmeticOperator::Subtract => " - ",
+                ArithmeticOperator::Multiply => " * ",
+            });
+            writer.write_param(operand)?;
+            writer.sql.push_str(syntax.numeric_cast);
+        }
+        Expression::ArrayMutation {
+            column,
+            operator,
+            operand,
+        } => {
+            let slot = writer.bind(operand)?;
+            (syntax.array_mutation)(writer, &column, operator, slot)?;
+        }
+        expression => write_expression(writer, syntax, column.storage(), expression)?,
+    }
+    Ok(())
 }
 
 fn write_returning(writer: &mut SqlWriter, returning: &[crate::sql::statement::ReturnedColumn]) {
@@ -351,6 +606,11 @@ fn write_expression(
             write_current(writer, &column);
             writer.sql.push_str(" + ");
             writer.write_param(Value::from(step))?;
+        }
+        Expression::Arithmetic { .. } | Expression::ArrayMutation { .. } => {
+            return Err(CompileError::InvalidStatement(
+                "update operator reached a non-update expression position".into(),
+            ));
         }
         Expression::CurrentTimestamp => writer.sql.push_str(syntax.current_timestamp),
     }

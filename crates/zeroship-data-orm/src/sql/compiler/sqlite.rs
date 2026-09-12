@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     sql::{
-        statement::{IdentityRequest, Statement},
+        statement::{ArrayOperator, Column, IdentityRequest, Statement},
         BindBudget,
     },
     value::Value,
@@ -28,7 +28,72 @@ const SYNTAX: super::shared::Syntax = super::shared::Syntax {
     generated_identity_override: None,
     timestamp_cast: "",
     vector_cast: "",
+    numeric_cast: "",
+    first_row_lock: "",
+    insensitive_like: "LIKE",
+    insensitive_like_suffix: " COLLATE NOCASE",
+    array_mutation: write_array_mutation,
 };
+
+fn write_column(writer: &mut SqlWriter, column: &Column) {
+    writer.identifier(column.name().as_str());
+}
+
+fn write_array_mutation(
+    writer: &mut SqlWriter,
+    column: &Column,
+    operator: ArrayOperator,
+    operand: super::ParameterSlot,
+) -> Result<(), CompileError> {
+    writer.sql.push_str("CASE WHEN ");
+    write_column(writer, column);
+    writer.sql.push_str(" IS NULL OR json_type(");
+    write_column(writer, column);
+    writer.sql.push_str(") = 'null' THEN ");
+    write_column(writer, column);
+    writer.sql.push_str(" WHEN json_type(");
+    write_column(writer, column);
+    writer.sql.push_str(") = 'array' THEN ");
+    match operator {
+        ArrayOperator::Push => write_append(writer, column, operand),
+        ArrayOperator::Pull => {
+            writer.sql.push('(');
+            write_elements(writer, column);
+            writer.sql.push_str(" SELECT json_group_array(json(element) ORDER BY position) FROM __zs_elements WHERE NOT zeroship_json_equal(element, ");
+            writer.write_bound(operand);
+            writer.sql.push_str("))");
+        }
+        ArrayOperator::AddToSet => {
+            writer.sql.push_str("CASE WHEN EXISTS (");
+            write_elements(writer, column);
+            writer
+                .sql
+                .push_str(" SELECT 1 FROM __zs_elements WHERE zeroship_json_equal(element, ");
+            writer.write_bound(operand);
+            writer.sql.push_str(")) THEN ");
+            write_column(writer, column);
+            writer.sql.push_str(" ELSE ");
+            write_append(writer, column, operand);
+            writer.sql.push_str(" END");
+        }
+    }
+    writer.sql.push_str(" ELSE json('') END");
+    Ok(())
+}
+
+fn write_elements(writer: &mut SqlWriter, column: &Column) {
+    writer.sql.push_str("WITH __zs_input(document) AS (SELECT ");
+    write_column(writer, column);
+    writer.sql.push_str("), __zs_elements(position, element) AS (SELECT __zs_each.key, __zs_input.document -> __zs_each.key FROM __zs_input, json_each(__zs_input.document) AS __zs_each)");
+}
+
+fn write_append(writer: &mut SqlWriter, column: &Column, operand: super::ParameterSlot) {
+    writer.sql.push_str("json_insert(");
+    write_column(writer, column);
+    writer.sql.push_str(", '$[#]', json(");
+    writer.write_bound(operand);
+    writer.sql.push_str("))");
+}
 
 impl SqlCompiler for SqliteCompiler {
     fn support(&self) -> SqlSupport {

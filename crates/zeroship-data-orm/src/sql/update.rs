@@ -1,6 +1,6 @@
 //! Shared update grammar. Assignments remain native values throughout parsing.
+use crate::sql::codecs::CodecError;
 use crate::value::{Record, Value};
-use crate::sql::{codecs::CodecError};
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +88,13 @@ pub struct Assignment<'a> {
     pub field: &'a str,
     pub operator: Operator,
     pub operand: &'a Value,
+}
+
+#[derive(Debug)]
+pub(crate) struct OwnedAssignment {
+    pub(crate) field: String,
+    pub(crate) operator: Operator,
+    pub(crate) operand: Value,
 }
 
 fn invalid(message: &str) -> CodecError {
@@ -232,6 +239,37 @@ pub fn normalize(patch: &mut Value) -> Result<(), CodecError> {
     Ok(())
 }
 
+pub(crate) fn into_assignments(mut patch: Value) -> Result<Vec<OwnedAssignment>, CodecError> {
+    normalize(&mut patch)?;
+    let Value::Object(fields) = patch else {
+        unreachable!("normalized update is an object")
+    };
+    let mut assignments = Vec::new();
+    for (field, value) in fields {
+        if field == "$set" {
+            let Value::Object(values) = value else {
+                unreachable!("normalized $set is an object")
+            };
+            assignments.extend(values.into_iter().map(|(field, operand)| OwnedAssignment {
+                field,
+                operator: Operator::Set,
+                operand,
+            }));
+            continue;
+        }
+        let Value::Object(mut operation) = value else {
+            unreachable!("normalized field operation is an object")
+        };
+        let (operator, operand) = operation.pop().expect("normalized field operation");
+        assignments.push(OwnedAssignment {
+            field,
+            operator: Operator::parse(&operator).expect("normalized operator"),
+            operand,
+        });
+    }
+    Ok(assignments)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,15 +315,13 @@ mod tests {
                 crate::sql::compile::SqlDialect::Postgres,
                 crate::sql::compile::SqlDialect::Sqlite,
             ] {
-                assert!(
-                    crate::sql::compile::build_set_clauses_with_dialect(
-                        &patch,
-                        &mut vec![],
-                        &value!({}),
-                        dialect
-                    )
-                    .is_err()
-                );
+                assert!(crate::sql::compile::build_set_clauses_with_dialect(
+                    &patch,
+                    &mut vec![],
+                    &value!({}),
+                    dialect
+                )
+                .is_err());
             }
         }
     }

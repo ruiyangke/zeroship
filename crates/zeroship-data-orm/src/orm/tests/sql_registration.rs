@@ -16,16 +16,16 @@ use std::sync::{
 struct FixtureCodecs;
 
 impl SqlStorageCodecs for FixtureCodecs {
-    fn storage_type(&self, _: &Value) -> Result<StorageType, CompileError> {
-        Ok(StorageType::Text)
+    fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+        SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite).storage_type(definition)
     }
 
-    fn encode(&self, _: StorageType, value: Value) -> Result<Value, CompileError> {
-        Ok(value)
+    fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+        SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite).encode(storage, value)
     }
 
-    fn decode(&self, _: StorageType, value: Value) -> Result<Value, CompileError> {
-        Ok(value)
+    fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError> {
+        SqlRegistration::builtin(crate::sql::compile::SqlDialect::Sqlite).decode(storage, value)
     }
 }
 
@@ -188,7 +188,10 @@ async fn insert_is_refused_by_the_registered_compiler_before_identity_allocation
         .insert(value!({"label":"blocked"}))
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("returning projections"));
+    assert!(
+        error.to_string().contains("returning projections"),
+        "{error}"
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     assert_empty(&owner).await;
     owner.close().await;
@@ -248,5 +251,49 @@ async fn conditional_upsert_is_refused_before_the_write_frame_and_row_mutation()
         .unwrap_err();
     assert!(error.to_string().contains("conditional conflict updates"));
     assert_empty(&owner).await;
+    owner.close().await;
+}
+
+#[compio::test]
+async fn update_one_is_refused_by_the_registered_compiler_before_row_mutation() {
+    let owner = CollectionFixture::sqlite("records", value!({"label":{"type":"string"}})).await;
+    let Output::Rows { rows, .. } = owner
+        .database
+        .collection("records")
+        .unwrap()
+        .insert(value!({"label":"original"}))
+        .await
+        .unwrap()
+    else {
+        panic!("expected inserted row")
+    };
+    let id = rows[0]["id"].clone();
+    let constrained = constrained_database(&owner, "fixture-update-without-returning", |support| {
+        support.returning = false
+    })
+    .await;
+
+    let error = constrained
+        .collection("records")
+        .unwrap()
+        .update(value!({"id":id}), value!({"label":"changed"}))
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("returning projections"),
+        "{error}"
+    );
+
+    let Output::Rows { rows, .. } = owner
+        .database
+        .collection("records")
+        .unwrap()
+        .find(value!({}), value!({}))
+        .await
+        .unwrap()
+    else {
+        panic!("expected rows")
+    };
+    assert_eq!(rows[0]["label"], value!("original"));
     owner.close().await;
 }

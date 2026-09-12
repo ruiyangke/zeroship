@@ -1,6 +1,10 @@
 //! Resolved physical statements. Application policy is applied before this boundary.
 
-use super::{compiler::CompileError, predicate::CompareOp, Ident, IdentRole, SchemaName};
+use super::{
+    compiler::CompileError,
+    predicate::{CompareOp, MembershipOp, PatternOp},
+    Ident, IdentRole, SchemaName,
+};
 use crate::value::Value;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -139,8 +143,35 @@ pub enum Expression {
     Default,
     Current(Column),
     Incoming(Column),
-    Increment { column: Column, step: i64 },
+    Increment {
+        column: Column,
+        step: i64,
+    },
+    Arithmetic {
+        column: Column,
+        operator: ArithmeticOperator,
+        operand: Value,
+    },
+    ArrayMutation {
+        column: Column,
+        operator: ArrayOperator,
+        operand: Value,
+    },
     CurrentTimestamp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArithmeticOperator {
+    Add,
+    Subtract,
+    Multiply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ArrayOperator {
+    Push,
+    Pull,
+    AddToSet,
 }
 
 #[derive(Debug)]
@@ -153,6 +184,69 @@ pub struct Comparison {
     pub column: Column,
     pub op: CompareOp,
     pub value: Value,
+}
+
+#[derive(Debug)]
+pub enum ResolvedPredicate {
+    And(Vec<Self>),
+    Or(Vec<Self>),
+    Not(Box<Self>),
+    Compare {
+        column: Column,
+        op: CompareOp,
+        value: Value,
+    },
+    Membership {
+        column: Column,
+        op: MembershipOp,
+        values: Vec<Value>,
+    },
+    Pattern {
+        column: Column,
+        op: PatternOp,
+        value: String,
+    },
+    IsNull {
+        column: Column,
+        negated: bool,
+    },
+    Const(bool),
+}
+
+impl ResolvedPredicate {
+    pub fn and(mut children: Vec<Self>) -> Self {
+        let mut flattened = Vec::new();
+        for child in children.drain(..) {
+            match child {
+                Self::And(nested) => flattened.extend(nested),
+                Self::Const(true) => {}
+                Self::Const(false) => return Self::Const(false),
+                child => flattened.push(child),
+            }
+        }
+        match flattened.len() {
+            0 => Self::Const(true),
+            1 => flattened.pop().expect("one predicate"),
+            _ => Self::And(flattened),
+        }
+    }
+
+    pub fn or(mut children: Vec<Self>) -> Self {
+        let mut flattened = Vec::new();
+        for child in children.drain(..) {
+            match child {
+                Self::Or(nested) => flattened.extend(nested),
+                Self::Const(false) => {}
+                Self::Const(true) => return Self::Const(true),
+                child => flattened.push(child),
+            }
+        }
+        match flattened.len() {
+            0 => Self::Const(false),
+            1 => flattened.pop().expect("one predicate"),
+            _ => Self::Or(flattened),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -204,6 +298,76 @@ pub struct InsertParts {
     pub rows: Vec<Vec<Expression>>,
     pub returning: Vec<ReturnedColumn>,
     pub insert_generated_identity: bool,
+}
+
+#[derive(Debug)]
+pub enum MutationScope {
+    First { target: Column },
+    Matching,
+}
+
+#[derive(Debug)]
+pub struct UpdateParts {
+    pub table: Table,
+    pub assignments: Vec<Assignment>,
+    pub predicate: ResolvedPredicate,
+    pub scope: MutationScope,
+    pub returning: Vec<ReturnedColumn>,
+}
+
+#[derive(Debug)]
+pub struct Update(UpdateParts);
+
+impl Update {
+    pub fn new(mut parts: UpdateParts) -> Result<Self, CompileError> {
+        validate_update(&parts)?;
+        parts
+            .assignments
+            .sort_by(|left, right| left.column.name().cmp(right.column.name()));
+        Ok(Self(parts))
+    }
+
+    pub fn into_parts(self) -> UpdateParts {
+        self.0
+    }
+
+    pub fn parts(&self) -> &UpdateParts {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), CompileError> {
+        validate_update(&self.0)
+    }
+}
+
+#[derive(Debug)]
+pub struct DeleteParts {
+    pub table: Table,
+    pub predicate: ResolvedPredicate,
+    pub scope: MutationScope,
+    pub returning: Vec<ReturnedColumn>,
+}
+
+#[derive(Debug)]
+pub struct Delete(DeleteParts);
+
+impl Delete {
+    pub fn new(parts: DeleteParts) -> Result<Self, CompileError> {
+        validate_delete(&parts)?;
+        Ok(Self(parts))
+    }
+
+    pub fn into_parts(self) -> DeleteParts {
+        self.0
+    }
+
+    pub fn parts(&self) -> &DeleteParts {
+        &self.0
+    }
+
+    pub fn validate(&self) -> Result<(), CompileError> {
+        validate_delete(&self.0)
+    }
 }
 
 #[derive(Debug)]
@@ -288,6 +452,8 @@ impl Upsert {
 pub enum Statement {
     Insert(Insert),
     Upsert(Upsert),
+    Update(Update),
+    Delete(Delete),
 }
 
 fn invalid(message: &'static str) -> CompileError {
@@ -365,6 +531,9 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
                         return Err(invalid("increment requires its assigned numeric column"));
                     }
                 }
+                Expression::Arithmetic { .. } | Expression::ArrayMutation { .. } => {
+                    return Err(invalid("upsert assignments cannot use update operators"));
+                }
                 Expression::CurrentTimestamp => {
                     if storage != StorageType::Timestamp {
                         return Err(invalid("current timestamp requires timestamp storage"));
@@ -389,6 +558,133 @@ fn validate_upsert(parts: &UpsertParts) -> Result<(), CompileError> {
         }
     }
     validate_returning(&parts.table, &parts.returning)
+}
+
+fn validate_update(parts: &UpdateParts) -> Result<(), CompileError> {
+    if parts.assignments.is_empty() {
+        return Err(invalid("update requires assignments"));
+    }
+    let mut columns = HashSet::new();
+    for assignment in &parts.assignments {
+        parts.table.check_column(&assignment.column)?;
+        if !columns.insert(assignment.column.index) {
+            return Err(invalid("column is assigned more than once"));
+        }
+        validate_update_expression(&parts.table, &assignment.column, &assignment.value)?;
+    }
+    validate_predicate(&parts.table, &parts.predicate)?;
+    validate_scope(&parts.table, &parts.scope)?;
+    validate_returning(&parts.table, &parts.returning)
+}
+
+fn validate_delete(parts: &DeleteParts) -> Result<(), CompileError> {
+    validate_predicate(&parts.table, &parts.predicate)?;
+    validate_scope(&parts.table, &parts.scope)?;
+    validate_returning(&parts.table, &parts.returning)
+}
+
+fn validate_scope(table: &Table, scope: &MutationScope) -> Result<(), CompileError> {
+    if let MutationScope::First { target } = scope {
+        table.check_column(target)?;
+    }
+    Ok(())
+}
+
+fn validate_update_expression(
+    table: &Table,
+    assigned: &Column,
+    expression: &Expression,
+) -> Result<(), CompileError> {
+    let storage = assigned.storage();
+    match expression {
+        Expression::Bind(value) if !storage.accepts(value) => Err(invalid(
+            "bound value does not match its physical storage type",
+        )),
+        Expression::Bind(_) | Expression::Null => Ok(()),
+        Expression::CurrentTimestamp if storage == StorageType::Timestamp => Ok(()),
+        Expression::Increment { column, .. } => {
+            table.check_column(column)?;
+            if column.index != assigned.index || !storage.numeric() {
+                return Err(invalid("increment requires its assigned numeric column"));
+            }
+            Ok(())
+        }
+        Expression::Arithmetic {
+            column, operand, ..
+        } => {
+            table.check_column(column)?;
+            if column.index != assigned.index
+                || !storage.numeric()
+                || !matches!(operand, Value::Number(_) | Value::Decimal(_))
+            {
+                return Err(invalid(
+                    "arithmetic requires its assigned numeric column and operand",
+                ));
+            }
+            Ok(())
+        }
+        Expression::ArrayMutation {
+            column, operand, ..
+        } => {
+            table.check_column(column)?;
+            if column.index != assigned.index
+                || storage != StorageType::Json
+                || !matches!(operand, Value::Json(_))
+            {
+                return Err(invalid(
+                    "array mutation requires its assigned JSON column and encoded operand",
+                ));
+            }
+            Ok(())
+        }
+        Expression::Default | Expression::Current(_) | Expression::Incoming(_) => {
+            Err(invalid("expression is not valid in an ordinary update"))
+        }
+        Expression::CurrentTimestamp => {
+            Err(invalid("current timestamp requires timestamp storage"))
+        }
+    }
+}
+
+fn validate_predicate(table: &Table, predicate: &ResolvedPredicate) -> Result<(), CompileError> {
+    let mut pending = vec![predicate];
+    while let Some(predicate) = pending.pop() {
+        match predicate {
+            ResolvedPredicate::And(children) | ResolvedPredicate::Or(children) => {
+                pending.extend(children);
+            }
+            ResolvedPredicate::Not(child) => pending.push(child),
+            ResolvedPredicate::Compare { column, value, .. } => {
+                table.check_column(column)?;
+                if value.is_null() || !column.storage().accepts(value) {
+                    return Err(invalid(
+                        "comparison requires a non-null value with matching storage type",
+                    ));
+                }
+            }
+            ResolvedPredicate::Membership { column, values, .. } => {
+                table.check_column(column)?;
+                if values.is_empty()
+                    || values
+                        .iter()
+                        .any(|value| value.is_null() || !column.storage().accepts(value))
+                {
+                    return Err(invalid(
+                        "membership requires non-null values with matching storage types",
+                    ));
+                }
+            }
+            ResolvedPredicate::Pattern { column, value, .. } => {
+                table.check_column(column)?;
+                if column.storage() != StorageType::Text || value.contains('\0') {
+                    return Err(invalid("pattern requires text storage without a NUL byte"));
+                }
+            }
+            ResolvedPredicate::IsNull { column, .. } => table.check_column(column)?,
+            ResolvedPredicate::Const(_) => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_returning(table: &Table, returning: &[ReturnedColumn]) -> Result<(), CompileError> {
@@ -419,6 +715,20 @@ impl std::fmt::Debug for Expression {
             Self::Increment { column, .. } => f
                 .debug_struct("Increment")
                 .field("column", column)
+                .finish_non_exhaustive(),
+            Self::Arithmetic {
+                column, operator, ..
+            } => f
+                .debug_struct("Arithmetic")
+                .field("column", column)
+                .field("operator", operator)
+                .finish_non_exhaustive(),
+            Self::ArrayMutation {
+                column, operator, ..
+            } => f
+                .debug_struct("ArrayMutation")
+                .field("column", column)
+                .field("operator", operator)
                 .finish_non_exhaustive(),
             Self::CurrentTimestamp => f.write_str("CurrentTimestamp"),
         }
