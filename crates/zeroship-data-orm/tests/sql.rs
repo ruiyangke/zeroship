@@ -22,3 +22,46 @@ mod public_contract;
 mod search_family;
 #[path = "sql/write_family.rs"]
 mod write_family;
+
+trait NumberedParameters {
+    fn placeholder_count(&self) -> usize;
+    fn placeholder_slots(&self) -> Vec<usize>;
+}
+
+impl NumberedParameters for zeroship_data_orm::sql::compiler::CompiledQuery {
+    fn placeholder_count(&self) -> usize {
+        let bytes = self.sql().as_bytes();
+        bytes
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| **b == b'$' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+            .count()
+    }
+
+    fn placeholder_slots(&self) -> Vec<usize> {
+        let bytes = self.sql().as_bytes();
+        let mut slots: Vec<usize> = Vec::new();
+        let mut index = 0_usize;
+        while index < bytes.len() {
+            if bytes[index] != b'$' {
+                index += 1;
+                continue;
+            }
+            let start = index + 1;
+            let mut end = start;
+            while end < bytes.len() && bytes[end].is_ascii_digit() {
+                end += 1;
+            }
+            if end == start {
+                index += 1;
+                continue;
+            }
+            if let Ok(slot) = self.sql()[start..end].parse::<usize>() {
+                slots.push(slot);
+            }
+            index = end;
+        }
+        slots.sort_unstable();
+        slots.dedup();
+        slots
+    }}

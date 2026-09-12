@@ -5,6 +5,8 @@
 //! must clear, following the repository's gate discipline: a check that examines
 //! nothing and a clean tree print the same thing.
 
+use zeroship_data_orm::Value;
+use crate::NumberedParameters;
 use zeroship_data_orm::sql::render::postgres::{self, RenderError};
 use zeroship_data_orm::sql::{
     AggregateRef, Arithmetic, ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue,
@@ -513,7 +515,7 @@ fn the_write_bound_is_capped_and_defaults_to_the_cap() {
     let rendered = postgres::render_update(&update).expect("renders");
     assert_eq!(
         rendered.params().last(),
-        Some(&Literal::Int(MAX_ROW_LIMIT)),
+        Some(&Value::from(MAX_ROW_LIMIT)),
         "the bound must be bound as a parameter, not interpolated"
     );
 
@@ -548,7 +550,7 @@ fn a_single_row_update_is_the_same_node_bounded_to_one() {
     .expect("valid update");
     let rendered = postgres::render_update(&update).expect("renders");
     assert!(rendered.sql().contains("LIMIT $2 FOR UPDATE)"));
-    assert_eq!(rendered.params()[1], Literal::Int(1));
+    assert_eq!(rendered.params()[1], Value::from(1));
     println!("ruled on 1 single-row update");
 }
 
@@ -573,7 +575,7 @@ fn a_written_null_renders_the_keyword_and_binds_nothing() {
         rendered.sql(),
         r#"INSERT INTO "users" ("name", "note") VALUES ($1, NULL)"#
     );
-    assert_eq!(rendered.params(), &[Literal::Int(7)]);
+    assert_eq!(rendered.params(), &[Value::from(7)]);
     assert_eq!(rendered.placeholder_count(), 1);
 
     // And on the UPDATE side.
@@ -589,7 +591,7 @@ fn a_written_null_renders_the_keyword_and_binds_nothing() {
     let rendered = postgres::render_update(&update).expect("renders");
     assert!(rendered.sql().contains(r#"SET "note" = NULL WHERE"#));
     // Only the bound remains as a parameter.
-    assert_eq!(rendered.params(), &[Literal::Int(MAX_ROW_LIMIT)]);
+    assert_eq!(rendered.params(), &[Value::from(MAX_ROW_LIMIT)]);
     println!("ruled on 2 written nulls");
 }
 
@@ -642,7 +644,7 @@ fn the_platform_assigned_field_bumps_both_render() {
         !sql.contains("::numeric"),
         "the cast survived a typed parameter: {sql}"
     );
-    assert_eq!(rendered.params()[0], Literal::Int(1));
+    assert_eq!(rendered.params()[0], Value::from(1));
     // The clock is the SERVER's: it is an expression, not a bound value.
     assert_eq!(rendered.params().len(), 2, "NOW() must bind nothing");
     println!("ruled on 1 version bump and 1 server-clock stamp");

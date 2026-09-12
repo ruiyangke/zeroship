@@ -10,7 +10,9 @@ use crate::sql::predicate::{
     AggregateRef, CompareOp, MembershipOp, Operand, PatternOp, Predicate, TextPattern,
 };
 use crate::sql::projection::{ProjectedField, ProjectionSource, SearchScalarKind};
-use crate::sql::render::{RenderedSql, ValueFormat};
+use crate::sql::render::ValueFormat;
+use crate::sql::compiler::CompiledQuery;
+use crate::value::Value;
 use crate::sql::search::{Search, SearchCriterion, VectorMetric};
 use crate::sql::write::{Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue};
 use core::fmt;
@@ -42,7 +44,7 @@ impl std::error::Error for RenderError {}
 /// # Errors
 ///
 /// [`RenderError`] if the plan carries a node this backend does not serve.
-pub fn render(plan: &DbPlan) -> Result<RenderedSql, RenderError> {
+pub fn render(plan: &DbPlan) -> Result<CompiledQuery, RenderError> {
     match plan {
         DbPlan::Select(select) => render_select(select),
         DbPlan::Insert(insert) => render_insert(insert),
@@ -57,7 +59,7 @@ pub fn render(plan: &DbPlan) -> Result<RenderedSql, RenderError> {
 /// # Errors
 ///
 /// [`RenderError`] if the plan carries a node this backend does not serve.
-pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
+pub fn render_select(plan: &Select) -> Result<CompiledQuery, RenderError> {
     let mut out = Writer::default();
     out.sql.push_str("SELECT ");
     if plan.is_distinct() {
@@ -141,7 +143,7 @@ pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
     out.sql.push_str(" OFFSET ");
     out.write_param(Literal::Int(plan.offset().get()));
 
-    Ok(RenderedSql::new(out.sql, out.params))
+    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
 }
 
 /// Lower an insert of one or more rows.
@@ -162,7 +164,7 @@ pub fn render_select(plan: &Select) -> Result<RenderedSql, RenderError> {
 ///
 /// [`RenderError`] if the `RETURNING` list carries a node this backend does not
 /// serve.
-pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
+pub fn render_insert(plan: &Insert) -> Result<CompiledQuery, RenderError> {
     let mut out = Writer::default();
     out.sql.push_str("INSERT INTO ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
@@ -189,7 +191,7 @@ pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
     }
 
     write_returning(&mut out, plan.returning())?;
-    Ok(RenderedSql::new(out.sql, out.params))
+    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
 }
 
 /// Lower a bounded update using the plan's declared row key.
@@ -197,7 +199,7 @@ pub fn render_insert(plan: &Insert) -> Result<RenderedSql, RenderError> {
 ///
 /// # Errors
 /// Returns a render error for unsupported filter or projection expressions.
-pub fn render_update(plan: &Update) -> Result<RenderedSql, RenderError> {
+pub fn render_update(plan: &Update) -> Result<CompiledQuery, RenderError> {
     let mut out = Writer::default();
     out.sql.push_str("UPDATE ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
@@ -212,7 +214,7 @@ pub fn render_update(plan: &Update) -> Result<RenderedSql, RenderError> {
         plan.row_key(),
     )?;
     write_returning(&mut out, plan.returning())?;
-    Ok(RenderedSql::new(out.sql, out.params))
+    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
 }
 
 /// Lower a bounded delete. Same bound, same lock, same argument as
@@ -222,7 +224,7 @@ pub fn render_update(plan: &Update) -> Result<RenderedSql, RenderError> {
 ///
 /// [`RenderError`] if the filter or the `RETURNING` list carries a node this
 /// backend does not serve.
-pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
+pub fn render_delete(plan: &Delete) -> Result<CompiledQuery, RenderError> {
     let mut out = Writer::default();
     out.sql.push_str("DELETE FROM ");
     write_qualified_table(&mut out, plan.namespace(), plan.collection());
@@ -235,7 +237,7 @@ pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
         plan.row_key(),
     )?;
     write_returning(&mut out, plan.returning())?;
-    Ok(RenderedSql::new(out.sql, out.params))
+    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
 }
 
 /// Lower a ranked search.
@@ -279,7 +281,7 @@ pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
 /// this backend does not serve. **No metric is refused here**: `pgvector`
 /// serves all three, and the one a backend cannot serve is refused by *that*
 /// backend - see [`crate::sql::search`].
-pub fn render_search(plan: &Search) -> Result<RenderedSql, RenderError> {
+pub fn render_search(plan: &Search) -> Result<CompiledQuery, RenderError> {
     let mut out = Writer::default();
 
     // The criterion's operands are bound FIRST, before the projection is
@@ -340,7 +342,7 @@ pub fn render_search(plan: &Search) -> Result<RenderedSql, RenderError> {
     out.sql.push_str(" LIMIT ");
     out.write_param(Literal::Int(plan.limit().get()));
 
-    Ok(RenderedSql::new(out.sql, out.params))
+    Ok(CompiledQuery::new(out.sql, out.params.into_iter().map(native_value).collect()))
 }
 
 /// The parameter slots a criterion's operands occupy.
@@ -485,6 +487,20 @@ fn write_within_radius(out: &mut Writer, slots: &CriterionSlots) {
     out.sql.push_str(", ");
     out.write_bound(*radius);
     out.sql.push(')');
+}
+
+fn native_value(value: Literal) -> Value {
+    match value {
+        Literal::Bool(value) => Value::Bool(value),
+        Literal::Int(value) => Value::from(value),
+        Literal::Float(value) => Value::try_from(value.get()).expect("finite literal"),
+        Literal::Text(value) => Value::String(value),
+        Literal::Json(value) => Value::Json(value),
+        Literal::Bytes(value) => Value::Bytes(value),
+        Literal::Vector(value) => Value::Array(value.elements().iter().map(|element| {
+            Value::try_from(element.get()).expect("finite vector component")
+        }).collect()),
+    }
 }
 
 /// Statement text under construction, plus the parameters bound so far.

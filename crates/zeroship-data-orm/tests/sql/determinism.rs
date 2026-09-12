@@ -19,6 +19,7 @@
 //! statement text. A rendering that iterated an unordered map would pass every
 //! correctness test in this repository and miss the cache on every call.
 
+use zeroship_data_orm::Value;
 use zeroship_data_orm::sql::render::postgres;
 use zeroship_data_orm::sql::{
     ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, CompareOp, Direction,
@@ -94,10 +95,10 @@ fn opposite_insertion_permutations_render_to_one_canonical_fixture() {
     assert_eq!(
         a.params(),
         &[
-            Literal::Int(30),
-            Literal::Int(90),
-            Literal::Int(25),
-            Literal::Int(0)
+            Value::from(30),
+            Value::from(90),
+            Value::from(25),
+            Value::from(0)
         ],
         "parameters must follow the canonical statement order, not the authored one"
     );
@@ -186,7 +187,7 @@ fn permuted_membership_sets_render_identically() {
     );
     assert_eq!(
         a.params()[..3],
-        [Literal::Int(1), Literal::Int(2), Literal::Int(3)]
+        [Value::from(1), Value::from(2), Value::from(3)]
     );
     println!("ruled on 2 permutations of 1 membership set");
 }
@@ -251,7 +252,7 @@ fn permuted_insert_columns_render_to_one_canonical_fixture() {
     assert_eq!(b.sql(), canonical, "reverse permutation drifted");
     assert_eq!(
         a.params(),
-        &[Literal::Int(2), Literal::Int(1)],
+        &[Value::from(2), Value::from(1)],
         "parameters must follow the canonical column order, not the authored one"
     );
     assert_eq!(a.params(), b.params());
@@ -316,11 +317,11 @@ fn permuted_update_assignments_render_to_one_canonical_fixture() {
     assert_eq!(
         a.params(),
         &[
-            Literal::Int(7),
-            Literal::Int(1),
-            Literal::Int(30),
-            Literal::Int(90),
-            Literal::Int(25),
+            Value::from(7),
+            Value::from(1),
+            Value::from(30),
+            Value::from(90),
+            Value::from(25),
         ],
         "parameters must follow the canonical statement order"
     );
@@ -353,7 +354,7 @@ fn insert_rows_keep_their_authored_order() {
         ab, ba,
         "the row order was canonicalised, which changes which row RETURNING yields first"
     );
-    assert_eq!(ab, vec![Literal::Int(1), Literal::Int(2)]);
+    assert_eq!(ab, vec![Value::from(1), Value::from(2)]);
     println!("ruled on 2 row permutations");
 }
 
