@@ -35,6 +35,51 @@ fn scalar(kind: &str, field: &str, value: &mut Value) -> Result<(), CodecError> 
     Ok(())
 }
 
+fn vector(field: &str, definition: &Value, value: &Value) -> Result<(), CodecError> {
+    let dimensions = definition
+        .get("vectorDims")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let valid = value.as_array().is_some_and(|values| {
+        !values.is_empty()
+            && dimensions == Some(values.len())
+            && values.iter().all(|value| {
+                value
+                    .as_f64()
+                    .is_some_and(|value| (value as f32).is_finite())
+            })
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid(
+            field,
+            "a finite vector matching its declared dimensions",
+        ))
+    }
+}
+
+fn geographic_point(field: &str, value: &Value) -> Result<(), CodecError> {
+    let valid = value.as_object().is_some_and(|point| {
+        point
+            .get("lat")
+            .and_then(Value::as_f64)
+            .is_some_and(|value| (-90.0..=90.0).contains(&value))
+            && point
+                .get("lng")
+                .and_then(Value::as_f64)
+                .is_some_and(|value| (-180.0..=180.0).contains(&value))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid(
+            field,
+            "a geographic point within coordinate bounds",
+        ))
+    }
+}
+
 fn temporal_item(definition: &Value) -> Option<&str> {
     (definition["type"].as_str() == Some("array"))
         .then(|| definition["items"].as_str())
@@ -145,6 +190,12 @@ fn prepare_value_at(
     }
     if matches!(kind, Some("boolean" | "bool")) && !value.is_boolean() {
         return Err(invalid(field, "a boolean"));
+    }
+    if kind == Some("vector") {
+        return vector(field, definition, value);
+    }
+    if kind == Some("geoPoint") {
+        return geographic_point(field, value);
     }
     if kind == Some("json") {
         return super::validate_json_value(field, value);
@@ -292,6 +343,35 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
 mod tests {
     use super::*;
     use crate::value;
+
+    #[test]
+    fn vector_and_geographic_writes_validate_the_declared_shape() {
+        let vector = value!({"type":"vector","vectorDims":2});
+        for mut value in [
+            value!([]),
+            value!([1.0]),
+            value!([1.0, 2.0, 3.0]),
+            value!([1.0, "two"]),
+            Value::Array(vec![Value::try_from(f64::MAX).unwrap(), value!(0.0)]),
+        ] {
+            assert!(prepare_value("embedding", &vector, &mut value).is_err());
+        }
+        let mut valid = value!([1.0, -2.0]);
+        prepare_value("embedding", &vector, &mut valid).unwrap();
+
+        let point = value!({"type":"geoPoint"});
+        for mut value in [
+            value!({}),
+            value!({"lat":0.0}),
+            value!({"lat":"north","lng":0.0}),
+            value!({"lat":91.0,"lng":0.0}),
+            value!({"lat":0.0,"lng":181.0}),
+        ] {
+            assert!(prepare_value("location", &point, &mut value).is_err());
+        }
+        let mut valid = value!({"lat":90.0,"lng":-180.0});
+        prepare_value("location", &point, &mut valid).unwrap();
+    }
 
     #[test]
     fn array_validation_preserves_native_buffers_and_encoded_numbers() {
