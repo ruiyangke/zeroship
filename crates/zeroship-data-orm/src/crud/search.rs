@@ -1,7 +1,7 @@
 use super::{predicate, resolved::ResolvedTable};
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        mapping::{self, QueryError},
         compiler::CompiledQuery,
         descriptors::{GeoPoint, VectorMetric},
         registration::SqlRegistration,
@@ -174,7 +174,7 @@ fn validate_limit(name: &str, value: usize) -> Result<(), QueryError> {
 }
 
 fn validate_read_field(field: &str, schema: &Value) -> Result<(), QueryError> {
-    compile::validate_field_name(field)?;
+    mapping::validate_field_name(field)?;
     if crate::sql::descriptors::readable_fields(schema).contains(field) {
         Ok(())
     } else {

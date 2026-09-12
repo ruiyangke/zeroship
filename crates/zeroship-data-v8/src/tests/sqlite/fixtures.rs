@@ -2,7 +2,7 @@
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 /// Drive a future to completion on a fresh compio runtime. The
 /// integration target has no global runtime — each `#[test]` builds

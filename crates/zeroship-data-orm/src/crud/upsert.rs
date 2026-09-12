@@ -3,7 +3,7 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        mapping::{self, QueryError},
         compiler::{CompiledQuery, Requirements},
         lifecycle::{AssignedValue, WriteAssignments},
         statement::{
@@ -65,13 +65,13 @@ fn resolve(
     expected_id: Option<Value>,
     registration: &crate::sql::registration::SqlRegistration,
 ) -> Result<Statement, QueryError> {
-    compile::validate_collection(collection)?;
+    mapping::validate_collection(collection)?;
     let Value::Object(mut document) = document else {
         return Err(invalid("upsert document must be an object"));
     };
-    let conflict = compile::parse_conflict_fields(conflict)?;
+    let conflict = mapping::parse_conflict_fields(conflict)?;
     for field in &conflict {
-        compile::validate_value_operation(field, schema)?;
+        mapping::validate_value_operation(field, schema)?;
     }
 
     let resolved = ResolvedTable::new(namespace, collection, schema, registration)?;
@@ -80,7 +80,7 @@ fn resolve(
         .iter()
         .map(|name| {
             table
-                .column(&compile::value_column_for_field(name, schema))
+                .column(&mapping::value_column_for_field(name, schema))
                 .map_err(Into::into)
         })
         .collect::<Result<_, QueryError>>()?;
@@ -139,7 +139,7 @@ fn resolve(
     }
     let condition = expected_id
         .map(|value| {
-            let column = table.column(&compile::value_column_for_field("id", schema))?;
+            let column = table.column(&mapping::value_column_for_field("id", schema))?;
             let value = registration.encode(column.storage(), value)?;
             Ok::<_, QueryError>(Comparison {
                 column,

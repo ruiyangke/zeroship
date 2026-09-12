@@ -1,7 +1,7 @@
 use super::{predicate, resolved::ResolvedTable};
 use crate::{
     sql::{
-        compile::QueryError,
+        mapping::QueryError,
         lifecycle::{AssignedValue, WriteAssignments},
         registration::SqlRegistration,
         statement::{
@@ -73,7 +73,7 @@ fn build(
         MutationScope::First {
             target: resolved
                 .table
-                .column(&crate::sql::compile::value_column_for_field("id", schema))?,
+                .column(&crate::sql::mapping::value_column_for_field("id", schema))?,
         }
     } else {
         MutationScope::Matching

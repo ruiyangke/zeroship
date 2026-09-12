@@ -42,8 +42,8 @@ pub(super) fn request(
     let column = resolved
         .table
         .column(&input.column)
-        .map_err(crate::sql::compile::QueryError::from)?;
+        .map_err(crate::sql::mapping::QueryError::from)?;
     IdentityRequest::new(resolved.table.clone(), column, count)
-        .map_err(crate::sql::compile::QueryError::from)
+        .map_err(crate::sql::mapping::QueryError::from)
         .map_err(Into::into)
 }

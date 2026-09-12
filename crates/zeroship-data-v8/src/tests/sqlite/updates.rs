@@ -3,7 +3,7 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 #[test]
 fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {

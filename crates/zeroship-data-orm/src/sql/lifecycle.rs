@@ -1,6 +1,6 @@
 //! Resolved column roles and SQL assignments supplied by the ORM.
 
-use crate::sql::compile::QueryError;
+use crate::sql::mapping::QueryError;
 use crate::value::Value;
 
 fn invalid(message: &str) -> QueryError {

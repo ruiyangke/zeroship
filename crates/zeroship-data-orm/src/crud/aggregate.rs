@@ -3,7 +3,7 @@
 use super::{predicate, read, resolved::ResolvedTable};
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
             ResolvedOperand, ResolvedOrder, ResolvedPredicate, ResolvedPredicateValue, SelectParts,
@@ -97,7 +97,7 @@ pub(crate) fn build(
             if having.is_some() {
                 return Err(invalid("aggregate: $having requires $group"));
             }
-            let projection = compile::implicit_read_fields(schema)?
+            let projection = mapping::implicit_read_fields(schema)?
                 .into_iter()
                 .map(|field| read::selected(&table, field))
                 .collect::<Result<Vec<_>, _>>()?;
@@ -261,7 +261,7 @@ fn resolve_having(
     outputs: &BTreeMap<String, AggregateOutput>,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
-    compile::validate_filter_budget(value)?;
+    mapping::validate_filter_budget(value)?;
     let fields = value
         .as_object()
         .ok_or_else(|| invalid("aggregate: $having must be an object"))?;
@@ -394,13 +394,13 @@ fn resolve_order(
 }
 
 fn validate_value_field(field: &str, schema: &Value, capability: &str) -> Result<(), QueryError> {
-    compile::validate_field_name(field)?;
+    mapping::validate_field_name(field)?;
     if !crate::sql::descriptors::readable_fields(schema).contains(field) {
         return Err(QueryError::InvalidIdent(format!(
             "field '{field}' is not a readable schema field; readable fields must be declared in the schema"
         )));
     }
-    compile::validate_value_operation(field, schema)?;
+    mapping::validate_value_operation(field, schema)?;
     if schema[field][capability].as_bool() == Some(false) {
         return Err(invalid(format!("field '{field}' is not {capability}")));
     }

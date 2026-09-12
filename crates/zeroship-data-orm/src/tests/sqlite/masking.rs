@@ -6,7 +6,7 @@ use crate::tests::fixtures::Host;
 
 use zeroship_migrate::schema::query::FkEmission;
 
-use crate::sql::compile::raw_column_name;
+use crate::sql::mapping::raw_column_name;
 
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;

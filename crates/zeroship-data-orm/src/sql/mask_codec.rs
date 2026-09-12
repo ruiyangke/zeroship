@@ -329,7 +329,7 @@ mod tests {
 /// existing test-only `zeroship-migrate-core` dev-dependency (which re-exports
 /// `zeroship_migrate_backend::mask_codec` at `schema::mask_codec`), so it adds
 /// no production dependency edge; the crates stay separated by the migration
-/// engine boundary exactly as `crate::sql::compile`'s identifier parity suite leaves
+/// engine boundary exactly as `crate::sql::mapping`'s identifier parity suite leaves
 /// them.
 ///
 /// # What it pins, and what it deliberately does not

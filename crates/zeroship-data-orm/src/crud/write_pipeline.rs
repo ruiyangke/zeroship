@@ -1,7 +1,7 @@
 use crate::value::Value;
 
 use crate::exec::exec_query;
-use crate::sql::compile;
+use crate::sql::mapping;
 use crate::tx_route::TxRoute;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -40,7 +40,7 @@ pub fn inspect_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> 
 fn validate_user_doc_keys(doc: &Value, schema: &Value) -> Result<(), DbError> {
     if let Some(obj) = doc.as_object() {
         for key in obj.keys() {
-            compile::validate_field_name(key)?;
+            mapping::validate_field_name(key)?;
             if schema.get(key).is_none() {
                 return Err(DbError::validation(
                     "unknown_field",
@@ -78,7 +78,7 @@ fn validate_upsert_conflict_fields(
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
-    let fields = compile::parse_conflict_fields(conflict_fields)?;
+    let fields = mapping::parse_conflict_fields(conflict_fields)?;
     let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
     let protected = upsert_requires_conflict_probe(schema, doc);
     for field in fields {
@@ -131,11 +131,11 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
             // Document-level operator (e.g. $set): its nested keys are fields.
             if let Some(nested) = value.as_object() {
                 for nested_key in nested.keys() {
-                    compile::validate_field_name(nested_key)?;
+                    mapping::validate_field_name(nested_key)?;
                 }
             }
         } else {
-            compile::validate_field_name(key)?;
+            mapping::validate_field_name(key)?;
         }
     }
     Ok(())
@@ -453,14 +453,14 @@ fn compile_target_probe(
     filter: super::predicate::Input,
     limit: i64,
     registration: &crate::sql::registration::SqlRegistration,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     use crate::sql::statement::{
         ResolvedOperand, ResolvedPredicate, RowLock, SelectParts, SelectStatement,
         SelectedExpression, Statement,
     };
 
     if limit <= 0 {
-        return Err(crate::sql::compile::QueryError::InvalidFilter(
+        return Err(crate::sql::mapping::QueryError::InvalidFilter(
             "target probe limit must be positive".into(),
         ));
     }
@@ -472,7 +472,7 @@ fn compile_target_probe(
         registration,
     )?;
     let identity = resolved.inputs.get("id").ok_or_else(|| {
-        crate::sql::compile::QueryError::InvalidFilter("descriptor requires an id field".into())
+        crate::sql::mapping::QueryError::InvalidFilter("descriptor requires an id field".into())
     })?;
     let identity = resolved.table.column(&identity.column)?;
     let predicate = filter.resolve(schema, &resolved, registration)?;
@@ -881,10 +881,10 @@ mod tests {
         run(async {
             let collection = "people";
             assert!(
-                !crate::sql::compile::RESERVED_ID_PREFIXES.is_empty(),
+                !crate::sql::mapping::RESERVED_ID_PREFIXES.is_empty(),
                 "the reserved-prefix fence must rule on at least one platform prefix"
             );
-            for (index, &prefix) in crate::sql::compile::RESERVED_ID_PREFIXES.iter().enumerate() {
+            for (index, &prefix) in crate::sql::mapping::RESERVED_ID_PREFIXES.iter().enumerate() {
                 let app_id = format!("app_reserved_descriptor_id_prefix_{index}");
                 let binding = DbBinding::cold_start(&app_id);
                 crate::tests::fixtures::cache_schema(
@@ -1075,7 +1075,7 @@ mod tests {
             "the field's own column must carry the mask after the relocation stage",
         );
 
-        let raw_col = crate::sql::compile::raw_column_name("ssn");
+        let raw_col = crate::sql::mapping::raw_column_name("ssn");
         let ciphertext = row
             .get(&raw_col)
             .and_then(Value::as_bytes)
@@ -1301,7 +1301,7 @@ mod tests {
                  encryption pass wrote to",
             );
             let update_ciphertext = update_target
-                .get(crate::sql::compile::raw_column_name("ssn").as_str())
+                .get(crate::sql::mapping::raw_column_name("ssn").as_str())
                 .and_then(Value::as_bytes)
                 .expect("update ssn ciphertext in the raw column");
             let update_key = backend

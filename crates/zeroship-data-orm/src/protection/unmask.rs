@@ -134,7 +134,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 /// The two fetch helpers below are the only readers of that column in the tree.
 /// They formatted the name themselves until this existed, which was coherent
 /// only while the write side did too: `protection::mask_pass` now places the value
-/// under the name `crate::sql::compile::declared_raw_column` resolves, so a
+/// under the name `crate::sql::mapping::declared_raw_column` resolves, so a
 /// SELECT that kept its own `format!` would miss every row a renamed column
 /// stored - and on SQLite it would MISS QUIETLY, because a double-quoted
 /// identifier that matches no column is taken as a string literal and the
@@ -155,7 +155,7 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
     let def = schema.get(canonical_column).ok_or_else(|| {
         DbError::internal(format!("unmask: column '{canonical_column}' vanished"))
     })?;
-    crate::sql::compile::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
+    crate::sql::mapping::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
         DbError::internal(format!(
             "unmask: column '{canonical_column}' has no raw column but passed the mask lookup"
         ))

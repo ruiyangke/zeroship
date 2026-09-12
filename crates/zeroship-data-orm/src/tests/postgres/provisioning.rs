@@ -144,14 +144,14 @@ mod live_reserved_sweep_tests {
     fn audit_ref(app: &str) -> String {
         format!(
             "{}.\"__zeroship_audit_unmask\"",
-            crate::sql::compile::quote_ident(app)
+            crate::sql::mapping::quote_ident(app)
         )
     }
 
     fn journal_ref(app: &str) -> String {
         format!(
             "{}.\"__zeroship_schema_migrations\"",
-            crate::sql::compile::quote_ident(app)
+            crate::sql::mapping::quote_ident(app)
         )
     }
 
@@ -192,7 +192,7 @@ mod live_reserved_sweep_tests {
         admin
             .batch_execute(&format!(
                 "CREATE SCHEMA IF NOT EXISTS {}",
-                crate::sql::compile::quote_ident(app)
+                crate::sql::mapping::quote_ident(app)
             ))
             .await
             .expect("create scratch app schema");
@@ -204,7 +204,7 @@ mod live_reserved_sweep_tests {
                 "CREATE TABLE IF NOT EXISTS {} (id BIGSERIAL PRIMARY KEY, name TEXT); \
                  CREATE TABLE IF NOT EXISTS {}.\"widgets\" (id BIGSERIAL PRIMARY KEY);",
                 journal_ref(app),
-                crate::sql::compile::quote_ident(app),
+                crate::sql::mapping::quote_ident(app),
             ))
             .await
             .expect("seed the swept journal stand-in and a creator table");
@@ -217,11 +217,11 @@ mod live_reserved_sweep_tests {
     /// concurrent work on this server.
     async fn teardown(admin: &Client, app: &str) {
         let role =
-            crate::sql::compile::quote_ident(&per_app_role_name(app).expect("scratch app role name"));
+            crate::sql::mapping::quote_ident(&per_app_role_name(app).expect("scratch app role name"));
         let _ = admin
             .batch_execute(&format!(
                 "DROP SCHEMA IF EXISTS {} CASCADE",
-                crate::sql::compile::quote_ident(app)
+                crate::sql::mapping::quote_ident(app)
             ))
             .await;
         let _ = admin
@@ -299,7 +299,7 @@ mod live_reserved_sweep_tests {
             .batch_execute(&format!(
                 "CREATE SCHEMA {}; \
                  CREATE VIEW {} AS SELECT 1::bigint AS id",
-                crate::sql::compile::quote_ident(&app),
+                crate::sql::mapping::quote_ident(&app),
                 audit_ref(&app),
             ))
             .await
@@ -344,7 +344,7 @@ mod live_reserved_sweep_tests {
             .batch_execute(&format!(
                 "CREATE SCHEMA {}; \
                  CREATE TABLE {} (id BIGINT PRIMARY KEY)",
-                crate::sql::compile::quote_ident(&app),
+                crate::sql::mapping::quote_ident(&app),
                 audit_ref(&app),
             ))
             .await
@@ -553,8 +553,8 @@ mod live_reserved_sweep_tests {
         admin
             .batch_execute(&format!(
                 "GRANT INSERT ON TABLE {}.\"widgets\" TO {}",
-                crate::sql::compile::quote_ident(&app),
-                crate::sql::compile::quote_ident(&role),
+                crate::sql::mapping::quote_ident(&app),
+                crate::sql::mapping::quote_ident(&role),
             ))
             .await
             .expect("give the control table one explicit privilege");
@@ -605,7 +605,7 @@ mod live_reserved_sweep_tests {
             .query_one_scalar(
                 &format!(
                     "SELECT has_table_privilege('{role}', '{}.\"widgets\"', 'INSERT')",
-                    crate::sql::compile::quote_ident(&app)
+                    crate::sql::mapping::quote_ident(&app)
                 ),
                 &[],
             )

@@ -3,7 +3,7 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        compile::QueryError,
+        mapping::QueryError,
         compiler::{CompiledQuery, Requirements},
         registration::SqlRegistration,
         statement::{Expression, Insert, InsertParts, Statement},

@@ -1,4 +1,4 @@
-//! Runtime collection validation shared by ORM operation preparation.
+//! Descriptor validation and physical storage mapping for ORM operations.
 
 use crate::{
     sql::{Ident, IdentRole},

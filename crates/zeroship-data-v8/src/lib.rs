@@ -22,7 +22,7 @@ use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::cdc::{broker, read_set};
 use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
 #[cfg(test)]
-use zeroship_data_orm::sql::compile;
+use zeroship_data_orm::sql::mapping;
 
 pub(crate) mod context;
 pub mod op_error;

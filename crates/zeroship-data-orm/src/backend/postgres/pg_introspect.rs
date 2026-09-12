@@ -192,7 +192,7 @@ SELECT c.relname AS table_name,
         column.mask = Some(MaskMeta {
             kind,
             classification,
-            raw_column: crate::sql::compile::raw_column_name(&display_column),
+            raw_column: crate::sql::mapping::raw_column_name(&display_column),
         });
     }
 

@@ -527,15 +527,15 @@ mod tests {
     fn from_query_error_assigns_distinct_codes() {
         let cases = [
             (
-                crate::compile::QueryError::InvalidFilter("bad".into()),
+                crate::mapping::QueryError::InvalidFilter("bad".into()),
                 "invalid_filter",
             ),
             (
-                crate::compile::QueryError::InvalidCollection("bad".into()),
+                crate::mapping::QueryError::InvalidCollection("bad".into()),
                 "invalid_collection",
             ),
             (
-                crate::compile::QueryError::InvalidIdent("bad".into()),
+                crate::mapping::QueryError::InvalidIdent("bad".into()),
                 "invalid_identifier",
             ),
         ];
@@ -555,12 +555,12 @@ mod tests {
     fn reserved_prefix_and_assigned_field_errors_carry_actionable_hints() {
         for (query_error, expected_code, word) in [
             (
-                crate::compile::validate_id_prefix("usr").unwrap_err(),
+                crate::mapping::validate_id_prefix("usr").unwrap_err(),
                 "reserved_id_prefix",
                 "prefix",
             ),
             (
-                crate::compile::QueryError::ImmutableAssignedField(
+                crate::mapping::QueryError::ImmutableAssignedField(
                     "field 'born' is assigned".into(),
                 ),
                 "immutable_assigned_field",
@@ -582,7 +582,7 @@ mod tests {
             "version",
             "deleted_at",
         ] {
-            crate::compile::validate_field_name(name).unwrap();
+            crate::mapping::validate_field_name(name).unwrap();
         }
     }
 

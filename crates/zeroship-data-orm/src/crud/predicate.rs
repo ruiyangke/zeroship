@@ -1,7 +1,7 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        mapping::{self, QueryError},
         predicate::{CompareOp, MembershipOp, PatternOp},
         registration::SqlRegistration,
         statement::{
@@ -93,7 +93,7 @@ pub(crate) fn resolve(
     table: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
-    compile::validate_filter_budget(&filter)?;
+    mapping::validate_filter_budget(&filter)?;
     resolve_inner(filter, schema, table, registration)
 }
 
@@ -123,8 +123,8 @@ pub(crate) fn resolve_model(
             op,
             mut value,
         } => {
-            compile::validate_field_name(field)?;
-            compile::validate_value_operation(field, schema)?;
+            mapping::validate_field_name(field)?;
+            mapping::validate_value_operation(field, schema)?;
             let definition = schema
                 .get(field)
                 .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
@@ -199,8 +199,8 @@ fn resolve_inner(
             });
             continue;
         }
-        compile::validate_field_name(&field)?;
-        compile::validate_value_operation(&field, schema)?;
+        mapping::validate_field_name(&field)?;
+        mapping::validate_value_operation(&field, schema)?;
         let definition = schema
             .get(&field)
             .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;

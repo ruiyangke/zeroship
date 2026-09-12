@@ -27,7 +27,7 @@ use zeroship_data_orm::error::DbError;
 /// `pg_error::is_missing_per_app_session_role` stops matching - which turns an
 /// actionable SCHEMA_NOT_PROVISIONED into a generic failure.
 fn quoted_per_app_role(schema: &SchemaName) -> Result<String, DbError> {
-    Ok(crate::sql::compile::quote_ident(&per_app_role_name(
+    Ok(crate::sql::mapping::quote_ident(&per_app_role_name(
         schema.as_str(),
     )?))
 }

@@ -33,7 +33,7 @@ pub(crate) async fn reserve(
     } = route
         .sql_registration()
         .compile_identity_allocation(request)
-        .map_err(crate::sql::compile::QueryError::from)?;
+        .map_err(crate::sql::mapping::QueryError::from)?;
     if let Some(reservation) = reservation {
         exec_mutation(route, reservation).await?;
     }

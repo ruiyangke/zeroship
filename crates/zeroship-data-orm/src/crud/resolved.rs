@@ -2,7 +2,7 @@
 
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{ReturnedColumn, StorageType, Table},
         Ident, IdentRole, SchemaName,
@@ -51,17 +51,17 @@ impl ResolvedTable {
         schema: &Value,
         registration: &SqlRegistration,
     ) -> Result<Self, QueryError> {
-        compile::validate_collection(collection)?;
+        mapping::validate_collection(collection)?;
         let fields = schema
             .as_object()
             .ok_or_else(|| invalid("statement requires a field-map schema"))?;
         let mut physical = Vec::new();
         let mut inputs = BTreeMap::new();
         for (name, definition) in fields {
-            if compile::is_schema_metadata_key(name) {
+            if mapping::is_schema_metadata_key(name) {
                 continue;
             }
-            let stored = compile::value_column_for_field(name, schema);
+            let stored = mapping::value_column_for_field(name, schema);
             let storage = if crate::sql::descriptors::effective_mask(definition).is_some() {
                 StorageType::Text
             } else {
@@ -77,7 +77,7 @@ impl ResolvedTable {
                     insert_only,
                 },
             );
-            if let Some(raw) = compile::declared_raw_column(name, definition)? {
+            if let Some(raw) = mapping::declared_raw_column(name, definition)? {
                 let raw_storage = registration.storage_type(definition)?;
                 physical.push((stored_ident(&raw)?, raw_storage));
                 inputs.insert(
@@ -106,10 +106,10 @@ impl ResolvedTable {
     }
 
     pub(crate) fn returning(&self, schema: &Value) -> Result<Vec<ReturnedColumn>, QueryError> {
-        compile::implicit_read_fields(schema)?
+        mapping::implicit_read_fields(schema)?
             .into_iter()
             .map(|name| {
-                let physical = compile::value_column_for_field(name, schema);
+                let physical = mapping::value_column_for_field(name, schema);
                 let alias = if physical == name {
                     None
                 } else {

@@ -15,7 +15,7 @@ use zeroship_migrate::schema::query::FkEmission;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
-use crate::sql::compile::{raw_column_name, read_surface_columns, validate_field_name};
+use crate::sql::mapping::{raw_column_name, read_surface_columns, validate_field_name};
 use crate::sql::{registration::SqlRegistration, SchemaName};
 use crate::value::{value, Value};
 use compio_postgres::{NoTls, Pool};
@@ -240,7 +240,7 @@ fn compile_insert(
     collection: &str,
     schema: &Value,
     document: &Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::insert::build_one(
         namespace,
         collection,
@@ -260,7 +260,7 @@ fn compile_find(
     order_by: Option<&Value>,
     select: Option<&Value>,
     schema: &Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::read::find(
         namespace,
         collection,
@@ -282,7 +282,7 @@ fn compile_distinct(
     field: &str,
     filter: &Value,
     schema: &Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::read::distinct(
         namespace,
         collection,
@@ -299,7 +299,7 @@ fn compile_aggregate(
     collection: &str,
     pipeline: &Value,
     schema: &Value,
-) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::aggregate::build(
         namespace,
         collection,
@@ -315,7 +315,7 @@ fn compile_filter(
     filter: &Value,
     _parameters: &mut Vec<Value>,
     _schema: &Value,
-) -> Result<crate::sql::Predicate, crate::sql::compile::QueryError> {
+) -> Result<crate::sql::Predicate, crate::sql::mapping::QueryError> {
     crate::sql::filter::decode(filter)
 }
 
@@ -2135,7 +2135,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
                 .query_text_params(
                     &format!(
                         r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
-                        crate::sql::compile::quote_ident(&raw_column_name("ssn")),
+                        crate::sql::mapping::quote_ident(&raw_column_name("ssn")),
                     ),
                     &[minted_id.as_str()],
                 )
@@ -2911,7 +2911,7 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 /// Create `<app>.<collection>` the way PRODUCTION creates a creator table.
 ///
 /// [`fixture`] renders its DDL with the DATA PLANE's emitter,
-/// `crate::sql::compile::build_create_table_with_fks`, whose only callers are
+/// `crate::sql::mapping::build_create_table_with_fks`, whose only callers are
 /// tests (measured 2026-09-04: no `src` call site outside its own module in any
 /// crate). Every creator table that exists on the platform is instead rendered by
 /// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection

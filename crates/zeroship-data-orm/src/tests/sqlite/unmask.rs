@@ -9,7 +9,7 @@ use zeroship_data_orm::backend::sqlite::SqliteBackend;
 
 use zeroship_data_orm::binding::DbBinding;
 
-use crate::sql::compile::raw_column_name;
+use crate::sql::mapping::raw_column_name;
 
 use zeroship_data_orm::protection::unmask;
 
@@ -112,7 +112,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
     // reservation. Asking for the transaction lane here contends with whatever
     // the unmask dispatch itself is holding.
     let client = backend.autocommit_client();
-    let q_app = crate::sql::compile::quote_ident(app_id);
+    let q_app = crate::sql::mapping::quote_ident(app_id);
     let sql = format!(
         r#"SELECT outcome, actor_role, classification
            FROM {q_app}."__zeroship_audit_unmask"
@@ -500,7 +500,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 
 /// The unmask SELECT names the raw column the DESCRIPTOR declares.
 ///
-/// The end-to-end half of the change `crate::sql::compile::declared_raw_column`
+/// The end-to-end half of the change `crate::sql::mapping::declared_raw_column`
 /// carries. The unit tests in `zeroship-data-orm`'s `protection::mask_pass` bind the
 /// WRITE side - which column the plaintext is relocated INTO - in the engine's
 /// default-feature build. Nothing there rules on the READ, because the read is a
