@@ -351,6 +351,17 @@ export type SortSpec<S> = [SortableField<S>] extends [never]
   : AtLeastOne<Record<SortableField<S>, 1 | -1>>;
 export type SortInput<S> = SortSpec<S> | SortableField<S> | `-${SortableField<S>}`;
 
+/** Fields exposed by a typed projection. */
+export type SelectableField<S> = string & keyof Row<S>;
+export type SelectSpec<S> = string extends SelectableField<S>
+  ? Record<string, number | boolean>
+  : [SelectableField<S>] extends [never]
+    ? never
+    : AtLeastOne<Record<SelectableField<S>, 1 | true>>;
+export type SelectInput<S> = string extends SelectableField<S>
+  ? string | readonly string[] | Record<string, number | boolean>
+  : SelectableField<S> | readonly SelectableField<S>[] | SelectSpec<S>;
+
 // ---------------------------------------------------------------------------
 // Update expression types — typed operators per field type
 // ---------------------------------------------------------------------------

@@ -26,6 +26,24 @@ async function portableReadTypes(): Promise<void> {
   const payloads = await records.distinct("payload");
   const _: Uint8Array[] | null = payloads.data;
 
+  const selected = await records.find().select("title");
+  const selectedTitle: string | undefined = selected.data?.[0]?.title;
+  // @ts-expect-error selecting one field removes other fields from the result
+  const selectedScore: number | undefined = selected.data?.[0]?.score;
+  void [selectedTitle, selectedScore];
+  records.find().select(["title", "score"] as const);
+  records.find().select({ title: 1, score: true });
+  // @ts-expect-error a projection must select at least one field
+  records.find().select({});
+  // @ts-expect-error string projection must name a declared field
+  records.find().select("missing");
+  // @ts-expect-error array projection must name declared fields
+  records.find().select(["missing"]);
+  // @ts-expect-error object projection must name declared fields
+  records.find().select({ missing: 1 });
+  // @ts-expect-error typed projections are inclusion-only
+  records.find().select({ title: 0 });
+
   records.find().sort({ title: 1, score: -1 });
   records.find().sort("title");
   records.find().sort("-score");
