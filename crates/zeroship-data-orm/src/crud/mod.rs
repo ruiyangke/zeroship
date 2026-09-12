@@ -220,9 +220,11 @@ pub fn plan_find(binding: &DbBinding, collection: &str, filter: &Value, opts: &V
     // DB-2: public `find` normalises an omitted limit here before calling the
     // builder. This does not protect internal builder callers; they must pass
     // their own explicit bound. Callers paginate past this page via `offset`.
-    let limit = Some(compile::effective_query_limit(
-        opts.get("limit").and_then(Value::as_i64),
-    ));
+    let limit = Some(
+        opts.get("limit")
+            .and_then(Value::as_i64)
+            .unwrap_or(crate::sql::MAX_ROW_LIMIT),
+    );
     // DB-3: strip an app-supplied reserved `auto` system actor — a find with
     // `{unmask, actor:{kind:"auto"}}` must not impersonate the platform.
     let unmask_sanitized = crate::protection::unmask::sanitize_app_actor(
@@ -667,23 +669,23 @@ pub(crate) async fn run_update_many(
                 frame.route(),
                 &coll,
                 filter.clone(),
-                compile::MAX_QUERY_LIMIT + 1,
+                i64::try_from(crate::budgets::MAX_PER_ROW_UPDATE_TARGETS)
+                    .expect("target budget must fit i64")
+                    + 1,
                 &schema,
             )
             .await?;
-            let target_limit = usize::try_from(compile::MAX_QUERY_LIMIT)
-                .expect("MAX_QUERY_LIMIT must be a positive usize");
+            let target_limit = crate::budgets::MAX_PER_ROW_UPDATE_TARGETS;
             if target_rows.len() > target_limit {
                 return Err(DbError::validation_hinted(
                     "update_many_target_limit_exceeded",
                     format!(
                         "updateMany matched more than {} rows; the maximum is {}",
-                        compile::MAX_QUERY_LIMIT,
-                        compile::MAX_QUERY_LIMIT
+                        target_limit, target_limit
                     ),
                     format!(
                         "Narrow the updateMany filter so one call targets at most {} rows.",
-                        compile::MAX_QUERY_LIMIT
+                        target_limit
                     ),
                 ));
             }

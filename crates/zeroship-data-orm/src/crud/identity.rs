@@ -1,10 +1,7 @@
 use super::resolved::ResolvedTable;
 use crate::{
     error::DbError,
-    sql::{
-        compile::MAX_INSERT_MANY_BATCH, registration::SqlRegistration, statement::IdentityRequest,
-        SchemaName,
-    },
+    sql::{registration::SqlRegistration, statement::IdentityRequest, SchemaName},
     value::Value,
 };
 
@@ -32,7 +29,7 @@ pub(super) fn request(
     count: usize,
     registration: &SqlRegistration,
 ) -> Result<IdentityRequest, DbError> {
-    if count == 0 || count > MAX_INSERT_MANY_BATCH {
+    if count == 0 || count > crate::budgets::MAX_INSERT_MANY_BATCH {
         return Err(DbError::validation(
             "generated_identity_batch",
             "identity allocation exceeds the insert batch limit",

@@ -3,7 +3,7 @@
 use super::resolved::ResolvedTable;
 use crate::{
     sql::{
-        compile::{self, QueryError},
+        compile::QueryError,
         compiler::{CompiledQuery, Requirements},
         registration::SqlRegistration,
         statement::{Expression, Insert, InsertParts, Statement},
@@ -45,7 +45,7 @@ pub(crate) fn build_many(
     let Value::Array(documents) = documents else {
         return Err(invalid("insertMany documents must be an array"));
     };
-    if documents.len() > compile::MAX_INSERT_MANY_BATCH {
+    if documents.len() > crate::budgets::MAX_INSERT_MANY_BATCH {
         return Err(invalid("insertMany exceeds the batch limit"));
     }
     let documents = documents

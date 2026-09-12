@@ -3,10 +3,7 @@ use super::{
     SqlSupport, SqlWriter,
 };
 use crate::{
-    sql::{
-        statement::{ArrayOperator, Column, IdentityRequest, Statement},
-        BindBudget,
-    },
+    sql::statement::{ArrayOperator, Column, IdentityRequest, Statement},
     value::Value,
 };
 
@@ -25,7 +22,7 @@ const SUPPORT: SqlSupport = SqlSupport {
     insert_generated_identity: true,
     identity_allocation: true,
     default_expression: true,
-    max_bind_parameters: BindBudget::POSTGRES.max(),
+    max_bind_parameters: super::POSTGRES_BIND_LIMIT,
 };
 
 const SYNTAX: super::shared::Syntax = super::shared::Syntax {

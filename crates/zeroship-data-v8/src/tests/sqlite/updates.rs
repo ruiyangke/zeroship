@@ -10,7 +10,7 @@ fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let total = zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 17;
+        let total = zeroship_data_orm::sql::MAX_ROW_LIMIT + 17;
         let body = r#"
 async function bulk() {
     const users = env.db.collection(COLLECTION);
@@ -243,7 +243,10 @@ const _procedures = { seed, updateManyByName };
             !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(" LIMIT {}", zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1);
+        let expected_limit = format!(
+            " LIMIT {}",
+            zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1
+        );
         for sql in &counters {
             assert!(
                 sql.ends_with(&expected_limit),
@@ -316,8 +319,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target_cap = usize::try_from(zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT)
-            .expect("MAX_QUERY_LIMIT must fit usize");
+        let target_cap = zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS;
         let seeded = target_cap + 1;
         let values = (0..seeded)
             .map(|index| format!("('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"))

@@ -1,8 +1,8 @@
 use super::FieldPath;
 use core::fmt;
 
-pub const MAX_ROW_LIMIT: i64 = super::compile::MAX_QUERY_LIMIT;
-pub const MAX_ROW_OFFSET: i64 = super::compile::MAX_QUERY_OFFSET;
+pub const MAX_ROW_LIMIT: i64 = 500;
+pub const MAX_ROW_OFFSET: i64 = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RowLimit(i64);

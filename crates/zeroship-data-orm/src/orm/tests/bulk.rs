@@ -1,7 +1,7 @@
 use super::*;
 use crate::cdc::{
-    ChangeOp,
     broker::{self, Subscription, SubscriptionMessage},
+    ChangeOp,
 };
 use fixtures::CollectionFixture;
 
@@ -18,7 +18,7 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
         .await;
     let db = fixture.database.clone();
     let entries = db.collection("entries").unwrap();
-    let total = crate::sql::compile::MAX_QUERY_LIMIT + 17;
+    let total = crate::sql::MAX_ROW_LIMIT + 17;
     let documents: Vec<_> = (0..total)
         .map(|n| value!({"label":format!("entry-{n}"), "status":"new"}))
         .collect();
@@ -67,16 +67,14 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
     );
 
     // A statement failure must leave every matching row unchanged.
-    assert!(
-        entries
-            .execute(Operation::Update {
-                filter: value!({}),
-                patch: value!({"label":"duplicate"}),
-                many: true,
-            })
-            .await
-            .is_err()
-    );
+    assert!(entries
+        .execute(Operation::Update {
+            filter: value!({}),
+            patch: value!({"label":"duplicate"}),
+            many: true,
+        })
+        .await
+        .is_err());
     assert_eq!(
         count(
             entries
@@ -157,15 +155,13 @@ async fn bulk_counts(mut fixture: CollectionFixture) {
         })
         .await
         .unwrap();
-    assert!(
-        escaped
-            .execute(Operation::Purge {
-                filter: value!({}),
-                many: true
-            })
-            .await
-            .is_err()
-    );
+    assert!(escaped
+        .execute(Operation::Purge {
+            filter: value!({}),
+            many: true
+        })
+        .await
+        .is_err());
     assert_eq!(
         count(entries.count(value!({}), value!({})).await.unwrap()),
         0
@@ -270,19 +266,20 @@ async fn postgres_bulk_counts_do_not_require_unrelated_column_reads() {
         .backend
         .get::<crate::backend::postgres::PostgresBackend>()
         .unwrap();
-    let table = format!("{}.\"entries\"", crate::sql::compile::quote_ident(db.binding.schema().as_str()));
+    let table = format!(
+        "{}.\"entries\"",
+        crate::sql::compile::quote_ident(db.binding.schema().as_str())
+    );
     let role = crate::sql::compile::quote_ident(
         &zeroship_core::database_role::per_app_role_name(db.binding.schema().as_str()).unwrap(),
     );
     backend.pool().batch_execute(&format!(
         "REVOKE SELECT ON {table} FROM {role}; GRANT SELECT (id, status, version, deleted_at) ON {table} TO {role}"
     )).await.unwrap();
-    assert!(
-        entries
-            .find(value!({}), value!({"select":["label"]}))
-            .await
-            .is_err()
-    );
+    assert!(entries
+        .find(value!({}), value!({"select":["label"]}))
+        .await
+        .is_err());
     assert_eq!(
         count(
             entries
@@ -402,16 +399,14 @@ async fn bulk_cdc(fixture: CollectionFixture) {
         ),
         0
     );
-    assert!(
-        entries
-            .execute(Operation::Update {
-                filter: value!({}),
-                patch: value!({"label":"duplicate"}),
-                many: true,
-            })
-            .await
-            .is_err()
-    );
+    assert!(entries
+        .execute(Operation::Update {
+            filter: value!({}),
+            patch: value!({"label":"duplicate"}),
+            many: true,
+        })
+        .await
+        .is_err());
     assert!(sub.pop().is_none());
 
     db.transaction(|tx| {

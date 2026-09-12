@@ -43,16 +43,8 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-pub const MAX_QUERY_LIMIT: i64 = 500;
-pub const MAX_QUERY_OFFSET: i64 = 10_000;
-pub const MAX_INSERT_MANY_BATCH: usize = 1_000;
-
 const MAX_FILTER_NESTING_DEPTH: usize = 16;
 const MAX_FILTER_CLAUSE_COUNT: usize = 128;
-
-pub fn effective_query_limit(explicit: Option<i64>) -> i64 {
-    explicit.unwrap_or(MAX_QUERY_LIMIT)
-}
 
 pub fn validate_collection(name: &str) -> Result<(), QueryError> {
     Ident::parse_as(name, IdentRole::Collection)
