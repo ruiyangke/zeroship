@@ -30,7 +30,6 @@ pub fn fixture_table_sql_for(
     let dialect = match dialect {
         SqlDialect::Postgres => &zeroship_migrate_postgres::DIALECT,
         SqlDialect::Sqlite => &zeroship_migrate_sqlite::DIALECT,
-        SqlDialect::Mysql => panic!("the runtime has no MySQL fixture backend"),
     };
     // The confined policy supplies assigned fields when compiling authored DDL.
     let authored = Value::Object(

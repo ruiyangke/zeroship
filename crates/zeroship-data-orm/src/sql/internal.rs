@@ -8,7 +8,6 @@ fn placeholder(dialect: SqlDialect, index: usize) -> String {
     match dialect {
         SqlDialect::Postgres => format!("${index}"),
         SqlDialect::Sqlite => format!("?{index}"),
-        SqlDialect::Mysql => "?".into(),
     }
 }
 

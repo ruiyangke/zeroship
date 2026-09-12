@@ -63,22 +63,17 @@ pub struct BuiltQuery {
 }
 
 /// Runtime SQL dialect. Drivers bind binary parameters directly.
-/// MySQL compilation has no corresponding runtime backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqlDialect {
     Postgres,
     Sqlite,
-    Mysql,
 }
 
 const SQLITE_NOW_EXPR: &str = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
 
 impl SqlDialect {
     pub fn binary_bind_placeholder(self, n: usize) -> String {
-        match self {
-            Self::Mysql => "?".into(),
-            _ => format!("${n}"),
-        }
+        format!("${n}")
     }
 
     pub fn encode_binary_param(self, value: Value) -> Result<Value, QueryError> {
@@ -94,7 +89,6 @@ impl SqlDialect {
         match self {
             Self::Postgres => "NOW()",
             Self::Sqlite => SQLITE_NOW_EXPR,
-            Self::Mysql => "CURRENT_TIMESTAMP(6)",
         }
     }
 }
@@ -413,16 +407,9 @@ pub fn quote_ident(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Quote a MySQL identifier with backticks.
-/// Escapes any embedded backticks by doubling them.
-pub fn mysql_quote_ident(name: &str) -> String {
-    format!("`{}`", name.replace('`', "``"))
-}
-
 pub(crate) fn quote_ident_for_dialect(name: &str, dialect: SqlDialect) -> String {
     match dialect {
         SqlDialect::Postgres | SqlDialect::Sqlite => quote_ident(name),
-        SqlDialect::Mysql => mysql_quote_ident(name),
     }
 }
 
@@ -530,11 +517,6 @@ fn push_field_value_bind(
                 crate::sql::temporal::format_timestamp_millis(millis)
                     .expect("validated portable timestamp"),
             ),
-            SqlDialect::Mysql => {
-                let canonical = crate::sql::temporal::format_timestamp_millis(millis)
-                    .expect("validated portable timestamp");
-                Value::String(canonical.trim_end_matches('Z').replace('T', " "))
-            }
         });
         return Ok(match dialect {
             SqlDialect::Postgres => format!("${}::timestamptz", params.len()),
@@ -1551,7 +1533,6 @@ pub fn build_insert_many_with_dialect(
         // MySQL's prepared-statement parameter count is also a 16-bit field.
         // This dialect is render-only today, but keeping its builder bounded
         // prevents a future executor from inheriting the same defect.
-        SqlDialect::Mysql => ("MySQL", POSTGRES_MAX_BIND_PARAMETERS),
     };
     if bind_count > bind_limit {
         return Err(QueryError::InvalidFilter(format!(
@@ -2989,11 +2970,6 @@ fn build_order_term_expr(col: &str, descending: bool, dialect: SqlDialect) -> St
             format!("{col} {dir} {nulls}")
         }
         SqlDialect::Sqlite => {
-            let dir = if descending { "DESC" } else { "ASC" };
-            let null_bucket = if descending { "DESC" } else { "ASC" };
-            format!("{col} IS NULL {null_bucket}, {col} {dir}")
-        }
-        SqlDialect::Mysql => {
             let dir = if descending { "DESC" } else { "ASC" };
             let null_bucket = if descending { "DESC" } else { "ASC" };
             format!("{col} IS NULL {null_bucket}, {col} {dir}")
@@ -6882,12 +6858,6 @@ mod tests {
         assert_eq!(p, "$7");
     }
 
-    #[test]
-    fn dialect_mysql_encrypted_placeholder_is_from_base64_param() {
-        let p = SqlDialect::Mysql.binary_bind_placeholder(7);
-        assert_eq!(p, "?");
-    }
-
     // -----------------------------------------------------------------
     // Raw-column DDL emission
     // -----------------------------------------------------------------
@@ -8963,13 +8933,12 @@ mod sqlite_now_parity {
     /// The dialect ids this crate's [`SqlDialect`] variants correspond to.
     ///
     /// Exhaustive over the enum by construction: the match below has no
-    /// wildcard, so a fourth variant fails to compile here rather than being
+    /// wildcard, so an additional variant fails to compile here rather than being
     /// skipped by a census that never looked for it.
     fn dialect_id(dialect: SqlDialect) -> &'static str {
         match dialect {
             SqlDialect::Postgres => "postgres",
             SqlDialect::Sqlite => "sqlite",
-            SqlDialect::Mysql => "mysql",
         }
     }
 
@@ -8980,7 +8949,7 @@ mod sqlite_now_parity {
     /// shipping set has no backend for is a finding, not a reason to examine
     /// fewer rows.
     fn pairs() -> Vec<(SqlDialect, &'static BackendVendor)> {
-        [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql]
+        [SqlDialect::Postgres, SqlDialect::Sqlite]
             .into_iter()
             .map(|dialect| {
                 let id = dialect_id(dialect);
@@ -9184,7 +9153,6 @@ fn render_filter(
                 match dialect {
                     SqlDialect::Postgres => {}
                     SqlDialect::Sqlite => sql.push_str(" COLLATE NOCASE"),
-                    SqlDialect::Mysql => sql.push_str(" COLLATE utf8mb4_0900_ai_ci"),
                 }
             }
             sql
@@ -9280,7 +9248,7 @@ mod encrypted_query_tests {
 
     #[test]
     fn encrypted_values_cannot_be_queried_even_when_capability_flags_claim_otherwise() {
-        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql] {
+        for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             for mask in [
                 value!({"kind":"none"}),
                 value!({"kind":"last4","classification":"spi"}),
