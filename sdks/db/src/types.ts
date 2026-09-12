@@ -146,6 +146,10 @@ export type InferInsertSchema<S> = S extends infer T
 /** The persisted fields declared by the collection schema. */
 export type Row<S> = InferSchema<S>;
 
+export type IdValue = string | number | bigint;
+/** The identity type declared by the collection schema. */
+export type RowId<S> = "id" extends keyof Row<S> ? Extract<Row<S>["id"], IdValue> : IdValue;
+
 export type AssignedKeys<S> = {
   [K in keyof S]: S[K] extends { readonly _assigned: true } ? K : never
 }[keyof S];
@@ -315,7 +319,7 @@ export type InferRowInput<C> =
 
 /** Branded `Id<N>` for a Collection — `Id<"users">` for `Collection<_, "users">`. */
 export type InferId<C> =
-  C extends import("./collection").Collection<any, infer N extends string> ? Id<N> :
+  C extends import("./collection").Collection<infer S, infer N extends string> ? Id<N, RowId<S>> :
   never;
 
 /**
@@ -696,26 +700,8 @@ export interface RefOptions {
   deferrable?: boolean;
 }
 
-/**
- * Cross-table typed ID (B2). Stored as a TEXT typed_id (`<prefix>_<22
- * base62 chars>`) at the DB layer but brand-tagged at the type layer
- * so `Id<"users">` and `Id<"posts">` are mutually incompatible — typos
- * like `db.posts.get({ authorId: postId })` (where `postId` is
- * `Id<"posts">`) become compile errors.
- *
- * Modelled after Convex's `Id<TableName>` brand
- * ([docs.convex.dev/database/document-ids]). The brand is a phantom
- * property typed but never assigned at runtime; the runtime value is
- * just a string, so JSON serialisation is unchanged.
- *
- * widened from `number & { __zeroshipTable }` to
- * `string & { __zeroshipTable }` in lockstep with the Rust-side
- * `id TEXT PRIMARY KEY` DDL and the `dispatch_insert` auto-mint pass
- * (which calls `zeroship_core::typed_id::generate(prefix)`). FK
- * columns also cascade to TEXT (`def_to_pg_type` for `Some("ref")`),
- * so a brand-typed `authorId: Id<"users">` round-trips faithfully.
- */
-export type Id<T extends string> = string & {
+/** Collection identity brand; the underlying value follows the declared ID type. */
+export type Id<T extends string, V extends IdValue = string> = V & {
   readonly __zeroshipTable: T;
 };
 

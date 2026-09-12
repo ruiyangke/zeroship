@@ -641,7 +641,7 @@ describe("with: non-numeric FK coercion + loud failure", () => {
     assert.ok(error);
     assert.match(
       error!.message,
-      /_loadRelations: FK value for field 'userId' must be a string id \(got object\)/,
+      /_loadRelations: FK value for field 'userId' must match the declared identity type \(got object\)/,
     );
   });
 
@@ -669,7 +669,7 @@ describe("with: non-numeric FK coercion + loud failure", () => {
     assert.ok(error);
     assert.match(
       error!.message,
-      /_loadRelations: FK value for field 'userId' must be a string id \(got bigint\)/,
+      /_loadRelations: FK value for field 'userId' must match the declared identity type \(got bigint\)/,
     );
   });
 });

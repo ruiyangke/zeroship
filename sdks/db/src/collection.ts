@@ -21,6 +21,8 @@ import type {
   Actor,
   Filter,
   Id,
+  IdValue,
+  RowId,
   NamedIndexSpec,
   NamingStrategy,
   PlainObject,
@@ -155,7 +157,7 @@ export class Collection<
    */
   private _indexes: readonly NamedIndexSpec[];
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
-  private _idLoader: IdLoader<Row<S>> | null;
+  private _idLoader: IdLoader<Row<S>, IdValue> | null;
   /**
    * Sibling-collection lookup, planted by `installSchema` so `with: { fk: true }`
    * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
@@ -175,7 +177,7 @@ export class Collection<
    */
   private _txDepth: number;
 
-  declare readonly Id: Id<N>;
+  declare readonly Id: Id<N, RowId<S>>;
   declare readonly RowInput: RowInput<S>;
 
   as<const A extends string>(alias: A): AliasedCollection<Row<S>, A> {
@@ -283,7 +285,7 @@ export class Collection<
   }
 
   private async _loadById(
-    id: string,
+    id: IdValue,
     txDepthAtCall: number,
   ): Promise<Row<S> | null> {
     return loadByIdCollection(this._crud(), id, txDepthAtCall);
@@ -298,19 +300,19 @@ export class Collection<
   }
 
   async get<K extends string & keyof Row<S>>(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: { select: K[]; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
   async get<W extends WithSpec>(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: { with: W; orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts?: { orderBy?: Record<string, 1 | -1> } & ReadHints<S>,
   ): Promise<Result<Row<S> | null>>;
   async get(
-    idOrFilter: string | Id<N> | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     opts: {
       actor?: Actor;
       select?: (string & keyof Row<S>)[];
@@ -354,7 +356,7 @@ export class Collection<
   }
 
   async update(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
     patch: UpdateExpression<S>,
   ): Promise<Result<Row<S> | null>> {
     return updateCollection(this._crud(), idOrFilter, patch);
@@ -368,7 +370,7 @@ export class Collection<
   }
 
   async delete(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return deleteCollection(this._crud(), idOrFilter);
   }
@@ -380,7 +382,7 @@ export class Collection<
   }
 
   async purge(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return purgeCollection(this._crud(), idOrFilter);
   }
@@ -392,7 +394,7 @@ export class Collection<
   }
 
   async restore(
-    idOrFilter: string | Filter<S>,
+    idOrFilter: RowId<S> | Filter<S>,
   ): Promise<Result<Row<S> | null>> {
     return restoreCollection(this._crud(), idOrFilter);
   }
@@ -422,11 +424,11 @@ export class Collection<
 
   async bulkUnmask(
     items: ReadonlyArray<{
-      id: string;
+      id: RowId<S>;
       columns: readonly (string & keyof Row<S>)[];
     }>,
     opts: { actor: Actor; reason?: string },
-  ): Promise<Result<Map<string, Record<string, unknown>>>> {
+  ): Promise<Result<Map<RowId<S>, Record<string, unknown>>>> {
     return bulkUnmaskCollection(this._masking(), items, opts);
   }
 
