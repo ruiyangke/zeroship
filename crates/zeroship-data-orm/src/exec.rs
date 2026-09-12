@@ -764,9 +764,7 @@ mod tests {
                 assert_eq!(ev.collection, "messages");
                 assert_eq!(ev.op, ChangeOp::Insert);
                 assert_eq!(ev.pk.as_deref(), Some("7"));
-                // changed_columns excludes `created_at`/`updated_at`
-                // (none here) and surfaces every other RETURNING
-                // column; order isn't part of the contract.
+                // Every returned column is reported; order is not part of the contract.
                 let mut cols = ev.changed_columns.clone();
                 cols.sort();
                 assert_eq!(cols, vec!["id".to_string(), "title".to_string()]);

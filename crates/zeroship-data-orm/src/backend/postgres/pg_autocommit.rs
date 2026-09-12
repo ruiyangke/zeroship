@@ -97,7 +97,7 @@ async fn with_roled_transaction<T>(
     Ok(result)
 }
 
-/// Run `sql` under the per-app role and render the rows as JSON objects.
+/// Run `sql` under the per-app role and decode native records.
 ///
 /// # Errors
 ///
