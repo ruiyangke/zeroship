@@ -140,6 +140,9 @@ fn prepare_value_at(
     if matches!(kind, Some("date" | "timestamp" | "calendarDate")) {
         return scalar(kind.unwrap(), field, value);
     }
+    if matches!(kind, Some("boolean" | "bool")) && !value.is_boolean() {
+        return Err(invalid(field, "a boolean"));
+    }
     if !matches!(kind, Some("array" | "object" | "union")) {
         return Ok(());
     }
@@ -214,12 +217,6 @@ fn prepare_document_at(
     };
     for (field, value) in document {
         if let Some(definition) = schema.get(field) {
-            if !matches!(
-                definition["type"].as_str(),
-                Some("date" | "timestamp" | "calendarDate" | "array" | "object" | "union")
-            ) {
-                continue;
-            }
             let path = if prefix.is_empty() {
                 field.clone()
             } else {
@@ -350,6 +347,23 @@ mod tests {
             Value::Json("[1,\"text\",null,[true]]".into()),
         ] {
             prepare_value("values", &value!({"type":"array"}), &mut data).unwrap();
+        }
+    }
+
+    #[test]
+    fn documents_reject_storage_shaped_booleans_at_every_depth() {
+        let schema = value!({
+            "active": {"type":"boolean"},
+            "settings": {
+                "type":"object",
+                "shape":{"enabled":{"type":"boolean"}}
+            }
+        });
+        for mut document in [
+            value!({"active":1,"settings":{"enabled":true}}),
+            value!({"active":true,"settings":{"enabled":1}}),
+        ] {
+            assert!(prepare_document(&schema, &mut document).is_err());
         }
     }
 

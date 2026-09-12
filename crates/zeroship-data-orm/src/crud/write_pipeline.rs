@@ -773,8 +773,37 @@ mod tests {
             )
             .unwrap();
             assert_eq!(dynamic, model);
+            assert!(dynamic
+                .sql
+                .starts_with("SELECT \"target\".\"id\" AS \"id\" FROM "));
             assert_eq!(dynamic.sql.contains("FOR UPDATE"), expects_lock);
             assert_eq!(dynamic.params, vec![Value::from("Ada"), Value::from(1_i64)]);
+        }
+    }
+
+    #[test]
+    fn target_probes_reject_storage_shaped_boolean_filters_on_every_backend() {
+        use crate::{
+            crud::predicate::Input,
+            sql::{registration::SqlRegistration, SchemaName},
+        };
+
+        let namespace = SchemaName::new("app").unwrap();
+        let schema = crate::value!({
+            "id": { "type": "string", "primaryKey": true },
+            "active": { "type": "boolean" }
+        });
+
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            let result = super::compile_target_probe(
+                &namespace,
+                "people",
+                &schema,
+                Input::Dynamic(crate::value!({ "active": 1 })),
+                1,
+                &registration,
+            );
+            assert!(result.is_err(), "boolean filters require logical booleans");
         }
     }
 

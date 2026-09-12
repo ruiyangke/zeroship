@@ -243,15 +243,15 @@ const _procedures = { seed, updateManyByName };
             !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(
-            " LIMIT {}",
-            zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1
+        let expected_limit = zeroship_data_orm::value::Value::from(
+            zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1,
         );
-        for sql in &counters {
+        for query in &counters {
             assert!(
-                sql.ends_with(&expected_limit),
-                "updateMany target resolution must carry the row ceiling; sql={sql}"
+                query.sql.ends_with(" LIMIT $2"),
+                "updateMany target resolution must bind the row ceiling; query={query:?}"
             );
+            assert_eq!(query.params.last(), Some(&expected_limit));
         }
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
@@ -375,11 +375,12 @@ const _procedures = { overflow };
             1,
             "the overflow SQL witness set must contain exactly the exercised probe"
         );
-        let expected_limit = format!(" LIMIT {}", target_cap + 1);
+        let expected_limit = zeroship_data_orm::value::Value::from(target_cap + 1);
         assert!(
-            counters[0].ends_with(&expected_limit),
+            counters[0].sql.ends_with(" LIMIT $2"),
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
+        assert_eq!(counters[0].params.last(), Some(&expected_limit));
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let state = client

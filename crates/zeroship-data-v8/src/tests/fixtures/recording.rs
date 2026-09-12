@@ -16,10 +16,22 @@ use zeroship_data_orm::{
 };
 
 thread_local! {
-    static QUERIES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    static QUERIES: RefCell<Vec<RecordedQuery>> = const { RefCell::new(Vec::new()) };
 }
-fn record(sql: &str) {
-    QUERIES.with_borrow_mut(|queries| queries.push(sql.to_owned()));
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecordedQuery {
+    pub(crate) sql: String,
+    pub(crate) params: Vec<Value>,
+}
+
+fn record(sql: &str, params: &[Value]) {
+    QUERIES.with_borrow_mut(|queries| {
+        queries.push(RecordedQuery {
+            sql: sql.to_owned(),
+            params: params.to_vec(),
+        })
+    });
 }
 pub(crate) fn clear() {
     QUERIES.with_borrow_mut(Vec::clear);
@@ -28,17 +40,21 @@ pub(crate) fn bulk_statements() -> Vec<String> {
     QUERIES.with_borrow(|queries| {
         queries
             .iter()
-            .filter(|sql| sql.starts_with("UPDATE ") || sql.starts_with("DELETE "))
-            .cloned()
+            .filter(|query| query.sql.starts_with("UPDATE ") || query.sql.starts_with("DELETE "))
+            .map(|query| query.sql.clone())
             .collect()
     })
 }
 /// Identifier-only reads expose target resolution and upsert conflict probes.
-pub(crate) fn id_probes() -> Vec<String> {
+pub(crate) fn id_probes() -> Vec<RecordedQuery> {
     QUERIES.with_borrow(|queries| {
         queries
             .iter()
-            .filter(|sql| sql.starts_with("SELECT \"id\" FROM "))
+            .filter(|query| {
+                query
+                    .sql
+                    .starts_with("SELECT \"target\".\"id\" AS \"id\" FROM ")
+            })
             .cloned()
             .collect()
     })
@@ -93,7 +109,7 @@ impl ScopedExecutor for RecordingBackend {
         sql: &str,
         params: &[Value],
     ) -> Result<Vec<Value>, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.query(app_id, schema, sql, params).await
     }
     async fn exec(
@@ -103,7 +119,7 @@ impl ScopedExecutor for RecordingBackend {
         sql: &str,
         params: &[Value],
     ) -> Result<u64, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.exec(app_id, schema, sql, params).await
     }
     async fn open_tx_session(
@@ -161,11 +177,11 @@ impl DriverSession for RecordingSession {
         self.0.server_process_id()
     }
     async fn query(&self, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.query(sql, params).await
     }
     async fn exec(&self, sql: &str, params: &[Value]) -> Result<u64, DbError> {
-        record(sql);
+        record(sql, params);
         self.0.exec(sql, params).await
     }
     async fn settle(&self, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
