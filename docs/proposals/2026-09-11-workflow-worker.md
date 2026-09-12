@@ -13,6 +13,11 @@ refactor branch, but their production composition remains unfinished. The branch
 also contains central-journal, remote-completion and Control-authority work that
 must be removed or replaced before cutover. Those implementations are not
 permission to centralize customer workflow data.
+Closed coordination messages now live in `zeroship_core::workflow_coordination`,
+alongside shared lifecycle metadata and validated identifiers/counters. Native
+wire tests reject execution data and credentials at the message boundary,
+including nested management operations and acknowledgements. The coordinator
+handlers and persistence have not yet replaced the data-owning prototype.
 
 This design supersedes the older
 [control-plane design](2026-07-05-durable-workflows-design.md),

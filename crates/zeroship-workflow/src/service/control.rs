@@ -97,7 +97,7 @@ impl AppWorkflows {
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
         validate_run(run_id)?;
-        let deploy_policy = options.deploy_policy()?;
+        let deploy_policy = crate::lifecycle::restart_deploy_policy(&options)?;
         let digest = digest(&(run_id, &options))?;
         let mut tx = self.service.store.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;

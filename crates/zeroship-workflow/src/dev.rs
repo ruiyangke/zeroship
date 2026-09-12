@@ -406,7 +406,7 @@ impl DevWorkflowEngine {
         run_id: &str,
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        let policy = options.deploy_policy()?;
+        let policy = crate::lifecycle::restart_deploy_policy(&options)?;
         let mut conn = self.lock_conn()?;
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

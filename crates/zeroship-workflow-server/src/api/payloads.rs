@@ -69,7 +69,9 @@ async fn upload(
                 .worker(authorization(&request), endpoints::WORKFLOW_TASK_UPLOAD)
                 .await?;
             let token = TaskToken::try_from(header(&request, TASK_TOKEN_HEADER)?.to_owned())?;
-            let request_id = RequestId::try_from(header(&request, REQUEST_ID_HEADER)?.to_owned())?;
+            let request_id = RequestId::parse(header(&request, REQUEST_ID_HEADER)?).map_err(|_| {
+                WorkflowServiceError::InvalidRequest("invalid workflow request identity".into())
+            })?;
             let reference: WorkflowOutputRef =
                 serde_json::from_str(header(&request, PAYLOAD_HEADER)?).map_err(|_| {
                     WorkflowServiceError::InvalidRequest(
