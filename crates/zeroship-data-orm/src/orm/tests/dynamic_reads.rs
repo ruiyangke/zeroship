@@ -100,3 +100,97 @@ async fn sqlite_dynamic_reads_use_the_registered_compiler() {
 async fn postgres_dynamic_reads_use_the_registered_compiler() {
     exercise(true).await;
 }
+
+#[compio::test]
+async fn dynamic_find_rejects_malformed_options() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({
+            "category":{"type":"string"},
+            "views":{"type":"integer"}
+        }),
+    )
+    .await;
+    let records = owner.database.collection("records").unwrap();
+
+    for (options, expected) in [
+        (value!({"limit":"1"}), "limit must be an integer"),
+        (value!({"offset":"1"}), "offset must be an integer"),
+        (
+            value!({"include_deleted":"true"}),
+            "include_deleted must be a boolean",
+        ),
+        (value!({"unmask":"category"}), "unmask must be an array"),
+        (
+            value!({"unmask":["category", 1]}),
+            "unmask entries must be strings",
+        ),
+        (value!({"unmaskReason":1}), "unmaskReason must be a string"),
+        (
+            value!({"orderBy":{"views":0}}),
+            "orderBy direction must be 1 or -1",
+        ),
+        (
+            value!({"orderBy":[["views", "desc"]]}),
+            "orderBy direction must be 1 or -1",
+        ),
+    ] {
+        let error = records.find(value!({}), options).await.unwrap_err();
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {error}"
+        );
+    }
+
+    let error = records
+        .find(value!({}), value!("invalid options"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("find options must be an object"));
+    owner.close().await;
+}
+
+#[compio::test]
+async fn other_dynamic_reads_reject_malformed_options() {
+    let owner = CollectionFixture::sqlite(
+        "records",
+        value!({
+            "category":{"type":"string"},
+            "views":{"type":"integer"}
+        }),
+    )
+    .await;
+    let records = owner.database.collection("records").unwrap();
+
+    let error = records
+        .count(value!({}), value!({"include_deleted":"true"}))
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("include_deleted must be a boolean"));
+
+    let error = records
+        .execute(Operation::Distinct {
+            field: "category".into(),
+            filter: value!({}),
+            options: value!("invalid options"),
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("distinct options must be an object"));
+
+    let error = records
+        .execute(Operation::Aggregate {
+            pipeline: value!([{"$group":{"records":{"$count":true}}}]),
+            options: value!("invalid options"),
+        })
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("aggregate options must be an object"));
+    owner.close().await;
+}
