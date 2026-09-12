@@ -14,11 +14,11 @@ use zeroship_core::{
     },
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{
-        client::{Error, Options, WorkerCoordinator},
         AcknowledgeManagement, AssignedScope, FailureCode, ManagementOutcome, PublishWakeHint,
         RegisterWorker, RequestId, RunId, ScopePage, WorkerId, WorkerState,
     },
 };
+use zeroship_workflow::coordination::{Error, Options, WorkerCoordinator};
 
 fn auth(issuer: ServiceIssuer) -> Arc<ServiceAuth> {
     let keyring = ServiceKeyring::from_parts(
@@ -43,7 +43,7 @@ fn worker_auth() -> Arc<ServiceAuth> {
     )
 }
 
-fn registration() -> RegisterWorker {
+const fn registration() -> RegisterWorker {
     RegisterWorker {
         capacity: NonZeroU32::new(3).unwrap(),
         state: WorkerState::Ready,
@@ -61,57 +61,63 @@ fn response(status: u16, body: &impl serde::Serialize) -> Vec<u8> {
     bytes
 }
 
-async fn reply(bytes: Vec<u8>, options: Options, test: impl AsyncFnOnce(WorkerCoordinator)) {
-    reply_as(bytes, worker_auth(), options, test).await;
+fn reply<'a>(
+    bytes: Vec<u8>,
+    options: Options,
+    test: impl AsyncFnOnce(WorkerCoordinator) + 'a,
+) -> futures::future::LocalBoxFuture<'a, ()> {
+    reply_as(bytes, worker_auth(), options, test)
 }
 
-async fn reply_as(
+fn reply_as<'a>(
     bytes: Vec<u8>,
     auth: Arc<ServiceAuth>,
     options: Options,
-    test: impl AsyncFnOnce(WorkerCoordinator),
-) {
-    let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let client = WorkerCoordinator::new(&url, auth, options).unwrap();
-    let (done, stop) = futures::channel::oneshot::channel();
-    let server = async {
-        let (mut stream, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        loop {
-            let compio::BufResult(read, bytes) = stream.read(vec![0; 1024]).await;
-            let read = read.unwrap();
-            assert_ne!(read, 0);
-            request.extend_from_slice(&bytes[..read]);
-            assert!(request.len() < 16 * 1024);
-            if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                let header = std::str::from_utf8(&request[..end])
-                    .unwrap()
-                    .to_ascii_lowercase();
-                assert!(header.contains("authorization: bearer "));
-                let length: usize = header
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length: "))
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                if request.len() >= end + 4 + length {
-                    break;
+    test: impl AsyncFnOnce(WorkerCoordinator) + 'a,
+) -> futures::future::LocalBoxFuture<'a, ()> {
+    Box::pin(async move {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let client = WorkerCoordinator::new(&url, auth, options).unwrap();
+        let (done, stop) = futures::channel::oneshot::channel();
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let compio::BufResult(read, bytes) = stream.read(vec![0; 1024]).await;
+                let read = read.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&bytes[..read]);
+                assert!(request.len() < 16 * 1024);
+                if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header = std::str::from_utf8(&request[..end])
+                        .unwrap()
+                        .to_ascii_lowercase();
+                    assert!(header.contains("authorization: bearer "));
+                    let length: usize = header
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
                 }
             }
-        }
-        // A body-size rejection may close the connection before all bytes send.
-        let _ = stream.write_all(bytes).await;
-        let _ = stop.await;
-    };
-    compio::time::timeout(Duration::from_secs(10), async {
-        futures::join!(server, async {
-            test(client).await;
-            let _ = done.send(());
-        });
+            // A body-size rejection may close the connection before all bytes send.
+            let _ = stream.write_all(bytes).await;
+            let _ = stop.await;
+        };
+        compio::time::timeout(Duration::from_secs(10), async {
+            futures::join!(server, async {
+                test(client).await;
+                let _ = done.send(());
+            });
+        })
+        .await
+        .expect("client contract hung");
     })
-    .await
-    .expect("client contract hung");
 }
 
 #[compio::test]

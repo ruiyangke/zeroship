@@ -69,9 +69,10 @@ grants. These paths and grants violate the revised ownership rule and must be
 removed with production composition; the new engine's customer binding does not
 establish that boundary for the old worker binary.
 
-The native worker coordinator client now exchanges registration, assignment,
-wake and management metadata through the authenticated service API. It binds
-the enrolled worker signer, mints a fresh assertion per call and checks response
+The native `zeroship_workflow::coordination::WorkerCoordinator` client exchanges
+registration, assignment, wake and management metadata through the authenticated
+service API. It binds the enrolled worker signer, mints a fresh assertion per
+call and checks response
 scope and receipt identity. Request serialization, response streaming and the
 complete exchange are bounded. Redirects and malformed metadata are rejected.
 The production worker's polling and policy composition remain pending.
@@ -135,9 +136,10 @@ schedule discovery retains its relational SQL query.
 Signal-token authorization reads app and topic epochs through generated models;
 revocation writes the scoped app, run or topic collection under the existing
 locks. Native tests preserve foreign-app and unaffected-target authority,
-idempotent revocation and epoch exhaustion behavior. Topic initialization keeps
-its explicit insert-on-conflict statement so issuing another token cannot reset
-a previously revoked epoch.
+idempotent revocation and epoch exhaustion behavior. Topic initialization reads
+the existing epoch and inserts an absent topic through ORM collections while
+holding the app lock. Concurrent issuers cannot reset a revoked epoch, including
+when they use independent worker connections.
 Payload admission, lookup, promotion and collection state changes now use ORM
 collections and generated models. Replay and slot reads join payload ownership
 with the complete app and generation scope. Quota aggregation uses native integer
@@ -277,6 +279,15 @@ codes and lifecycle states. Retried requests retain their original command and
 authenticated Control issuer. Delivery can repeat after a lost response or reach
 another assigned worker; applying it still requires the customer's engine to
 deduplicate by request identity in its own database.
+
+Production management execution must retain its outcome for the coordinator's
+entire redelivery lifetime. The engine's ordinary request receipts expire, while
+a queued coordinator command currently remains pending until acknowledgement.
+Connecting polling directly to `transition` or `restart` would therefore allow a
+lost acknowledgement and delayed retry to repeat a restart after receipt expiry.
+The worker needs durable management receipts, including rejected outcomes,
+before that connection is enabled. Acknowledgements remain closed metadata;
+their durability must not require either service to read the other's database.
 
 The worker publishes wake-up metadata from a durable intent committed beside
 its own scheduling changes. Publication is retryable and revisioned. A wake-up

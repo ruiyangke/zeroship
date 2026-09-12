@@ -6,7 +6,6 @@
 //! resources and never grant authority to them.
 
 mod lifecycle;
-pub mod client;
 pub use lifecycle::{RestartDeploy, RestartOptions, RestartTarget, RunOperation, RunState};
 
 use crate::{app_id::AppId, entity_id::declare_entity_id, typed_id};
