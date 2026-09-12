@@ -178,7 +178,10 @@ impl SqlCompiler for PostgresCompiler {
         statement: Statement,
         effective: &SqlSupport,
     ) -> Result<CompiledQuery, CompileError> {
-        self.check(&self.requirements(&statement), effective)?;
+        self.check(
+            &super::shared::compiler_requirements(self, &statement),
+            effective,
+        )?;
         match statement {
             Statement::Select(statement) => {
                 super::shared::compile_select(SYNTAX, effective, statement)

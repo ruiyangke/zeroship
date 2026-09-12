@@ -145,6 +145,19 @@ fn scalar_select(
 }
 
 #[test]
+fn resolved_statements_reject_empty_connectives() {
+    for predicate in [
+        ResolvedPredicate::And(Vec::new()),
+        ResolvedPredicate::Or(Vec::new()),
+    ] {
+        assert_eq!(
+            select_with_predicate(aliased_table(), predicate).unwrap_err(),
+            CompileError::InvalidStatement("predicate connective cannot be empty".into())
+        );
+    }
+}
+
+#[test]
 fn resolved_selects_reject_backend_dependent_ordering() {
     for storage in [
         StorageType::Boolean,
@@ -1061,6 +1074,38 @@ fn parts(table: &Table) -> UpsertParts {
 }
 
 #[test]
+fn upsert_normalizes_record_derived_assignments() {
+    fn assignment(table: &Table, name: &str, value: Value) -> Assignment {
+        Assignment {
+            column: table.column(name).unwrap(),
+            value: Expression::Bind(value),
+        }
+    }
+
+    let table = table();
+    let mut first = parts(&table);
+    first.update = vec![
+        assignment(&table, "revision", Value::from(9)),
+        assignment(&table, "payload", Value::Bytes(vec![1, 2, 3])),
+    ];
+    let mut second = parts(&table);
+    second.update = vec![
+        assignment(&table, "payload", Value::Bytes(vec![1, 2, 3])),
+        assignment(&table, "revision", Value::from(9)),
+    ];
+
+    let first = SqlRegistration::postgres()
+        .compile(Statement::Upsert(Upsert::new(first).unwrap()))
+        .unwrap();
+    let second = SqlRegistration::postgres()
+        .compile(Statement::Upsert(Upsert::new(second).unwrap()))
+        .unwrap();
+
+    assert_eq!(first.sql(), second.sql());
+    assert_eq!(first.params(), second.params());
+}
+
+#[test]
 fn source_membership_cannot_be_forged_with_the_same_table_name() {
     let own = table();
     let foreign = table();
@@ -1236,6 +1281,10 @@ struct PermissiveCompiler(SqlSupport);
 impl SqlCompiler for PermissiveCompiler {
     fn support(&self) -> SqlSupport {
         self.0
+    }
+
+    fn bind_parameters(&self, _: &Statement) -> usize {
+        0
     }
 
     fn check(&self, _: &Requirements, _: &SqlSupport) -> Result<(), CompileError> {

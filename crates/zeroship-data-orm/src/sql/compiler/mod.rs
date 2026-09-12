@@ -7,6 +7,7 @@ mod sqlite;
 mod writer;
 pub use postgres::PostgresCompiler;
 pub use query::{CompiledQuery, ParameterType};
+pub(crate) use shared::compiler_requirements;
 pub use shared::{IdentityPlan, IdentityReadPlan, Requirements, SqlCompiler, SqlSupport};
 pub use sqlite::SqliteCompiler;
 pub(crate) use writer::{ParameterSlot, SqlWriter};
