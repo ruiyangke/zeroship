@@ -2,6 +2,7 @@
 //! Production collection compilation also lives in `sql::compile`; their shared
 //! compiler replacement is described in the ORM SQL compilation proposal.
 
+use crate::sql::compiler::BindBudget;
 use crate::sql::compiler::{CompileError, CompiledQuery, ParameterSlot, SqlWriter};
 use crate::sql::ident::Ident;
 use crate::sql::literal::Literal;
@@ -12,7 +13,6 @@ use crate::sql::predicate::{
 };
 use crate::sql::projection::{ProjectedField, ProjectionSource, SearchScalarKind};
 use crate::sql::search::{Search, SearchCriterion, VectorMetric};
-use crate::sql::write::BindBudget;
 use crate::sql::write::{
     Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue,
 };

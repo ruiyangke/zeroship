@@ -7,80 +7,16 @@
 //! Row limits and backend bind budgets bound different resources and are checked
 //! separately. JSON array mutations live in the runtime collection compiler.
 
+use crate::sql::compiler::BindBudget;
 use crate::sql::ident::Ident;
 use crate::sql::literal::Literal;
 use crate::sql::plan::RowLimit;
-use crate::sql::predicate::{MAX_PREDICATE_DEPTH, Predicate};
+use crate::sql::predicate::{Predicate, MAX_PREDICATE_DEPTH};
 use crate::sql::projection::{Projection, ProjectionKind};
 use core::fmt;
 
 /// Maximum rows in an insert plan, separate from the backend's bind budget.
 pub const MAX_INSERT_ROWS: usize = 1_000;
-
-/// The bind-parameter ceiling of one backend's wire protocol.
-///
-/// # Why this is an argument and not a constant
-///
-/// The bound is **per dialect**: `POSTGRES_MAX_BIND_PARAMETERS` and
-/// `SQLITE_MAX_BIND_PARAMETERS` are two different numbers at `query.rs:602-603`.
-/// This crate has no dialect at plan-construction time, because a plan is
-/// backend-neutral by design and the backend is chosen at lowering.
-///
-/// Three ways to resolve that, two of them wrong:
-///
-/// * **Hard-code `PostgreSQL`.** Then the dev tier silently accepts a batch it
-///   cannot execute, and the failure arrives from `SQLite` as a driver error
-///   naming neither the batch nor the bound.
-/// * **Take the tighter of the two.** Then production refuses a batch it could
-///   serve because the dev tier could not, which is the dev tier constraining
-///   production - the inversion of what a dev tier is for.
-/// * **Make the caller name it.** The caller *does* know which backend the plan
-///   is bound for; it is the same decision that picks the renderer. So the
-///   budget is a required constructor argument with no default.
-///
-/// The type is a closed set of two associated constants and has **no public
-/// constructor**, so a caller cannot invent a budget of `usize::MAX` and argue
-/// their way past the bound. Adding a dialect means adding a constant here,
-/// beside the two it must be compared against.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BindBudget {
-    dialect: &'static str,
-    max: usize,
-}
-
-impl BindBudget {
-    /// `PostgreSQL`: 65,535.
-    ///
-    /// Verified against the encoder that writes the field rather than taken
-    /// from the mirrored constant alone: `frontend::bind` writes the Bind
-    /// message's parameter count through `write_counted`, which narrows with
-    /// `u16::from_usize(count)?` and `BigEndian::write_u16`
-    /// (postgres-protocol 0.6.12, `src/message/frontend.rs:48-101`; that
-    /// version is the one `Cargo.lock:4366-4368` resolves). One parameter more
-    /// than this is an encoder error, not a truncated message.
-    pub const POSTGRES: Self = Self {
-        dialect: "postgres",
-        max: u16::MAX as usize,
-    };
-
-    /// `SQLite`: 32,766. Mirrors `SQLITE_MAX_BIND_PARAMETERS` (`query.rs:603`).
-    pub const SQLITE: Self = Self {
-        dialect: "sqlite",
-        max: 32_766,
-    };
-
-    /// The ceiling.
-    #[must_use]
-    pub const fn max(self) -> usize {
-        self.max
-    }
-
-    /// The dialect's name, for refusal messages.
-    #[must_use]
-    pub const fn dialect_name(self) -> &'static str {
-        self.dialect
-    }
-}
 
 /// A value a write puts into a column.
 ///
