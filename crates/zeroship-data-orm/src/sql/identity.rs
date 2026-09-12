@@ -61,7 +61,6 @@ pub fn allocation(
             has_sequence: BuiltQuery { sql:format!("SELECT name FROM {}.sqlite_schema WHERE type = 'table' AND name = 'sqlite_sequence'", crate::sql::compile::quote_ident(namespace.as_str())), params:vec![] },
             sequence: BuiltQuery { sql:format!("SELECT seq AS id FROM {}.sqlite_sequence WHERE name = $1", crate::sql::compile::quote_ident(namespace.as_str())), params:vec![Value::from(collection)] },
         }),
-        SqlDialect::Mysql => Err(QueryError::InvalidFilter("identity reservation is unavailable for this dialect".into())),
     }
 }
 

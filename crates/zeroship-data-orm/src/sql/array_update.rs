@@ -67,11 +67,6 @@ pub fn render(
                  THEN {mutation} ELSE json('') END"
             )
         }
-        SqlDialect::Mysql => {
-            return Err(QueryError::InvalidFilter(
-                "array updates are unsupported for MySQL".into(),
-            ));
-        }
     };
     Ok(format!("{column} = {expression}"))
 }
