@@ -477,7 +477,24 @@ export type InferId<C> =
  * (eager-load the full target row). Future shapes — column narrowing,
  * relation-level filters — slot in as `{ columns: K[] } | { where: Filter }`.
  */
-export type WithSpec = Record<string, true>;
+export type RelationField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: [ExtractRefTarget<NonNullable<S[K]>>] extends [never] ? never : K;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: [ExtractRefTarget<NonNullable<Row<S>[K]>>] extends [never]
+          ? never
+          : K;
+      }[keyof Row<S>]);
+
+export type WithSpec<S = PlainObject> = [RelationField<S>] extends [never]
+  ? never
+  : AtLeastOne<Record<RelationField<S>, true>>;
+
+export type ExactWithSpec<S, W extends WithSpec<S>> = W &
+  Record<Exclude<keyof W, RelationField<S>>, never>;
 
 /**
  * Extract the target table name (e.g. `"users"`) from whatever shape the
@@ -496,9 +513,11 @@ export type ExtractRefTarget<X> =
     ? U extends Id<infer T>
       ? T
       : never
-    : X extends { type: "ref"; refTarget: infer T extends string }
+    : X extends Id<infer T, any>
       ? T
-      : never;
+      : X extends { type: "ref"; refTarget: infer T extends string }
+        ? T
+        : never;
 
 /**
  * Unwrap whatever shape an `AllSchemas[name]` slot holds into the raw
@@ -518,11 +537,8 @@ export type UnwrapSchemaForRelation<T> =
 
 /**
  * Resolve the target table's `Row<...>` given the field type at `S[K]`
- * and the parent db's schema map. Falls back to `PlainObject` when the
- * target name can't be matched against any declared collection — that
- * preserves the v1 behaviour for unknown targets without breaking
- * compilation. Tightens to the real `Row<TargetSchema>` whenever
- * `installSchema`'s schema map carries the target name (the common case).
+ * and the parent database's schema map. Standalone models without that map
+ * use `PlainObject`; installed schemas resolve the declared target row.
  */
 export type ResolveTargetRow<X, AllSchemas> =
   ExtractRefTarget<X> extends infer Target
@@ -541,10 +557,9 @@ export type ResolveTargetRow<X, AllSchemas> =
  * threading it through `Collection<S, N, AllSchemas>` lets us look up each key's
  * `t.ref(target)` and resolve `target` to the target collection's `Row`.
  * The default `Record<string, unknown>` keeps direct `Collection`/`Query`
- * users (e.g. `model("users", ...)`) compiling — they degrade to
- * `PlainObject` per relation, exactly the v1 behaviour.
+ * users (e.g. `model("users", ...)`) compiling with `PlainObject` relations.
  */
-export type WithRelations<S, W extends WithSpec, AllSchemas = Record<string, unknown>> = {
+export type WithRelations<S, W extends WithSpec<S>, AllSchemas = Record<string, unknown>> = {
   [K in keyof W & keyof S]: ResolveTargetRow<S[K], AllSchemas> | null;
 };
 

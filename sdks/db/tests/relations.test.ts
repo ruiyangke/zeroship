@@ -306,7 +306,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: { bogus: true } — clear error when field is unknown", async () => {
     const { db } = makeDb();
-    const { data, error } = await db.todos.find({}, { with: { bogus: true } as { bogus: true } });
+    const { data, error } = await db.todos.find({}, { with: { bogus: true } as never });
     assert.equal(data, null);
     assert.ok(error);
     assert.match(error!.message, /is not a reference field/);
@@ -315,7 +315,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
   test("with: { id: true } — clear error when field is not a ref", async () => {
     const { db } = makeDb();
     // `id` is a real field but not a t.ref — must reject identically.
-    const { data, error } = await db.todos.find({}, { with: { id: true } as { id: true } });
+    const { data, error } = await db.todos.find({}, { with: { id: true } as never });
     assert.equal(data, null);
     assert.ok(error);
     assert.match(error!.message, /is not a reference field/);
@@ -323,7 +323,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: { title: true } — clear error when field exists but isn't a ref", async () => {
     const { db } = makeDb();
-    const { data, error } = await db.todos.find({}, { with: { title: true } as { title: true } });
+    const { data, error } = await db.todos.find({}, { with: { title: true } as never });
     assert.equal(data, null);
     assert.ok(error);
     assert.match(error!.message, /is not a reference field/);
@@ -368,7 +368,7 @@ describe("with: { fk: true } — relation-aware reads", () => {
 
   test("with: {} (empty spec) is a no-op — relation step never runs", async () => {
     const { db, calls } = makeDb();
-    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: {} });
+    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: {} as never });
     assert.ok(data);
     // Original todos shape preserved; no users find fired.
     const userFinds = calls.find.filter((c) => c.collection === "users");
@@ -555,7 +555,7 @@ describe("Query.with — guards against direct Query construction", () => {
       async () => [],
     );
     assert.throws(
-      () => q.with({ userId: true }),
+      () => q.with({ userId: true } as never),
       (e: unknown) => {
         assert.ok(e instanceof TypeError);
         assert.match((e as Error).message, /Collection\.find/);

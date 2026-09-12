@@ -54,6 +54,18 @@ const db = installSchemaForTest(
   { native, naming: { toColumn: (s) => s, toField: (s) => s } },
 );
 
+function relationKeyTypes(): void {
+  db.todos.find({}).with({ userId: true });
+  db.todos.find({}, { with: { projectId: true } });
+  // @ts-expect-error relation loading requires a declared reference field
+  db.todos.find({}).with({ title: true });
+  // @ts-expect-error valid relation keys do not permit unrelated fields
+  db.todos.find({}).with({ userId: true, title: true });
+  // @ts-expect-error an empty relation request has no effect
+  db.todos.get("todo_1", { with: {} });
+}
+void relationKeyTypes;
+
 describe("relations type-level: inline find(filter, { with })", () => {
   test("data[0].userId is Row<usersSchema> | null — .email / .name / .id all typecheck", async () => {
     const { data } = await db.todos.find({}, { with: { userId: true } });
