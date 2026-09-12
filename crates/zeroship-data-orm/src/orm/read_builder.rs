@@ -69,19 +69,29 @@ impl<C: Column> SourceColumn<C> {
 }
 impl<C: FilterableColumn> SourceColumn<C> {
     pub fn eq<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+        self.comparison("$eq", value)
+    }
+    pub fn gt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+        self.comparison("$gt", value)
+    }
+    fn comparison<T: EncodeValue<C::SqlType>>(
+        &self,
+        operator: &str,
+        value: T,
+    ) -> Result<Predicate, DbError> {
         let filter = crate::sql::filter::decode(&Value::Object(
             [(
                 C::NAME.into(),
-                Value::Object([("$eq".into(), value.encode_value()?)].into()),
+                Value::Object([(operator.into(), value.encode_value()?)].into()),
             )]
             .into(),
         ))?;
         let Predicate::And(mut children) = filter else {
-            return Err(read::invalid("invalid equality"));
+            return Err(read::invalid("invalid comparison"));
         };
         let predicate = children
             .pop()
-            .ok_or_else(|| read::invalid("missing equality"))?;
+            .ok_or_else(|| read::invalid("missing comparison"))?;
         Ok(match predicate {
             Predicate::Compare { op, rhs, .. } => Predicate::Compare {
                 lhs: Operand::Path(self.path()),
@@ -92,7 +102,7 @@ impl<C: FilterableColumn> SourceColumn<C> {
                 operand: Operand::Path(self.path()),
                 negated,
             },
-            _ => return Err(read::invalid("invalid equality")),
+            _ => return Err(read::invalid("invalid comparison")),
         })
     }
     pub fn eq_column<D: FilterableColumn>(
