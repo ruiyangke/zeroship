@@ -479,12 +479,29 @@ pub enum RowLock {
 }
 
 #[derive(Debug)]
-pub struct SelectStatement(SelectParts);
+pub struct SelectStatement(SelectParts, Option<SelectSummary>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SelectSummary {
+    Count,
+    Exists,
+}
 
 impl SelectStatement {
+    pub(crate) fn summarize(mut self, summary: SelectSummary) -> Self {
+        self.0.order_by.clear();
+        self.0.offset = None;
+        self.0.limit = (summary == SelectSummary::Exists).then_some(1);
+        self.1 = Some(summary);
+        self
+    }
+    pub(crate) fn summary(&self) -> Option<SelectSummary> {
+        self.1
+    }
+
     pub fn new(parts: SelectParts) -> Result<Self, CompileError> {
         validate_select(&parts)?;
-        Ok(Self(parts))
+        Ok(Self(parts, None))
     }
 
     pub fn parts(&self) -> &SelectParts {
