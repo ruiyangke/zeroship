@@ -452,7 +452,6 @@ async fn close_admission(
     for collection in [
         models::runs::Entity::COLLECTION,
         models::generations::Entity::COLLECTION,
-        models::schedules::Entity::COLLECTION,
     ] {
         let retained = tx
             .database()

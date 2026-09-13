@@ -557,62 +557,6 @@ async fn receipt_contract(store: Rc<OrmStore>) {
     }
 }
 
-#[compio::test]
-async fn sqlite_schedule_references_prevent_deployment_release() {
-    let dir = tempfile::tempdir().unwrap();
-    schedule_contract(Rc::new(
-        sqlite_store(&dir.path().join("customer.sqlite")).await,
-    ))
-    .await;
-}
-#[compio::test]
-async fn postgres_schedule_references_prevent_deployment_release() {
-    let fixture = PostgresFixture::start().await;
-    schedule_contract(Rc::new(fixture.store.clone())).await;
-}
-async fn schedule_contract(store: Rc<OrmStore>) {
-    use crate::service::{IntervalAnchor, ScheduleRegistration, ScheduleTiming};
-    let (service, app, _, platform) = registered_service(store).await;
-    let client = platform.client(&app);
-    let mut first = DeployRegistration {
-        id: typed_id::generate("dep"),
-        hash: String::new(),
-        workflows: ["Example".into()].into(),
-        schedules: vec![],
-    };
-    first.schedules.push(ScheduleRegistration {
-        name: "periodic".into(),
-        workflow_name: "Example".into(),
-        schedule: ScheduleTiming::Interval {
-            interval_ms: 3_600_000,
-            anchor: IntervalAnchor::Deploy,
-        },
-        input: json!(null),
-        overlap: Default::default(),
-        catch_up: Default::default(),
-    });
-    let first = platform
-        .publish(&app, &first, &Sources::default())
-        .await
-        .unwrap();
-    let second = platform.deploy(&app).await;
-    service
-        .acquire_deployment_hold(&app, &first.id, &first.hash, &client)
-        .await
-        .unwrap();
-    service.activate_deploy(&app, &first).await.unwrap();
-    service.activate_deploy(&app, &second).await.unwrap();
-    assert!(service
-        .release_deployment_hold(&app, &first.id, &client)
-        .await
-        .is_err());
-    platform.assert_held(&app, &first.id).await;
-    assert!(service
-        .pending_deployment_holds(&app, None, 1)
-        .await
-        .unwrap()
-        .is_empty());
-}
 
 struct NoPlatformIo(HoldScope);
 

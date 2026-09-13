@@ -12,9 +12,10 @@ token and topic broadcast helpers used by systems outside the app.
 This reference describes the current implementation. The revised
 [manager and job queue design](../proposals/2026-09-11-workflow-worker.md) assigns
 cron, timers and durable job delivery to the workflow server. Workers consume
-jobs and keep execution history and payloads in creator storage. That scheduling
-and production cutover is not complete; the current local host uses the shared
-journal engine and its worker-side scheduling loop. The provisioning instructions
+jobs and keep execution history and payloads in creator storage. Native manager
+scheduling and creator Cron acceptance exist; production and local host
+composition remain incomplete. The creator calendar loop has been removed,
+so the current CLI task loop does not generate scheduled jobs. The provisioning instructions
 below still apply today.
 
 ## Rust integration
@@ -638,8 +639,12 @@ schedule({ name: "heartbeat", schedule: cronExpr("*/5 * * * *"), workflow: Heart
 ```
 
 Schedule registrations are discovered at build time and stored in the deploy
-manifest. The engine sweeps the normalized schedule rows and starts ordinary
-workflow runs.
+manifest. The manager evaluates calendar metadata and persists each occurrence
+with its deployment, activation revision and run identity. The creator worker
+verifies that deployment, resolves its static input and atomically accepts the
+occurrence with a run and Advance publication intent. It performs no calendar
+evaluation. Completed acceptance and overlap skips survive redelivery;
+unavailable prerequisites and capacity failures remain retryable.
 
 Supported schedule forms:
 

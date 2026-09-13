@@ -118,7 +118,7 @@ impl WorkflowService {
             )
             .await?;
         let now = tx.now().await?;
-        super::schedules::reconcile(&tx, app, deploy, &policy, now).await?;
+        super::schedules::validate_deployment(deploy, &policy, now)?;
         tx.commit().await
     }
 

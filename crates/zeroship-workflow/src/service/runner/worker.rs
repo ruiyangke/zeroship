@@ -202,16 +202,6 @@ async fn maintain(service: &WorkflowService, options: WorkerOptions, shutdown: S
         let tick = async {
             match compio::time::timeout(
                 Duration::from_millis(options.maintenance_timeout_ms),
-                service.tick_schedules(),
-            )
-            .await
-            {
-                Ok(Ok(_)) => {}
-                Ok(Err(error)) => tracing::warn!(code = error.code(), "workflow scheduling failed"),
-                Err(_) => tracing::warn!("workflow scheduling timed out"),
-            }
-            match compio::time::timeout(
-                Duration::from_millis(options.maintenance_timeout_ms),
                 service.collect_payloads(options.payload_collection_batch),
             )
             .await

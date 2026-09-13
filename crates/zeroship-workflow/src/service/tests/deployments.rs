@@ -2,7 +2,6 @@ use super::*;
 use crate::operations::{RunOperation, RunState};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 mod failures;
-mod schedules;
 
 fn image(value: &str) -> Sources {
     Sources {

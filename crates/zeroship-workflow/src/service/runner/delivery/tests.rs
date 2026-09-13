@@ -1,6 +1,7 @@
 use super::*;
 mod activation;
 mod consumer;
+mod cron;
 use crate::{
     operations::{RunState, StartOptions},
     service::{

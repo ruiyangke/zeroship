@@ -6,10 +6,7 @@
 use super::*;
 use crate::{
     engine::WorkflowOutputRef,
-    service::{
-        IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleRegistration, ScheduleTiming,
-        WorkerIdentity,
-    },
+    service::WorkerIdentity,
 };
 use std::time::Instant;
 use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
@@ -43,17 +40,7 @@ async fn seed_app(
                 id: typed_id::generate("dep"),
                 hash: "b".repeat(64),
                 workflows: ["Example".into()].into(),
-                schedules: vec![ScheduleRegistration {
-                    name: "periodic".into(),
-                    workflow_name: "Example".into(),
-                    schedule: ScheduleTiming::Interval {
-                        interval_ms: 3_600_000,
-                        anchor: IntervalAnchor::Deploy,
-                    },
-                    input: json!(null),
-                    overlap: ScheduleOverlap::default(),
-                    catch_up: ScheduleCatchUp::default(),
-                }],
+                schedules: vec![],
             },
         )
         .await
@@ -96,7 +83,6 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
     )
     .await
     .remove(0);
-    let source_schedules = journal_rows(&tx, "schedules", json!({"app_id":source.as_str()})).await;
     for _ in 0..140 {
         let app = AppId::mint();
         journal_insert(&tx, "app_state", json!({"id":storage_id(), "app_id":app.as_str(), "signal_epoch":0, "last_polled_at":-1})).await.unwrap();
@@ -116,15 +102,6 @@ async fn seed_unassigned_backlog(service: &WorkflowService, source: &AppId) {
         )
         .await
         .unwrap();
-        for source_schedule in &source_schedules {
-            let mut schedule = serde_json::to_value(&source_schedule.0).unwrap();
-            schedule["id"] = json!(typed_id::new_workflow_schedule_id());
-            schedule["app_id"] = json!(app.as_str());
-            schedule["deploy_id"] = json!(deploy_id);
-            schedule["next_at"] = json!(0);
-            schedule["last_checked_at"] = json!(-1);
-            journal_insert(&tx, "schedules", schedule).await.unwrap();
-        }
         crate::service::signals::publish(
             &mut tx,
             &app,
@@ -170,7 +147,6 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     for (table, column) in [
         ("tasks", "deadline"),
         ("runs", "due_at"),
-        ("schedules", "next_at"),
         ("payloads", "expires_at"),
     ] {
         journal_update(&tx, table, json!({}), json!({column:0})).await;
@@ -190,7 +166,6 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         .with_payload_storage(storage)
         .unwrap();
     assert!(reopened.poll(&worker).await.unwrap().is_none());
-    assert_eq!(reopened.tick_schedules().await.unwrap(), 0);
     assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
     assert_eq!(reopened.collect_payloads(1).await.unwrap(), 0);
     reopened
@@ -199,7 +174,6 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
         .unwrap();
     let task = reopened.poll(&worker).await.unwrap().unwrap();
     assert_eq!(task.invocation.app_id, assigned.as_str());
-    assert_eq!(reopened.tick_schedules().await.unwrap(), 1);
     assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
     let tx = service.begin().await.unwrap();
     let completed = journal_rows(&tx, "broadcasts", json!({"finished":1})).await;
@@ -253,15 +227,6 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     let foreign_task = journal_rows(&tx, "tasks", json!({"app_id":foreign.as_str()})).await;
     assert_eq!(foreign_task.len(), 1);
     assert_eq!(foreign_task[0].text("state").unwrap(), "leased");
-    assert_eq!(
-        journal_count(
-            &tx,
-            "occurrences",
-            json!({"app_id":{"$ne":assigned.as_str()}})
-        )
-        .await,
-        0
-    );
     assert_eq!(
         journal_count(
             &tx,

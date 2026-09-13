@@ -11,7 +11,7 @@ use super::{
     deployment_retention::admission_generation,
     deployments::unavailable,
     deploys,
-    models::{activation_scopes, activations, deploys as deployment_rows, job_receipts, schedules},
+    models::{activation_scopes, activations, deploys as deployment_rows, job_receipts},
     store::Transaction,
     AppWorkflows, DeployRegistration,
 };
@@ -150,7 +150,7 @@ impl AppWorkflows {
     }
 }
 
-async fn receipt(
+pub(super) async fn receipt(
     tx: &Transaction,
     job: &JobSpec,
 ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
@@ -291,15 +291,6 @@ async fn select(
             "activation_id":job.id.as_str()}))
             .await?;
     }
-    // Once manager activation selects code, the local calendar loses authority.
-    tx.database()
-        .collection(schedules::Entity::COLLECTION)?
-        .execute(Operation::Update {
-            filter: value!({"app_id":job.app_id.as_str()}),
-            patch: value!({"next_at":null}),
-            many: true,
-        })
-        .await?;
     Ok(())
 }
 

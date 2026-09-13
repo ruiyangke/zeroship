@@ -161,6 +161,11 @@ impl Record {
                     && self.reconciliation.is_none()
                     && self.reconciliation_next.is_none()
             }
+            JobOperation::Cron { run_id, .. } => {
+                (self.run_id.is_none() || self.run_id.as_deref() == Some(run_id.as_str()))
+                    && self.reconciliation.is_none()
+                    && self.reconciliation_next.is_none()
+            }
             JobOperation::Reconcile {} => {
                 self.run_id.is_none()
                     && self.reconciliation.is_some()
@@ -172,10 +177,18 @@ impl Record {
             return Err(invalid());
         }
         match (&self.outcome, self.completed_at) {
-            (Some(outcome), Some(_)) => Ok(Some(JobReceipt {
-                job: job.clone(),
-                outcome: decode(outcome)?,
-            })),
+            (Some(outcome), Some(_)) => {
+                let outcome = decode(outcome)?;
+                if let JobOperation::Cron { run_id, .. } = &job.operation {
+                    let valid = match outcome {
+                        JobOutcome::Completed => self.run_id.as_deref() == Some(run_id.as_str()),
+                        JobOutcome::Rejected => self.run_id.is_none(),
+                        _ => false,
+                    };
+                    if !valid { return Err(invalid()); }
+                }
+                Ok(Some(JobReceipt { job: job.clone(), outcome }))
+            }
             (None, None) => Ok(None),
             _ => Err(invalid()),
         }
@@ -513,6 +526,11 @@ impl AppWorkflows {
         check_scope(&self.app, job)?;
         self.service.policies.resolve(&self.app)?;
         let tx = self.service.begin().await?;
+        if matches!(job.operation, JobOperation::Cron { .. }) {
+            let receipt = super::cron::receipt(&tx, job).await?;
+            tx.commit().await?;
+            return Ok(receipt);
+        }
         let receipt = read(&tx, job)
             .await?
             .map(|record| record.receipt(job))
