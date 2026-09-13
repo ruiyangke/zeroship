@@ -292,33 +292,5 @@ pub struct GateState {
     pub meter: Arc<zeroship_metering::Meter>,
 }
 
-/// A gateway service identity backed by a freshly generated key, for tests that
-/// need the gateway to SIGN.
-///
-/// Not `#[cfg(test)]`: the gateway's integration tests build `GateState`
-/// directly and would otherwise each grow their own copy of this, which is how
-/// two fixtures end up signing under keys that verify differently. The peer
-/// bundle is empty because the gateway verifies its own envelope from its own
-/// signer, and nothing here receives an inbound service call.
-#[must_use]
-pub fn test_gateway_service_auth() -> zeroship_core::service_peers::ServiceAuth {
-    use zeroship_core::service_assertion::{
-        ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
-    };
-    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring, GATEWAY_SERVICE_NAME};
-
-    let issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
-    let keyring = ServiceKeyring::from_parts(
-        issuer,
-        ServiceSigningKey::generate(),
-        ServiceTrustBundle::new(),
-    )
-    .expect("gateway keyring");
-    ServiceAuth::new(
-        keyring,
-        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
-    )
-}
-
 #[cfg(test)]
 mod tests;
