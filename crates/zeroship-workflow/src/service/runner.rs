@@ -79,6 +79,20 @@ impl WorkflowService {
         }
     }
 }
+
+impl super::AppWorkflows {
+    /// Bind task and payload operations to this app's retained policy generation.
+    /// A shared host registry cannot broaden this handle to another app, and a
+    /// replacement policy binding cannot renew the authority it captured.
+    #[must_use]
+    pub fn tasks(&self, worker: WorkerIdentity) -> WorkerTasks {
+        WorkerTasks {
+            service: self.service.clone(),
+            worker,
+        }
+    }
+}
+
 #[async_trait(?Send)]
 impl TaskTransport for WorkerTasks {
     async fn poll(&self) -> Result<Option<TaskAssignment>, WorkflowServiceError> {

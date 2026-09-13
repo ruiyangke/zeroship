@@ -42,6 +42,83 @@ fn assert_conflict<T>(result: Result<T, WorkflowServiceError>) {
     ));
 }
 
+#[compio::test]
+async fn bound_host_setup_rejects_foreign_registry_before_polling() {
+    let (policies, binding) = registry();
+    install(&binding, configured(1));
+    let foreign = Arc::new(HostPolicies::default());
+    let foreign_binding = foreign.bind(binding.app_id().clone()).unwrap();
+    install(&foreign_binding, configured(1));
+    let polled = std::cell::Cell::new(false);
+    let result = policies
+        .run_bound(&foreign_binding, async {
+            polled.set(true);
+            Ok(())
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(WorkflowServiceError::PermissionDenied)
+    ));
+    assert!(!polled.get());
+    policies
+        .run_bound(&binding, async { Ok(()) })
+        .await
+        .unwrap();
+}
+
+#[compio::test]
+async fn bound_host_setup_captures_authority_before_first_poll() {
+    let (policies, binding) = registry();
+    let polled = std::cell::Cell::new(false);
+    let setup = policies.run_bound(&binding, async {
+        polled.set(true);
+        Ok(())
+    });
+    install(&binding, configured(1));
+    assert_unavailable(setup.await);
+    assert!(!polled.get());
+
+    let binding = policies.bind(binding.app_id().clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_millis(20);
+    install(&binding, leased(1, deadline));
+    let setup = policies.run_bound(&binding, pending::<Result<(), WorkflowServiceError>>());
+    install(&binding, leased(1, Instant::now() + Duration::from_secs(5)));
+    assert_unavailable(
+        compio::time::timeout(Duration::from_secs(1), setup)
+            .await
+            .unwrap(),
+    );
+    binding.authority().unwrap().check().unwrap();
+}
+
+#[compio::test]
+async fn bound_host_setup_drops_native_work_when_generation_is_replaced() {
+    struct Stopped<'a>(&'a std::cell::Cell<bool>);
+    impl Drop for Stopped<'_> {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
+    let (policies, binding) = registry();
+    install(&binding, configured(1));
+    let stopped = std::cell::Cell::new(false);
+    let mut setup = policies.run_bound(&binding, async {
+        let _stopped = Stopped(&stopped);
+        pending::<Result<(), WorkflowServiceError>>().await
+    });
+    assert!(futures::poll!(setup.as_mut()).is_pending());
+    let replacement = policies.bind(binding.app_id().clone()).unwrap();
+    install(&replacement, configured(1));
+    assert_unavailable(setup.await);
+    assert!(stopped.get());
+    policies
+        .run_bound(&replacement, async { Ok(()) })
+        .await
+        .unwrap();
+}
+
 #[test]
 fn replacement_retires_capabilities_and_outstanding_refreshes() {
     let (policies, original) = registry();
