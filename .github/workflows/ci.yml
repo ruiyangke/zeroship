@@ -154,15 +154,13 @@ jobs:
       # The PostgreSQL suites still require the shared provisioner. Redis
       # driver and KV tests start their own servers through Testcontainers.
       #
-      # `zeroship-mailer` is the same shape and is why the SMTP sink is in that
-      # script's set: its plaintext-transport test is not feature-gated, so
-      # `--workspace` builds and runs it here, and it fails without a sink.
+      # Mailer owns its PostgreSQL and SMTP fixtures through Testcontainers.
       #
       # The SAME script a developer runs, not a `services:` block that would be a
       # second definition of the same servers. `services:` also cannot pass
       # `-c wal_level=logical`. The native data job configures its owned
       # testcontainers separately; this job uses the compose definition.
-      - name: Provision the shared test backends (postgres, smtp sink)
+      - name: Provision the shared PostgreSQL test backend
         run: bash tests/provision_test_backends.sh
       - name: Install snapshot clients matching the test server
         run: |
@@ -745,16 +743,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # No billing test sends mail. The sink is here because the overlay writer
-      # below waits on EVERY backend before describing any of them, and because
-      # the provisioner describes the workspace's test backends as a SET - a job
-      # that adopts the set adopts all of it. Per-job subsets would be a second,
-      # hand-maintained statement of which tests need what.
-      smtp:
-        image: axllent/mailpit:latest
-        ports:
-          - 1025:1025
-          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -834,20 +822,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # The plaintext SMTP sink zeroship-mailer's transport test dials. This job
-      # runs `cargo test -p zeroship-mailer` as a whole package (the binary list
-      # in run_auth_suite.sh), and that test FAILS without a sink rather than
-      # skipping, so the sink is a service of this job like the two above.
-      #
-      # NO `--health-cmd`, and that is not an omission: the provisioner step
-      # below waits on this port itself with a bounded probe and fails naming the
-      # address, which is the same readiness contract with one fewer guess about
-      # what the image ships to probe with.
-      smtp:
-        image: axllent/mailpit:latest
-        ports:
-          - 1025:1025
-          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440
@@ -943,12 +917,6 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-      # The shared provisioner also checks the SMTP sink used by mailer tests.
-      smtp:
-        image: axllent/mailpit:latest
-        ports:
-          - 1025:1025
-          - 8025:8025
     env:
       PG_HOST: localhost
       PG_PORT: 5440

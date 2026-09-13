@@ -144,7 +144,6 @@ fail() { FAIL=$((FAIL + 1)); RAN=$((RAN + 1)); echo "  FAIL $1"; }
 # crates/zeroship-data-orm/src/backend/sqlite/mod.rs:1470, where a comment still calls the
 # deleted minter a pattern to mirror; this gate cannot see a comment.
 INVENTORY="
-AUTH_TEST_SMTP_SINK
 CPG_FD_PROBE_CHILD
 PG_TEST_URL
 REDPANDA_BROKERS
