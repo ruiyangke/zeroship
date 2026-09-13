@@ -117,11 +117,13 @@ database URL or generated backend overlay is needed.
 cargo xtask test auth
 ```
 
+Worker tests also own their PostgreSQL and Redis containers. Run
+`cargo xtask test worker` to build the migration host and test the package.
+
 The remaining shell suites still need their configured development backends:
 
 ```bash
 tests/run_billing_suite.sh      # migrate + test zeroship-control and zeroship-migrate-server
-tests/run_worker_suite.sh       # migrate + test zeroship-worker
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
                                 # for. Dry run unless --apply; never FORCE.
 ./tests/golden_path.sh          # build a creator app locally and deploy it
