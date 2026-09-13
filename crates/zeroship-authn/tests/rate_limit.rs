@@ -1,4 +1,4 @@
-//! Shared buckets settle refill, capacity and contention in PostgreSQL.
+//! Shared buckets settle refill, capacity and contention in `PostgreSQL`.
 
 #![allow(
     clippy::future_not_send,
@@ -124,8 +124,8 @@ async fn concurrent_first_claims_cannot_overdraw_a_bucket_or_report_a_store_outa
         let left = left.unwrap();
         let right = right.unwrap();
         assert_ne!(left.consumed, right.consumed);
-        assert_eq!(left.remaining_tokens, 0.0);
-        assert_eq!(right.remaining_tokens, 0.0);
+        assert!(left.remaining_tokens.abs() < f64::EPSILON);
+        assert!(right.remaining_tokens.abs() < f64::EPSILON);
         let rows = admin
             .query(
                 "SELECT bucket_key, tokens::double precision FROM zeroship.rate_limits",
@@ -135,7 +135,7 @@ async fn concurrent_first_claims_cannot_overdraw_a_bucket_or_report_a_store_outa
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get::<_, String>(0), KEY);
-        assert_eq!(rows[0].get::<_, f64>(1), 0.0);
+        assert!(rows[0].get::<_, f64>(1).abs() < f64::EPSILON);
         assert_consumption(consume_state(&first, KEY, quota).await.unwrap(), false, 0.0);
         assert_consumption(
             consume_state(&second, "login:other@example.test", quota)

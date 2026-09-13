@@ -53,13 +53,13 @@ async fn keys(client: &Client) -> Vec<String> {
 #[compio::test]
 async fn concurrent_replicas_admit_one_assertion_and_reject_its_replay() {
     Database::run(async |database| {
-        let [left, right] = race(database, |client| {
+        let outcomes = race(database, |client| {
             Arc::new(PostgresReplayStore::new(client))
         })
         .await;
-        match (left, right) {
-            (Ok(_), Err(AuthError::CredentialRejected))
-            | (Err(AuthError::CredentialRejected), Ok(_)) => {}
+        match outcomes {
+            [Ok(_), Err(AuthError::CredentialRejected)]
+            | [Err(AuthError::CredentialRejected), Ok(_)] => {}
             other => panic!("expected acceptance and replay refusal, got {other:?}"),
         }
         assert_eq!(keys(&database.connect().await).await.len(), 1);
