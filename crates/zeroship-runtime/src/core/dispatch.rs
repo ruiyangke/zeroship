@@ -104,7 +104,7 @@ pub struct ErrorExtras<'a> {
 /// `stack`, `code`, `details`, `retryable`.
 ///
 /// The FIELD SET matches the JS-side `errorResponse()` in
-/// `init.rs::BOOTSTRAP_JS`. The BEHAVIOUR does not, and this comment used to
+/// `init.rs::HOST_ENTRY_JS`. The BEHAVIOUR does not, and this comment used to
 /// say it did — "so a procedure throw produces the same body whether the
 /// kernel's RPC fast path caught the exception or the slow path's JS handler
 /// did". That is false at 5xx and the difference is the whole point of this

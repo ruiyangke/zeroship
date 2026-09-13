@@ -41,7 +41,7 @@ pub fn startup_declarations_open(scope: &mut v8::PinScope) -> bool {
 /// - `app_id` → from `scope.get_slot::<SharedState>()` → `state.app_id`
 /// - `meter`  → from `scope.get_slot::<SharedState>()` → `state.meter`
 /// - resources → from `thread_local!` (pools, caches — initialized lazily
-///   on first callback via async bootstrap; see `plugin-db` for the pattern)
+///   during native startup; see the DB plugin for the pattern)
 ///
 /// `Send + Sync + 'static` are needed so plugins can live inside an
 /// `Arc<dyn NativePlugin>` that crosses worker-thread boundaries in the

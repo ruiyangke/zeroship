@@ -35,7 +35,7 @@ pub enum FetchOutcome {
     },
 }
 
-/// Result of executing the durable-workflow replay entry in the bootstrap.
+/// Result of executing the embedded durable-workflow replay entry.
 pub enum WorkflowOutcome {
     /// Replay completed synchronously or settled during the dispatch
     /// microtask checkpoint. `json` is the already-stringified StepResult.

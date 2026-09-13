@@ -94,10 +94,8 @@ async fn read_stream(reader: zeroship_runtime::channel::StreamReader) -> String 
 
 #[test]
 fn dict_shape_dispatches_basic_handler() {
-    // The simplest possible dict-shape: `default.rpc = { foo: (input) => ... }`.
-    // The bootstrap detects the object shape and wraps it via
-    // `__zsDispatch`. The kernel calls our wrapper as if it were a
-    // function-shape handler.
+    // The simplest possible dictionary shape: native dispatch resolves `foo`
+    // by its wire name and calls the stored procedure reference.
     let runtime = build_runtime(
         r#"
         export default {

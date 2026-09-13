@@ -189,7 +189,7 @@ pub struct HttpResult {
 ///
 /// This module captures native capabilities before `./__user__.js` evaluates.
 /// Creator code does not receive these captured callbacks.
-const KIND_BRIDGE_JS: &str = r##"
+const WORKFLOW_BRIDGE_JS: &str = r##"
 import { AsyncLocalStorage } from "node:async_hooks";
 
 const zsWorkflowDispatchAls = new AsyncLocalStorage();
@@ -1303,99 +1303,29 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
 }
 "##;
 
-pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
+pub(crate) static WORKFLOW_BRIDGE_SPEC: LazyLock<String> =
     LazyLock::new(|| format!("__zs_kind_bridge_{}.js", uuid::Uuid::new_v4().simple()));
 
-pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
-    let prefix = bootstrap_prefix_js();
-    let mut s =
-        String::with_capacity(prefix.len() + BOOTSTRAP_MAIN_JS.len());
+pub(crate) static HOST_ENTRY_JS: LazyLock<String> = LazyLock::new(|| {
+    let prefix = host_entry_prefix_js();
+    let mut s = String::with_capacity(prefix.len() + HOST_ENTRY_MAIN_JS.len());
     s.push_str(&prefix);
-    s.push_str(BOOTSTRAP_MAIN_JS);
+    s.push_str(HOST_ENTRY_MAIN_JS);
     s
 });
 
-fn bootstrap_prefix_js() -> String {
+fn host_entry_prefix_js() -> String {
     format!(
         r#"
 import {{ __zsWorkflowDispatch }} from "./{}";
 import * as user from "./__user__.js";
 
 "#,
-        &*BOOTSTRAP_KIND_BRIDGE_SPEC
+        &*WORKFLOW_BRIDGE_SPEC
     )
 }
 
-const BOOTSTRAP_MAIN_JS: &str = r##"
-// Vercel AI-SDK Data Stream Protocol encoder.
-//
-// Each line is `<typeId>:<json>\n`. TypeIds we emit:
-//   0:"text"           — text part (string yield)
-//   2:[<json>]         — typed object yield (the array shape matches
-//                        the AI-SDK convention: a yield is one
-//                        element of a streaming array)
-//   e:{...}            — structured error envelope (zeroship extension;
-//                        the AI-SDK parser tolerates unknown ids)
-//   d:{}               — done
-//
-// `outputIsString`, when truthy, forces every yield to the `0:` lane —
-// even non-string values get coerced via String(). Set by callers that
-// know the procedure's declared output schema is a string. When
-// undefined, we per-value-typeof: strings go to `0:`, anything else
-// goes to `2:`.
-//
-// The async generator's `return` value (vs yields) is intentionally
-// dropped on the floor — the AI-SDK protocol has no equivalent. If the
-// creator wants a final value distinguished from yields, they emit it
-// as the last `yield` and `return undefined`.
-function sseFromAsyncGen(gen, outputIsString) {
-    const encoder = new TextEncoder();
-    const body = new ReadableStream({
-        async start(controller) {
-            try {
-                while (true) {
-                    const step = await gen.next();
-                    if (step.done) {
-                        controller.enqueue(encoder.encode("d:{}\n"));
-                        break;
-                    }
-                    const v = step.value;
-                    if (outputIsString || typeof v === "string") {
-                        controller.enqueue(encoder.encode("0:" + JSON.stringify(String(v)) + "\n"));
-                    } else {
-                        controller.enqueue(encoder.encode("2:[" + JSON.stringify(v) + "]\n"));
-                    }
-                }
-            } catch (e) {
-                // `e:` carries the structured error envelope — keeps
-                // the SSE error frame field-compatible with the unary
-                // error body so clients can share a single parser.
-                // `code` and `retryable` are type-checked; `details`
-                // is forwarded as-is when present.
-                const env = {
-                    message: (e && e.message) || String(e),
-                    name:    (e && e.name)    || "Error",
-                };
-                if (e && typeof e.code === "string") env.code = e.code;
-                if (e && e.details !== undefined)    env.details = e.details;
-                if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
-                controller.enqueue(encoder.encode("e:" + JSON.stringify(env) + "\n"));
-                controller.enqueue(encoder.encode("d:{}\n"));
-            } finally {
-                controller.close();
-            }
-        },
-    });
-    return new Response(body, {
-        status: 200,
-        headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache, no-transform",
-            "X-Accel-Buffering": "no",
-        },
-    });
-}
-
+const HOST_ENTRY_MAIN_JS: &str = r##"
 function errorResponse(err) {
     const status = Number.isInteger(err && err.status) && err.status >= 400 && err.status < 600
         ? err.status : 500;
@@ -1492,7 +1422,7 @@ async function fallbackFetch(request) {
 
 export default {
     // Durable workflow replay entry. The worker calls this with a
-    // control-plane StepRequest envelope; the bootstrap replays the
+    // control-plane StepRequest envelope; the workflow bridge replays the
     // deploy-pinned Workflow class against the supplied journal prefix
     // and returns a StepResult-shaped JSON object.
     workflow(envelope, ctx) {
@@ -1508,7 +1438,7 @@ export default {
     // fetch(). Skips Request/Response construction — hot-path-only win.
     fetchFast: USER_FETCH_FAST,
     // Standard WinterCG fetch handler — the user's default.fetch
-    // directly (no bootstrap wrapper). Catches everything not handled
+    // directly. Catches everything not handled
     // by `rpc` or `fetchFast`.
     fetch: USER_FETCH || fallbackFetch,
 };
@@ -1686,22 +1616,20 @@ pub(crate) fn prepare_application(
     // class above is the sole provider; building with
     // `--no-default-features` (polyfill mode) is no longer supported.
 
-    // Wrap the user's module graph in the bootstrap entry.
+    // Wrap the user's module graph in the runtime-owned host entry.
     //
-    // The wrapper contains the bootstrap, its private capability bridge,
-    // the renamed creator entry and the remaining creator sources. Native
+    // The wrapper contains entry normalization, the workflow bridge, the
+    // renamed creator entry and the remaining creator sources. Native
     // modules resolve through the runtime factories.
     //
-    // The load_modules walker compiles BOOTSTRAP_JS first, discovers its
+    // The module loader compiles HOST_ENTRY_JS first, discovers its
     // import (`./__user__.js`) and transitively the user's `zeroship`
-    // imports, then instantiates + evaluates the bootstrap. The returned
-    // namespace is the bootstrap's, so ensure_initialized reads
-    // `default.fetch` off the bootstrap (not the user module) — exactly the
-    // indirection we want.
+    // imports, then instantiates and evaluates the host entry. Its namespace
+    // supplies the normalized application entry to native startup.
     let wrapped = if dev_host_entry {
         modules.to_vec()
     } else {
-        wrap_with_bootstrap(modules)
+        wrap_with_host_entry(modules)
     };
 
     // Compile the graph and retain adapter preparation before creator evaluation.
@@ -1716,10 +1644,10 @@ pub(crate) fn prepare_application(
     Ok(PreparedApplication { entry, descriptor: runtime_descriptor, promises })
 }
 
-/// Rewrite the user's module list so the bootstrap is the new entry.
+/// Rewrite the user's module list so the runtime-owned host module is the entry.
 ///
 /// The user's declared first module is renamed to `__user__.js`; a synthetic
-/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry. Native modules
+/// `index.js` (HOST_ENTRY_JS) is prepended as the new entry. Native modules
 /// resolve through the runtime factories.
 ///
 /// **Collision**: the compiler always emits `index.js` as the user's entry,
@@ -1727,13 +1655,13 @@ pub(crate) fn prepare_application(
 /// `debug_assert!` catches this in dev builds; in release it's silently
 /// overwritten (the user module's source wins over our internal specifier
 /// by virtue of ordering in the sources map).
-fn wrap_with_bootstrap(
+fn wrap_with_host_entry(
     modules: &[crate::modules::ModuleEntry],
 ) -> Vec<crate::modules::ModuleEntry> {
     use crate::modules::ModuleEntry;
 
     // Empty input preserved as-is — the module loader will return a clean
-    // "No modules to load" error. Don't synthesize a bootstrap pointing at
+    // "No modules to load" error. Don't synthesize a host entry pointing at
     // a non-existent `__user__.js`.
     if modules.is_empty() {
         return Vec::new();
@@ -1741,25 +1669,25 @@ fn wrap_with_bootstrap(
 
     let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
 
-    // entry 0: bootstrap becomes the new entrypoint under "index.js".
+    // entry 0: the host normalizer becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
         specifier: "index.js".into(),
-        source: BOOTSTRAP_JS.clone(),
+        source: HOST_ENTRY_JS.clone(),
     });
 
     // entry 1: capture native capabilities before creator code evaluates.
     out.push(ModuleEntry {
-        specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
-        source: KIND_BRIDGE_JS.into(),
+        specifier: WORKFLOW_BRIDGE_SPEC.clone(),
+        source: WORKFLOW_BRIDGE_JS.into(),
     });
 
     // entry 2: user's original entry, renamed to "__user__.js". Its own
-    // declared specifier (usually "index.js") is discarded — the bootstrap
+    // declared specifier (usually "index.js") is discarded — the host entry
     // imports `./__user__.js` by exact name.
     let user_entry = &modules[0];
     debug_assert!(
         user_entry.specifier != "__user__.js",
-        "User entry collides with bootstrap's internal specifier",
+        "User entry collides with the runtime host's internal specifier",
     );
     out.push(ModuleEntry {
         specifier: "__user__.js".into(),
@@ -2539,7 +2467,7 @@ fn setup_globals_with_descriptor(
     }
 
     // __zs_env — returns the frozen env snapshot (same as fetch's 2nd arg).
-    // The bootstrap capability bridge still captures this callback.
+    // The embedded workflow bridge still captures this callback.
     {
         let f = v8::Function::new(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
