@@ -443,3 +443,6 @@ mod tests {
     // `zeroship_id::app_id`. Re-asserting either here would be a second copy
     // of a check this module no longer performs.
 }
+
+#[cfg(test)]
+mod database_tests;

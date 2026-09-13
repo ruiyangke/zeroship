@@ -1042,7 +1042,7 @@ mod tests {
         // Encode the WorkerUser as the worker would receive it, verify the
         // signature, and JSON-parse it back - `scopes` must survive verbatim.
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-        let service_auth = crate::test_gateway_service_auth();
+        let service_auth = crate::tests::gateway_service_auth();
         let signer = service_auth
             .user_envelope_signer()
             .expect("the test gateway signs");
@@ -1233,7 +1233,7 @@ mod tests {
         );
 
         let state = StdArc::new(crate::GateState {
-            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
+            service_auth: std::sync::Arc::new(crate::tests::gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),

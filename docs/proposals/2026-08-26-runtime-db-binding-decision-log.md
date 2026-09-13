@@ -147,13 +147,12 @@ because a rejected rename returns every few months, and the reason it was reject
 gets lost.
 
 **`api.<domain>` is already the gateway, and it is load-bearing in a way a hostname usually is not.**
-`deploy/ops/Caddyfile:79-80` routes it to `gateway:8000`, and `https://api.zeroship.ai` is the
-gateway's `--public-url` default (`docs/reference/env-vars.md:345`) - which is the **`iss` claim of
-the tokens the gateway signs**. It is hardcoded as the issuer in three shipped harnesses
-(`tests/e2e_auth_rpc.sh:143`, `tests/e2e_dev_vs_deployed_auth.sh:555`, `tests/golden_path.sh:4067`)
-and one integration test (`crates/zeroship-gateway/tests/oidc_rp_e2e.rs:43`). Repointing it is not a
-routing change; it moves a cryptographic identity, and every already-issued token's `iss` stops
-matching.
+`deploy/ops/Caddyfile` routes it to `gateway:8000`, and `https://api.zeroship.ai` is the
+gateway's `--public-url` default (`docs/reference/env-vars.md`), which is the **issuer of
+the tokens the gateway signs**. Authentication harnesses (`tests/e2e_auth_rpc.sh`,
+`tests/e2e_dev_vs_deployed_auth.sh`, `tests/golden_path.sh`) and private gateway fixtures
+(`crates/zeroship-gateway/src/tests/browser/mod.rs`) use that issuer too. Repointing it
+changes the cryptographic identity and token-verification contract.
 
 **What is behind it, enumerated rather than assumed.** Nine registered endpoints, of which exactly
 ONE is a proxy: `/__zeroship/internal/workflow-advance`, which looks up the route, enforces account

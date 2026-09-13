@@ -24,11 +24,22 @@
 //! Usage pattern in a store fn (operates on a `&mut Client`; a `PoolConnection`
 //! derefs mutably to it):
 //!
-//! ```ignore
-//! let tx = conn.transaction().await?;          // begin
-//! rls::set_tenant_app(&tx, app_id).await?;     // SET LOCAL zeroship.tenant_app
-//! let rows = tx.query(SQL, params).await?;     // runs under the tenant GUC
-//! tx.commit().await?;                          // GUC auto-reverts here
+//! ```no_run
+//! # use zeroship_gateway::rls;
+//! # use zeroship_core::app_id::AppId;
+//! # async fn load_sessions(
+//! #     conn: &mut compio_postgres::Client,
+//! #     app_id: &AppId,
+//! # ) -> Result<Vec<compio_postgres::Row>, Box<dyn std::error::Error>> {
+//! let tx = conn.transaction().await?;
+//! rls::set_tenant_app(&tx, app_id).await?;
+//! let rows = tx.query(
+//!     "SELECT id FROM zeroship.gateway_sessions WHERE app_id = $1",
+//!     &[&app_id.as_str()],
+//! ).await?;
+//! tx.commit().await?;
+//! # Ok(rows)
+//! # }
 //! ```
 //!
 //! Keeping the begin/commit inline in each store fn (rather than behind a
