@@ -157,8 +157,6 @@ export function App() {
         _key: ck,
         created_at: Date.now(),
         updated_at: Date.now(),
-        created_by: null,
-        updated_by: null,
         version: 1,
         userId: input.userId,
         title: input.title,
@@ -166,7 +164,6 @@ export function App() {
         tags: [],
         done: false,
         archived: false,
-        deleted_at: null,
       };
       qc.setQueryData<Todo[]>(key, (old = []) => [optimistic, ...old]);
       return { prev, ck, userId: input.userId };

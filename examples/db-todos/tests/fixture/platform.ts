@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createWriteStream, type WriteStream } from "node:fs";
-import { generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { connect, createServer } from "node:net";
 import { join, resolve } from "node:path";
@@ -13,12 +13,14 @@ import { generate } from "selfsigned";
 import { stringify } from "smol-toml";
 import { Parser } from "tar";
 import { GenericContainer, Wait, type StartedTestContainer } from "testcontainers";
+import { typedIdFromStableSeed } from "@zeroship/server/typed-id";
 import type { Target } from "../targets";
 import { issuer } from "./issuer";
 import { Processes } from "./processes";
 
 const example = fileURLToPath(new URL("../../", import.meta.url));
 const root = resolve(example, "../..");
+export const fixtureOwnerId = typedIdFromStableSeed("usr", "db-todos-platform-fixture-owner");
 
 async function reservePort() {
   const server = createServer();
@@ -139,7 +141,7 @@ export class Platform {
     await processes.run("app-build", process.execPath, [vite, "build"], app);
     const bundle = join(app, "dist/app.zship");
     await checkManifest(bundle);
-    await processes.run("dev-migrate", "pnpm", ["migrate"], app);
+    await processes.run("dev-migrate", process.execPath, [join(root, "sdks/vite-plugin/dist/cli/migrate-dev.js")], app);
 
     console.info("DB fixture: start backing containers and apply platform migrations");
     const postgres = await this.container(new GenericContainer("postgres:16")
@@ -161,7 +163,7 @@ export class Platform {
     const identity = issuer();
     const jwks = await this.container(identity.container);
     const issuerUrl = `http://${jwks.getHost()}:${jwks.getMappedPort(80)}`;
-    const owner = randomUUID();
+    const owner = fixtureOwnerId;
     const seeded = await postgres.exec(["psql", "-U", "postgres", "-d", "db_fixture", "-v", "ON_ERROR_STOP=1", "-c",
       `INSERT INTO zeroship.users (id, email, name, email_verified_at) VALUES ('${owner}', 'kv-${owner}@zeroship.test', 'DB fixture owner', NOW())`]);
     assert.equal(seeded.exitCode, 0, `Seed authenticated fixture owner: ${seeded.output}`);

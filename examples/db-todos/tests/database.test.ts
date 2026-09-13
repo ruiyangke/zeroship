@@ -41,14 +41,20 @@ test("the database contract holds through local and deployed app requests", asyn
       expect(rollbacks.length).toBeGreaterThan(0);
       for (const name of rollbacks) expect(savepoints).toContain(name);
       expect(statements).not.toContain("BEGIN ISOLATION LEVEL SNAPSHOT");
+    } else {
+      expect(object(captured.txIsoRR).json).toMatchObject({
+        error: { code: "unsupported_isolation_level" }, countAfter: 0,
+      });
+      expect(object(captured.txIsoSer).json).toMatchObject({ error: null, countAfter: 1 });
+      expect(object(captured.txIsoNone).json).toMatchObject({ countAfter: 1 });
+      expect(object(captured.txTotal).json).toBe(6);
     }
     captures.push(normalize(captured));
   }
   expect(captures).toHaveLength(2);
   const divergences = Object.keys(captures[0]).filter((key) => !isDeepStrictEqual(captures[0][key], captures[1][key])).sort();
-  // SQLite serializes writers, so an autocommit write alongside an open write
-  // transaction differs from PostgreSQL. Callback-scope behavior must agree.
-  expect(divergences).toEqual(["cxPlain", "cxTotal"]);
+  // SQLite's writer contention and supported isolation levels differ.
+  expect(divergences).toEqual(["cxPlain", "cxTotal", "txIsoRR", "txTotal"]);
 });
 
 test("invalid creator input fails without writing rows", async () => {
