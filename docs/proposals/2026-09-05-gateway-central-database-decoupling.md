@@ -400,12 +400,12 @@ MEASURED. Auth holds every lifecycle verb on this table: the mint inside
 `crates/zeroship-auth/src/store/users.rs`, and the userinfo and introspect
 reads. Auth's own comments say it owns the table.
 
-MEASURED. **The upsert SQL is forked byte-identical across two crates.**
-`access_identity_upsert_sql` in
-`crates/zeroship-auth/src/oidc/authorization_code.rs` and
-`identity_upsert_sql` in `crates/zeroship-gateway/src/identities.rs` are both
-`const fn`s returning the same string literal with the same line-continuation
-spelling. Nothing links them and nothing keeps them equal.
+Auth's `access_identity_upsert_sql` in
+`crates/zeroship-auth/src/oidc/authorization_code.rs` and the statement inside
+`identities::upsert` in `crates/zeroship-gateway/src/identities.rs` separately
+implement the mapping write. Each preserves the subject and alias while clearing
+revocation on re-grant. The gateway's SQL-text assertion has been replaced with
+database behavior tests; the statements remain independently maintained.
 
 MEASURED, and **this refutes the premise the investigation started from.** The
 gateway's own comment justifying its write says the cookie path "retains its own
