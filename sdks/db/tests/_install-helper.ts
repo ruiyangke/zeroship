@@ -1,10 +1,8 @@
 /**
  * Test-only adapter that stands in for the descriptor build step.
  *
- * `installSchema` lives in `@zeroship/bootstrap` (the framework-internal
- * coordination package) and takes its collections exclusively from the
- * runtime schema descriptor. The declared schema argument is not consulted
- * for fields, options, or indexes; an absent descriptor installs nothing.
+ * `installSchema` is supplied by the DB internal entry and takes its
+ * collections exclusively from the runtime schema descriptor.
  * In production the toolchain folds committed migrations into that
  * descriptor before boot.
  *
@@ -14,16 +12,13 @@
  * that to the installer. Without it the installer is correct to install
  * nothing, and every downstream assertion fails as `db.<collection>` being
  * undefined, a symptom nowhere near its cause.
- *
- * The reverse dependency direction (db -> bootstrap) is dev-only; the
- * production graph (bootstrap -> db) stays acyclic.
  */
 import {
   installSchema,
   normalizeSchema,
   type InstallSchemaOptions,
   type RuntimeSchemaDescriptor,
-} from "@zeroship/bootstrap/install-schema";
+} from "@zeroship/db/internal";
 // `SchemaBuilder`/`Db`/`SchemaInput` come from the PUBLISHED `@zeroship/db`
 // specifier, not raw `../src/...`, because callers build their schemas via
 // `schema(...)` imported the same way (`import { schema, t } from
@@ -107,10 +102,7 @@ export function installSchemaForTest<
   schemas: T,
   opts: { native: NativeDb; naming?: InstallSchemaOptions["naming"] },
 ): Db<FixtureSchemas<T>> {
-  installSchema(schemas as never, opts.native, {
-    descriptor: descriptorFor(schemas),
-    ...(opts.naming ? { naming: opts.naming } : {}),
-  } as never);
+  installSchema(opts.native, descriptorFor(schemas), { naming: opts.naming });
   // The installer plants the per-collection wrappers and the `transaction` /
   // `live` extensions on the native handle as own properties, so the handle
   // itself is the `Db<T>` the call sites (`db.users.find(...)`) expect.

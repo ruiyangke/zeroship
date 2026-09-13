@@ -27,8 +27,7 @@ function fixture() {
     db: unknown,
   ) => { setMaskPolicy?: (value: unknown) => Promise<void> };
   const installSchema = () => ({ collections: {} });
-  const load = async (name: string) => name === "@zeroship/db/internal"
-    ? { _flushPendingMaskPolicy } : { installSchema };
+  const load = async (_name: string) => ({ _flushPendingMaskPolicy, installSchema });
   const installDbMaskPolicy = async (policy: Record<string, readonly string[]>) => {
     const platform = platformResolver(db);
     await platform?.setMaskPolicy?.(policy);

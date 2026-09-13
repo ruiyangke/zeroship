@@ -83,17 +83,7 @@ export {
 };
 `;
 
-/**
- * Resolve `@zeroship/bootstrap` (and its `./install-schema` subpath)
- * to the framework-installed copy of the package. The user's project
- * doesn't depend on `@zeroship/bootstrap` — it's a framework-internal
- * package the dev-bootstrap loads through the ModuleRunner so the
- * `TypeBuilder` class identity matches the one the user's `t.*`
- * builders use.
- *
- * Without this resolver, ModuleRunner can't find the bootstrap package
- * via the user's `node_modules` chain (pnpm doesn't hoist).
- */
+/** Resolve framework dependencies through the plugin's installation. */
 function resolveBootstrapPkgRoot(): string | undefined {
   try {
     const mainUrl = new URL(import.meta.resolve("@zeroship/bootstrap"));
@@ -105,10 +95,12 @@ function resolveBootstrapPkgRoot(): string | undefined {
 
 export function zeroshipBootstrapResolverPlugin(): Plugin {
   const pkgRoot = resolveBootstrapPkgRoot();
+  const dbInternal = new URL(import.meta.resolve("@zeroship/db/internal")).pathname;
   return {
     name: "zeroship:bootstrap-resolver",
     enforce: "pre" as const,
     resolveId(id: string) {
+      if (id === "@zeroship/db/internal") return dbInternal;
       if (!pkgRoot) return null;
       if (id === "@zeroship/bootstrap") {
         return `${pkgRoot}/dist/index.js`;

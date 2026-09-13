@@ -19,7 +19,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { installSchema } from "@zeroship/bootstrap/install-schema";
+import { installSchema } from "@zeroship/db/internal";
 import { t } from "@zeroship/db";
 import { descriptorFor } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";
@@ -29,9 +29,7 @@ import type { NativeDb } from "../src/native.js";
  * the declaration, then hand both to the installer.
  */
 function install(schemas: Record<string, unknown>, native: NativeDb) {
-  return installSchema(schemas as never, native, {
-    descriptor: descriptorFor(schemas),
-  } as never);
+  return installSchema(native, descriptorFor(schemas) as never);
 }
 
 /**
@@ -166,9 +164,7 @@ describe("installSchema", () => {
       indexes: [],
     };
 
-    const { collections } = installSchema(declared as never, native, {
-      descriptor: { version: 2, collections: descriptorCollections },
-    } as never);
+    const { collections } = installSchema(native, { version: 2, collections: descriptorCollections } as never);
 
     assert.ok(Object.hasOwn(collections, "__proto__"));
     assert.equal(typeof native.collection("__proto__").find, "function");
@@ -226,10 +222,32 @@ describe("installSchema", () => {
         },
       },
     };
-    installSchema({} as never, makeMockNative(), {
-      descriptor: reentrantDescriptor,
-    } as never);
+    installSchema(makeMockNative(), reentrantDescriptor as never);
     assert.ok(caught instanceof Error, "re-entrant call must throw");
     assert.equal((caught as { code?: string }).code, "INSTALL_IN_FLIGHT");
   });
+});
+
+test("installer bookkeeping does not occupy a creator collection name", () => {
+  const native = makeMockNative();
+  const { collections } = install({
+    __zeroshipDbInstalledNames: { value: t.string().required() },
+  }, native);
+  const handle = native as unknown as Record<string, unknown>;
+  assert.equal(handle.__zeroshipDbInstalledNames, collections.__zeroshipDbInstalledNames);
+  assert.equal(typeof (handle.__zeroshipDbInstalledNames as { find: unknown }).find, "function");
+});
+
+test("reinstallation ignores forged bookkeeping and removes only its stale collections", () => {
+  const native = makeMockNative();
+  const handle = native as unknown as Record<string, unknown>;
+  install({ before: { value: t.string().required() } }, native);
+  handle.applicationState = "keep";
+  Object.defineProperty(handle, "__zeroshipDbInstalledNames", {
+    value: ["applicationState"], configurable: true, writable: true,
+  });
+  install({ after: { value: t.string().required() } }, native);
+  assert.equal(handle.applicationState, "keep");
+  assert.equal(Object.hasOwn(handle, "before"), false);
+  assert.equal(typeof (handle.after as { find: unknown }).find, "function");
 });

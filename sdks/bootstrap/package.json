@@ -15,10 +15,6 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
-    "./install-schema": {
-      "types": "./dist/install-schema.d.ts",
-      "import": "./dist/install-schema.js"
-    },
     "./dispatcher": {
       "types": "./dist/dispatcher.d.ts",
       "import": "./dist/dispatcher.js"
