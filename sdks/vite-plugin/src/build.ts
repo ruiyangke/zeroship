@@ -15,7 +15,7 @@ import {
   type DiscoveredSchedule,
 } from "./manifest.js";
 import {
-  zeroshipBootstrapResolverPlugin,
+  zeroshipFrameworkResolverPlugin,
   zeroshipModulePlugin,
 } from "./zeroship-module.js";
 import { genTypesFromMigrations } from "./gen-types/index.js";
@@ -520,13 +520,9 @@ export function buildPlugin(
         // more — the synthetic SSR entry discovers procedures at
         // module-init time from the user namespace's exports.
         transformPlugin(state),
-        // The synthetic server entry side-effect-imports
-        // @zeroship/bootstrap so the runtime can resolve its dynamic
-        // imports from the bundled worker. That package is
-        // framework-internal, so the nested SSR build must resolve it
-        // through the Vite plugin's dependency tree rather than the
-        // user's app root.
-        zeroshipBootstrapResolverPlugin(),
+        // Framework-private SDK imports resolve through the Vite plugin's
+        // dependency tree rather than the creator's app root.
+        zeroshipFrameworkResolverPlugin(),
         // Synthetic SSR entry virtual module owner. The entry's body
         // is build-time-static and order-independent.
         rpcRegistryPlugin({
