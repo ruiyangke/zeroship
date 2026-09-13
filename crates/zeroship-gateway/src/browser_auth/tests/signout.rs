@@ -16,52 +16,6 @@ async fn provider_failure_does_not_undo_local_signout() {
     exercise_signout("local", true).await;
 }
 
-async fn stored_anchor_ids(admin: &compio_postgres::Client) -> Vec<Uuid> {
-    admin
-        .query(
-            "SELECT id FROM zeroship.app_session_anchors ORDER BY id",
-            &[],
-        )
-        .await
-        .unwrap()
-        .iter()
-        .map(|row| row.get(0))
-        .collect()
-}
-
-async fn control_anchor(
-    state: &GateState,
-    app: &AppId,
-    client: &str,
-    user: &UserId,
-    refresh: &str,
-) -> Uuid {
-    let encrypted = zeroship_core::crypto::encrypt(
-        &state.anchor_enc_key,
-        format!("zs-anchor-refresh:{client}:{}", user.as_str()).as_bytes(),
-        refresh.as_bytes(),
-    )
-    .unwrap();
-    let pool = crate::db::checkout(state.db.as_ref().unwrap())
-        .await
-        .unwrap();
-    let mut connection = pool.acquire().await.unwrap();
-    anchors::create(
-        &mut connection,
-        &anchors::NewAnchor {
-            app_id: app,
-            client_id: client,
-            global_user_id: user,
-            refresh_token_enc: &encrypted,
-            refresh_family_id: refresh,
-            granted_scopes: &["openid".to_owned()],
-        },
-    )
-    .await
-    .unwrap()
-    .id
-}
-
 async fn exercise_signout(scope: &str, provider_unavailable: bool) {
     Database::migrated(async |database| {
         let op = Arc::new(MockOP::new(client_id()));
