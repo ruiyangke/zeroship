@@ -3,7 +3,7 @@
     reason = "workflow cases keep V8 and database drivers on their compio runtime"
 )]
 
-use super::tests::usage_value;
+use crate::worker_fixture::usage_value;
 use crate::identity_fixture::gateway_authorization;
 use super::workflow_advance_unsigned;
 use fixture::{
