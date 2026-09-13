@@ -14,7 +14,15 @@ pub fn expand(input: Input) -> syn::Result<TokenStream> {
     generate(input, &crate::engine()?)
 }
 
+fn metadata_path(orm: &syn::Path) -> syn::Path {
+    let mut path = orm.clone();
+    path.segments.pop();
+    path.segments.push(syn::parse_quote!(schema));
+    path
+}
+
 fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
+    let schema = metadata_path(orm);
     let Input {
         visibility,
         name,
@@ -105,9 +113,9 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
                 pub enum Entity {}
                 impl #orm::Entity for Entity {
                     const COLLECTION: &'static str = #collection_name;
-                    fn schema() -> &'static #orm::schema::CollectionSchema {
-                        static SCHEMA: ::std::sync::OnceLock<#orm::schema::CollectionSchema> = ::std::sync::OnceLock::new();
-                        SCHEMA.get_or_init(|| #orm::schema::CollectionSchema::new([#(#definitions),*]))
+                    fn schema() -> &'static #schema::CollectionSchema {
+                        static SCHEMA: ::std::sync::OnceLock<#schema::CollectionSchema> = ::std::sync::OnceLock::new();
+                        SCHEMA.get_or_init(|| #schema::CollectionSchema::new([#(#definitions),*]))
                     }
                 }
                 pub mod columns { #(#columns)* }
@@ -122,8 +130,8 @@ fn generate(input: Input, orm: &syn::Path) -> syn::Result<TokenStream> {
     Ok(quote! {
         #visibility mod #name {
             #(#modules)*
-            pub fn schema() -> #orm::schema::Schema {
-                #orm::schema::Schema::new([#(#schema_entries),*])
+            pub fn schema() -> #schema::Schema {
+                #schema::Schema::new([#(#schema_entries),*])
             }
         }
     })
@@ -145,12 +153,13 @@ fn sql_type(column: &Column, orm: &syn::Path) -> TokenStream {
 }
 
 fn column_schema(column: &Column, orm: &syn::Path) -> TokenStream {
+    let schema = metadata_path(orm);
     let kind = Ident::new(column.kind.name(), column.name.span());
     let required = !column.nullable;
     let mut fields = vec![quote!(required: #required)];
     if let Some(items) = column.items {
         let items = Ident::new(items.name(), column.name.span());
-        fields.push(quote!(items: Some(#orm::schema::LogicalType::#items)));
+        fields.push(quote!(items: Some(#schema::LogicalType::#items)));
     }
     let mut storage = Vec::new();
     for property in &column.properties {
@@ -180,9 +189,9 @@ fn column_schema(column: &Column, orm: &syn::Path) -> TokenStream {
             Property::Number(name, value) => {
                 let name = Ident::new(name, column.name.span());
                 let value = match value {
-                    literal::Literal::Signed(value) => quote!(#orm::schema::Number::from(#value)),
-                    literal::Literal::Unsigned(value) => quote!(#orm::schema::Number::from(#value)),
-                    literal::Literal::Float(value) => quote!(#orm::schema::Number::from_f64(#value).expect("finite schema literal")),
+                    literal::Literal::Signed(value) => quote!(#schema::Number::from(#value)),
+                    literal::Literal::Unsigned(value) => quote!(#schema::Number::from(#value)),
+                    literal::Literal::Float(value) => quote!(#schema::Number::from_f64(#value).expect("finite schema literal")),
                     _ => unreachable!("validated number constraint"),
                 };
                 fields.push(quote!(#name: Some(#value)));
@@ -202,33 +211,33 @@ fn column_schema(column: &Column, orm: &syn::Path) -> TokenStream {
             Property::Assignment { event, generator, increment } => {
                 let event = Ident::new(match event.to_string().as_str() { "insert" => "Insert", "write" => "Write", _ => "Delete" }, event.span());
                 let generator = match generator.to_string().as_str() {
-                    "now" => quote!(#orm::schema::AssignmentGenerator::Now),
-                    "typed_id" => quote!(#orm::schema::AssignmentGenerator::TypedId),
-                    "actor" => quote!(#orm::schema::AssignmentGenerator::Actor),
-                    "identity" => quote!(#orm::schema::AssignmentGenerator::Identity),
-                    _ => { let amount = increment.expect("validated increment"); quote!(#orm::schema::AssignmentGenerator::Increment(#amount)) }
+                    "now" => quote!(#schema::AssignmentGenerator::Now),
+                    "typed_id" => quote!(#schema::AssignmentGenerator::TypedId),
+                    "actor" => quote!(#schema::AssignmentGenerator::Actor),
+                    "identity" => quote!(#schema::AssignmentGenerator::Identity),
+                    _ => { let amount = increment.expect("validated increment"); quote!(#schema::AssignmentGenerator::Increment(#amount)) }
                 };
-                fields.push(quote!(assignment: Some(#orm::schema::Assignment { by: #generator, on: #orm::schema::AssignmentEvent::#event })));
+                fields.push(quote!(assignment: Some(#schema::Assignment { by: #generator, on: #schema::AssignmentEvent::#event })));
             }
             Property::Reference { collection, column: target } => {
                 let collection = spelling(collection);
                 let target = spelling(target);
                 let relation = column.relation().map(spelling);
                 let name = relation.map_or_else(|| quote!(None), |name| quote!(Some(::std::string::String::from(#name))));
-                fields.push(quote!(reference: Some(#orm::schema::RelationSchema { collection: ::std::string::String::from(#collection), column: ::std::string::String::from(#target), name: #name })));
+                fields.push(quote!(reference: Some(#schema::RelationSchema { collection: ::std::string::String::from(#collection), column: ::std::string::String::from(#target), name: #name })));
             }
             Property::Relation(_) => {}
-            Property::Mask { kind, classification } => fields.push(quote!(mask: Some(#orm::schema::MaskSchema { kind: ::std::string::String::from(#kind), classification: ::std::string::String::from(#classification) }))),
+            Property::Mask { kind, classification } => fields.push(quote!(mask: Some(#schema::MaskSchema { kind: ::std::string::String::from(#kind), classification: ::std::string::String::from(#classification) }))),
             Property::VectorMetric(metric) => {
                 let metric = Ident::new(match metric.to_string().as_str() { "cosine" => "Cosine", "l2" => "L2", _ => "InnerProduct" }, metric.span());
-                fields.push(quote!(vector_metric: #orm::schema::VectorMetric::#metric));
+                fields.push(quote!(vector_metric: #schema::VectorMetric::#metric));
             }
         }
     }
     if !storage.is_empty() {
-        fields.push(quote!(storage: #orm::schema::StorageMapping { #(#storage),*, ..::core::default::Default::default() }));
+        fields.push(quote!(storage: #schema::StorageMapping { #(#storage),*, ..::core::default::Default::default() }));
     }
-    quote!(#orm::schema::ColumnSchema { #(#fields),*, ..#orm::schema::ColumnSchema::new(#orm::schema::LogicalType::#kind) })
+    quote!(#schema::ColumnSchema { #(#fields),*, ..#schema::ColumnSchema::new(#schema::LogicalType::#kind) })
 }
 
 fn field_map(columns: &[Column], orm: &syn::Path) -> TokenStream {

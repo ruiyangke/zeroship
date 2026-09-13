@@ -4,7 +4,6 @@
 //! the request's identity, actor, read set and transaction route synchronously;
 //! execution can then yield without consulting another request's context.
 
-pub use crate::schema;
 use crate::schema::{FieldMap, Schema};
 pub use crate::value::Value;
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
