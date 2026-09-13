@@ -214,7 +214,7 @@ Then open `http://localhost:8000/apps/db-todos/`.
 
 ## Tests
 
-The shared PostgreSQL and SMTP suites use the provisioner:
+The remaining shared PostgreSQL suites use the provisioner:
 
 ```bash
 tests/provision_test_backends.sh
@@ -224,8 +224,13 @@ Database verification is part of ordinary `cargo test`; it has no opt-in
 feature. Libtest runs serially by default because platform fixtures share
 fleet-wide state. The suite runners below prepare the required migrations.
 
-The provisioner writes the PostgreSQL test overlay and starts the mailer test's SMTP sink.
-Use `PG_TEST_URL` or `AUTH_TEST_SMTP_SINK` to target your own servers.
+The provisioner writes the PostgreSQL test overlay. `PG_TEST_URL` redirects
+suites that still use this shared database.
+Auth, authn and mailer tests own their migrated PostgreSQL containers. Mailer
+also owns its Mailpit SMTP sink and inspects captured messages through its API;
+these tests require Docker and accept no external database or SMTP address.
+Run `cargo xtask test migrations` to build their migration host, then
+`cargo test -p zeroship-mailer` to verify delivery and suppression.
 KV and Redis driver tests provision their required servers with Testcontainers;
 they need Docker and do not read shared Redis URLs. See the
 [KV test commands](../../crates/zeroship-kv/README.md).
