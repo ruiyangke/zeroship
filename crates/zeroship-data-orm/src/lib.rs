@@ -48,6 +48,7 @@ pub mod masking;
 pub mod metrics;
 pub mod orm;
 pub mod protection;
+pub mod schema;
 pub(crate) mod schema_cache;
 pub mod search;
 pub mod sql;

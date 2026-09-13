@@ -53,12 +53,12 @@ async fn concurrent_upsert(identity: IdentityMode, masked: bool, nested: bool) {
                 .as_ref()
                 .clone()
         });
-        fields["id"].as_object_mut().unwrap().shift_remove("assign");
-        fields["id"]["writable"] = Value::Bool(true);
+        fields["id"].assignment = None;
+        fields["id"].writable = true;
         owner.database = Database::from_schema(
             current.binding.clone(),
             current.backend.clone(),
-            vec![("records".into(), fields)],
+            Schema::new([("records".into(), CollectionSchema::new(fields))]),
         )
         .unwrap();
     }
@@ -72,7 +72,7 @@ async fn concurrent_upsert(identity: IdentityMode, masked: bool, nested: bool) {
     let other = Database::from_schema(
         db.binding.clone(),
         db.backend.clone(),
-        vec![("records".into(), fields)],
+        Schema::new([("records".into(), CollectionSchema::new(fields))]),
     )
     .unwrap();
     other
@@ -215,7 +215,7 @@ async fn cancelling_a_waiting_protected_upsert_rolls_back_its_internal_frame() {
     let other = Database::from_schema(
         db.binding.clone(),
         db.backend.clone(),
-        vec![("records".into(), fields)],
+        Schema::new([("records".into(), CollectionSchema::new(fields))]),
     )
     .unwrap();
     let subscription = crate::cdc::broker::subscribe(db.binding.app_id(), "records");

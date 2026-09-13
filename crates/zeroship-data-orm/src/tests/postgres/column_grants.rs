@@ -48,7 +48,7 @@ fn unique_suffix() -> String {
         .to_string()
 }
 
-fn readable_columns(schema: &Value) -> Vec<String> {
+fn readable_columns(schema: &crate::schema::FieldMap) -> Vec<String> {
     crate::sql::mapping::implicit_read_fields(schema)
         .expect("readable fixture fields")
         .into_iter()
@@ -81,7 +81,7 @@ async fn fixture(admin: &Client, suffix: &str) -> (String, String) {
         .expect("create fixture role");
 
     let table = format!("{}.{}", quote_ident(&app), quote_ident(COLLECTION));
-    let readable = readable_columns(&schema);
+    let readable = readable_columns(&crate::tests::fixtures::native_fields(schema));
     let readable_list = readable
         .iter()
         .map(|column| quote_ident(column))
@@ -152,7 +152,7 @@ fn registered_writes_obey_column_scoped_read_grants() {
             let postgres = crate::tests::fixtures::postgres::Postgres::start();
             let admin = connect(&postgres.url()).await;
             let (app, role) = fixture(&admin, &unique_suffix()).await;
-            let schema = people_schema();
+            let schema = crate::tests::fixtures::native_fields(people_schema());
             let namespace = SchemaName::new(&app).expect("namespace");
             let registration = SqlRegistration::postgres();
             let session = connect(&postgres.url()).await;

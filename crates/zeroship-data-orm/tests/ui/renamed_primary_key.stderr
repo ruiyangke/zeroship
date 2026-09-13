@@ -1,5 +1,5 @@
-error: entries: collection requires an 'id' primary key
- --> tests/ui/renamed_primary_key.rs:3:22
+error: collection requires an 'id' primary key
+ --> tests/ui/renamed_primary_key.rs:5:9
   |
-3 | schema!(pub models = "../fixtures/renamed-primary-key.runtime.json");
-  |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+5 |         entries {
+  |         ^^^^^^^

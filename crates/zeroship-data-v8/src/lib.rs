@@ -129,8 +129,8 @@ impl NativePlugin for DbPlugin {
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
         let collection_names = schemas
-            .iter()
-            .map(|(name, _)| name.clone())
+            .collections()
+            .map(|(name, _)| name.to_owned())
             .collect::<Vec<_>>();
         // Same refusal as `mint_db`: an app id that is not a legal schema name
         // has no binding to key the descriptor under, so publish nothing rather
@@ -184,30 +184,16 @@ fn install_native_collection_properties<'s>(
 
 fn descriptor_schemas(
     descriptor: Option<&serde_json::Value>,
-) -> Result<Vec<(String, zeroship_data_orm::value::Value)>, String> {
-    let Some(descriptor) = descriptor else {
-        return Ok(Vec::new());
-    };
-    let collections = descriptor
-        .get("collections")
-        .and_then(serde_json::Value::as_object)
-        .ok_or_else(|| "descriptor has no object `collections` field".to_string())?;
-
-    collections
-        .iter()
-        .map(|(name, collection)| {
-            let fields = collection
-                .get("fields")
-                .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| {
-                    format!("descriptor collection {name:?} has no object `fields` field")
-                })?;
-            Ok((
-                name.clone(),
-                zeroship_data_orm::value::to_value(fields).map_err(|e| e.to_string())?,
-            ))
-        })
-        .collect()
+) -> Result<zeroship_data_orm::schema::Schema, String> {
+    descriptor.map_or_else(
+        || Ok(zeroship_data_orm::schema::Schema::default()),
+        |descriptor| {
+            zeroship_data_orm::schema::Schema::from_runtime_descriptor(
+                &zeroship_data_orm::value::Value::from(descriptor.clone()),
+            )
+            .map_err(|error| error.to_string())
+        },
+    )
 }
 
 #[cfg(test)]
@@ -438,8 +424,12 @@ export default { fetch() { return new Response("ok"); } };
             .expect("declared collection must resolve before any read");
         assert_eq!(
             schema.as_ref(),
-            &runtime_descriptor["collections"]["users"]["fields"],
-            "native boot must publish the descriptor's field map verbatim"
+            zeroship_data_orm::schema::CollectionSchema::from_fields(
+                &runtime_descriptor["collections"]["users"]["fields"]
+            )
+            .unwrap()
+            .fields(),
+            "native boot must publish the decoded collection contract"
         );
         let mut invalid = runtime_descriptor.clone();
         invalid["collections"]["users"]["fields"] = value!({
@@ -457,6 +447,27 @@ export default { fetch() { return new Response("ok"); } };
             )
             .expect_err("renamed identity must fail at native installation");
         assert!(error.contains("id"), "{error}");
+        assert_eq!(
+            descriptor::collection_schema(&binding, "users").unwrap(),
+            schema
+        );
+        let mut invalid_reference = runtime_descriptor;
+        invalid_reference["collections"]["users"]["fields"]["owner_id"] = value!({
+            "type":"string", "refTarget":"undeclared", "refColumn":"id", "relation":"owner"
+        });
+        let replacement_namespace = plugin.build_instance(scope, APP).unwrap();
+        let error = plugin
+            .bind_runtime_descriptor(
+                scope,
+                APP,
+                replacement_namespace,
+                Some(&serde_json::to_value(&invalid_reference).unwrap()),
+            )
+            .expect_err("missing relation targets must fail before creator evaluation");
+        assert!(
+            error.contains("reference target collection is not declared"),
+            "{error}"
+        );
         assert_eq!(
             descriptor::collection_schema(&binding, "users").unwrap(),
             schema

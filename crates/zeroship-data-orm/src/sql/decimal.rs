@@ -19,27 +19,15 @@ pub(crate) enum Arithmetic {
 }
 
 pub(crate) fn storage(
-    definition: &crate::value::Value,
+    definition: &crate::schema::ColumnSchema,
 ) -> Result<Option<DecimalStorage>, CompileError> {
-    if definition["type"].as_str() != Some("number") {
+    if definition.logical_type != crate::schema::LogicalType::Number {
         return Ok(None);
     }
-    let Some(precision) = definition.get("precision") else {
+    let Some(precision) = definition.precision else {
         return Ok(None);
     };
-    let precision = precision
-        .as_u64()
-        .ok_or_else(|| invalid("decimal precision must be a positive integer"))?;
-    let scale = definition
-        .get("scale")
-        .map(|value| {
-            value
-                .as_u64()
-                .ok_or_else(|| invalid("decimal scale must be a non-negative integer"))
-        })
-        .transpose()?
-        .unwrap_or(0);
-    DecimalStorage::new(precision, scale).map(Some)
+    DecimalStorage::new(precision, definition.scale.unwrap_or(0)).map(Some)
 }
 
 pub(crate) fn valid(value: &str) -> bool {
@@ -259,10 +247,6 @@ fn round(coefficient: BigInt, places: usize) -> BigInt {
 
 fn power_of_ten(power: usize) -> BigInt {
     BigInt::from(10u8).pow(u32::try_from(power).expect("bounded decimal exponent"))
-}
-
-fn invalid(message: &str) -> CompileError {
-    CompileError::InvalidStatement(message.into())
 }
 
 #[derive(Clone, Copy, Debug)]

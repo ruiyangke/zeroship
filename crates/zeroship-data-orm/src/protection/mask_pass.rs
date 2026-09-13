@@ -11,6 +11,7 @@
 
 use std::collections::HashMap;
 
+use crate::schema::FieldMap;
 use crate::value::Value;
 use zeroize::Zeroizing;
 
@@ -67,13 +68,10 @@ pub type DerivedMasks = Vec<DerivedMask>;
 /// 4. If the column value is `null`, skip — `null` passes through as
 ///    `null` (no mask written, per Q-MASK-L).
 pub fn apply_mask_on_write(
-    schema: &Value,
+    schema: &FieldMap,
     plaintexts: &MaskPlaintextSidechannel,
     row: &Value,
 ) -> Result<DerivedMasks, DbError> {
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(Vec::new());
-    };
     let Some(obj) = row.as_object() else {
         return Err(DbError::internal(
             "apply_mask_on_write: row must be a JSON object",
@@ -82,7 +80,7 @@ pub fn apply_mask_on_write(
 
     let mut derived: DerivedMasks = Vec::new();
 
-    for (col, def) in schema_obj.iter() {
+    for (col, def) in schema.iter() {
         let Some(mask) = crate::sql::descriptors::effective_mask(def) else {
             continue;
         };
@@ -232,10 +230,11 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
 ///
 /// Returns `Ok(())` when the schema declares no masked columns or the
 /// row is missing fields; never errors on a malformed row.
-pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Result<(), DbError> {
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(());
-    };
+pub fn wrap_row_on_read(
+    schema: &FieldMap,
+    collection: &str,
+    row: &mut Value,
+) -> Result<(), DbError> {
     let Some(obj) = row.as_object_mut() else {
         return Ok(());
     };
@@ -255,7 +254,7 @@ pub fn wrap_row_on_read(schema: &Value, collection: &str, row: &mut Value) -> Re
     let mut to_wrap: Vec<(String, String, String)> = Vec::new(); // (col, masked_value, classification)
     let mut to_strip: Vec<String> = Vec::new();
 
-    for (col, def) in schema_obj.iter() {
+    for (col, def) in schema.iter() {
         let Some(mask) = crate::sql::descriptors::effective_mask(def) else {
             continue;
         };
@@ -346,6 +345,12 @@ pub fn mask_sentinel_signature() -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    fn test_schema(fields: crate::value::Value) -> crate::schema::FieldMap {
+        crate::schema::CollectionSchema::from_fields(&fields)
+            .unwrap()
+            .into_fields()
+    }
+
     use super::*;
     use crate::value;
 
@@ -363,7 +368,11 @@ mod tests {
 
     /// Run the two write stages in the order `WriteStages::apply_to_doc` does:
     /// derive the masks, then place them.
-    fn derive_and_relocate(schema: &Value, plaintexts: &MaskPlaintextSidechannel, row: &mut Value) {
+    fn derive_and_relocate(
+        schema: &FieldMap,
+        plaintexts: &MaskPlaintextSidechannel,
+        row: &mut Value,
+    ) {
         let masks = apply_mask_on_write(schema, plaintexts, row).expect("derive masks");
         relocate_masked_columns(&masks, row).expect("relocate");
     }
@@ -371,13 +380,13 @@ mod tests {
     #[test]
     fn a_masked_encrypted_write_puts_the_mask_in_the_logical_column_and_moves_the_ciphertext() {
         // Encrypted column: plaintext arrives via the sidechannel.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({
             "id": "usr_01",
             "ssn": "BASE64CIPHERTEXT",
@@ -413,13 +422,13 @@ mod tests {
     /// the sidechannel.
     #[test]
     fn a_missing_sidechannel_still_preserves_the_ciphertext() {
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "encrypted": true,
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({ "id": "usr_01", "ssn": "BASE64CIPHERTEXT" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
@@ -436,12 +445,12 @@ mod tests {
     fn a_mask_only_write_moves_the_plaintext_to_the_raw_column() {
         // Non-encrypted but masked column: plaintext stays in `row[col]`,
         // sidechannel has no entry.
-        let schema = value!({
+        let schema = test_schema(value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email", "classification": "pii" }
             }
-        });
+        }));
         let mut row = value!({ "id": "usr_01", "email": "alice@example.com" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
@@ -463,13 +472,13 @@ mod tests {
     #[test]
     fn apply_mask_on_write_skips_kind_none() {
         // Explicit opt-out leaves the stored value unchanged.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "encrypted": true,
                 "mask": { "kind": "none", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({ "id": "usr_01", "ssn": "BASE64CT" });
         let mut plaintexts = MaskPlaintextSidechannel::new();
         plaintexts.insert("ssn".to_string(), Zeroizing::new("123-45-6789".to_string()));
@@ -483,12 +492,12 @@ mod tests {
     #[test]
     fn apply_mask_on_write_skips_null_value() {
         // Null passes through as null.
-        let schema = value!({
+        let schema = test_schema(value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email", "classification": "pii" }
             }
-        });
+        }));
         let mut row = value!({ "id": "usr_01", "email": null });
         let plaintexts = MaskPlaintextSidechannel::new();
 
@@ -501,13 +510,13 @@ mod tests {
     #[test]
     fn apply_mask_on_write_skips_absent_column() {
         // A partial update that omits the field does not add it.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             },
             "name": { "type": "string" }
-        });
+        }));
         let mut row = value!({ "name": "alice" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
@@ -519,7 +528,7 @@ mod tests {
 
     #[test]
     fn apply_mask_on_write_handles_multiple_columns() {
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -532,7 +541,7 @@ mod tests {
                 "type": "string",
                 "mask": { "kind": "dateYear", "classification": "pii" }
             }
-        });
+        }));
         let mut row = value!({
             "id": "usr_01",
             "ssn": "123-45-6789",
@@ -560,16 +569,20 @@ mod tests {
 
     #[test]
     fn apply_mask_on_write_accepts_exact_decimal_plaintext() {
-        let schema = value!({
+        let schema = test_schema(value!({
             "amount": {
                 "type": "number",
                 "precision": 30,
                 "scale": 2,
                 "mask": { "kind": "full", "classification": "spi" }
             }
-        });
+        }));
         let mut row = Value::Object(
-            [("amount".into(), Value::Decimal("9007199254740993.01".into()))].into(),
+            [(
+                "amount".into(),
+                Value::Decimal("9007199254740993.01".into()),
+            )]
+            .into(),
         );
 
         derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
@@ -583,12 +596,12 @@ mod tests {
 
     #[test]
     fn apply_mask_on_write_rejects_unknown_kind() {
-        let schema = value!({
-            "ssn": {
-                "type": "string",
-                "mask": { "kind": "absurdly-novel-kind", "classification": "spi" }
-            }
+        let mut definition = crate::schema::ColumnSchema::new(crate::schema::LogicalType::Text);
+        definition.mask = Some(crate::schema::MaskSchema {
+            kind: "absurdly-novel-kind".into(),
+            classification: "spi".into(),
         });
+        let schema = FieldMap::from_iter([("ssn".into(), definition)]);
         let row = value!({ "ssn": "abc" });
         let plaintexts = MaskPlaintextSidechannel::new();
 
@@ -602,10 +615,10 @@ mod tests {
     #[test]
     fn apply_mask_on_write_noop_when_no_masked_columns() {
         // Schema with only non-masked fields — pass is a no-op.
-        let schema = value!({
+        let schema = test_schema(value!({
             "name": { "type": "string" },
             "age": { "type": "number" }
-        });
+        }));
         let mut row = value!({ "name": "alice", "age": 30 });
         let plaintexts = MaskPlaintextSidechannel::new();
         let original = row.clone();
@@ -622,14 +635,14 @@ mod tests {
     #[test]
     fn wrap_row_on_read_aliased_select_shape() {
         // The projected field contains its configured display value.
-        let schema = value!({
+        let schema = test_schema(value!({
             "id": { "type": "string", "primaryKey": true },
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             },
             "name": { "type": "string" }
-        });
+        }));
         let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
@@ -675,12 +688,12 @@ mod tests {
         // consumer. The fixture is hand-built either way, so what the test
         // exercises never depended on which producer made the row - only the
         // name did.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let raw = crate::sql::mapping::raw_column_name("ssn");
         let mut row = value!({
             "id": "usr_01",
@@ -710,13 +723,13 @@ mod tests {
     fn wrap_row_on_read_skips_kind_none() {
         // Opt-out: `kind: "none"` retains plaintext-on-read (the
         // decrypt-on-read path); no wrapping happens.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "encrypted": true,
                 "mask": { "kind": "none", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({
             "id": "usr_01",
             "ssn": "decrypted-plaintext"
@@ -736,12 +749,12 @@ mod tests {
     fn wrap_row_on_read_uses_default_pii_classification() {
         // When the schema mask block omits `classification`, default is
         // `"pii"` (mirrors the SDK's default).
-        let schema = value!({
+        let schema = test_schema(value!({
             "email": {
                 "type": "string",
                 "mask": { "kind": "email" }
             }
-        });
+        }));
         let mut row = value!({
             "id": "usr_01",
             "email": "a***@example.com"
@@ -760,13 +773,13 @@ mod tests {
     fn wrap_row_on_read_handles_numeric_id() {
         // Mask metadata uses a textual row identity for every descriptor
         // supported by the ORM.
-        let schema = value!({
+        let schema = test_schema(value!({
             "id": { "type": "integer", "primaryKey": true },
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({
             "id": 42,
             "ssn": "***-**-6789"
@@ -784,12 +797,12 @@ mod tests {
         // Projection that excluded `id` — `row_pk` falls back to empty
         // string; the wrap still happens (`unmask()` will surface a typed
         // error when row_pk is empty).
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({ "ssn": "***-**-6789" });
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
@@ -806,12 +819,12 @@ mod tests {
     #[test]
     fn wrap_row_on_read_never_returns_plaintext() {
         // Treat an unexpected plaintext display value as untrusted input.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
@@ -840,10 +853,10 @@ mod tests {
     fn wrap_row_on_read_noop_when_no_masked_columns() {
         // Schema with only non-masked fields — row passes through
         // unchanged.
-        let schema = value!({
+        let schema = test_schema(value!({
             "name": { "type": "string" },
             "age": { "type": "number" }
-        });
+        }));
         let mut row = value!({ "id": "usr_01", "name": "alice", "age": 30 });
         let original = row.clone();
 
@@ -855,12 +868,12 @@ mod tests {
     #[test]
     fn wrap_row_on_read_noop_when_row_not_object() {
         // Defensive: a `Value::Null` row passes through without error.
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
             }
-        });
+        }));
         let mut row = Value::Null;
         wrap_row_on_read(&schema, "users", &mut row).unwrap();
         assert_eq!(row, Value::Null);
@@ -868,7 +881,7 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_handles_multiple_masked_columns() {
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" }
@@ -881,7 +894,7 @@ mod tests {
                 "type": "string",
                 "mask": { "kind": "dateYear", "classification": "pii" }
             }
-        });
+        }));
         // Aliased-SELECT shape: parent slots hold masked strings.
         let mut row = value!({
             "id": "usr_01",
@@ -918,17 +931,20 @@ mod tests {
     /// does NOT produce. That is deliberate: a fixture spelling the derived name
     /// passes against a body that ignores the descriptor entirely, which is the
     /// state this pair of tests exists to move off.
-    fn masked_def_with_raw(raw: &str) -> Value {
-        value!({
-            "type": "string",
-            "mask": { "kind": "last4", "classification": "spi" },
-            "storage": { "valueColumn": "ssn", "rawColumn": raw },
-        })
+    fn masked_def_with_raw(raw: &str) -> crate::schema::ColumnSchema {
+        let mut definition = crate::schema::ColumnSchema::new(crate::schema::LogicalType::Text);
+        definition.mask = Some(crate::schema::MaskSchema {
+            kind: "last4".into(),
+            classification: "spi".into(),
+        });
+        definition.storage.value_column = Some("ssn".into());
+        definition.storage.raw_column = Some(raw.into());
+        definition
     }
 
     #[test]
     fn a_write_relocates_to_the_raw_column_the_descriptor_declares() {
-        let schema = value!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
+        let schema = FieldMap::from_iter([("ssn".into(), masked_def_with_raw("__zs_raw2__ssn"))]);
         let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
         derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
@@ -953,7 +969,7 @@ mod tests {
 
     #[test]
     fn wrap_row_on_read_strips_the_raw_column_the_descriptor_declares() {
-        let schema = value!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
+        let schema = FieldMap::from_iter([("ssn".into(), masked_def_with_raw("__zs_raw2__ssn"))]);
         let mut row = value!({
             "id": "usr_01",
             "ssn": "***-**-6789",
@@ -978,7 +994,7 @@ mod tests {
     /// satisfied.
     #[test]
     fn a_descriptor_naming_a_creator_reachable_raw_column_refuses_both_passes() {
-        let schema = value!({ "ssn": masked_def_with_raw("nickname") });
+        let schema = FieldMap::from_iter([("ssn".into(), masked_def_with_raw("nickname"))]);
 
         let row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
         let err = apply_mask_on_write(&schema, &MaskPlaintextSidechannel::new(), &row)
@@ -999,9 +1015,9 @@ mod tests {
     /// green on a tree where masking no longer worked at all.
     #[test]
     fn a_descriptor_without_a_storage_block_still_uses_the_derived_name() {
-        let schema = value!({
+        let schema = test_schema(value!({
             "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } }
-        });
+        }));
         let raw = crate::sql::mapping::raw_column_name("ssn");
         let mut row = value!({ "id": "usr_01", "ssn": "123-45-6789" });
 
@@ -1013,5 +1029,33 @@ mod tests {
             row.get(&raw).is_none(),
             "the derived raw column is still stripped on read: {row}",
         );
+    }
+
+    #[test]
+    fn native_and_decoded_masks_preserve_ciphertext_and_hide_raw_storage() {
+        let mut field = masked_def_with_raw("__zs_raw2__ssn");
+        field.encrypted = true;
+        let native = crate::schema::CollectionSchema::new([("ssn".into(), field)]).into_fields();
+        let decoded = test_schema(value!({
+            "ssn": {
+                "type": "string", "required": true, "encrypted": true,
+                "mask": {"kind": "last4", "classification": "spi"},
+                "storage": {"valueColumn": "ssn", "rawColumn": "__zs_raw2__ssn"}
+            }
+        }));
+        assert_eq!(native, decoded);
+        let ciphertext = Value::Bytes(vec![0, 255, 128]);
+        let mut plaintexts = MaskPlaintextSidechannel::new();
+        plaintexts.insert("ssn".into(), Zeroizing::new("123-45-6789".into()));
+        for schema in [native, decoded] {
+            let mut row = value!({"id": "row", "ssn": ciphertext.clone()});
+            derive_and_relocate(&schema, &plaintexts, &mut row);
+            assert_eq!(row["__zs_raw2__ssn"], ciphertext);
+            assert_eq!(row["ssn"], value!("***-**-6789"));
+            wrap_row_on_read(&schema, "people", &mut row).unwrap();
+            assert!(row.get("__zs_raw2__ssn").is_none());
+            assert_eq!(row["ssn"]["masked"], value!("***-**-6789"));
+            assert_eq!(row["ssn"]["classification"], value!("spi"));
+        }
     }
 }

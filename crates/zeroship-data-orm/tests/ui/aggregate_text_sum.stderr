@@ -1,7 +1,7 @@
 error[E0599]: the method `sum` exists for struct `SourceColumn<title>`, but its trait bounds were not satisfied
- --> tests/ui/aggregate_text_sum.rs:6:36
+ --> tests/ui/aggregate_text_sum.rs:7:36
   |
-6 |     p.column(schema::posts::title).sum();
+7 |     p.column(schema::posts::title).sum();
   |                                    ^^^ method cannot be called on `SourceColumn<title>` due to unsatisfied trait bounds
   |
  ::: src/orm/codecs.rs

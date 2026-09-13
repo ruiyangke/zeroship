@@ -4,6 +4,7 @@
 //! the request's identity, actor, read set and transaction route synchronously;
 //! execution can then yield without consulting another request's context.
 
+use crate::schema::{FieldMap, Schema};
 pub use crate::value::Value;
 use std::{cell::Cell, future::Future, marker::PhantomData, rc::Rc};
 use zeroship_data_orm::binding::DbBinding;
@@ -34,16 +35,16 @@ impl Database {
         }
         .execute(Operation::Read(Box::new(query)))
     }
-    /// Open the configured backend and bind the deployment's runtime metadata.
+    /// Open the configured backend and install its native schema.
     pub async fn connect(
         binding: DbBinding,
         options: crate::ConnectOptions,
-        collections: Vec<(String, Value)>,
+        schema: Schema,
     ) -> Result<Self, DbError> {
-        Self::from_schema(binding, options.connect().await?, collections)
+        Self::from_schema(binding, options.connect().await?, schema)
     }
 
-    /// Bind an already installed runtime descriptor to a backend.
+    /// Bind an installed schema to a backend.
     pub fn new(context: crate::OrmContext, binding: DbBinding, backend: BackendHandle) -> Self {
         Self {
             identity: Rc::new(()),
@@ -56,17 +57,15 @@ impl Database {
         }
     }
 
-    /// Install the host's collection descriptors before exposing this database.
-    /// Validation completes before publication, so failure leaves the previous
-    /// descriptor intact.
+    /// Validate and install the host's schema in an independent context.
     pub fn from_schema(
         binding: DbBinding,
         backend: BackendHandle,
-        collections: Vec<(String, Value)>,
+        schema: Schema,
     ) -> Result<Self, DbError> {
         let context = crate::OrmContext::new();
         context.with(|| {
-            crate::descriptor::install_collections(&binding, collections)?;
+            crate::descriptor::install_collections(&binding, schema)?;
             Ok(Self::new(context.clone(), binding, backend))
         })
     }
@@ -104,13 +103,24 @@ impl Database {
         &self.binding
     }
 
-    /// Bind generated collection metadata to this deployment's descriptor.
+    /// Check the native model against the host's installed schema.
     pub fn entity<E: Entity>(&self) -> Result<EntityCollection<E>, DbError> {
         self.context.with(|| {
             let collection = self.collection(E::COLLECTION)?;
             let schema = crate::descriptor::collection_schema(&self.binding, E::COLLECTION)?;
-            if schema.as_ref() != E::schema() {
-                return Err(schema_mismatch::<E>());
+            if schema.as_ref() != E::schema().fields() {
+                let field = schema
+                    .keys()
+                    .chain(E::schema().keys())
+                    .find(|name| schema.get(*name) != E::schema().get(*name))
+                    .expect("unequal field maps differ at a field");
+                return Err(DbError::config(
+                    "orm_schema_mismatch",
+                    format!(
+                        "collection '{}': column '{field}' differs from the installed schema",
+                        E::COLLECTION,
+                    ),
+                ));
             }
             Ok(EntityCollection {
                 collection,
@@ -282,18 +292,14 @@ impl Collection {
 #[derive(Debug)]
 pub struct EntityCollection<E: Entity> {
     collection: Collection,
-    schema: std::sync::Arc<Value>,
+    schema: std::sync::Arc<FieldMap>,
     entity: PhantomData<E>,
 }
-fn schema_mismatch<E: Entity>() -> DbError {
-    schema_mismatch_for(E::COLLECTION)
-}
-
 fn schema_mismatch_for(collection: &str) -> DbError {
     DbError::config(
         "orm_schema_mismatch",
         format!(
-            "collection '{}': Rust metadata differs from the installed runtime descriptor; regenerate from the deployment's schema.runtime.json",
+            "collection '{}': model metadata differs from the installed schema",
             collection,
         ),
     )
@@ -373,7 +379,7 @@ mod relations;
 pub use mutations::ConflictTarget;
 mod transactions;
 pub use crate::error::IsolationLevel;
-pub use codecs::{Decimal, Point, Protected, sql_types};
+pub use codecs::{sql_types, Decimal, Point, Protected};
 pub use model::*;
 pub use transactions::TransactionOptions;
 pub mod read;
@@ -382,15 +388,7 @@ mod read_builder;
 mod read_input;
 pub use crate::value::Record;
 pub use read_builder::*;
-pub use zeroship_data_macros::{Changeset, FromRow, Insertable, schema};
-
-/// Implementation support for generated metadata.
-#[doc(hidden)]
-pub mod __private {
-    pub fn schema_value(json: &str) -> super::Value {
-        serde_json::from_str(json).expect("schema macro emitted validated descriptor JSON")
-    }
-}
+pub use zeroship_data_macros::{schema, Changeset, FromRow, Insertable};
 
 #[cfg(test)]
 mod tests;

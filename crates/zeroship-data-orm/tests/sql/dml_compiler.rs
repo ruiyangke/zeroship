@@ -168,11 +168,13 @@ fn resolved_selects_reject_backend_dependent_ordering() {
         StorageType::GeoPoint,
     ] {
         let result = scalar_select(storage, |parts| {
-            parts.order_by.push(zeroship_data_orm::sql::statement::ResolvedOrder {
-                expression: parts.projection[0].expression.clone(),
-                direction: Direction::Ascending,
-                nulls: NullOrder::Last,
-            });
+            parts
+                .order_by
+                .push(zeroship_data_orm::sql::statement::ResolvedOrder {
+                    expression: parts.projection[0].expression.clone(),
+                    direction: Direction::Ascending,
+                    nulls: NullOrder::Last,
+                });
         });
         assert_eq!(
             result.unwrap_err(),
@@ -186,11 +188,13 @@ fn resolved_selects_reject_backend_dependent_ordering() {
         StorageType::Timestamp,
     ] {
         assert!(scalar_select(storage, |parts| {
-            parts.order_by.push(zeroship_data_orm::sql::statement::ResolvedOrder {
-                expression: parts.projection[0].expression.clone(),
-                direction: Direction::Ascending,
-                nulls: NullOrder::Last,
-            });
+            parts
+                .order_by
+                .push(zeroship_data_orm::sql::statement::ResolvedOrder {
+                    expression: parts.projection[0].expression.clone(),
+                    direction: Direction::Ascending,
+                    nulls: NullOrder::Last,
+                });
         })
         .is_ok());
     }
@@ -1599,7 +1603,10 @@ impl SqlCompiler for OverbindingCompiler {
 struct DownstreamCodecs;
 
 impl SqlStorageCodecs for DownstreamCodecs {
-    fn storage_type(&self, _: &Value) -> Result<StorageType, CompileError> {
+    fn storage_type(
+        &self,
+        _: &zeroship_data_orm::schema::ColumnSchema,
+    ) -> Result<StorageType, CompileError> {
         Ok(StorageType::Integer)
     }
 

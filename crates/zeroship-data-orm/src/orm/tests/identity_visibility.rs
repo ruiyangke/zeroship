@@ -36,11 +36,15 @@ async fn hidden_id(postgres: bool) {
                 .as_ref()
                 .clone()
         });
-        fields["id"][flag] = value!(false);
+        match flag {
+            "readable" => fields["id"].readable = false,
+            "projectable" => fields["id"].projectable = false,
+            _ => unreachable!(),
+        }
         let db = Database::from_schema(
             owner.database.binding.clone(),
             owner.database.backend.clone(),
-            vec![("records".into(), fields)],
+            Schema::new([("records".into(), CollectionSchema::new(fields))]),
         )
         .unwrap();
         db.install_mask_policy(value!({"support":["pii"]})).unwrap();
@@ -52,12 +56,10 @@ async fn hidden_id(postgres: bool) {
                 .unwrap(),
         );
         assert_eq!(inserted[0]["secret"], value!("private"));
-        assert!(
-            !inserted[0]["masked"]["_meta"]["row_pk"]
-                .as_str()
-                .unwrap()
-                .is_empty()
-        );
+        assert!(!inserted[0]["masked"]["_meta"]["row_pk"]
+            .as_str()
+            .unwrap()
+            .is_empty());
         let source = ReadSource::new("records", "r");
         let mut read = ReadQuery::new(source.clone());
         read.filter = crate::sql::Predicate::compare(
@@ -98,12 +100,10 @@ async fn hidden_id(postgres: bool) {
             "select":["masked"],"unmask":["masked"],"actor":{"kind":"support","id":"usr_reader"},"unmaskReason":"verify projection"
         })).await.unwrap());
         assert_eq!(unmasked, vec![value!({"masked":"raw"})]);
-        assert!(
-            records
-                .find(value!({}), value!({"select":["id"]}))
-                .await
-                .is_err()
-        );
+        assert!(records
+            .find(value!({}), value!({"select":["id"]}))
+            .await
+            .is_err());
         let updated = rows(
             records
                 .execute(Operation::Update {

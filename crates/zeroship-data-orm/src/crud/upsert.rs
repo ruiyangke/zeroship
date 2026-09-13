@@ -1,6 +1,7 @@
 //! Resolve a prepared upsert into physical columns before SQL compilation.
 
 use super::resolved::ResolvedTable;
+use crate::schema::FieldMap;
 use crate::{
     sql::{
         compiler::{CompiledQuery, Requirements},
@@ -18,7 +19,7 @@ use std::collections::HashSet;
 pub(crate) struct Builder<'a> {
     namespace: &'a SchemaName,
     collection: &'a str,
-    schema: &'a Value,
+    schema: &'a FieldMap,
     assignments: &'a WriteAssignments,
     registration: &'a crate::sql::registration::SqlRegistration,
 }
@@ -27,7 +28,7 @@ impl<'a> Builder<'a> {
     pub(crate) const fn new(
         namespace: &'a SchemaName,
         collection: &'a str,
-        schema: &'a Value,
+        schema: &'a FieldMap,
         assignments: &'a WriteAssignments,
         registration: &'a crate::sql::registration::SqlRegistration,
     ) -> Self {
@@ -51,7 +52,7 @@ impl<'a> Builder<'a> {
     }
 }
 
-pub(crate) fn requirements(schema: &Value, guard_identity: bool) -> Requirements {
+pub(crate) fn requirements(schema: &FieldMap, guard_identity: bool) -> Requirements {
     let allocates_identity = guard_identity && super::identity::is_generated(schema);
     Requirements {
         relational_reads: false,
