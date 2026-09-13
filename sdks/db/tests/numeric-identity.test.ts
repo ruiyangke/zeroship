@@ -1,7 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Collection } from "../src/collection.js";
-import { loadRelations } from "../src/collection/relations.js";
 import { t, type InferId, type PlainObject } from "../src/types.js";
 import type { NativeDb } from "../src/native.js";
 import type { TxCollection } from "../src/db-types.js";
@@ -66,25 +65,6 @@ test("bulk unmask returns keys in the caller's numeric representation", async ()
   assert.deepEqual([...result.data!.keys()], ids);
   for (const id of ids) assert.deepEqual(result.data!.get(id), { label: "private" });
 });
-
-for (const [type, ids] of [["string", ["7"]], ["int", [0, 7]], ["bigInt", [7n, 9007199254740993n]]] as const) {
-  test(`relations load ${type} references without converting wire values`, async () => {
-    const rows: PlainObject[] = [...ids, ids[0], null].map(parentId => ({ parentId }));
-    const queries: unknown[] = [];
-    await loadRelations({
-      _name: "children", _schema: { parentId: { type, refTarget: "parents", refColumn: "id" } },
-      _resolveCollection: () => ({
-        _schema: { id: { type, required: true, primaryKey: true } },
-        find: async filter => {
-          queries.push(filter);
-          return { data: ids.map(id => ({ id: id === 7n ? 7 : id })), error: null };
-        },
-      }),
-    }, rows, { parentId: true });
-    assert.deepEqual(queries, [{ id: { $in: [...ids] } }]);
-    assert.deepEqual(rows.map(row => row.parentId), [...ids, ids[0]].map(id => ({ id: id === 7n ? 7 : id })).concat([null] as never));
-  });
-}
 
 function contracts(collection: Collection<typeof fields, "records">) {
   const id = 7 as InferId<typeof collection>;

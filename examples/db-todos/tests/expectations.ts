@@ -25,7 +25,7 @@ export function assertDeployed(captured: Capture, run: string) {
   expect(result("pair")).toMatchObject({ a: { id: alice.id }, b: { id: bob.id } });
   const joined = rows(result("withUser"));
   expect(joined).toHaveLength(5);
-  for (const row of joined) expect(row.userId).toMatchObject({ id: alice.id, email: `alice-${run}@probe.test` });
+  for (const row of joined) expect(row.user).toMatchObject({ id: alice.id, email: `alice-${run}@probe.test` });
   expect(rows(result("list")).every((row) => row.userId === alice.id)).toBe(true);
   for (const name of ["p1", "p2"]) expect(result(name)).toMatchObject({ isDone: false, continueCursor: expect.stringMatching(/.+/) });
   expect(result("p3")).toMatchObject({ isDone: true });

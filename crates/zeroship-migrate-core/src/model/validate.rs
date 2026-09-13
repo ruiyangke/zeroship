@@ -6548,9 +6548,36 @@ fn validate_declared_table_column_names(
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
+    if let crate::model::ir::Op::CreateTable { columns, .. } = op {
+        crate::model::relations::validate_relation_names(
+            columns.iter().map(|column| column.name.as_str()),
+            columns.iter().filter_map(|column| {
+                let reference = column.references.as_ref()?;
+                Some((
+                    reference.relation.as_deref()?,
+                    Some(reference.table.as_str()),
+                    Some(reference.column.as_str()),
+                ))
+            }),
+        )
+        .map_err(|reason| relation_authoring_error(reason, target_dialect, op_index))?;
+    }
     declared_table_column_names(op)
         .into_iter()
         .try_for_each(|name| refuse_reserved_column_name(vendors, name, target_dialect, op_index))
+}
+
+fn relation_authoring_error(reason: String, dialect: &DialectId, op_index: usize) -> AuthoringError {
+    AuthoringError {
+        code: CODE_OP_INVALID.to_owned(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        dialect: dialect.clone(),
+        reason,
+        suggested_fix: Some(
+            "declare a unique relation name alongside an explicit foreign-key target".into(),
+        ),
+    }
 }
 
 /// The column-name refusal itself, taking the NAME rather than the op. The peer of
@@ -6668,6 +6695,8 @@ pub fn validate_declared_descriptor_identifiers(
     target_dialect: &DialectId,
 ) -> Result<(), AuthoringError> {
     for (index, descriptor) in descriptors.iter().enumerate() {
+        crate::model::relations::validate_descriptor_relations(descriptor)
+            .map_err(|reason| relation_authoring_error(reason, target_dialect, index))?;
         refuse_reserved_collection_name(vendors, &descriptor.name, target_dialect, index)?;
         for field in &descriptor.fields {
             refuse_reserved_column_name(vendors, &field.name, target_dialect, index)?;
@@ -13383,6 +13412,7 @@ mod tests {
                 unique: None,
                 value_format: None,
                 references: Some(ColumnReference {
+                    relation: None,
                     table: "accounts".into(),
                     column: "id".into(),
                     on_delete: None,
@@ -14230,6 +14260,7 @@ mod tests {
             unique: None,
             value_format,
             references: target.map(|(table, column)| ColumnReference {
+                relation: None,
                 table: table.into(),
                 column: column.into(),
                 on_delete: None,

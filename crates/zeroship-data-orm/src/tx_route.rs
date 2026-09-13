@@ -12,8 +12,8 @@
 
 use crate::backend::BackendHandle;
 use crate::binding::DbBinding;
-use crate::sql::registration::SqlRegistration;
 use crate::sql::SchemaName;
+use crate::sql::registration::SqlRegistration;
 use crate::transaction::scope::TransactionScope;
 
 /// A synchronous routing decision awaiting backend binding.
@@ -43,7 +43,7 @@ enum CapturedConnection {
 /// A captured dispatch bound to its backend. It carries app identity, callback
 /// scope and SQL registration together, so execution does not re-read host context.
 /// Construct through [`CapturedRoute::bind`].
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct TxRoute {
     app_id: String,
     meter: Option<zeroship_metering::MeterHandle>,

@@ -492,6 +492,10 @@ fn shape(predicate: &ResolvedPredicate) -> String {
 fn operand_shape(operand: &ResolvedOperand) -> String {
     match operand {
         ResolvedOperand::Column(column) => column.name().as_str().to_owned(),
+        ResolvedOperand::Comparison(comparison) => format!(
+            "comparison({},{:?})",
+            comparison.column.name().as_str(), comparison.op,
+        ),
         ResolvedOperand::Aggregate {
             function,
             column,

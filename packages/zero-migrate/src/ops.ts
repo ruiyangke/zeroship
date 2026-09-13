@@ -824,6 +824,7 @@ type ColumnReferenceFacet = Readonly<{
   table: string;
   column: string;
   name?: string;
+  relation?: string;
   onDelete?: RefAction;
   onUpdate?: RefAction;
 }>;
@@ -937,7 +938,7 @@ class ColumnDefImpl implements ColumnDefType {
   references(
     table: string,
     column: string,
-    options: { onDelete?: RefAction; onUpdate?: RefAction; name?: string } = {},
+    options: { onDelete?: RefAction; onUpdate?: RefAction; name?: string; relation?: string } = {},
   ): ColumnDefImpl {
     requireString(table, "t.*.references(table, column, options): table");
     if (table.length === 0) {
@@ -957,10 +958,19 @@ class ColumnDefImpl implements ColumnDefType {
     if (options.name !== undefined) {
       requireNonEmptyString(options.name, "t.*.references(table, column, { name })");
     }
+    if (options.relation !== undefined) {
+      const relation = options.relation;
+      if (typeof relation !== "string" || relation.startsWith("_") || !/^[A-Za-z0-9_]+$/.test(relation) ||
+          relation.length > 63 || /^(?:__zs_|__zeroship|sqlite_)/i.test(relation) ||
+          ["__proto__", "constructor", "prototype"].includes(relation)) {
+        throw structuredError("OP_INVALID", "references relation must be a nonreserved output identifier");
+      }
+    }
     const reference = compact({
       table,
       column,
       name: options.name,
+      relation: options.relation,
       onDelete: requireReferenceAction(
         options.onDelete,
         "t.*.references(table, column, { onDelete })",
@@ -3440,11 +3450,19 @@ function recordCreateTable(
   const indexes: Node[] = [];
   const pkCols: string[] = [];
   const columnNames = Object.keys(args.columns);
+  const relations = new Set<string>();
 
   for (const colName of columnNames) {
     const def = args.columns[colName];
     if (!isColumnDef(def)) {
       throw structuredError("OP_INVALID", `create column "${colName}" must be a t.* ColumnDef`);
+    }
+    const relation = def._reference?.relation;
+    if (relation !== undefined) {
+      if (columnNames.includes(relation) || relations.has(relation)) {
+        throw structuredError("OP_INVALID", `relation ${JSON.stringify(relation)} must be unique and cannot shadow a column in ${JSON.stringify(name)}`);
+      }
+      relations.add(relation);
     }
     cols.push(def.__toIrColumn(colName));
     if (def._primaryKey) pkCols.push(colName);

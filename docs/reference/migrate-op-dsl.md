@@ -289,7 +289,7 @@ Chainable modifiers (`packages/zero-migrate/src/ops.ts`), each returning a fresh
 | `.default(value)` | a typed scalar literal, `now()` / `uuidV4()`, **or** a function-expression callback for composed defaults — never raw SQL |
 | `.primaryKey()` | mark the table primary key (implies `NOT NULL`) |
 | `.unique()` | add a single-column `UNIQUE` |
-| `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete`/`onUpdate`/`name`) |
+| `.references(table, column, options?)` | a typed single-column foreign key — keeps this column's storage type and adds the target `{ table, column }` (+ optional `onDelete`/`onUpdate`/`name`/`relation`) |
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
@@ -304,7 +304,7 @@ export default {
         status: t.text().notNull().default("pending"),
         customer_id: ids.typeId({ prefix: "cus" })
           .notNull()
-          .references("customers", "id"),
+          .references("customers", "id", { relation: "customer" }),
         owner_id: t.uuid().notNull().references("users", "id", { onDelete: "cascade" }),
       },
     });
@@ -319,6 +319,12 @@ chose (`t.uuid()` or `ids.typeId(...)` above) and the facet records the full tar
 explicit constraint name (absent ⇒ `<table>_<column>_fkey`). Both halves of the
 target are required — a missing target column is an `OP_INVALID` at authoring
 time, never a silently table-only reference.
+
+`relation` declares the ORM navigation name: the example exposes
+`.with({ customer: true })` while keeping `customer_id` as the scalar foreign key.
+The name must be a nonreserved output identifier, unique within its collection,
+and cannot collide with a column. It is carried in runtime metadata; `name`
+independently names the SQL constraint.
 
 The facet is **create-table only**: `.column().add()`, `.setType()`, and nested
 type positions (`t.encrypted({ of })`, a domain's `as`) reject a `.references()`

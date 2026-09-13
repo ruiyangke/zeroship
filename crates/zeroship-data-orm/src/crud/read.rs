@@ -3,13 +3,13 @@
 use super::{predicate, resolved::ResolvedTable};
 use crate::{
     sql::{
+        Direction, Ident, IdentRole, NullOrder, RowLimit, RowOffset, SchemaName,
         mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
-            ResolvedOperand, ResolvedOrder, ResolvedPredicate, SelectParts, SelectStatement,
-            SelectedExpression, Statement,
+            Comparison, ResolvedOperand, ResolvedOrder, ResolvedPredicate, SelectParts,
+            SelectStatement, SelectedExpression, Statement,
         },
-        Direction, Ident, IdentRole, NullOrder, RowLimit, RowOffset, SchemaName,
     },
     value::Value,
 };
@@ -31,12 +31,130 @@ pub(crate) fn find(
     filter_soft_deleted: bool,
     registration: &SqlRegistration,
 ) -> Result<crate::sql::compiler::CompiledQuery, QueryError> {
+    find_with_projections(
+        namespace,
+        collection,
+        schema,
+        filter,
+        limit,
+        offset,
+        order_by,
+        select,
+        unmask_columns,
+        filter_soft_deleted,
+        &[],
+        registration,
+    )
+    .map(|(query, _)| query)
+}
+
+pub(crate) fn relation_match_capacity(
+    schema: &Value,
+    registration: &SqlRegistration,
+) -> Result<usize, QueryError> {
+    let fields = projection_fields(None, schema, &[])?.len();
+    let capacity = crate::orm::read::MAX_READ_FIELDS
+        .saturating_sub(fields)
+        .min(crate::sql::MAX_MEMBERSHIP_LIST_LEN)
+        .min(crate::sql::MAX_ROW_LIMIT as usize)
+        .min(registration.support().max_bind_parameters.saturating_sub(1) / 2);
+    if capacity == 0 {
+        return Err(invalid(
+            "reference lookup exceeds its projection or parameter budget",
+        ));
+    }
+    Ok(capacity)
+}
+
+pub(crate) fn find_with_key_matches(
+    namespace: &SchemaName,
+    collection: &str,
+    schema: &Value,
+    key: &str,
+    values: &[Value],
+    registration: &SqlRegistration,
+) -> Result<(crate::sql::compiler::CompiledQuery, Vec<String>), QueryError> {
+    if values.is_empty() || values.len() > relation_match_capacity(schema, registration)? {
+        return Err(invalid("reference lookup exceeds its key budget"));
+    }
+    let filter = Value::Object(
+        [(
+            key.into(),
+            Value::Object([("$in".into(), Value::Array(values.to_vec()))].into()),
+        )]
+        .into(),
+    );
+    let matches = values.iter().map(|value| (key, value)).collect::<Vec<_>>();
+    find_with_projections(
+        namespace,
+        collection,
+        schema,
+        filter,
+        Some(crate::sql::MAX_ROW_LIMIT),
+        None,
+        None,
+        None,
+        &[],
+        true,
+        &matches,
+        registration,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn find_with_projections(
+    namespace: &SchemaName,
+    collection: &str,
+    schema: &Value,
+    filter: Value,
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<&Value>,
+    select: Option<&Value>,
+    unmask_columns: &[String],
+    filter_soft_deleted: bool,
+    matches: &[(&str, &Value)],
+    registration: &SqlRegistration,
+) -> Result<(crate::sql::compiler::CompiledQuery, Vec<String>), QueryError> {
     let table = ResolvedTable::aliased(namespace, collection, SOURCE_ALIAS, schema, registration)?;
     let fields = projection_fields(select, schema, unmask_columns)?;
-    let projection = fields
+    let mut projection = fields
         .into_iter()
         .map(|field| selected(&table, &field))
         .collect::<Result<Vec<_>, _>>()?;
+    let mut aliases = Vec::new();
+    for (field, value) in matches {
+        let comparison = predicate::resolve(
+            Value::Object([((*field).into(), (*value).clone())].into()),
+            schema,
+            &table,
+            registration,
+        )?;
+        let ResolvedPredicate::Compare {
+            lhs: ResolvedOperand::Column(column),
+            op,
+            rhs: crate::sql::statement::ResolvedPredicateValue::Bind { value, .. },
+        } = comparison
+        else {
+            return Err(invalid("reference lookup requires column equality"));
+        };
+        let mut suffix = aliases.len();
+        let output = loop {
+            let output = format!("_relation_match_{suffix}");
+            if projection
+                .iter()
+                .all(|selected| selected.alias.as_str() != output)
+            {
+                break output;
+            }
+            suffix += 1;
+        };
+        projection.push(SelectedExpression {
+            expression: ResolvedOperand::Comparison(Comparison { column, op, value }),
+            alias: alias(&output)?,
+        });
+        aliases.push(output);
+    }
     let predicate = visible_predicate(
         predicate::resolve(filter, schema, &table, registration)?,
         schema,
@@ -54,7 +172,7 @@ pub(crate) fn find(
         .transpose()
         .map_err(|error| invalid(error.to_string()))?
         .map(RowOffset::get);
-    compile_select(
+    let query = compile_select(
         table,
         projection,
         predicate,
@@ -63,7 +181,8 @@ pub(crate) fn find(
         offset,
         false,
         registration,
-    )
+    )?;
+    Ok((query, aliases))
 }
 
 pub(crate) fn count(

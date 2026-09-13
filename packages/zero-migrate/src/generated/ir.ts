@@ -276,6 +276,7 @@ export interface ColumnReference {
   onDelete?: RefAction | null;
   onUpdate?: RefAction | null;
   name?: string | null;
+  relation?: string | null;
 }
 
 /** A column definition inside `createTable`. Lifecycle operations use their own

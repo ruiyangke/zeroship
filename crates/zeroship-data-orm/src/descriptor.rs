@@ -27,6 +27,9 @@ pub fn install_collections(
         crate::sql::descriptors::validate_collection_identity(schema).map_err(|message| {
             DbError::validation("invalid_collection_identity", format!("{name}: {message}"))
         })?;
+        crate::sql::descriptors::relation_fields(schema).map_err(|message| {
+            DbError::validation("invalid_relation", format!("{name}: {message}"))
+        })?;
         let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
         crate::sql::lifecycle::soft_delete_column(schema)?;
         crate::sql::lifecycle::concurrency_column(schema)?;
@@ -146,6 +149,54 @@ mod tests {
             assert!(collection_schema(&binding, "replacement").is_err());
             assert!(collection_schema(&binding, "invalid").is_err());
         }
+    }
+
+    #[test]
+    fn invalid_relation_metadata_cannot_replace_installed_collections() {
+        crate::tests::fixtures::reset_engine();
+        let binding = DbBinding::cold_start("app_relation_contract");
+        let valid = value!({
+            "id":{"type":"string", "required":true, "primaryKey":true},
+            "owner_id":{"type":"string", "refTarget":"people", "refColumn":"id", "relation":"owner"}
+        });
+        install_collections(&binding, vec![("entries".into(), valid.clone())]).unwrap();
+        for relation in [
+            value!(null),
+            value!(true),
+            value!(""),
+            value!("owner.name"),
+            value!("__proto__"),
+            value!("constructor"),
+            value!("prototype"),
+            value!("_meta"),
+            value!("_custom"),
+            value!("__zeroship_internal"),
+            value!("id"),
+            value!("owner_id"),
+        ] {
+            let mut fields = valid.clone();
+            fields["owner_id"]["relation"] = relation;
+            assert!(install_collections(&binding, vec![("entries".into(), fields)]).is_err());
+            assert_eq!(
+                collection_schema(&binding, "entries").unwrap().as_ref(),
+                &valid
+            );
+        }
+        let mut duplicate = valid.clone();
+        duplicate["editor_id"] = valid["owner_id"].clone();
+        assert!(install_collections(&binding, vec![("entries".into(), duplicate)]).is_err());
+        for required in ["refTarget", "refColumn"] {
+            let mut fields = valid.clone();
+            fields["owner_id"]
+                .as_object_mut()
+                .unwrap()
+                .swap_remove(required);
+            assert!(install_collections(&binding, vec![("entries".into(), fields)]).is_err());
+        }
+        assert_eq!(
+            collection_schema(&binding, "entries").unwrap().as_ref(),
+            &valid
+        );
     }
 
     #[test]

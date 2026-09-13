@@ -1,811 +1,197 @@
-/**
- * Relation-aware reads — `with: { fk: true }` eager-loads referenced rows.
- *
- * Covers:
- *   - happy path (one fk, joined row attached)
- *   - null fk → joined field is null
- *   - missing target row (fk points to a deleted row) → null
- *   - two relations in one call → single roundtrip per relation
- *   - repeated fk values dedupe to one IN clause
- *   - with: { bogus: true } (not a ref field) → rejects with clear error
- *   - with: { id: true } (not a ref field) → rejects similarly
- *   - inline `find(filter, { with })` and chainable `.with(...)` both work
- *   - Query.paginate honours `.with(...)` and dedupes the same way
- *   - inside db.transaction(...) — `tx.x.find(...).with(...)` joins on TX_CONN
- *   - type-level: `Awaited<...>.data[0].user` is `PlainObject | null`
- */
-import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { test } from "node:test";
+import { naming, t } from "@zeroship/db";
 import { installSchemaForTest } from "./_install-helper.js";
-import { t, schema } from "@zeroship/db";
-import { FixtureQuery as Query } from "./_query-fixture.js";
 import type { NativeDb } from "../src/native.js";
-import type { Id } from "@zeroship/db";
+import { Query } from "../src/query.js";
 
-// The fixtures below key everything off project "10" (see the
-// `rowsByTable` literals). Those literals themselves are untyped mock
-// data (loose `AnyRec`), but every `find({ projectId: ... })` /
-// `.with(...)` call below goes through the REAL typed `Filter<S>`,
-// which types a `t.ref("projects")` field as the branded `Id<"projects">`
-// - a bare string literal does not structurally carry that brand.
-// This constant supplies it once instead of casting at each call site.
-const PROJECT_10 = "10" as Id<"projects">;
+type Row = Record<string, unknown>;
+type Call = { collection: string; filter: Row; opts: Row; transaction: boolean };
 
-type AnyRec = Record<string, unknown>;
-
-/**
- * **P9 PR 1** — the SDK's `get()` now routes through `find` with
- * `{limit:1}` (the native `findOne` v8_method was removed). The mock
- * splits `find` calls into two buckets:
- *   - `findBatched`: the `{id: {$in: [...]}}` shape from the IdLoader
- *   - `findSingle`: the `{limit:1}` shape (formerly the `findOne` call)
- *
- * Old test assertions on `calls.findOne` migrate to `calls.findSingle`.
- */
-type CallLog = {
-  find: { collection: string; filter: AnyRec; opts: AnyRec }[];
-  findBatched: { collection: string; filter: AnyRec; opts: AnyRec }[];
-  findSingle: { collection: string; filter: AnyRec; opts: AnyRec }[];
-};
-
-/** Mock native that returns rows by table. The find handler understands
- *  `{ id: { $in: [...] } }` so the relation loader's batched IN works.
- *
- *  **P7 PR 3** — FK columns cascade to TEXT typed_id; the loader sends
- *  string ids on the wire. The mock keeps tables string-keyed to match
- *  the typed_id contract directly. */
-function makeMock(
-  tables: Record<string, Record<string, AnyRec>>,
-): { native: NativeDb; calls: CallLog } {
-  const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
+function fixture(rows: Row[], options: { snakeCase?: boolean; failure?: Error } = {}) {
+  const calls: Call[] = [];
+  let transaction = false;
   const native = {
-    // P9 PR 3: native `transaction(callback)` orchestrator stub.
-    transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
-    collection(name: string) {
+    async transaction(callback: (raw: unknown) => unknown) {
+      transaction = true;
+      try { return await callback(undefined); }
+      finally { transaction = false; }
+    },
+    collection(collection: string) {
       return {
-        async find(filter: AnyRec, opts: AnyRec) {
-          calls.find.push({ collection: name, filter, opts });
-          const rows = tables[name] ?? {};
-          const idClause = filter.id as { $in?: string[] } | string | undefined;
-          const isBatched =
-            idClause !== null &&
-            typeof idClause === "object" &&
-            Array.isArray((idClause as AnyRec).$in);
-          if (isBatched) {
-            calls.findBatched.push({ collection: name, filter, opts });
-            const ids = (idClause as { $in: string[] }).$in;
-            return ids.map((i) => rows[i]).filter(Boolean);
-          }
-          if (opts && (opts as AnyRec).limit === 1) {
-            calls.findSingle.push({ collection: name, filter, opts });
-          }
-          if (typeof idClause === "string") {
-            const r = rows[idClause];
-            return r ? [r] : [];
-          }
-          // Whole-table scan with optional field-eq filter.
-          const out: AnyRec[] = [];
-          for (const r of Object.values(rows)) {
-            let ok = true;
-            for (const [k, v] of Object.entries(filter)) {
-              if (k.startsWith("$")) continue;
-              if (r[k] !== v) { ok = false; break; }
-            }
-            if (ok) out.push(r);
-          }
-          return out;
+        async find(filter: Row, opts: Row) {
+          calls.push({ collection, filter, opts, transaction });
+          assert.equal(collection, "posts", "the adapter must not query relation targets");
+          if (options.failure) throw options.failure;
+          return structuredClone(rows);
         },
-        async insert(_doc: AnyRec) { return _doc; },
       };
     },
-  };
-  return { native: native as unknown as NativeDb, calls };
+  } as unknown as NativeDb;
+  const db = installSchemaForTest({
+    people: { displayName: t.string(), accountKey: t.string().unique(), payload: t.json() },
+    posts: {
+      title: t.string(),
+      authorId: t.ref("people", { column: "accountKey", relation: "author" }),
+      reviewerId: t.ref("people", { relation: "reviewer" }),
+    },
+  }, { native, naming: options.snakeCase ? naming.snakeCase : naming.asIs });
+  return { db, calls };
 }
 
-function makeDb(calls?: CallLog) {
-  const tables: Record<string, Record<string, AnyRec>> = {
-    users: {
-      "1": { id: "1", email: "alice@example.com", name: "Alice" },
-      "2": { id: "2", email: "bob@example.com", name: "Bob" },
-    },
-    projects: {
-      "10": { id: "10", name: "Apollo" },
-      "11": { id: "11", name: "Beacon" },
-    },
-    todos: {
-      "100": { id: "100", userId: "1", projectId: "10", title: "buy milk" },
-      "101": { id: "101", userId: "2", projectId: "10", title: "write tests" },
-      "102": { id: "102", userId: "1", projectId: "11", title: "deploy" },
-      "103": { id: "103", userId: null,           projectId: "10", title: "orphan" },
-      // FK to a user that doesn't exist in the users table — missing target.
-      "104": { id: "104", userId: "9999", projectId: "11", title: "ghost" },
+const loaded = { id: "post_a", title: "notes", authorId: "author_a", author: { id: "person_a", accountKey: "author_a", displayName: "Ada" } };
+
+for (const terminal of ["find", "get", "first", "unique", "last", "paginate"] as const) {
+  test(`${terminal} forwards with once and consumes native relation rows`, async () => {
+    const { db, calls } = fixture([loaded]);
+    let result: unknown;
+    if (terminal === "get") {
+      const read = await db.posts.get("post_a", { with: { author: true } });
+      assert.equal(read.error, null);
+      result = read.data;
+    } else {
+      const query = db.posts.find({}, { with: { author: true } }).sort({ id: 1 });
+      if (terminal === "find") {
+        const read = await query;
+        assert.equal(read.error, null);
+        result = read.data?.[0];
+      } else if (terminal === "paginate") {
+        const read = await query.paginate({ numItems: 5 });
+        assert.equal(read.error, null);
+        result = read.data?.page[0];
+      } else {
+        const read = await query[terminal]();
+        assert.equal(read.error, null);
+        result = read.data;
+      }
+    }
+    assert.deepEqual(result, loaded);
+    assert.equal(calls.length, 1);
+    assert.deepEqual(calls[0].opts.with, { author: true });
+  });
+}
+
+test("chained with merges references and preserves native nulls", async () => {
+  const row = { ...loaded, reviewerId: null, reviewer: null };
+  const { db, calls } = fixture([row]);
+  const result = await db.posts.find().with({ author: true }).with({ reviewer: true });
+  assert.equal(result.error, null);
+  assert.deepEqual(result.data, [row]);
+  assert.deepEqual(calls.map(call => call.opts.with), [{ author: true, reviewer: true }]);
+});
+
+test("relation mappings rename declared target fields without changing JSON or mask payloads", async () => {
+  const payload = { nested_key: { display_name: "untouched" } };
+  const protectedName = { masked: "A***", classification: "pii", sentinel: "__zsmask__" };
+  const nativeRow = {
+    id: "post_a", author_id: "author_a", author: {
+      id: "person_a", account_key: "author_a", display_name: protectedName,
+      payload, unknown_native_key: "kept",
     },
   };
-  const mock = makeMock(tables);
-  if (calls) {
-    calls.find = mock.calls.find;
-    calls.findBatched = mock.calls.findBatched;
-    calls.findSingle = mock.calls.findSingle;
+  const { db, calls } = fixture([nativeRow], { snakeCase: true });
+  const result = await db.posts.find().with({ author: true });
+  assert.equal(result.error, null);
+  assert.deepEqual(result.data, [{
+    id: "post_a", authorId: "author_a", author: {
+      id: "person_a", accountKey: "author_a", displayName: protectedName,
+      payload, unknown_native_key: "kept",
+    },
+  }]);
+  assert.deepEqual(calls[0].opts.with, { author: true });
+  assert.deepEqual(nativeRow.author.payload, payload);
+});
+
+test("empty parent results still forward relation validation to native", async () => {
+  const { db, calls } = fixture([]);
+  assert.deepEqual(await db.posts.find({}, { with: { author: true } }), { data: [], error: null });
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].opts.with, { author: true });
+});
+
+test("native relation errors preserve their code through find and get", async () => {
+  const failure = Object.assign(new Error("invalid reference"), { code: "unknown_relation" });
+  const { db, calls } = fixture([], { failure });
+  const query = await db.posts.find({}, { with: { author: true } });
+  const single = await db.posts.get("post_a", { with: { author: true } });
+  for (const result of [query, single]) {
+    assert.equal(result.data, null);
+    assert.equal((result.error as Error & { code: string }).code, failure.code);
   }
-  const db = installSchemaForTest(
-    {
-      users: {
-        email: t.string().required().unique(),
-        name: t.string().required(),
-      },
-      projects: {
-        name: t.string().required(),
-      },
-      todos: {
-        userId: t.ref("users"),
-        projectId: t.ref("projects").required(),
-        title: t.string().required(),
-      },
-    },
-    { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-  );
-  return { db, calls: mock.calls };
-}
+  assert.equal(calls.length, 2);
+});
 
-describe("with: { fk: true } — relation-aware reads", () => {
-  test("happy path: find(filter, { with: { userId: true } }) attaches the joined row", async () => {
-    const { db, calls } = makeDb();
-    // Project 10 has 3 todos in fixtures: 100 (userId=1), 101 (userId=2),
-    // 103 (userId=null — exercises the null FK path on the same page).
-    const { data, error } = await db.todos.find({ projectId: PROJECT_10 }, { with: { userId: true } });
-    assert.equal(error, null);
-    assert.ok(data);
-    assert.equal(data!.length, 3);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    const t101 = data!.find((r) => r.id === "101") as AnyRec;
-    const t103 = data!.find((r) => r.id === "103") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", email: "alice@example.com", name: "Alice" });
-    assert.deepEqual(t101.userId, { id: "2", email: "bob@example.com", name: "Bob" });
-    assert.equal(t103.userId, null, "null FK on the page stays null after join");
-
-    // The relation fired exactly ONE find against `users` (batch IN of distinct ids).
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    assert.equal(userFinds.length, 1, "expected exactly one batched find against users");
-    // **P7 PR 3** — FK columns are TEXT typed_ids on the wire; the
-    // loader stringifies legacy-number FK values before the `$in`.
-    const idClause = userFinds[0].filter.id as { $in: string[] };
-    assert.deepEqual([...idClause.$in].sort(), ["1", "2"]);
+test("direct Query forwards relation options without an SDK loader", async () => {
+  const calls: ZeroshipDbFindOpts[] = [];
+  const query = new Query("posts", {}, async (_name, _filter, opts) => {
+    calls.push(opts);
+    return [loaded];
   });
+  const result = await query.with({ author: true });
+  assert.equal(result.error, null);
+  assert.deepEqual(result.data, [loaded]);
+  assert.deepEqual(calls, [{ with: { author: true } }]);
+});
 
-  test("chainable .with(...) on Query produces the same result", async () => {
-    const { db } = makeDb();
-    const { data } = await db.todos
-      .find({ projectId: PROJECT_10 })
-      .with({ userId: true });
-    assert.ok(data);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", email: "alice@example.com", name: "Alice" });
-  });
-
-  test("get(id, { with: { userId: true } }) attaches the joined row", async () => {
-    const { db, calls } = makeDb();
-    const { data, error } = await db.todos.get("100", { with: { userId: true } });
-    assert.equal(error, null);
-    assert.ok(data);
-    assert.deepEqual((data as AnyRec).userId, { id: "1", email: "alice@example.com", name: "Alice" });
-
-    // get(id) with `with` skips the DataLoader path and goes through
-    // find with limit:1 (formerly findOne).
-    assert.equal(calls.findSingle.length, 1, "get(id, {with}) bypasses the loader");
-    assert.equal(calls.findSingle[0].collection, "todos");
-  });
-
-  test("null FK value → joined field is null", async () => {
-    const { db } = makeDb();
-    const { data } = await db.todos.get("103", { with: { userId: true } });
-    assert.ok(data);
-    assert.equal((data as AnyRec).userId, null);
-  });
-
-  test("missing target row → joined field is null", async () => {
-    const { db } = makeDb();
-    const { data } = await db.todos.get("104", { with: { userId: true } });
-    assert.ok(data);
-    assert.equal((data as AnyRec).userId, null);
-  });
-
-  test("two relations in one call → one roundtrip per relation", async () => {
-    const { db, calls } = makeDb();
-    const { data, error } = await db.todos.find(
-      { projectId: PROJECT_10 },
-      { with: { userId: true, projectId: true } },
-    );
-    assert.equal(error, null);
-    assert.ok(data);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", email: "alice@example.com", name: "Alice" });
-    assert.deepEqual(t100.projectId, { id: "10", name: "Apollo" });
-
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    const projectFinds = calls.find.filter((c) => c.collection === "projects");
-    assert.equal(userFinds.length, 1, "one find against users");
-    assert.equal(projectFinds.length, 1, "one find against projects");
-  });
-
-  test("same FK referenced N times → deduped to one IN clause", async () => {
-    const { db, calls } = makeDb();
-    // todos 100 and 102 both have userId=1 — should dedupe to [1] in the IN.
-    const { data } = await db.todos.find({}, { with: { userId: true } });
-    assert.ok(data);
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    assert.equal(userFinds.length, 1);
-    // **P7 PR 3** — typed_id string wire shape.
-    const idClause = userFinds[0].filter.id as { $in: string[] };
-    // Only the distinct non-null user ids should appear: 1 and 2 (104's 9999 too).
-    const seen = new Set(idClause.$in);
-    assert.equal(seen.size, idClause.$in.length, "ids must be deduped");
-    assert.ok(seen.has("1"));
-    assert.ok(seen.has("2"));
-  });
-
-  test("more than 100 distinct FKs → the IN list is chunked, never over the cap", async () => {
-    // The SDK must split relation lookups before they reach the ORM budget.
-    const N = 150;
-    const users: Record<string, AnyRec> = {};
-    const todos: Record<string, AnyRec> = {};
-    for (let i = 0; i < N; i++) {
-      const uid = `u${i}`;
-      users[uid] = { id: uid, email: `u${i}@example.com`, name: `User ${i}` };
-      todos[`t${i}`] = { id: `t${i}`, userId: uid, projectId: "10", title: `todo ${i}` };
-    }
-    const mock = makeMock({ users, projects: { "10": { id: "10", name: "Apollo" } }, todos });
-    const db = installSchemaForTest(
-      {
-        users: { email: t.string().required().unique(), name: t.string().required() },
-        projects: { name: t.string().required() },
-        todos: {
-          userId: t.ref("users"),
-          projectId: t.ref("projects").required(),
-          title: t.string().required(),
-        },
-      },
-      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.todos.find({}, { with: { userId: true } });
-    assert.equal(error, null);
-    assert.ok(data);
-    assert.equal(data!.length, N);
-
-    const batches = mock.calls.findBatched.filter((c) => c.collection === "users");
-    assert.ok(batches.length > 0, "the relation fetch must fire");
-    for (const b of batches) {
-      const list = (b.filter.id as { $in: string[] }).$in;
-      assert.ok(
-        list.length <= 100,
-        `every IN list must stay within the builder's cap of 100; got ${list.length}`,
-      );
-    }
-
-    // And chunking must not lose or duplicate work: every distinct FK is
-    // requested exactly once across all batches. A fix that chunks but drops
-    // the tail would satisfy the cap assertion above on its own.
-    const requested = batches.flatMap((b) => (b.filter.id as { $in: string[] }).$in);
-    assert.equal(new Set(requested).size, requested.length, "no id requested twice");
-    assert.equal(new Set(requested).size, N, "every distinct FK is requested");
-
-    // The joined rows still land, which is the behaviour the cap protects.
-    const first = data!.find((r) => r.id === "t0") as AnyRec;
-    assert.equal((first.userId as AnyRec).id, "u0");
-  });
-
-  test("empty result set → no relation fetch fires", async () => {
-    const { db, calls } = makeDb();
-    // userId = 9999 doesn't exist on any todo (todos table key is id, not userId).
-    // Use an impossible filter via id IN [] surrogate: count -based check below.
-    const { data } = await db.todos.find({ id: "__missing__" }, { with: { userId: true } });
-    assert.deepEqual(data, []);
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    assert.equal(userFinds.length, 0, "no relation fetch on empty page");
-  });
-
-  test("with: { bogus: true } — clear error when field is unknown", async () => {
-    const { db } = makeDb();
-    const { data, error } = await db.todos.find({}, { with: { bogus: true } as never });
-    assert.equal(data, null);
-    assert.ok(error);
-    assert.match(error!.message, /is not a reference field/);
-  });
-
-  test("with: { id: true } — clear error when field is not a ref", async () => {
-    const { db } = makeDb();
-    // `id` is a real field but not a t.ref — must reject identically.
-    const { data, error } = await db.todos.find({}, { with: { id: true } as never });
-    assert.equal(data, null);
-    assert.ok(error);
-    assert.match(error!.message, /is not a reference field/);
-  });
-
-  test("with: { title: true } — clear error when field exists but isn't a ref", async () => {
-    const { db } = makeDb();
-    const { data, error } = await db.todos.find({}, { with: { title: true } as never });
-    assert.equal(data, null);
-    assert.ok(error);
-    assert.match(error!.message, /is not a reference field/);
-  });
-
-  test("paginate({...}) honours `.with(...)`", async () => {
-    const { db, calls } = makeDb();
-    const { data, error } = await db.todos
-      .find({})
-      .sort({ id: 1 })
-      .with({ userId: true })
-      .paginate({ cursor: null, numItems: 3 });
-    assert.equal(error, null);
-    assert.ok(data);
-    assert.equal(data!.page.length, 3);
-    // First page is todos 100, 101, 102 — userIds 1, 2, 1.
-    for (const r of data!.page as AnyRec[]) {
-      const uid = r.userId;
-      // Either a joined user object or null (id 103 has null FK; not in this page).
-      assert.ok(uid === null || (typeof uid === "object" && uid !== null && "email" in uid));
-    }
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    assert.equal(userFinds.length, 1, "one batched users find for the page");
-  });
-
-  test("inside db.transaction(...) — tx.x.find(...).with(...) works", async () => {
-    const { db, calls } = makeDb();
-    const { data, error } = await db.transaction(async (tx) => {
-      const rows = await tx.todos.find({ projectId: PROJECT_10 }).with({ userId: true });
-      return rows;
+for (const terminal of ["find", "get", "paginate"] as const) {
+  test(`transaction ${terminal} forwards relations through its native call`, async () => {
+    const { db, calls } = fixture([loaded]);
+    const result = await db.transaction(async tx => {
+      if (terminal === "get") return tx.posts.get("post_a", { with: { author: true } });
+      const query = tx.posts.find().with({ author: true });
+      if (terminal === "paginate") return (await query.paginate({ numItems: 5 })).page[0];
+      return (await query)[0];
     });
-    assert.equal(error, null);
-    assert.ok(data);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", email: "alice@example.com", name: "Alice" });
-    // The tx body's find against users still routes through the per-collection
-    // surface (TX_CONN handles the connection routing in Rust); we only verify
-    // the join happened.
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    assert.equal(userFinds.length, 1);
+    assert.equal(result.error, null);
+    assert.deepEqual(result.data, loaded);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].transaction, true);
+    assert.deepEqual(calls[0].opts.with, { author: true });
   });
-
-  test("with: {} (empty spec) is a no-op — relation step never runs", async () => {
-    const { db, calls } = makeDb();
-    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: {} as never });
-    assert.ok(data);
-    // Original todos shape preserved; no users find fired.
-    const userFinds = calls.find.filter((c) => c.collection === "users");
-    assert.equal(userFinds.length, 0);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    assert.equal(t100.userId, "1", "FK string id is left in place when no relation requested");
-  });
-
-  test("with: { userId: false } at runtime — strict `true` only, rejects", async () => {
-    const { db } = makeDb();
-    // Cast: TS type forbids `false`, but a JS caller could send it.
-    const { data, error } = await db.todos.find(
-      {},
-      { with: { userId: false } as unknown as { userId: true } },
-    );
-    assert.equal(data, null);
-    assert.ok(error);
-    assert.match(error!.message, /only `true` is supported/);
-  });
-});
-
-describe("with: type-level inference (compile-time)", () => {
-  test("Row<S> & WithRelations<S, W, AllSchemas> resolves the joined key to Row<TargetSchema>", async () => {
-    const { db } = makeDb();
-    const { data } = await db.todos.find({ projectId: PROJECT_10 }, { with: { userId: true } });
-    if (!data) return;
-    const first = data[0];
-    // After the v2 generics refactor `first.userId` is `Row<usersSchema> | null`
-    // — no cast needed. `first.userId.email` is `string`, `first.userId.id`
-    // is `string`, etc. This is the load-bearing assertion: it would NOT
-    // compile under the v1 `WithRelations<W>` (which widened to PlainObject).
-    if (first.userId !== null) {
-      const email: string = first.userId.email;
-      const name: string = first.userId.name;
-      const id: string = first.userId.id;
-      assert.equal(typeof email, "string");
-      assert.equal(typeof name, "string");
-      assert.equal(typeof id, "string");
-    }
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Parallelism: two relations load concurrently, not in series. The old
-// `for..of await` loop in `_loadRelations` made N relations a 2× / 3× latency
-// hit even though each relation hits a disjoint target table.
-// ---------------------------------------------------------------------------
-
-/** The interval one artificially-delayed `find` occupied. */
-interface SlowSpan {
-  collection: string;
-  start: number;
-  end: number;
 }
 
-describe("with: parallel relation loading", () => {
-  /**
-   * Build a mock that injects an artificial delay into every `find` against
-   * the named target tables, and records the interval each delayed call
-   * occupied.
-   *
-   * Those intervals are the evidence. Two loads that overlap in time ran
-   * concurrently; two that do not, ran in series. That is the property under
-   * test, stated directly. Timing the whole call instead and comparing it to
-   * a ceiling proves the same thing only while the machine is idle - under
-   * load the scheduler can push a genuinely parallel pair past any ceiling
-   * that a sequential pair would have to exceed.
-   */
-  function makeSlowMock(
-    tables: Record<string, Record<string, AnyRec>>,
-    slowTargets: Set<string>,
-    delayMs: number,
-  ): { native: NativeDb; calls: CallLog; spans: SlowSpan[] } {
-    const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
-    const spans: SlowSpan[] = [];
-    const native = {
-      // P9 PR 3: native `transaction(callback)` orchestrator stub.
-      transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
-      collection(name: string) {
-        return {
-          async find(filter: AnyRec, opts: AnyRec) {
-            calls.find.push({ collection: name, filter, opts });
-            if (slowTargets.has(name)) {
-              const start = performance.now();
-              await new Promise((r) => setTimeout(r, delayMs));
-              spans.push({ collection: name, start, end: performance.now() });
-            }
-            const rows = tables[name] ?? {};
-            const idClause = filter.id as { $in?: string[] } | string | undefined;
-            if (
-              idClause !== null &&
-              typeof idClause === "object" &&
-              Array.isArray((idClause as AnyRec).$in)
-            ) {
-              const ids = (idClause as { $in: string[] }).$in;
-              return ids.map((i) => rows[i]).filter(Boolean);
-            }
-            const out: AnyRec[] = [];
-            for (const r of Object.values(rows)) {
-              let ok = true;
-              for (const [k, v] of Object.entries(filter)) {
-                if (k.startsWith("$")) continue;
-                if (r[k] !== v) { ok = false; break; }
-              }
-              if (ok) out.push(r);
-            }
-            return out;
-          },
-          async insert(_doc: AnyRec) { return _doc; },
-        };
-      },
-    };
-    return { native: native as unknown as NativeDb, calls, spans };
-  }
-
-  test("two slow relations load in parallel, not sequentially", async () => {
-    const tables: Record<string, Record<string, AnyRec>> = {
-      users: { "1": { id: "1", name: "Alice" }, "2": { id: "2", name: "Bob" } },
-      projects: { "10": { id: "10", name: "Apollo" }, "11": { id: "11", name: "Beacon" } },
-      todos: {
-        "100": { id: "100", userId: "1", projectId: "10", title: "buy milk" },
-        "101": { id: "101", userId: "2", projectId: "11", title: "write tests" },
-      },
-    };
-    const mock = makeSlowMock(tables, new Set(["users", "projects"]), 50);
-    const db = installSchemaForTest(
-      {
-        users: { name: t.string().required() },
-        projects: { name: t.string().required() },
-        todos: {
-          userId: t.ref("users"),
-          projectId: t.ref("projects").required(),
-          title: t.string().required(),
-        },
-      },
-      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.todos.find({}, { with: { userId: true, projectId: true } });
-
-    assert.equal(error, null);
-    assert.ok(data);
-    // Sanity check that the joins actually happened — otherwise a
-    // timing assertion would pass for the wrong reason.
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", name: "Alice" });
-    assert.deepEqual(t100.projectId, { id: "10", name: "Apollo" });
-
-    // Both relations must actually have been delayed, or there is nothing
-    // to overlap and the assertion below would hold vacuously.
-    assert.deepEqual(
-      mock.spans.map((s) => s.collection).sort(),
-      ["projects", "users"],
-      "both relation targets must have taken the slow path",
-    );
-
-    // The two loads overlap: each began before the other ended. A sequential
-    // loader produces disjoint intervals no matter how the machine is loaded,
-    // so this separates the two implementations and nothing else does.
-    const [a, b] = mock.spans;
-    assert.ok(
-      a.start < b.end && b.start < a.end,
-      `expected the relation loads to overlap in time, got ` +
-        `${a.collection} [${a.start.toFixed(1)}, ${a.end.toFixed(1)}] and ` +
-        `${b.collection} [${b.start.toFixed(1)}, ${b.end.toFixed(1)}] ` +
-        `(disjoint intervals mean they ran in series)`,
-    );
+for (const author of [{ id: "person_a", accountKey: "author_a" }, null]) {
+  test(`pagination keeps a scalar FK cursor when its native relation is ${author === null ? "missing" : "loaded"}`, async () => {
+    const { db, calls } = fixture([
+      { id: "post_a", authorId: "author_a", author },
+      { id: "post_b", authorId: "author_b", author: null },
+    ]);
+    const page = await db.posts.find().with({ author: true }).sort({ authorId: 1 }).paginate({ numItems: 1 });
+    assert.equal(page.error, null);
+    assert.equal(page.data!.page[0].authorId, "author_a");
+    assert.deepEqual(page.data!.page[0].author, author);
+    await db.posts.find().with({ author: true }).sort({ authorId: 1 }).paginate({ numItems: 1, cursor: page.data!.continueCursor });
+    assert.deepEqual(calls[1].filter, { $or: [
+      { authorId: { $gt: "author_a" } },
+      { $and: [{ authorId: "author_a" }, { id: { $gt: "post_a" } }] },
+    ] });
+    assert.equal(calls.length, 2);
   });
+}
+
+for (const selectFirst of [true, false]) {
+  test(`relation aliases survive selection with selectFirst=${selectFirst}`, async () => {
+    const row = { id: "post_a", author: loaded.author };
+    const { db, calls } = fixture([row]);
+    const result = await (selectFirst
+      ? db.posts.find().select(["id"]).with({ author: true })
+      : db.posts.find().with({ author: true }).select(["id"]));
+    assert.equal(result.error, null);
+    assert.deepEqual(result.data, [row]);
+    assert.deepEqual(calls[0].opts, { select: ["id"], with: { author: true } });
+  });
+}
+
+test("reference builders retain scalar storage and named metadata through modifiers", () => {
+  const integer = t.integer().references("people", { column: "id", relation: "author" }).nullable().required();
+  const bigint = t.bigInt().references("people", { column: "id", relation: "author" }).required();
+  assert.deepEqual(integer.toFieldDef(), { type: "integer", refTarget: "people", refColumn: "id", relation: "author", required: true });
+  assert.deepEqual(bigint.toFieldDef(), { type: "bigInt", refTarget: "people", refColumn: "id", relation: "author", required: true });
+  assert.throws(() => t.number().references("people"), /reference storage/);
 });
 
-// ---------------------------------------------------------------------------
-// Safety: Query.with() must throw if the Query was constructed without a
-// relation loader (i.e. via `new Query(...)` directly, bypassing
-// `Collection.find`). Old behaviour: silent no-op.
-// ---------------------------------------------------------------------------
-
-describe("Query.with — guards against direct Query construction", () => {
-  test("calling .with() on a Query with no loader throws TypeError", () => {
-    // Construct a Query directly, skipping the optional `loadRelations`
-    // argument that `Collection.find` normally passes.
-    const q = new Query<unknown, unknown>(
-      "todos",
-      {} as ZeroshipDbFilter,
-      async () => [],
-    );
-    assert.throws(
-      () => q.with({ userId: true } as never),
-      (e: unknown) => {
-        assert.ok(e instanceof TypeError);
-        assert.match((e as Error).message, /Collection\.find/);
-        assert.match((e as Error).message, /direct Query construction/);
-        return true;
-      },
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// FK validation: post-PR 3 the FK column type cascaded to TEXT typed_id,
-// so a string FK value is the only accepted shape. Anything else is a
-// hard error; the SDK no longer coerces numeric or bigint values.
-// ---------------------------------------------------------------------------
-
-describe("with: non-numeric FK coercion + loud failure", () => {
-  test("string FK value joins successfully (typed_id wire shape)", async () => {
-    // **P7 PR 3** — Pre-PR 3 this same test asserted a string FK threw
-    // `with_fk_not_numeric`; PR 3 widened the contract so a string FK
-    // is the canonical shape (the FK column type cascaded to TEXT). The
-    // value "1" matches the `users[1]` row through the mock's
-    // string-aware lookup.
-    const tables: Record<string, Record<string, AnyRec>> = {
-      users: { "1": { id: "1", name: "Alice" } },
-      todos: {
-        "100": { id: "100", userId: "1", title: "buy milk" },
-      },
-    };
-    const mock = makeMock(tables);
-    const db = installSchemaForTest(
-      {
-        users: { name: t.string().required() },
-        todos: {
-          userId: t.ref("users"),
-          title: t.string().required(),
-        },
-      },
-      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.todos.find({}, { with: { userId: true } });
-    assert.equal(error, null);
-    assert.ok(data);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", name: "Alice" });
-  });
-
-  test("non-id-shaped FK value (object) throws with_fk_not_id_shaped", async () => {
-    const tables: Record<string, Record<string, AnyRec>> = {
-      users: { "1": { id: "1", name: "Alice" } },
-      todos: {
-        "100": { id: "100", userId: { malformed: true }, title: "buy milk" },
-      },
-    };
-    const mock = makeMock(tables);
-    const db = installSchemaForTest(
-      {
-        users: { name: t.string().required() },
-        todos: {
-          userId: t.ref("users"),
-          title: t.string().required(),
-        },
-      },
-      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.todos.find({}, { with: { userId: true } });
-    assert.equal(data, null, "object FK must surface as a typed error");
-    assert.ok(error);
-    assert.match(
-      error!.message,
-      /_loadRelations: FK value for field 'userId' must match the declared identity type \(got object\)/,
-    );
-  });
-
-  test("bigint FK value throws instead of coercing", async () => {
-    const tables: Record<string, Record<string, AnyRec>> = {
-      users: { "1": { id: "1", name: "Alice" } },
-      todos: {
-        "100": { id: "100", userId: 1n, title: "buy milk" },
-      },
-    };
-    const mock = makeMock(tables);
-    const db = installSchemaForTest(
-      {
-        users: { name: t.string().required() },
-        todos: {
-          userId: t.ref("users"),
-          title: t.string().required(),
-        },
-      },
-      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.todos.find({}, { with: { userId: true } });
-    assert.equal(data, null);
-    assert.ok(error);
-    assert.match(
-      error!.message,
-      /_loadRelations: FK value for field 'userId' must match the declared identity type \(got bigint\)/,
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Soft-delete + relations: the documented contract is that a FK pointing at
-// Native reads apply the target collection's declared visibility policy.
-describe("with: soft-delete + relations contract", () => {
-  test("FK pointing at a soft-deleted target yields null in the joined field", async () => {
-    // Mock the native visibility rule for the
-    // `$in` branch (the default mock skips this — we need it here).
-    const tables: Record<string, Record<string, AnyRec>> = {
-      users: {
-        "1": { id: "1", name: "Alice", deleted_at: null },
-        "2": { id: "2", name: "Bob", deleted_at: 1700000000000 }, // soft-deleted
-      },
-      todos: {
-        "100": { id: "100", userId: "1", title: "alice todo" },
-        "101": { id: "101", userId: "2", title: "bob todo" },
-      },
-    };
-    const calls: CallLog = { find: [], findBatched: [], findSingle: [] };
-    const native = {
-      // P9 PR 3: native `transaction(callback)` orchestrator stub.
-      transaction: async (cb: (raw: unknown) => unknown) => cb(undefined),
-      collection(name: string) {
-        return {
-          async find(filter: AnyRec, opts: AnyRec) {
-            calls.find.push({ collection: name, filter, opts });
-            const rows = tables[name] ?? {};
-            // _mergeFilter on a soft-delete collection wraps the user's
-            // filter in `{ $and: [orig, { deleted_at: null }] }` (when the
-            // original filter is non-empty) — flatten the top-level
-            // `$and` so the id IN clause and the deleted_at clause are
-            // both visible to the matcher.
-            const clauses: AnyRec[] =
-              Array.isArray(filter.$and)
-                ? (filter.$and as AnyRec[])
-                : [filter];
-            let idIn: string[] | null = null;
-            let wantDeletedAtNull = name === "users" && !opts?.includeDeleted;
-            for (const c of clauses) {
-              const idClause = c.id as { $in?: string[] } | string | undefined;
-              if (
-                idClause !== null &&
-                typeof idClause === "object" &&
-                Array.isArray((idClause as AnyRec).$in)
-              ) {
-                idIn = (idClause as { $in: string[] }).$in;
-              }
-              if ("deleted_at" in c && c.deleted_at === null) wantDeletedAtNull = true;
-            }
-            const matchSoftDelete = (r: AnyRec): boolean =>
-              wantDeletedAtNull ? r.deleted_at === null : true;
-            if (idIn !== null) {
-              return idIn
-                .map((i) => rows[i])
-                .filter((r): r is AnyRec => Boolean(r) && matchSoftDelete(r));
-            }
-            // Whole-table scan honouring soft-delete only.
-            const out: AnyRec[] = [];
-            for (const r of Object.values(rows)) {
-              if (!matchSoftDelete(r)) continue;
-              out.push(r);
-            }
-            return out;
-          },
-          async insert(_doc: AnyRec) { return _doc; },
-        };
-      },
-    };
-    const db = installSchemaForTest(
-      {
-        users: schema({ name: t.string().required() }).softDelete(),
-        todos: {
-          userId: t.ref("users"),
-          title: t.string().required(),
-        },
-      },
-      { native: native as unknown as NativeDb, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.todos.find({}, { with: { userId: true } });
-    assert.equal(error, null);
-    assert.ok(data);
-    const t100 = data!.find((r) => r.id === "100") as AnyRec;
-    const t101 = data!.find((r) => r.id === "101") as AnyRec;
-    assert.deepEqual(t100.userId, { id: "1", name: "Alice", deleted_at: null });
-    assert.equal(
-      t101.userId,
-      null,
-      "FK to a soft-deleted user must yield null in the joined field",
-    );
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Self-referencing FK: `users.managerId: t.ref("users")` must work, including
-// when a row is its own manager and when many rows share the same manager
-// (dedup to one IN clause).
-// ---------------------------------------------------------------------------
-
-describe("with: self-referencing FK", () => {
-  test("self-ref join works, including a user that manages itself, and dedupes", async () => {
-    const tables: Record<string, Record<string, AnyRec>> = {
-      users: {
-        "1": { id: "1", name: "Alice", managerId: null },
-        "2": { id: "2", name: "Bob", managerId: "1" },
-        "3": { id: "3", name: "Carol", managerId: "1" }, // shares manager with Bob → dedup
-        "5": { id: "5", name: "Eve", managerId: "5" },   // manages themselves
-      },
-    };
-    const mock = makeMock(tables);
-    const db = installSchemaForTest(
-      {
-        users: {
-          name: t.string().required(),
-          managerId: t.ref("users"),
-        },
-      },
-      { native: mock.native, naming: { toColumn: s => s, toField: s => s } },
-    );
-
-    const { data, error } = await db.users.find({}, { with: { managerId: true } });
-    assert.equal(error, null);
-    assert.ok(data);
-    const alice = data!.find((r) => r.id === "1") as AnyRec;
-    const bob = data!.find((r) => r.id === "2") as AnyRec;
-    const carol = data!.find((r) => r.id === "3") as AnyRec;
-    const eve = data!.find((r) => r.id === "5") as AnyRec;
-
-    assert.equal(alice.managerId, null, "null manager FK stays null");
-    assert.deepEqual(bob.managerId, { id: "1", name: "Alice", managerId: null });
-    assert.deepEqual(carol.managerId, { id: "1", name: "Alice", managerId: null });
-    // Self-reference: Eve's manager is Eve. The joined row carries the
-    // PRE-join shape — i.e. managerId: "5" (a string id), not infinite-depth.
-    assert.deepEqual(eve.managerId, { id: "5", name: "Eve", managerId: "5" });
-
-    // The relation loader fired exactly ONE find against `users`
-    // (the relation target). Dedup: distinct ids in the IN clause
-    // should be [1, 5] (Alice + Eve), not [1, 1, 5].
-    const userFinds = mock.calls.find.filter((c) => c.collection === "users");
-    // First find is the outer `db.users.find({})`; the relation loader's
-    // batched IN is the second.
-    assert.equal(userFinds.length, 2);
-    // **P7 PR 3** — typed_id string wire shape for FK ids.
-    const idClause = userFinds[1].filter.id as { $in: string[] };
-    const seen = new Set(idClause.$in);
-    assert.equal(seen.size, idClause.$in.length, "ids must be deduped");
-    assert.deepEqual([...seen].sort(), ["1", "5"]);
-  });
+test("redeclaring a reference replaces its previous target options", () => {
+  const field = t.ref("people", { column: "account_key", relation: "author", onDelete: "cascade" })
+    .references("teams", { relation: "team" });
+  assert.deepEqual(field.toFieldDef(), { type: "ref", refTarget: "teams", relation: "team" });
 });

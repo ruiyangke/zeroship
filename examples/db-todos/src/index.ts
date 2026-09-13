@@ -139,14 +139,12 @@ export const getUserPair = query(
   { id: "users.getPair" },
 );
 
-// Smoke for relation-aware reads: `find({}, { with: { userId: true } })`
-// must attach the joined user row at each todo's `userId` field in a
-// single batched roundtrip across all rows.
+// Load the user alongside the foreign key.
 export const listTodosWithUser = query(
   async ({ userId }: { userId: string }) => {
     const { data, error } = await db.todos.find(
       { userId: userIdFromWire(userId), archived: false },
-      { with: { userId: true } },
+      { with: { user: true } },
     );
     if (error) throw error;
     return data ?? [];
