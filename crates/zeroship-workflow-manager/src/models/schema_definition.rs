@@ -109,6 +109,14 @@ zeroship_data_orm::orm::schema! {
             created_at: BigInt,
         }
 
+        schedule_disables {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            revision: BigInt,
+            created_at: BigInt,
+        }
+
         schedule_occurrences {
             #[orm(primary_key)]
             id: Text,
@@ -125,7 +133,8 @@ zeroship_data_orm::orm::schema! {
             #[orm(primary_key)]
             id: Text,
             revision: BigInt,
-            activation_id: Text,
+            enabled: Boolean,
+            activation_id: Nullable<Text>,
         }
 
         schedules {

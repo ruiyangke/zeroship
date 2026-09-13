@@ -14,6 +14,7 @@ export const managerIdentityColumns = {
   recovery_scopes: ["id", "deployment_id", "pending_job_id"],
   schedule_deployments: ["id", "app_id"],
   schedule_activations: ["id", "app_id", "deployment_id"],
+  schedule_disables: ["id", "app_id"],
   schedule_scopes: ["id", "activation_id"],
   schedules: ["id", "app_id", "name", "activation_id"],
   schedule_occurrences: ["id", "app_id", "schedule_id", "run_id", "job_id", "activation_id"],
@@ -121,8 +122,11 @@ export function workflowManagerSchema(namespace) {
   ]);
   table("schedule_activations", { schema: namespace }).index("schedule_activations_identity_key").add({ on: ["app_id", "id"], unique: true });
   index("schedule_activations", "deployment", ["app_id", "deployment_id", "id"]);
+  create("schedule_disables", {
+    app_id: text(), revision: integer(), created_at: integer(),
+  }, ["app_id", "revision"], [fk("schedule_disable_scope", ["app_id"], "queue_scopes", ["id"])]);
   create("schedule_scopes", {
-    revision: integer(), activation_id: text(),
+    revision: integer(), enabled: t.boolean().notNull(), activation_id: t.text(),
   }, ["id"], [
     fk("schedule_scope_app", ["id"], "queue_scopes", ["id"]),
     fk("schedule_scope_activation", ["id", "activation_id"], "schedule_activations", ["app_id", "id"]),

@@ -37,6 +37,15 @@ Creator activation and cron acceptance are handled by the customer engine.
 The server drives due scheduling through the native manager. Normal deployment
 publication and ordinary worker/CLI composition still need integration.
 
+Calendar disable shares the platform's activation revision sequence. Its durable
+receipt remains replayable after restore, and disabling before the first
+activation fences delayed older requests. Disable retains accepted jobs, calendar
+progress, recovery responsibility and holds. Restoring the same deployment
+preserves its interval anchor and catch-up progress while creating new activation
+readiness. Due scans exclude disabled scopes before applying their page limits.
+This gate controls calendar publication; creator admission and executor shutdown
+have separate policy authority.
+
 `driver::Driver` visits bounded calendar, recovery and unfinished-hold pages.
 Each lane captures its upper identity and advances past an attempted candidate
 before I/O. A shared lane deadline bounds scans and candidate operations; failed

@@ -19,8 +19,8 @@ use zeroship_core::{
     workflow_coordination::{FailureCode, AUDIENCE},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
     workflow_schedules::{
-        ActivateSchedules, RegisterSchedules, ScheduleCatchUp, ScheduleDescriptor, ScheduleOverlap,
-        ScheduleTiming,
+        ActivateSchedules, DisableSchedules, RegisterSchedules, ScheduleCatchUp,
+        ScheduleDescriptor, ScheduleOverlap, ScheduleTiming,
     },
 };
 use zeroship_workflow_client::{ControlCoordinator, Error, Options};
@@ -96,6 +96,14 @@ impl Exchange {
     fn activate(command: &ActivateSchedules, response: Value) -> Self {
         Self {
             endpoint: endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
+            request: json!(command),
+            response,
+            status: 200,
+        }
+    }
+    fn disable(command: &DisableSchedules, response: Value) -> Self {
+        Self {
+            endpoint: endpoints::WORKFLOW_SCHEDULE_DISABLE,
             request: json!(command),
             response,
             status: 200,
@@ -332,6 +340,47 @@ async fn schedule_failures_keep_the_closed_transport_contract() {
 }
 
 #[compio::test]
+async fn disable_preserves_revision_and_rejects_changed_or_open_receipts() {
+    let command = DisableSchedules {
+        app_id: AppId::mint(),
+        revision: 7.try_into().unwrap(),
+    };
+    let mut foreign = json!(command);
+    foreign["appId"] = json!(AppId::mint());
+    let mut newer = json!(command);
+    newer["revision"] = json!(8);
+    let mut open = json!(command);
+    open["input"] = json!({"private":"customer data"});
+    let mut unavailable = Exchange::disable(&command, json!({"code":"unavailable"}));
+    unavailable.status = 503;
+    peer(
+        vec![
+            Exchange::disable(&command, json!(command)),
+            Exchange::disable(&command, json!(command)),
+            Exchange::disable(&command, foreign),
+            Exchange::disable(&command, newer),
+            Exchange::disable(&command, open),
+            unavailable,
+        ],
+        async |client| {
+            assert_eq!(client.disable_schedules(&command).await.unwrap(), command);
+            assert_eq!(client.disable_schedules(&command).await.unwrap(), command);
+            for _ in 0..3 {
+                assert_eq!(
+                    client.disable_schedules(&command).await,
+                    Err(Error::InvalidResponse)
+                );
+            }
+            assert_eq!(
+                client.disable_schedules(&command).await,
+                Err(Error::Refused(FailureCode::Unavailable))
+            );
+        },
+    )
+    .await;
+}
+
+#[compio::test]
 async fn control_instance_credentials_cannot_publish_schedules() {
     let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let client = ControlCoordinator::new(
@@ -348,6 +397,15 @@ async fn control_instance_credentials_cannot_publish_schedules() {
         );
         assert_eq!(
             client.activate_schedules(&activation(&command)).await,
+            Err(Error::Unauthenticated)
+        );
+        assert_eq!(
+            client
+                .disable_schedules(&DisableSchedules {
+                    app_id: command.app_id.clone(),
+                    revision: 1.try_into().unwrap(),
+                })
+                .await,
             Err(Error::Unauthenticated)
         );
     };

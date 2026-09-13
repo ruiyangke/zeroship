@@ -28,8 +28,8 @@ use zeroship_core::{
     workflow_coordination::{FailureCode, AUDIENCE},
     workflow_jobs::{DeploymentId, JobOperation, JobSpec},
     workflow_schedules::{
-        ActivateSchedules, RegisterSchedules, ScheduleCatchUp, ScheduleDescriptor, ScheduleOverlap,
-        ScheduleTiming,
+        ActivateSchedules, DisableSchedules, RegisterSchedules, ScheduleCatchUp,
+        ScheduleDescriptor, ScheduleOverlap, ScheduleTiming,
     },
 };
 use zeroship_workflow_client::{ControlCoordinator, Error, Options};
@@ -201,6 +201,7 @@ async fn authentication(fixture: &Fixture, registration: &RegisterSchedules) {
     for endpoint in [
         endpoints::WORKFLOW_SCHEDULE_REGISTER,
         endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
+        endpoints::WORKFLOW_SCHEDULE_DISABLE,
     ] {
         rejects_before_body(fixture, endpoint, None).await;
         for signer in &fixture.rejected {
@@ -240,6 +241,56 @@ async fn authentication(fixture: &Fixture, registration: &RegisterSchedules) {
 
 async fn closed_requests(fixture: &Fixture) {
     let registration = registration();
+    closed_disable_requests(fixture, &registration).await;
+    closed_deployment_requests(fixture, &registration).await;
+    assert_eq!(
+        fixture
+            .platform
+            .admin
+            .query_one(
+                "SELECT COUNT(*) FROM workflow_manager.schedule_deployments WHERE id=$1",
+                &[&registration.deployment_id.as_str()],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
+async fn closed_disable_requests(fixture: &Fixture, registration: &RegisterSchedules) {
+    let mut disable = json!(DisableSchedules {
+        app_id: registration.app_id.clone(),
+        revision: 1.try_into().unwrap(),
+    });
+    disable["workerId"] = json!("caller-selected");
+    assert_eq!(
+        fixture
+            .post(
+                endpoints::WORKFLOW_SCHEDULE_DISABLE,
+                &fixture.token(),
+                &disable
+            )
+            .await,
+        (StatusCode::BAD_REQUEST, json!({"code":"invalid"}))
+    );
+    disable["workerId"] = json!("x".repeat(2048));
+    assert_eq!(
+        fixture
+            .post(
+                endpoints::WORKFLOW_SCHEDULE_DISABLE,
+                &fixture.token(),
+                &disable
+            )
+            .await,
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"code":"request_too_large"})
+        )
+    );
+}
+
+async fn closed_deployment_requests(fixture: &Fixture, registration: &RegisterSchedules) {
     let original = json!(registration);
     let mut unknown = original.clone();
     unknown["input"] = json!({"private":"payload"});
@@ -274,7 +325,7 @@ async fn closed_requests(fixture: &Fixture) {
             json!({"code":"request_too_large"})
         )
     );
-    let mut activation = json!(activation(&registration, 1));
+    let mut activation = json!(activation(registration, 1));
     activation["holderId"] = json!("caller-chosen");
     assert_eq!(
         fixture
@@ -300,19 +351,6 @@ async fn closed_requests(fixture: &Fixture) {
             json!({"code":"request_too_large"}),
         )
     );
-    assert_eq!(
-        fixture
-            .platform
-            .admin
-            .query_one(
-                "SELECT COUNT(*) FROM workflow_manager.schedule_deployments WHERE id=$1",
-                &[&registration.deployment_id.as_str()],
-            )
-            .await
-            .unwrap()
-            .get::<_, i64>(0),
-        0
-    );
 }
 
 async fn accepted_occurrence(fixture: &Fixture, registration: &RegisterSchedules) -> String {
@@ -335,6 +373,52 @@ async fn accepted_occurrence(fixture: &Fixture, registration: &RegisterSchedules
     }).await.expect("manager did not publish the due calendar without a worker")
 }
 
+async fn disable_before_first_activation(fixture: &Fixture) {
+    let registration = registration();
+    let command = DisableSchedules {
+        app_id: registration.app_id.clone(),
+        revision: 2.try_into().unwrap(),
+    };
+    assert_eq!(
+        fixture.client.disable_schedules(&command).await.unwrap(),
+        command
+    );
+    fixture
+        .client
+        .register_schedules(&registration)
+        .await
+        .unwrap();
+    for revision in [1, 2] {
+        assert_eq!(
+            fixture
+                .client
+                .activate_schedules(&activation(&registration, revision))
+                .await,
+            Err(Error::Refused(FailureCode::Conflict))
+        );
+    }
+    let state = fixture.platform.admin.query_one(
+        "SELECT revision,enabled,activation_id FROM workflow_manager.schedule_scopes WHERE id=$1",
+        &[&registration.app_id.as_str()],
+    ).await.unwrap();
+    assert_eq!(state.get::<_, i64>(0), command.revision.get());
+    assert!(!state.get::<_, bool>(1));
+    assert_eq!(state.get::<_, Option<String>>(2), None);
+    assert_eq!(
+        fixture
+            .platform
+            .admin
+            .query_one(
+                "SELECT COUNT(*) FROM workflow_manager.jobs WHERE app_id=$1",
+                &[&registration.app_id.as_str()],
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+}
+
 async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedules) {
     let command = activation(registration, 1);
     let original = fixture.client.activate_schedules(&command).await.unwrap();
@@ -351,6 +435,7 @@ async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedule
         original
     );
     let occurrence = accepted_occurrence(fixture, registration).await;
+    let disabled = disable_active(fixture, registration).await;
 
     let mut changed = registration.clone();
     changed.schedules[0].workflow_name = "different-workflow".into();
@@ -365,6 +450,59 @@ async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedule
         reordered
     );
 
+    replace_and_replay(
+        fixture,
+        registration,
+        &command,
+        &original,
+        &disabled,
+        &occurrence,
+    )
+    .await;
+}
+
+async fn disable_active(fixture: &Fixture, registration: &RegisterSchedules) -> DisableSchedules {
+    let disabled = DisableSchedules {
+        app_id: registration.app_id.clone(),
+        revision: 2.try_into().unwrap(),
+    };
+    assert_eq!(
+        fixture.client.disable_schedules(&disabled).await.unwrap(),
+        disabled
+    );
+    assert_eq!(
+        fixture.client.disable_schedules(&disabled).await.unwrap(),
+        disabled
+    );
+    assert!(!fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT enabled FROM workflow_manager.schedule_scopes WHERE id=$1",
+            &[&registration.app_id.as_str()],
+        )
+        .await
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(
+        fixture
+            .client
+            .activate_schedules(&activation(registration, 2))
+            .await,
+        Err(Error::Refused(FailureCode::Conflict))
+    );
+
+    disabled
+}
+
+async fn replace_and_replay(
+    fixture: &Fixture,
+    registration: &RegisterSchedules,
+    command: &ActivateSchedules,
+    original: &JobSpec,
+    disabled: &DisableSchedules,
+    occurrence: &str,
+) {
     let replacement = RegisterSchedules {
         app_id: registration.app_id.clone(),
         deployment_id: DeploymentId::mint(),
@@ -382,8 +520,32 @@ async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedule
         .unwrap();
     assert_ne!(original.id, newer.id);
     assert_eq!(
-        fixture.client.activate_schedules(&command).await.unwrap(),
-        original
+        fixture.client.disable_schedules(disabled).await.unwrap(),
+        *disabled
+    );
+    assert!(fixture
+        .platform
+        .admin
+        .query_one(
+            "SELECT enabled FROM workflow_manager.schedule_scopes WHERE id=$1",
+            &[&registration.app_id.as_str()],
+        )
+        .await
+        .unwrap()
+        .get::<_, bool>(0));
+    assert_eq!(
+        fixture
+            .client
+            .disable_schedules(&DisableSchedules {
+                app_id: registration.app_id.clone(),
+                revision: 3.try_into().unwrap(),
+            })
+            .await,
+        Err(Error::Refused(FailureCode::Conflict))
+    );
+    assert_eq!(
+        fixture.client.activate_schedules(command).await.unwrap(),
+        *original
     );
     assert_eq!(
         fixture
@@ -401,13 +563,13 @@ async fn activation_lifecycle(fixture: &Fixture, registration: &RegisterSchedule
     );
     let foreign = ActivateSchedules {
         app_id: AppId::mint(),
-        ..command
+        ..command.clone()
     };
     assert_eq!(
         fixture.client.activate_schedules(&foreign).await,
         Err(Error::Refused(FailureCode::Denied))
     );
-    assert_removed(fixture, registration, &replacement, &newer, &occurrence).await;
+    assert_removed(fixture, registration, &replacement, &newer, occurrence).await;
 }
 
 async fn assert_removed(
@@ -481,6 +643,7 @@ async fn control_publishes_immutable_schedules_without_workers() {
     let registration = registration();
     authentication(&fixture, &registration).await;
     closed_requests(&fixture).await;
+    disable_before_first_activation(&fixture).await;
     activation_lifecycle(&fixture, &registration).await;
     assert_eq!(
         fixture

@@ -6,8 +6,8 @@
 
 use crate::{
     models::schema::{
-        schedule_activations, schedule_deployments, schedule_occurrences, schedule_scopes,
-        schedules,
+        schedule_activations, schedule_deployments, schedule_disables, schedule_occurrences,
+        schedule_scopes, schedules,
     },
     queue::{self, Budget},
     recovery,
@@ -18,7 +18,9 @@ use zeroship_core::{
     app_id::AppId,
     workflow_coordination::{RequestId, Revision, RunId},
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
-    workflow_schedules::{ActivateSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId},
+    workflow_schedules::{
+        ActivateSchedules, DisableSchedules, RegisterSchedules, ScheduleDescriptor, ScheduleId,
+    },
 };
 use zeroship_data_orm::orm::{Database, FindOptions, FromRow, Insertable};
 use zeroship_workflow_calendar::{ScheduleCatchUp, ScheduleTiming};
@@ -82,7 +84,15 @@ struct Activation {
 #[orm(entity = schedule_scopes)]
 struct Active {
     revision: i64,
-    activation_id: String,
+    enabled: bool,
+    activation_id: Option<String>,
+}
+
+#[derive(FromRow)]
+#[orm(entity = schedule_disables)]
+struct Disabled {
+    id: String,
+    created_at: i64,
 }
 
 #[derive(FromRow)]
@@ -101,9 +111,9 @@ struct Schedule {
 
 #[derive(FromRow)]
 #[orm(entity = schedules)]
-struct Due {
-    id: String,
-    app_id: String,
+pub(crate) struct Due {
+    pub(crate) id: String,
+    pub(crate) app_id: String,
 }
 
 #[derive(FromRow)]
@@ -143,7 +153,17 @@ struct NewActivation<'a> {
 struct NewScope<'a> {
     id: &'a str,
     revision: i64,
-    activation_id: &'a str,
+    enabled: bool,
+    activation_id: Option<&'a str>,
+}
+
+#[derive(Insertable)]
+#[orm(entity = schedule_disables)]
+struct NewDisable<'a> {
+    id: String,
+    app_id: &'a str,
+    revision: i64,
+    created_at: i64,
 }
 
 #[derive(Insertable)]
@@ -261,9 +281,73 @@ impl Scheduler {
         Ok(())
     }
 
-    /// Select future scheduling and enqueue activation in the same transaction.
-    /// Previously created occurrences keep their own activation prerequisite and pin.
-    /// Matching old requests replay without changing the current activation.
+    /// Stop calendar production while preserving accepted jobs and recovery.
+    ///
+    /// # Errors
+    /// Rejects revisions reused by activation, unknown stale commands and storage
+    /// failures. Exact accepted commands replay without changing newer state.
+    pub async fn disable(&self, request: &DisableSchedules) -> Result<DisableSchedules, Error> {
+        self.queue
+            .transact(|tx| async move {
+                queue::register_scope_in(&tx, &request.app_id).await?;
+                queue::lock_scope(&tx, &request.app_id).await?;
+                if activation_at_revision(&tx, &request.app_id, request.revision)
+                    .await?
+                    .is_some()
+                {
+                    return Err(Error::Conflict);
+                }
+                if disabled(&tx, &request.app_id, request.revision.get())
+                    .await?
+                    .is_some()
+                {
+                    return Ok(request.clone());
+                }
+                let previous = active(&tx, &request.app_id).await?;
+                if previous
+                    .as_ref()
+                    .is_some_and(|scope| scope.revision >= request.revision.get())
+                {
+                    return Err(Error::Conflict);
+                }
+                tx.entity::<schedule_disables::Entity>()?
+                    .insert::<_, Disabled>(NewDisable {
+                        id: RequestId::mint().as_str().into(),
+                        app_id: request.app_id.as_str(),
+                        revision: request.revision.get(),
+                        created_at: self.queue.clock.now().await?,
+                    })
+                    .await?;
+                if let Some(previous) = previous {
+                    changed(
+                        tx.entity::<schedule_scopes::Entity>()?
+                            .update_many(
+                                schedule_scopes::id
+                                    .eq(request.app_id.as_str())?
+                                    .and(schedule_scopes::revision.eq(previous.revision)?),
+                                schedule_scopes::revision
+                                    .set(request.revision.get())?
+                                    .and(schedule_scopes::enabled.set(false)?)?,
+                            )
+                            .await?,
+                    )?;
+                } else {
+                    tx.entity::<schedule_scopes::Entity>()?
+                        .insert::<_, Active>(NewScope {
+                            id: request.app_id.as_str(),
+                            revision: request.revision.get(),
+                            enabled: false,
+                            activation_id: None,
+                        })
+                        .await?;
+                }
+                Ok(request.clone())
+            })
+            .await
+    }
+
+    /// Select a deployment, resuming retained calendars when restoring the same
+    /// disabled deployment. Readiness still belongs to this activation's job.
     ///
     /// # Errors
     /// Rejects unprepared deployments, stale/conflicting revisions, changed calendar
@@ -279,17 +363,14 @@ impl Scheduler {
                 .queue
                 .transact_for(budget.clone(), |tx| async move {
                     queue::lock_scope(&tx, &request.app_id).await?;
-                    let existing = tx
-                        .entity::<schedule_activations::Entity>()?
-                        .find::<Activation>(
-                            schedule_activations::app_id
-                                .eq(request.app_id.as_str())?
-                                .and(schedule_activations::revision.eq(request.revision.get())?),
-                            one(),
-                        )
+                    if disabled(&tx, &request.app_id, request.revision.get())
                         .await?
-                        .into_iter()
-                        .next();
+                        .is_some()
+                    {
+                        return Err(Error::Conflict);
+                    }
+                    let existing =
+                        activation_at_revision(&tx, &request.app_id, request.revision).await?;
                     if let Some(existing) = existing {
                         if existing.deployment_id != request.deployment_id.as_str() {
                             return Err(Error::Conflict);
@@ -313,6 +394,18 @@ impl Scheduler {
                     check_interpretation(&prepared)?;
                     let metadata = metadata(&prepared, &request.app_id, &request.deployment_id)?;
                     self.validate(&metadata)?;
+                    let restore =
+                        if let Some(previous) = active.as_ref().filter(|scope| !scope.enabled) {
+                            if let Some(id) = &previous.activation_id {
+                                let previous = load_activation(&tx, &request.app_id, id).await?;
+                                (previous.deployment_id == request.deployment_id.as_str())
+                                    .then_some(previous)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
                     if !retention::prepared(&tx, &request.app_id, &request.deployment_id).await? {
                         return Ok(Retention::Acquire(request.deployment_id.clone()));
                     }
@@ -345,11 +438,15 @@ impl Scheduler {
                                         .and(schedule_scopes::revision.eq(active.revision)?)
                                         .and(
                                             schedule_scopes::activation_id
-                                                .eq(active.activation_id.as_str())?,
+                                                .eq(active.activation_id.as_deref())?,
                                         ),
-                                    schedule_scopes::revision.set(request.revision.get())?.and(
-                                        schedule_scopes::activation_id.set(job.id.as_str())?,
-                                    )?,
+                                    schedule_scopes::revision
+                                        .set(request.revision.get())?
+                                        .and(
+                                            schedule_scopes::activation_id
+                                                .set(Some(job.id.as_str()))?,
+                                        )?
+                                        .and(schedule_scopes::enabled.set(true)?)?,
                                 )
                                 .await?,
                         )?;
@@ -358,21 +455,26 @@ impl Scheduler {
                             .insert::<_, Active>(NewScope {
                                 id: request.app_id.as_str(),
                                 revision: request.revision.get(),
-                                activation_id: job.id.as_str(),
+                                enabled: true,
+                                activation_id: Some(job.id.as_str()),
                             })
                             .await?;
                     }
-                    tx.entity::<schedules::Entity>()?
-                        .update_many(
-                            schedules::app_id.eq(request.app_id.as_str())?,
-                            schedules::next_at
-                                .set(None::<i64>)?
-                                .and(schedules::catch_up_until.set(None::<i64>)?)?
-                                .and(schedules::catch_up_remaining.set(None::<i64>)?)?,
-                        )
-                        .await?;
-                    for descriptor in &metadata.schedules {
-                        self.install(&tx, request, &job.id, descriptor, now).await?;
+                    if let Some(previous) = restore {
+                        Self::restore(&tx, request, &job.id, &previous, &metadata).await?;
+                    } else {
+                        tx.entity::<schedules::Entity>()?
+                            .update_many(
+                                schedules::app_id.eq(request.app_id.as_str())?,
+                                schedules::next_at
+                                    .set(None::<i64>)?
+                                    .and(schedules::catch_up_until.set(None::<i64>)?)?
+                                    .and(schedules::catch_up_remaining.set(None::<i64>)?)?,
+                            )
+                            .await?;
+                        for descriptor in &metadata.schedules {
+                            self.install(&tx, request, &job.id, descriptor, now).await?;
+                        }
                     }
                     recovery::ensure_in(
                         &tx,
@@ -394,6 +496,82 @@ impl Scheduler {
                 }
             }
         }
+    }
+
+    async fn restore(
+        tx: &Database,
+        request: &ActivateSchedules,
+        job: &JobId,
+        previous: &Activation,
+        metadata: &RegisterSchedules,
+    ) -> Result<(), Error> {
+        let limit = i64::try_from(metadata.schedules.len())
+            .map_err(|_| Error::Storage)?
+            .checked_add(1)
+            .ok_or(Error::Storage)?;
+        let saved = tx
+            .entity::<schedules::Entity>()?
+            .query()
+            .filter(
+                schedules::app_id
+                    .eq(request.app_id.as_str())?
+                    .and(schedules::activation_id.eq(previous.id.as_str())?)
+                    .and(
+                        schedules::next_at
+                            .ne(None::<i64>)?
+                            .or(schedules::catch_up_until.ne(None::<i64>)?)
+                            .or(schedules::catch_up_remaining.ne(None::<i64>)?),
+                    ),
+            )
+            .limit(limit)?
+            .all::<Schedule>()
+            .await?;
+        if saved.len() != metadata.schedules.len() {
+            return Err(Error::Storage);
+        }
+        for schedule in saved {
+            let definition = descriptor(metadata, &schedule.name)?;
+            if schedule.activation_id != previous.id {
+                return Err(Error::Storage);
+            }
+            if schedule.revision != previous.revision
+                || schedule.next_at.is_none()
+                || serde_json::from_str::<ScheduleDescriptor>(&schedule.definition)
+                    .map_err(|_| Error::Storage)?
+                    != *definition
+            {
+                return Err(Error::Storage);
+            }
+            let allowance = match definition.catch_up {
+                ScheduleCatchUp::Skip => 1,
+                ScheduleCatchUp::Backfill { max } => {
+                    i64::try_from(max).map_err(|_| Error::Storage)?
+                }
+            };
+            match (schedule.catch_up_until, schedule.catch_up_remaining) {
+                (None, None) => {}
+                (Some(boundary), Some(remaining))
+                    if remaining > 0
+                        && remaining <= allowance
+                        && schedule.next_at.is_some_and(|at| at <= boundary) => {}
+                _ => return Err(Error::Storage),
+            }
+            changed(
+                tx.entity::<schedules::Entity>()?
+                    .update_many(
+                        schedules::app_id
+                            .eq(request.app_id.as_str())?
+                            .and(schedules::id.eq(schedule.id.as_str())?)
+                            .and(schedules::activation_id.eq(previous.id.as_str())?)
+                            .and(schedules::revision.eq(previous.revision)?),
+                        schedules::activation_id
+                            .set(job.as_str())?
+                            .and(schedules::revision.set(request.revision.get())?)?,
+                    )
+                    .await?,
+            )?;
+        }
+        Ok(())
     }
 
     async fn install(
@@ -466,25 +644,23 @@ impl Scheduler {
     pub async fn due(&self, after: Option<&ScheduleId>) -> Result<Vec<DueSchedule>, Error> {
         self.queue
             .transact(|tx| async move {
-                let mut filter = schedules::next_at.lte(Some(self.queue.clock.now().await?))?;
-                if let Some(after) = after {
-                    filter = filter.and(schedules::id.gt(after.as_str())?);
-                }
-                tx.entity::<schedules::Entity>()?
-                    .query()
-                    .filter(filter)
-                    .order_by(schedules::id.asc())
-                    .limit(i64::from(self.options.page_size))?
-                    .all::<Due>()
-                    .await?
-                    .into_iter()
-                    .map(|row| {
-                        Ok(DueSchedule {
-                            app_id: AppId::parse(&row.app_id).map_err(|_| Error::Storage)?,
-                            schedule_id: ScheduleId::parse(&row.id).map_err(|_| Error::Storage)?,
-                        })
+                due_in(
+                    &tx,
+                    self.queue.clock.now().await?,
+                    after.map(ScheduleId::as_str),
+                    None,
+                    false,
+                    self.options.page_size,
+                )
+                .await?
+                .into_iter()
+                .map(|row| {
+                    Ok(DueSchedule {
+                        app_id: AppId::parse(&row.app_id).map_err(|_| Error::Storage)?,
+                        schedule_id: ScheduleId::parse(&row.id).map_err(|_| Error::Storage)?,
                     })
-                    .collect()
+                })
+                .collect()
             })
             .await
     }
@@ -496,11 +672,20 @@ impl Scheduler {
     /// # Errors
     /// Rejects a foreign/missing schedule, changed interpretation and storage failures.
     /// Failure preserves the previous cursor; retry cannot mint another committed occurrence.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "calendar occurrence publication and cursor advancement share a fenced transaction"
+    )]
     pub async fn dispatch(&self, app: &AppId, id: &ScheduleId) -> Result<Page, Error> {
         self.queue
             .transact(|tx| async move {
                 queue::lock_scope(&tx, app).await?;
-                let record = schedule(&tx, app, id).await?.ok_or(Error::Denied)?;
+                let Some(record) = selected_schedule(&tx, app, id).await? else {
+                    return Ok(Page {
+                        jobs: vec![],
+                        more: false,
+                    });
+                };
                 let now = self.queue.clock.now().await?;
                 let Some(mut at) = record.next_at.filter(|at| *at <= now) else {
                     return Ok(Page {
@@ -855,12 +1040,143 @@ async fn prepared(
 }
 
 async fn active(tx: &Database, app: &AppId) -> Result<Option<Active>, Error> {
-    Ok(tx
+    let scope = tx
         .entity::<schedule_scopes::Entity>()?
         .find::<Active>(schedule_scopes::id.eq(app.as_str())?, one())
         .await?
         .into_iter()
-        .next())
+        .next();
+    if let Some(scope) = &scope {
+        Revision::try_from(scope.revision).map_err(|_| Error::Storage)?;
+        let disabled = disabled(tx, app, scope.revision).await?.is_some();
+        if scope.enabled == disabled {
+            return Err(Error::Storage);
+        }
+        if let Some(id) = &scope.activation_id {
+            let activation = load_activation(tx, app, id).await?;
+            if (scope.enabled && activation.revision != scope.revision)
+                || (!scope.enabled && activation.revision >= scope.revision)
+            {
+                return Err(Error::Storage);
+            }
+        } else if scope.enabled {
+            return Err(Error::Storage);
+        }
+    }
+    Ok(scope)
+}
+
+async fn disabled(tx: &Database, app: &AppId, revision: i64) -> Result<Option<Disabled>, Error> {
+    let stored = tx
+        .entity::<schedule_disables::Entity>()?
+        .query()
+        .filter(
+            schedule_disables::app_id
+                .eq(app.as_str())?
+                .and(schedule_disables::revision.eq(revision)?),
+        )
+        .first::<Disabled>()
+        .await?;
+    if let Some(stored) = &stored {
+        RequestId::parse(&stored.id).map_err(|_| Error::Storage)?;
+        if stored.created_at < 0 {
+            return Err(Error::Storage);
+        }
+    }
+    Ok(stored)
+}
+
+async fn activation_at_revision(
+    tx: &Database,
+    app: &AppId,
+    revision: Revision,
+) -> Result<Option<Activation>, Error> {
+    Ok(tx
+        .entity::<schedule_activations::Entity>()?
+        .query()
+        .filter(
+            schedule_activations::app_id
+                .eq(app.as_str())?
+                .and(schedule_activations::revision.eq(revision.get())?),
+        )
+        .first::<Activation>()
+        .await?)
+}
+
+/// Shared calendar eligibility for the public due page and the driver's bounded
+/// identity sweep. Filtering precedes the limit so stopped apps cannot hide work.
+pub(crate) async fn due_in(
+    tx: &Database,
+    now: i64,
+    after: Option<&str>,
+    upper: Option<&str>,
+    descending: bool,
+    limit: u32,
+) -> Result<Vec<Due>, Error> {
+    use zeroship_data_orm::sql::{CompareOp, Literal, Operand, Predicate};
+    let schedule = tx.entity::<schedules::Entity>()?.alias("schedule")?;
+    let scope = tx.entity::<schedule_scopes::Entity>()?.alias("scope")?;
+    let mut filter = vec![
+        scope.column(schedule_scopes::enabled).eq(true)?,
+        Predicate::compare(
+            Operand::Path(schedule.column(schedules::next_at).asc().path),
+            CompareOp::Lte,
+            Operand::Lit(Literal::Int(now)),
+        ),
+    ];
+    for (value, comparison) in [(after, CompareOp::Gt), (upper, CompareOp::Lte)] {
+        if let Some(value) = value {
+            filter.push(Predicate::compare(
+                Operand::Path(schedule.column(schedules::id).asc().path),
+                comparison,
+                Operand::Lit(Literal::Text(value.into())),
+            ));
+        }
+    }
+    Ok(tx
+        .from(&schedule)
+        .inner_join(
+            &scope,
+            schedule
+                .column(schedules::app_id)
+                .eq_column(scope.column(schedule_scopes::id))?,
+        )?
+        .filter(Predicate::And(filter))
+        .order_by(if descending {
+            schedule.column(schedules::id).desc()
+        } else {
+            schedule.column(schedules::id).asc()
+        })
+        .select(schedule.row::<Due>())?
+        .limit(i64::from(limit))?
+        .all()
+        .await?)
+}
+
+// The caller holds the app lock. Disabled identities remain available to their
+// accepted occurrences but cannot generate another calendar page.
+async fn selected_schedule(
+    tx: &Database,
+    app: &AppId,
+    id: &ScheduleId,
+) -> Result<Option<Schedule>, Error> {
+    let active = active(tx, app).await?.ok_or(Error::Denied)?;
+    if !active.enabled {
+        return Ok(None);
+    }
+    let record = schedule(tx, app, id).await?.ok_or(Error::Denied)?;
+    if active.activation_id.as_deref() != Some(record.activation_id.as_str())
+        || active.revision != record.revision
+    {
+        if record.next_at.is_none()
+            && record.catch_up_until.is_none()
+            && record.catch_up_remaining.is_none()
+        {
+            return Ok(None);
+        }
+        return Err(Error::Storage);
+    }
+    Ok(Some(record))
 }
 
 async fn schedule(tx: &Database, app: &AppId, id: &ScheduleId) -> Result<Option<Schedule>, Error> {

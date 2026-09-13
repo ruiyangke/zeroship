@@ -10,7 +10,7 @@ use zeroship_core::{
         Revision, ScopePage, VerifyAssignment, WorkerPage, WorkerState, AUDIENCE,
     },
     workflow_jobs::{JobOperation, JobSpec},
-    workflow_schedules::{ActivateSchedules, RegisterSchedules},
+    workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
 };
 
 /// A runtime-local coordinator client bound to the trusted Control signer.
@@ -93,6 +93,29 @@ impl ControlCoordinator {
             return Err(Error::InvalidResponse);
         }
         Ok(job)
+    }
+
+    /// Stop future calendar publication under a stable Control revision.
+    /// The receipt acknowledges the manager's calendar fence; it does not
+    /// acknowledge creator admission policy or an executor's shutdown.
+    ///
+    /// # Errors
+    /// Refuses instance credentials, failed exchanges and changed disable receipts.
+    pub async fn disable_schedules(
+        &self,
+        request: &DisableSchedules,
+    ) -> Result<DisableSchedules, Error> {
+        if !self.schedule_publisher {
+            return Err(Error::Unauthenticated);
+        }
+        let receipt: DisableSchedules = self
+            .transport
+            .post(endpoints::WORKFLOW_SCHEDULE_DISABLE, request)
+            .await?;
+        if receipt != *request {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(receipt)
     }
 
     /// # Errors

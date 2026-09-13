@@ -987,6 +987,70 @@
         }
       ]
     },
+    "schedule_disables": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "revision": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "revision"
+          }
+        },
+        "created_at": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "created_at"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "schedule_disables_scope_key",
+          "fields": [
+            "app_id",
+            "revision"
+          ],
+          "unique": true
+        }
+      ]
+    },
     "schedule_occurrences": {
       "fields": {
         "id": {
@@ -1130,9 +1194,19 @@
             "valueColumn": "revision"
           }
         },
+        "enabled": {
+          "type": "boolean",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "enabled"
+          }
+        },
         "activation_id": {
           "type": "string",
-          "required": true,
           "readable": true,
           "filterable": true,
           "sortable": true,

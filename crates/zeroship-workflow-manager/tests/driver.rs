@@ -149,9 +149,14 @@ fn options(page_limit: u32) -> Options {
 }
 
 async fn queue(fixture: &Fixture, holds: Rc<dyn HoldClient>) -> Queue {
-    Queue::connect(fixture.binding(), fixture.url(), Default::default(), holds)
-        .await
-        .unwrap()
+    Queue::connect(
+        fixture.binding(),
+        fixture.url(),
+        zeroship_workflow_manager::Options::default(),
+        holds,
+    )
+    .await
+    .unwrap()
 }
 
 async fn rows(fixture: &Fixture, table: &str, filter: Value) -> Vec<Value> {
@@ -212,7 +217,7 @@ async fn activate(
     fixture: &Fixture,
     queue: &Queue,
     app: &AppId,
-    schedules: Vec<ScheduleDescriptor>,
+    definitions: Vec<ScheduleDescriptor>,
 ) {
     let scheduler = Scheduler::new(queue.clone(), options(1).scheduling).unwrap();
     let deployment = DeploymentId::mint();
@@ -220,7 +225,7 @@ async fn activate(
         .prepare(&RegisterSchedules {
             app_id: app.clone(),
             deployment_id: deployment.clone(),
-            schedules,
+            schedules: definitions,
         })
         .await
         .unwrap();
@@ -632,6 +637,10 @@ async fn retention_replies(fixture: &Fixture) {
     assert_eq!(client.calls.get(), before);
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the cancellation fixture observes one interrupted operation and its recovery"
+)]
 async fn interrupted(fixture: &Fixture, expire: bool) {
     let catalog = Catalog::new(fixture).await;
     let client = FaultClient::new(catalog.client());

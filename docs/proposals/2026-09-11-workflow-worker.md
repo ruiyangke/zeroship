@@ -230,7 +230,8 @@ with this queue namespace; it is not a second authoritative placement store.
 | `workflow_manager.recovery_scopes` | Durable reconciliation responsibility, activation revision, future-job deployment, next due time and retained pending job. |
 | `workflow_manager.schedule_deployments` | Immutable allowlisted schedule descriptors and the calendar interpretation for a normal deployment. No business input. |
 | `workflow_manager.schedule_activations` | Stable activation job, deployment, app revision and activation instant. Job settlement determines dispatch readiness. |
-| `workflow_manager.schedule_scopes` | Current scheduling activation for an app; older activation receipts remain independently replayable. |
+| `workflow_manager.schedule_disables` | Historical Control disable commands in the shared activation revision sequence. Exact replay cannot change a newer scope state. |
+| `workflow_manager.schedule_scopes` | App lifecycle revision, calendar-enabled state and optional selected activation; historical receipts remain independently replayable. |
 | `workflow_manager.schedules` | Logical schedule identity across deployments, active descriptor and persisted due/catch-up frontier. |
 | `workflow_manager.schedule_occurrences` | Stable occurrence request, run and job identities bound to a schedule revision, instant and activation prerequisite. |
 | `zeroship.worker_instances` | Control-owned enrollment, public key and revocation state; distinct from workflow registration. |
@@ -794,6 +795,30 @@ must prepare and activate a new normal deployment under the new interpretation;
 already persisted occurrences keep their original instant and job. Retrying an
 old activation receipt never changes current scheduling or its interpretation.
 
+The lifecycle cutover uses the same Control-owned app revision for activation,
+disable and restore. A disable command records a durable receipt and advances
+the manager's scope fence even before its first activation. An exact historical
+disable replay returns its receipt without undoing a newer restore; activation
+and disable cannot share a revision. An unknown older request cannot reopen
+scheduling. Disabled scopes are excluded before due-page limits, and calendar
+publication rechecks the scope inside its transaction.
+
+Disable preserves calendar cursors, interval anchors, frozen catch-up state,
+accepted occurrences, recovery responsibility and deployment holds. Restoring
+the same immutable deployment creates fresh activation readiness while retaining
+its calendar progress. Restoring a different staged deployment uses normal
+schedule replacement. Historical jobs continue to depend on their original
+activation, rather than the new readiness receipt.
+
+Control must commit each desired lifecycle change and its immutable publication
+intent together. Its response distinguishes pending synchronization from manager
+acknowledgement. Calendar acknowledgement proves that subsequent manager turns
+observe the disable fence; it does not establish creator admission policy or
+quiesce an executing task. The legacy archive promise based on a shared Control
+database lock cannot survive private-zone cutover unchanged. Worker policy
+fencing and its acknowledgement require their own authority contract. Calendar
+disable continues to permit accepted Advance and reconciliation jobs.
+
 The native manager persists a catch-up boundary and remaining allowance across
 processing pages. New observations apply the declared allowance and host ceiling;
 an existing observation retains its committed remaining allowance. Restart or a
@@ -1330,8 +1355,10 @@ routes are registered in
 [`workflow-server/src/api.rs`](../../crates/zeroship-workflow-server/src/api.rs).
 Authenticated job submission, claim, heartbeat and settlement routes are in
 [`workflow-server/src/api/jobs.rs`](../../crates/zeroship-workflow-server/src/api/jobs.rs).
-Activation and ingress-scope entries remain target operations; their exact wire
-envelopes and endpoint registration must land with their producers and consumers.
+Control schedule preparation, activation and disable routes are in
+[`workflow-server/src/api/schedules.rs`](../../crates/zeroship-workflow-server/src/api/schedules.rs).
+Normal deployment publication and ingress-scope host composition remain cutover
+work; endpoint availability alone does not provide their durable handoff.
 The inventory includes required semantics beyond the currently available routes.
 
 | Operation | Authorized caller and receiving owner | Successful result |
@@ -1341,6 +1368,7 @@ The inventory includes required semantics beyond the currently available routes.
 | Resolve eligibility/place app | Trusted Control/host context to manager. | Durable app/worker revision admitted under capacity and zone constraints. |
 | Poll/renew/release assignment | Enrolled worker to manager. | Only that worker's authorized scopes and current revision outcomes; release does not retire the app's recovery duty. |
 | Register/activate deployment | Control to manager. | Idempotent immutable schedule metadata and monotonic activation state; dispatch readiness remains distinct. |
+| Disable calendar | Control to manager. | Durable app revision fence and historical receipt; accepted jobs, recovery and creator policy remain independent. |
 | Establish/close ingress scope | Trusted creator host through manager policy. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an arbitrary app. |
 | Submit job/intents | Assigned worker or native manager scheduling logic to manager queue. | Receipt for the stable immutable specification; changed content under the same job identity conflicts. |
 | Claim job | Enrolled worker with current assignment to manager queue. | A persisted delivery attempt and bounded authority, or no eligible work. |
@@ -1615,6 +1643,14 @@ contracts on PostgreSQL and SQLite. Request receipt tests cover aged records,
 reopen, later lifecycle changes and revoked signal capabilities. Host integration
 and distributed acceptance remain separate verification obligations.
 
+Ordinary creator ingress now captures its host policy before journal I/O and
+rechecks the captured authority after lock waits and before commit. Its original
+deadline bounds the entire attempt, including database cancellation; a concurrent
+host refresh cannot extend that attempt. Native tests force policy replacement
+after staged writes and expiry during a blocked write, and verify rollback and
+durable receipt replay. These local fences do not establish assignment-bound
+remote policy delivery or a distributed archive acknowledgement.
+
 Workflow provisioning preserves an existing creator schema's migrator ownership.
 Native PostgreSQL container tests exercise both provisioning orders, repeated
 runtime provisioning and actual table creation through a confined migrator login.
@@ -1690,6 +1726,16 @@ replica races, restart, persisted catch-up limits, due pagination and transactio
 rollback. Corruption regressions reject changed descriptors, substituted jobs
 and missing occurrence linkage. Native schema declarations also pass parity
 checks against the migration artifacts.
+
+Native schedule disable/restore shares the activation revision order. Disabling
+an app preserves its calendar cursor, frozen catch-up allowance and accepted
+jobs. Restoring the same deployment creates a fresh readiness activation while
+preserving calendar progress; replacing it selects the replacement's calendar.
+Historical command replay cannot undo a newer selection. Disabled scopes are
+excluded before due-page limits. Exact-Control authenticated register, activate
+and disable routes expose these native operations independently of workers.
+Normal deployment and lifecycle commands still need their durable Control
+publication handoff.
 
 Creator activation now resolves the immutable deployment hash through the
 authenticated journal hold receipt and verifies the normal app artifact. Its
@@ -1796,7 +1842,7 @@ through the replacement before deleting the old source.
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
 | Complete job envelopes | Keep closed metadata. Finalize activation, event/fanout, continuation cursors, management lifecycle revisions and operation-specific deployment prerequisites before their consumers are wired. |
-| Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Define archive/stage/restore and revision-fenced schedule disable, and keep the calendar's activation origin explicit across delayed delivery. |
+| Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
 | Receipt retirement | Define admissibility fences and publication/settlement watermarks before deleting job deduplication state. Retain it until that proof exists. |
 | Dispatch fairness and persistent failure | Define fair progress and observable parking/retry policy without deleting accepted work or starving management/reconciliation. |
@@ -1812,8 +1858,8 @@ outside the queue cutover.
 - Finalize the missing closed delivery, scope-recovery and retention contracts;
   add their manager models using the canonical migration/ORM pipeline.
 - Connect normal deployment registration, activation and queue holds to manager
-  scheduling through a durable Control publication intent; finish lifecycle
-  disable/restore behavior and remove the standalone scheduler host.
+  scheduling through a durable Control publication intent; connect lifecycle
+  commands to native disable/restore and remove the standalone scheduler host.
 - Finish creator management and collection job acceptance with durable receipts,
   publication intents and lifecycle fences before enabling those deliveries.
 - Complete the ingress responsibility handshake before admitting new work through

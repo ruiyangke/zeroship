@@ -35,3 +35,13 @@ pub struct ActivateSchedules {
     pub deployment_id: DeploymentId,
     pub revision: Revision,
 }
+
+/// Stop future calendar generation without cancelling accepted work.
+/// The platform shares the activation revision sequence; acceptance echoes the
+/// exact command, including when a later activation has restored scheduling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DisableSchedules {
+    pub app_id: AppId,
+    pub revision: Revision,
+}

@@ -7,7 +7,7 @@ use std::time::Duration;
 use zeroship_core::{
     service_identity::{endpoints, ServiceEndpoint},
     service_peers::{service_issuer, CONTROL_SERVICE_NAME},
-    workflow_schedules::{ActivateSchedules, RegisterSchedules},
+    workflow_schedules::{ActivateSchedules, DisableSchedules, RegisterSchedules},
 };
 use zeroship_workflow_manager::scheduling::{Options, Scheduler};
 
@@ -20,6 +20,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::resource(endpoints::WORKFLOW_SCHEDULE_ACTIVATE.path_template())
                 .route(web::post().to(activate)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_SCHEDULE_DISABLE.path_template())
+                .route(web::post().to(disable)),
         );
 }
 
@@ -71,6 +75,24 @@ async fn activate(
             let command: ActivateSchedules = read_json(&request, body).await?;
             Scheduler::new(state.service.queue.clone(), Options::default())?
                 .activate(&command)
+                .await
+                .map_err(Error::from)
+        }
+        .await,
+    )
+}
+
+async fn disable(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            authenticate(&request, &state, endpoints::WORKFLOW_SCHEDULE_DISABLE).await?;
+            let command: DisableSchedules = read_json(&request, body).await?;
+            Scheduler::new(state.service.queue.clone(), Options::default())?
+                .disable(&command)
                 .await
                 .map_err(Error::from)
         }

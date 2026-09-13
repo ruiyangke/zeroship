@@ -69,7 +69,13 @@ CREATE UNIQUE INDEX IF NOT EXISTS "schedule_activations_identity_key" ON "workfl
 
 CREATE INDEX IF NOT EXISTS "schedule_activations_deployment_idx" ON "workflow_manager"."schedule_activations" ("app_id", "deployment_id", "id");
 
-CREATE TABLE "workflow_manager"."schedule_scopes" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL, "activation_id" text NOT NULL, CONSTRAINT "schedule_scope_activation" FOREIGN KEY ("id", "activation_id") REFERENCES "workflow_manager"."schedule_activations" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "schedule_scope_app" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+CREATE TABLE "workflow_manager"."schedule_disables" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "revision" bigint NOT NULL, "created_at" bigint NOT NULL, CONSTRAINT "schedule_disable_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "schedule_disable_scope_idx" ON "workflow_manager"."schedule_disables" ("app_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_disables_scope_key" ON "workflow_manager"."schedule_disables" ("app_id", "revision");
+
+CREATE TABLE "workflow_manager"."schedule_scopes" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL, "enabled" boolean NOT NULL, "activation_id" text, CONSTRAINT "schedule_scope_activation" FOREIGN KEY ("id", "activation_id") REFERENCES "workflow_manager"."schedule_activations" ("app_id", id) ON DELETE RESTRICT, CONSTRAINT "schedule_scope_app" FOREIGN KEY ("id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "schedule_scope_activation_idx" ON "workflow_manager"."schedule_scopes" ("id", "activation_id");
 
@@ -125,9 +131,11 @@ ALTER TABLE "workflow_manager"."schedule_deployments" ALTER COLUMN "id" TYPE tex
 
 ALTER TABLE "workflow_manager"."schedule_activations" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "deployment_id" TYPE text COLLATE "C";
 
+ALTER TABLE "workflow_manager"."schedule_disables" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C";
+
 ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '63eb4ec5f38df09a87d698a26555d96fd1696338c8d915e0536e1978e1d3f556');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '97a8d8bda8a01cdef6527b18319298b96b4a2fb411e64cc05e3783597ae8a919');
