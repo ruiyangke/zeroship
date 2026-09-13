@@ -29,46 +29,6 @@ fn key<'s>(scope: &mut v8::PinScope<'s, '_>, k: &'static v8::OneByteConst) -> v8
 }
 
 // ---------------------------------------------------------------------------
-// HTTP helper constants
-// ---------------------------------------------------------------------------
-
-/// JS helper compiled once: constructs a `Request` from Rust-supplied params.
-///
-/// Goes through the public spec constructor `new Request(url, init)`. The
-/// previous shape-direct path (`Object.create(Request.prototype) + obj.set
-/// per field`) only worked against the JS polyfill — the native Request
-/// (`#[v8_class]` with internal field 0 holding `Box<RequestState>`) rejects
-/// `Object.create(prototype)` because the resulting instance has a null
-/// internal field, and the first getter call throws "Illegal invocation".
-///
-/// Native `fetch()` builds Request objects directly inside V8, with no
-/// JSON header intermediate. This helper remains for the kernel's
-/// slow-path `default.fetch` dispatch where Rust passes raw header
-/// bytes; once that dispatch path moves fully native, this constant can
-/// go away too.
-///
-/// Fast paths still preserved:
-///   - Skips `JSON.parse` when `headersJson` is empty or `"[]"`.
-///   - Skips body copy when body is empty or method is GET/HEAD.
-pub const HTTP_CREATE_REQUEST_JS: &str = r#"(function(method, url, headersJson, body) {
-    // "[]" is 2 chars; anything longer means at least one real header.
-    var pairs;
-    if (headersJson && headersJson.length > 2) {
-        pairs = JSON.parse(headersJson);
-    } else {
-        pairs = [];
-    }
-    // Build init lazily — body is only included for methods that allow one.
-    var init;
-    if (body && method !== "GET" && method !== "HEAD") {
-        init = { method: method, headers: pairs, body: body };
-    } else {
-        init = { method: method, headers: pairs };
-    }
-    return new Request(url, init);
-})"#;
-
-// ---------------------------------------------------------------------------
 // V8 property access helpers
 // ---------------------------------------------------------------------------
 

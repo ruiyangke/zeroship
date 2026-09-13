@@ -120,6 +120,35 @@ pub trait NativePlugin: Send + Sync + 'static {
     ) -> Result<(), String> {
         Ok(())
     }
+
+    /// Prepare SDK facades before creator evaluation. The module graph is
+    /// compiled and native namespaces are bound. Any returned promise is
+    /// retained by startup and must settle before creator code runs.
+    ///
+    /// # Errors
+    /// Return an error to reject startup if SDK preparation cannot begin.
+    fn prepare_runtime<'s>(
+        &self,
+        _scope: &mut v8::PinScope<'s, '_>,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        Ok(None)
+    }
+
+    /// Finalize startup declarations after creator evaluation, before any
+    /// entry is published for dispatch. This hook is synchronous.
+    ///
+    /// # Errors
+    /// Return an error to reject startup without publishing dispatch handlers.
+    fn finalize_runtime<'s>(
+        &self,
+        _scope: &mut v8::PinScope<'s, '_>,
+        _namespace: v8::Local<'s, v8::Object>,
+        _descriptor: Option<&serde_json::Value>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Resolve the app id stamped onto the active runtime for plugin lifecycle

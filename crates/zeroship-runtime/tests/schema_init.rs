@@ -1,18 +1,12 @@
-//! Stage 5c schema auto-discovery — runtime-side init.
+//! Descriptor validation and native plugin preparation before creator startup.
 //!
-//! Covers:
-//!   - The bootstrap's inlined runtime entry installs schema only from
-//!     `manifest.runtime_descriptor`.
-//!   - When no DbPlugin is registered (`__zs_env()?.db` is absent)
-//!     the init script silently no-ops — required so dev runs without
-//!     `DATABASE_URL` still boot.
-//!   - When the runtime ships an `installSchema`-shaped module, an `env.db`
-//!     namespace, and a descriptor, the init script calls
-//!     `installSchema(env, descriptor)` with the live
-//!     `env.db` handle.
-//!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
+//! The host binds only the manifest descriptor and passes the live namespace
+//! to each preparation hook. Schema-less apps and hosts without a DB plugin
+//! still start. The DB fixture supplies its own installer module to observe
+//! the descriptor handoff without substituting creator-owned module sources.
 
 use crate::common;
+use futures::FutureExt;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, init_v8};
@@ -46,6 +40,20 @@ export function installSchema(env, descriptor, options) {
 export function _flushPendingMaskPolicy() { return null; }
 "#,
         }]
+    }
+
+    fn prepare_runtime<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        namespace: v8::Local<'s, v8::Object>,
+        descriptor: Option<&serde_json::Value>,
+    ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        let Some(descriptor) = descriptor else { return Ok(None); };
+        let json = v8::String::new(scope, &descriptor.to_string()).unwrap();
+        let descriptor = v8::json::parse(scope, json).unwrap();
+        zeroship_runtime::modules::invoke_module_export(
+            scope, "zeroship:db/internal", "installSchema", &[namespace.into(), descriptor],
+        ).map(Some)
     }
 
     fn register(&self, r: &mut NativeRegistrar) {
@@ -594,6 +602,7 @@ fn corrupt_runtime_descriptor_json_fails_isolate_init() {
 
     let err = runtime
         .initialize(&EnvSnapshot::empty())
+        .now_or_never().expect("invalid descriptor fails before async work")
         .expect_err("invalid descriptor JSON must fail isolate init");
     assert!(
         err.contains("manifest.runtime_descriptor is not valid JSON"),
@@ -620,6 +629,7 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
 
     let err = runtime
         .initialize(&EnvSnapshot::empty())
+        .now_or_never().expect("invalid descriptor fails before async work")
         .expect_err("non-v2 descriptor must fail isolate init");
     assert!(
         err.contains("RuntimeSchemaDescriptor v2"),

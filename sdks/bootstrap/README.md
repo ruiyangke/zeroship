@@ -25,9 +25,9 @@ lockstep.
 - `fetch-handler.ts` — WinterCG `fetch` wrapper that routes
   `/__zeroship/v1/<id>` through the dispatcher and falls through to the
   user's own `default.fetch`.
-- `runtime-entry.ts` — TLA orchestrator the runtime crate
-  `include_str!`s. Reads the injected `RuntimeSchemaDescriptor`, calls
-  `installSchema` from `@zeroship/db/internal`, and exposes mask-policy readiness for the dispatcher.
+- `runtime-entry.ts` — production mask-policy handoff embedded by the runtime.
+  It exposes policy readiness for the dispatcher. The native DB plugin prepares
+  SDK collections before creator evaluation.
 - `dev-entry.ts` — dev-mode equivalent that wires the dispatcher /
   fetch handler / schema install around a user-supplied module loader
   (e.g. Vite's ModuleRunner).

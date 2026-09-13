@@ -215,7 +215,7 @@ async fn mismatched_or_missing_host_identity_rejects_before_creator_evaluation()
             export default { fetch() { return new Response('evaluated'); } };
         ",
         );
-        let error = runtime.initialize(&EnvSnapshot::empty()).unwrap_err();
+        let error = runtime.initialize(&EnvSnapshot::empty()).await.unwrap_err();
         assert!(
             error.contains("workflow binding does not match runtime app identity"),
             "{error}"

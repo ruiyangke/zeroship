@@ -12,6 +12,8 @@ The runtime-native plugin interface is defined in [crates/zeroship-runtime/src/c
 - optional `build_instance(...)`
 - optional `bind_runtime_descriptor(...)`
 - optional `javascript_modules()`
+- optional `prepare_runtime(...)`
+- optional `finalize_runtime(...)`
 
 `NativeRegistrar` exposes:
 
@@ -35,6 +37,27 @@ in native lifecycle hooks; adapter JavaScript uses the app-scoped primitives.
 The [DB adapter](../../crates/zeroship-data-v8/src/lib.rs) supplies the DB SDK
 internal entry as `zeroship:db/internal`. Its source and build dependency belong
 to `zeroship-data-v8`; the runtime core loads the registered module graph.
+
+## Startup lifecycle
+
+The runtime binds the validated descriptor and compiles the module graph before
+calling `prepare_runtime`. A plugin can use `modules::invoke_module_export` to
+prepare its SDK facade. Startup retains the returned promise and drives native
+operations until preparation settles, before evaluating creator modules.
+
+After creator evaluation settles, the runtime calls the synchronous
+`finalize_runtime` hooks before publishing dispatch handlers. Startup runs
+without a request identity. Its failure is cached; queued requests receive the
+same startup diagnostic. Wall and CPU limits apply while startup is pending,
+and the CPU budget carries across asynchronous continuations.
+
+`Runtime::initialize(...).await` completes when the runtime is ready or fails.
+The worker awaits it before caching an isolate. Hosts that manage multiple
+isolates keep them exited between asynchronous turns; initialization enters
+and exits the isolate around its synchronous V8 work.
+
+DB facade preparation uses this lifecycle. The remaining bootstrap mask-policy
+handoff has not yet moved into native finalization.
 
 ## Current plugin styles
 

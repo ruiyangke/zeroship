@@ -776,12 +776,13 @@ async fn control_bounded_loop_completes_when_the_deadline_allows_it() {
 }
 
 #[compio::test]
-async fn native_runner_executes_v8_and_commits_the_workflow_frontier() {
+async fn native_runner_awaits_creator_startup_before_committing_the_frontier() {
     let fixture = Fixture::new(
         r#"
+        const exponent = await new Promise(resolve => setTimeout(() => resolve(2), 0));
         export class Example {
             async run(trigger, step) {
-                const squared = await step.run('square', () => trigger.input.number ** 2);
+                const squared = await step.run('square', () => trigger.input.number ** exponent);
                 return { squared };
             }
         }

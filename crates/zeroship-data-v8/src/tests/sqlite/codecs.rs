@@ -4,6 +4,49 @@ use super::fixtures::*;
 use crate::tests::fixtures::parity;
 
 #[test]
+fn stored_json_limit_round_trips_through_worker_find() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        apply_schema_ahead_of_runtime(
+            &dir,
+            &format!(
+            "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".documents ({SYSTEM_COLUMNS_SQLITE}, payload TEXT);"
+        ),
+        );
+        let limit = zeroship_data_orm::sql::codecs::MAX_JSON_DEPTH;
+        let source = sqlite_runtime_source(
+            "documents",
+            &zeroship_data_orm::value!({
+                "payload":{"type":"json"}
+            }),
+            &format!(
+                r#"
+const _procedures = {{
+  async nesting() {{
+    const documents = env.db.collection(COLLECTION);
+    let payload = "leaf";
+    for (let i = 0; i < {limit}; i++) payload = [payload];
+    try {{
+      const inserted = await documents.insert({{ payload }});
+      const rows = await documents.find({{ id: inserted.id }});
+      let value = rows[0].payload;
+      let depth = 0;
+      while (Array.isArray(value)) {{ depth++; value = value[0]; }}
+      return {{ depth, leaf: value }};
+    }} catch (error) {{ return {{ error: error.message }}; }}
+  }}
+}};
+"#
+            ),
+        );
+        assert_eq!(
+            dispatch_sqlite_runtime(&dir, &source, "nesting"),
+            zeroship_data_orm::value!({"json":{"depth":limit,"leaf":"leaf"}})
+        );
+    });
+}
+
+#[test]
 fn artifact_binary_defaults_reach_sdk_inserts_as_native_bytes() {
     run(async {
         let dir = tempfile::tempdir().unwrap();

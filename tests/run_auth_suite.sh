@@ -270,15 +270,6 @@ echo "------------------------------------------------------------------"
 # use: these tests seed their own users and key off per-test UUIDs, and
 # TEST_THREADS serializes the run.
 #
-# GATEWAY_ANCHORS_DB_URL and GATEWAY_POOL_SMOKE_URL were exported here, and
-# there is nothing left to export - both now read the single test DSN above.
-# Their history is the argument for that collapse rather than a footnote to it:
-# GATEWAY_POOL_SMOKE_URL was set NOWHERE in this repository outside its own
-# test file and one docs line, so `crates/zeroship-gateway/tests/db_pool_smoke.rs`
-# announced a skip on every run of `cargo test --workspace` and its one test had
-# never executed. A private name for a value that already exists is a test that
-# does not run, and it looks exactly like a test that passes.
-
 # Mailer runs as a whole package with owned PostgreSQL and SMTP fixtures.
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
 # `zeroship-authn` is here because it was in NO gate at all. Its PostgreSQL
@@ -303,7 +294,6 @@ for spec in \
   "zeroship-gateway:identities_relay_test" \
   "zeroship-gateway:sessions_test" \
   "zeroship-gateway:oidc_rp_e2e" \
-  "zeroship-gateway:db_pool_smoke" \
 ; do
   pkg="${spec%%:*}"
   bin="${spec#*:}"
@@ -322,6 +312,10 @@ for spec in \
       --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
   fi
 done
+
+# Gateway library tests own their database and service fixtures.
+cargo test -p zeroship-gateway --lib --no-fail-fast -- \
+  --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
 # Required backend tests fail if their fixtures cannot start. Mailer owns its
@@ -355,11 +349,7 @@ if log_shows_disk_full "$LOG"; then
   exit 90
 fi
 
-# 595 -> 604 for the three targets added above. The +9 is the measured delta and
-# nothing more: 647 before, 656 after, on the same database provisioning, and
-# the added tests account for all nine - zeroship-authn's lib (2), its
-# service_replay_pg_test (6, previously six announced skips at 0.00s, now
-# 1.10s of real work) and zeroship-gateway's db_pool_smoke (1, 0.52s).
+# The suite floor guards against a run that lost test coverage.
 AUTH_MIN_PASSED=604
 if [ "$passed" -lt "$AUTH_MIN_PASSED" ]; then
   echo "FAIL: only ${passed} auth tests passed, fewer than the ${AUTH_MIN_PASSED} this gate expects." >&2

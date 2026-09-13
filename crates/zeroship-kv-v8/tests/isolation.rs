@@ -123,7 +123,7 @@ export default {
 };
 "#;
 
-fn app(plugin: Arc<dyn NativePlugin>, own: &str, other: &str) -> (Runtime, EnvSnapshot) {
+async fn app(plugin: Arc<dyn NativePlugin>, own: &str, other: &str) -> (Runtime, EnvSnapshot) {
     let env = EnvSnapshot::vars_only(serde_json::json!({
         "APP_ID": other,
         "OWN_ID": own,
@@ -138,9 +138,9 @@ fn app(plugin: Arc<dyn NativePlugin>, own: &str, other: &str) -> (Runtime, EnvSn
         .env_vars(HashMap::from([("APP_ID".into(), own.into())]))
         .plugins(vec![plugin])
         .build();
-    runtime.initialize(&env).expect("initialize isolated app");
-    runtime.start_pump();
     runtime.exit_isolate();
+    runtime.initialize(&env).await.expect("initialize isolated app");
+    runtime.start_pump();
     (runtime, env)
 }
 
@@ -253,8 +253,8 @@ async fn exercise_isolation(store: KvStore) {
     seed(&b, b_id).await;
 
     let plugin: Arc<dyn NativePlugin> = Arc::new(KvBinding::new(store, None));
-    let (runtime_a, env_a) = app(Arc::clone(&plugin), a_id, b_id);
-    let (runtime_b, env_b) = app(plugin, b_id, a_id);
+    let (runtime_a, env_a) = app(Arc::clone(&plugin), a_id, b_id).await;
+    let (runtime_b, env_b) = app(plugin, b_id, a_id).await;
 
     assert_response(request(&runtime_a, &env_a, "attack")).await;
     assert_untouched(&b, b_id).await;
