@@ -36,7 +36,7 @@ impl<E: Entity> EntityCollection<E> {
 }
 impl<E: Entity> EntityAlias<E> {
     #[must_use]
-    pub fn include_deleted(mut self) -> Self {
+    pub const fn include_deleted(mut self) -> Self {
         self.source.include_deleted = true;
         self
     }
@@ -260,7 +260,7 @@ impl Database {
             database: self.clone(),
             query: ReadQuery::new(source.source.clone()),
             selection: (),
-            validate_selection: |_, database, _| database.check_scope(),
+            validate_selection: |(), database, _| database.check_scope(),
             error: (!Rc::ptr_eq(&self.identity, &source.database.identity))
                 .then(|| read::invalid("read sources must belong to the same database handle")),
             schemas: vec![SchemaExpectation {

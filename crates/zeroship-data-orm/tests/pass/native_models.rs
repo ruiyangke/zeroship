@@ -52,7 +52,8 @@ fn main() {
             nickname: Change::Set(None)
         }
         .into_changes()
-        .unwrap()["nickname"]
-            .is_null()
+        .unwrap()
+            .and(posts::nickname.set(Some("duplicate")).unwrap())
+            .is_err()
     );
 }

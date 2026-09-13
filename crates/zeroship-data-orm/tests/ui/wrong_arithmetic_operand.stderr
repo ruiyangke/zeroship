@@ -1,0 +1,36 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/wrong_arithmetic_operand.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0277]: the trait bound `&str: EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>` is not satisfied
+ --> tests/ui/wrong_arithmetic_operand.rs:4:58
+  |
+4 | fn main() { let _ = schema::counters::quantity.increment("one"); }
+  |                                                --------- ^^^^^ the trait `EncodeValue<zeroship_data_orm::orm::sql_types::BigInt>` is not implemented for `&str`
+  |                                                |
+  |                                                required by a bound introduced by this call
+  |
+help: the following other types implement trait `EncodeValue<S>`
+ --> src/orm/codecs.rs
+  |
+  |         impl EncodeValue<$sql> for &str {
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |         |
+  |         `&str` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Text>`
+  |         `&str` implements `EncodeValue<zeroship_data_orm::orm::sql_types::Time>`
+...
+  | text_codec!(Text, Time);
+  | ----------------------- in this macro invocation
+...
+  | impl EncodeValue<CalendarDate> for &str {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `&str` implements `EncodeValue<zeroship_data_orm::orm::sql_types::CalendarDate>`
+note: required by a bound in `orm::model::patch::<impl zeroship_data_orm::orm::Field<C>>::increment`
+ --> src/orm/model/patch.rs
+  |
+  |     pub fn increment<T: EncodeValue<<C::SqlType as NumericSqlType>::Operand>>(
+  |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `orm::model::patch::<impl Field<C>>::increment`
+  = note: this error originates in the macro `text_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

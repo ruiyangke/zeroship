@@ -1,0 +1,32 @@
+warning: unused import: `zeroship_data_orm::orm::*`
+ --> tests/ui/increment_generated_column.rs:1:5
+  |
+1 | use zeroship_data_orm::orm::*;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0599]: the method `increment` exists for struct `zeroship_data_orm::orm::Field<version>`, but its trait bounds were not satisfied
+ --> tests/ui/increment_generated_column.rs:4:47
+  |
+4 |   fn main() { let _ = schema::counters::version.increment(1_i32); }
+  |                                                 ^^^^^^^^^
+  |
+ ::: tests/ui/../fixtures/mutation_expressions_schema.rs
+  |
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 counters {
+  | |                     #[orm(primary_key)]
+... |
+  | |                     #[orm(default = 1, assign(on = write, by = increment(1)), writable = false)]
+  | |                     version: Integer,
+  | |___________________________- doesn't satisfy `version: UpdatableColumn`
+  |
+  = note: the following trait bounds were not satisfied:
+          `version: UpdatableColumn`
+note: the trait `UpdatableColumn` must be implemented
+ --> src/orm/model.rs
+  |
+  | pub trait UpdatableColumn: WritableColumn {}
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
