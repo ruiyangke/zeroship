@@ -166,6 +166,7 @@ mod iss66_built_rpc_dispatch;
 mod iss71_sequential_streams;
 mod message_event;
 mod modules;
+mod plugin_modules;
 mod native_source_cancel_race;
 mod next_tick_ordering;
 mod node_buffer;

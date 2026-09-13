@@ -1,35 +1,15 @@
-//! V8 host callback for `await import(specifier)`.
+//! V8 host callback for dynamic imports.
 //!
-//! Resolution paths, in order:
+//! Imports resolve against the compiled module registry, then native module
+//! factories and embedded bootstrap sources. Resolved modules are cached so
+//! static and dynamic imports share identity. Arbitrary missing creator modules
+//! are rejected; this callback does not fetch source code.
 //!
-//!   1. Registry hit — module already pre-compiled by `load_modules`'s
-//!      static-import BFS, OR previously cached by an earlier dynamic
-//!      import. Returned as-is so static + dynamic imports of the same
-//!      specifier share a single module instance (no double evaluation,
-//!      no split namespace).
-//!   2. Native synthetic (`node:async_hooks`, `node:crypto`) — minted
-//!      via `native_modules::resolve_native`, instantiated, evaluated,
-//!      then cached into the registry so future dynamic OR static
-//!      imports of the same specifier hit path 1.
-//!      2.5. Runtime-provided module (`@zeroship/db/internal`,
-//!      `@zeroship/db/internal`, `zeroship`) — see `bootstrap_modules`.
-//!      The runtime injects the code that imports these (the bootstrap
-//!      `runtime-entry.js`), so it owns their resolution even when the
-//!      tree-shaken `.zship` bundle doesn't carry them (ISS-63). The
-//!      module + its transitive runtime-provided deps are compiled into
-//!      the registry, instantiated through the real static-graph
-//!      resolver, evaluated, and cached for path 1.
-//!   3. Miss — reject with `TypeError("Cannot find module '<spec>'")`.
-//!      No fetch, no compile-on-demand for arbitrary bundle paths: outside
-//!      the runtime-provided set, the bundle is the closed world.
+//! Evaluation runs in a promise continuation, and the import resolves only
+//! after V8's cached evaluation promise settles. Linking and evaluation errors
+//! propagate through that promise with their original cause.
 //!
-//! V8's per-module evaluation cache makes `module.evaluate()` idempotent
-//! after the first call, so the registry's module handles are safe to
-//! return repeatedly without re-running side effects.
-//!
-//! Hooked from `RuntimeInner::new_with_plugins` via
-//! `set_host_import_module_dynamically_callback` — must be installed
-//! before any user JS runs so the very first `import()` hits this path.
+//! Installed before creator evaluation by `RuntimeInner::new_with_plugins`.
 
 #![allow(unsafe_code)]
 
@@ -41,7 +21,7 @@ use crate::core::native_modules;
 /// `resolve_callback` so dynamic and static specifier shapes resolve to
 /// the same compiled module.
 fn registry_lookup<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+    scope: &v8::PinScope<'s, '_>,
     spec: &str,
 ) -> Option<v8::Local<'s, v8::Module>> {
     let registry = scope.get_slot::<SharedRegistry>()?.clone();
@@ -64,7 +44,7 @@ fn registry_lookup<'s>(
 /// bare specifier so a subsequent dynamic OR static import of
 /// `node:foo` hits the same module record.
 fn cache_into_registry<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+    scope: &v8::PinScope<'s, '_>,
     spec: &str,
     module: v8::Local<'s, v8::Module>,
 ) {
@@ -75,29 +55,73 @@ fn cache_into_registry<'s>(
     }
 }
 
-/// Walk a fresh module to `Evaluated`. Synthetic modules have no
-/// imports so the empty resolver suffices; bundle modules retrieved
-/// from the registry are already at least `Instantiated` (and usually
-/// `Evaluated`) thanks to `load_modules`'s eager instantiate/evaluate
-/// path. The status guards below short-circuit duplicate work.
-fn instantiate_and_evaluate<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    module: v8::Local<'s, v8::Module>,
-) -> Option<v8::Local<'s, v8::Value>> {
-    if module.get_status() == v8::ModuleStatus::Uninstantiated {
-        let _ = module.instantiate_module(scope, native_modules::empty_resolve);
-    }
-    if module.get_status() == v8::ModuleStatus::Instantiated {
-        let _ = module.evaluate(scope);
-    }
-    if module.get_status() == v8::ModuleStatus::Errored {
-        return None;
-    }
-    Some(module.get_module_namespace())
+/// Return a namespace only after its module evaluation has settled.
+#[expect(clippy::needless_pass_by_value, reason = "V8 callback signature")]
+fn evaluated_namespace(
+    _scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    rv.set(args.data());
 }
 
-/// Resolve a runtime-provided module (`@zeroship/db/internal`,
-/// `@zeroship/db/internal`, `zeroship`) — see [`bootstrap_modules`].
+/// Runs as a promise continuation, after the importing module has left its
+/// synchronous evaluation frame. Reentrant imports can then reuse V8's cached
+/// evaluation promise without attempting to evaluate an active sync module.
+#[expect(clippy::needless_pass_by_value, reason = "V8 callback signature")]
+fn evaluate_import(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let specifier = args.data().to_rust_string_lossy(scope);
+    let Some(module) = registry_lookup(scope, &specifier) else {
+        let message = v8::String::new(scope, &format!("Cannot find module '{specifier}'")).unwrap();
+        let error = v8::Exception::type_error(scope, message);
+        scope.throw_exception(error);
+        return;
+    };
+    if module.get_status() == v8::ModuleStatus::Uninstantiated
+        && module.instantiate_module(scope, modules::resolve_callback) != Some(true)
+    {
+        // V8's linking exception rejects the promise running this callback.
+        return;
+    }
+    let Some(value) = module.evaluate(scope) else {
+        return;
+    };
+    let namespace = module.get_module_namespace();
+    let Ok(evaluation) = v8::Local::<v8::Promise>::try_from(value) else {
+        // Native synthetic evaluators can complete synchronously without a
+        // promise. Their exports are already populated at this point.
+        rv.set(namespace);
+        return;
+    };
+    let Some(on_fulfilled) = v8::Function::builder(evaluated_namespace)
+        .data(namespace)
+        .build(scope)
+    else {
+        return;
+    };
+    if let Some(result) = evaluation.then(scope, on_fulfilled) {
+        rv.set(result.into());
+    }
+}
+
+fn import_registered<'s>(
+    scope: &v8::PinScope<'s, '_>,
+    resolver: v8::Local<'s, v8::PromiseResolver>,
+    specifier: v8::Local<'s, v8::String>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    let callback = v8::Function::builder(evaluate_import)
+        .data(specifier.into())
+        .build(scope)?;
+    let undefined = v8::undefined(scope);
+    resolver.resolve(scope, undefined.into());
+    resolver.get_promise(scope).then(scope, callback)
+}
+
+/// Resolve an embedded bootstrap module through [`bootstrap_modules`].
 ///
 /// The runtime, not the bundle, owns these: it injects the code that
 /// imports them (`runtime-entry.js` spliced into the bootstrap `index.js`),
@@ -127,8 +151,7 @@ fn resolve_bootstrap_module<'s>(
 
     // Walk the transitive runtime-provided closure (DFS) and compile each
     // member into the registry if absent. `zeroship` is frequently already
-    // present (the user app statically imports it); install-schema /
-    // internal are not. Compiling a member doesn't evaluate it — that
+    // present because creator code statically imports it. Compiling a member doesn't evaluate it — that
     // happens during the entry's `instantiate_module` + `evaluate` below,
     // exactly as `load_modules` does for the static graph.
     let mut stack: Vec<&str> = vec![spec];
@@ -157,49 +180,14 @@ fn resolve_bootstrap_module<'s>(
     Some(v8::Local::new(scope, &g))
 }
 
-/// Instantiate (via the real static-graph resolver, so transitive imports
-/// resolve) and evaluate a runtime-provided bootstrap module, returning its
-/// namespace. Distinct from [`instantiate_and_evaluate`] (which uses
-/// `empty_resolve` for import-less synthetics): bootstrap modules DO have
-/// static imports.
-fn instantiate_and_evaluate_bootstrap<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    module: v8::Local<'s, v8::Module>,
-) -> Option<v8::Local<'s, v8::Value>> {
-    if module.get_status() == v8::ModuleStatus::Uninstantiated {
-        let _ = module.instantiate_module(scope, modules::resolve_callback);
-    }
-    if module.get_status() == v8::ModuleStatus::Instantiated {
-        let _ = module.evaluate(scope);
-    }
-    if module.get_status() == v8::ModuleStatus::Errored {
-        return None;
-    }
-    Some(module.get_module_namespace())
-}
-
 /// Reject `resolver` with `TypeError(message)` and return its promise.
 fn reject_typeerror<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+    scope: &v8::PinScope<'s, '_>,
     resolver: v8::Local<'s, v8::PromiseResolver>,
-    message: String,
+    message: &str,
 ) -> v8::Local<'s, v8::Promise> {
-    let msg = v8::String::new(scope, &message).unwrap();
+    let msg = v8::String::new(scope, message).unwrap();
     let exc = v8::Exception::type_error(scope, msg);
-    let promise = resolver.get_promise(scope);
-    resolver.reject(scope, exc);
-    promise
-}
-
-/// Reject with whatever exception V8 left on the module (its
-/// `get_exception()` for `Errored`) — gives the user the real cause
-/// rather than a flattened "evaluation failed" string.
-fn reject_module_error<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    resolver: v8::Local<'s, v8::PromiseResolver>,
-    module: v8::Local<'s, v8::Module>,
-) -> v8::Local<'s, v8::Promise> {
-    let exc = module.get_exception();
     let promise = resolver.get_promise(scope);
     resolver.reject(scope, exc);
     promise
@@ -207,7 +195,7 @@ fn reject_module_error<'s>(
 
 /// `set_host_import_module_dynamically_callback` target. Returns
 /// `None` only on `PromiseResolver::new` failure (stack overflow, OOM)
-/// — every other path settles a promise and returns `Some`.
+/// — resolution and evaluation otherwise settle the returned promise.
 pub(crate) fn host_import_module_dynamically_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     _host_defined_options: v8::Local<'s, v8::Data>,
@@ -218,55 +206,22 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
     let resolver = v8::PromiseResolver::new(scope)?;
     let spec = specifier.to_rust_string_lossy(scope);
 
-    // Path 1: registry hit. Covers static-imported bundle modules AND
-    // any native synthetic that an earlier static or dynamic import
-    // already minted+cached.
-    if let Some(module) = registry_lookup(scope, &spec) {
-        match instantiate_and_evaluate(scope, module) {
-            Some(ns) => {
-                let promise = resolver.get_promise(scope);
-                resolver.resolve(scope, ns);
-                return Some(promise);
-            }
-            None => return Some(reject_module_error(scope, resolver, module)),
-        }
+    if registry_lookup(scope, &spec).is_some() {
+        return import_registered(scope, resolver, specifier);
     }
 
-    // Path 2: native synthetic not yet seen. Mint, walk to Evaluated,
-    // cache so subsequent imports hit path 1.
     if let Some(module) = native_modules::resolve_native(scope, &spec) {
-        match instantiate_and_evaluate(scope, module) {
-            Some(ns) => {
-                cache_into_registry(scope, &spec, module);
-                let promise = resolver.get_promise(scope);
-                resolver.resolve(scope, ns);
-                return Some(promise);
-            }
-            None => return Some(reject_module_error(scope, resolver, module)),
-        }
+        cache_into_registry(scope, &spec, module);
+        return import_registered(scope, resolver, specifier);
     }
 
-    // Path 2.5: runtime-provided module (`@zeroship/db/internal`,
-    // `@zeroship/db/internal`, `zeroship`). The runtime injects the code
-    // that imports these (runtime-entry.js), so it owns their resolution
-    // even when the tree-shaken bundle doesn't carry them (ISS-63). The
-    // requested module is cached into the registry by
-    // `resolve_bootstrap_module`, so subsequent imports hit path 1.
-    if let Some(module) = resolve_bootstrap_module(scope, &spec) {
-        match instantiate_and_evaluate_bootstrap(scope, module) {
-            Some(ns) => {
-                let promise = resolver.get_promise(scope);
-                resolver.resolve(scope, ns);
-                return Some(promise);
-            }
-            None => return Some(reject_module_error(scope, resolver, module)),
-        }
+    if resolve_bootstrap_module(scope, &spec).is_some() {
+        return import_registered(scope, resolver, specifier);
     }
 
-    // Path 3: not in the bundle.
     Some(reject_typeerror(
         scope,
         resolver,
-        format!("Cannot find module '{spec}'"),
+        &format!("Cannot find module '{spec}'"),
     ))
 }

@@ -2193,6 +2193,7 @@ pub fn load_polyfills_and_modules(
     modules: &[crate::modules::ModuleEntry],
     plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
 ) -> Result<v8::Global<v8::Value>, String> {
+    crate::core::plugin_modules::register(scope, plugins, modules)?;
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
     let app_id = crate::plugin::runtime_app_id(scope);
     for plugin in plugins {
