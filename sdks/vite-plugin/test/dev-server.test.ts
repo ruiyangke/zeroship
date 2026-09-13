@@ -276,16 +276,15 @@ describe("devServerPlugin", () => {
     });
     try {
       const firstRuntime = await harness.runtimeLog();
-      const failed = await fetch(`${harness.origin}/api/probe`);
-      assert.equal(failed.status, 500);
+      const failed = await waitForStatus(`${harness.origin}/api/probe`, 500);
       assert.equal(failed.headers.has(DEV_RUNTIME_STATE_HEADER), false);
       assert.equal(await failed.text(), "module init failed");
 
       await harness.queueHmrChange();
       await waitFor(async () => {
         assert.equal(await harness.runtimeSpawnCount(), 2);
+        assert.notEqual((await harness.runtimeLog()).pid, firstRuntime.pid);
       });
-      assert.notEqual((await harness.runtimeLog()).pid, firstRuntime.pid);
     } finally {
       await harness.close();
     }
@@ -298,8 +297,7 @@ describe("devServerPlugin", () => {
       freshRuntimeRequired: true,
     });
     try {
-      const runtimeFailure = await fetch(`${harness.origin}/api/probe`);
-      assert.equal(runtimeFailure.status, 500);
+      await waitForStatus(`${harness.origin}/api/probe`, 500);
 
       const callback = `${harness.origin}/__zeroship/auth/popup-callback`;
       const authorize = await fetch(
@@ -815,6 +813,15 @@ async function waitFor(fn: () => Promise<void>, timeoutMs = 10_000): Promise<voi
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+}
+
+async function waitForStatus(url: string, status: number): Promise<Response> {
+  let response: Response | undefined;
+  await waitFor(async () => {
+    response = await fetch(url);
+    assert.equal(response.status, status);
+  });
+  return response!;
 }
 
 async function waitForProcessExit(pid: number, timeoutMs = 10_000): Promise<void> {
