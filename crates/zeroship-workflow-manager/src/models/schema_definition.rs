@@ -160,8 +160,11 @@ zeroship_data_orm::orm::schema! {
         workers {
             #[orm(primary_key)]
             id: Text,
+            #[orm(default = 1)]
             capacity: BigInt,
+            #[orm(default = "ready")]
             state: Text,
+            #[orm(default = 0)]
             expires_at: BigInt,
             #[orm(default = 0)]
             lock_version: BigInt,

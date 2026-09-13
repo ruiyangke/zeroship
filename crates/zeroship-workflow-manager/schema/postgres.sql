@@ -11,7 +11,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "deployment_holds_scope_key" ON "workflow_mana
 
 CREATE INDEX IF NOT EXISTS "deployment_holds_pending_idx" ON "workflow_manager"."deployment_holds" ("state", "app_id", "deployment_id");
 
-CREATE TABLE "workflow_manager"."workers" ("id" text PRIMARY KEY NOT NULL, "capacity" bigint NOT NULL, "state" text NOT NULL, "expires_at" bigint NOT NULL, "lock_version" bigint NOT NULL DEFAULT 0);
+CREATE TABLE "workflow_manager"."workers" ("id" text PRIMARY KEY NOT NULL, "capacity" bigint NOT NULL DEFAULT 1, "state" text NOT NULL DEFAULT 'ready', "expires_at" bigint NOT NULL DEFAULT 0, "lock_version" bigint NOT NULL DEFAULT 0);
 
 CREATE TABLE "workflow_manager"."assignments" ("id" text PRIMARY KEY NOT NULL, "app_id" text NOT NULL, "worker_id" text NOT NULL, "revision" bigint NOT NULL, "expires_at" bigint NOT NULL, "released" boolean NOT NULL, "wake_revision" bigint, "next_due_at" bigint, CONSTRAINT "assignment_scope" FOREIGN KEY ("app_id") REFERENCES "workflow_manager"."queue_scopes" (id) ON DELETE RESTRICT, CONSTRAINT "assignment_worker" FOREIGN KEY ("worker_id") REFERENCES "workflow_manager"."workers" (id) ON DELETE RESTRICT);
 
@@ -138,4 +138,4 @@ ALTER TABLE "workflow_manager"."schedule_scopes" ALTER COLUMN "id" TYPE text COL
 ALTER TABLE "workflow_manager"."schedules" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "name" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
 
 ALTER TABLE "workflow_manager"."schedule_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "activation_id" TYPE text COLLATE "C";
-INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '97a8d8bda8a01cdef6527b18319298b96b4a2fb411e64cc05e3783597ae8a919');
+INSERT INTO workflow_manager.schema_version (id, fingerprint) VALUES ('manager', '2f428124a965d02dc8592969949c32fbe88a3227fcc424f87053560c836f489c');
