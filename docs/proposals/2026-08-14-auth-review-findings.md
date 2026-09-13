@@ -308,12 +308,10 @@ Invisible today only because the base `button` rule happens to set the same two
 declarations. The moment that base style changes, both silently stop being
 primary. A class should mean the same thing wherever it is written.
 
-Found by auditing every class in every template against the stylesheet rather
-than by reading. Three others came back as intentional unstyled hooks
-(`auth-shell` is redundant with the `body` layout; the per-provider oauth
-classes would break dark mode, and `.oauth-button` already styles them fully),
-and they are named in `template_css_test.rs` with those reasons rather than
-silently tolerated.
+The original source scan allowed semantic hooks whose appearance comes from
+other selectors. That scan is retired: selector text cannot establish that a
+rule matches the rendered element. The auth browser suite checks computed
+styles on actual pages.
 
 ---
 

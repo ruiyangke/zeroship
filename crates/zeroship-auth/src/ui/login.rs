@@ -726,9 +726,8 @@ mod tests {
     /// WHAT THIS DOES NOT COVER: whether a given screen reader actually voices
     /// a `role="alert"` that is already in the document at first paint, which
     /// varies by AT and browser and cannot be asserted from a rendered string.
-    /// This pins the markup contract only. It also says nothing about the other
-    /// ten templates carrying the same banner; `template_a11y_error_banner`
-    /// below is what covers those.
+    /// This exercises the login page's rendered markup contract. Other pages
+    /// need their own rendered-response or browser assertions.
     #[test]
     fn login_page_error_is_announced_and_describes_the_fields() {
         let render = |error| {
