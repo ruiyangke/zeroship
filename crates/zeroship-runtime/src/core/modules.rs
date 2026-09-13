@@ -78,7 +78,7 @@ fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Opti
 
 /// Compile a single module from source.
 ///
-/// Shared with the dynamic-import callback for the core `zeroship` facade.
+/// Native synthetic modules are created separately by their runtime factories.
 pub(crate) fn compile_module(
     scope: &mut v8::PinScope,
     specifier: &str,
@@ -209,7 +209,6 @@ pub(crate) fn compile_modules(
                 };
 
                 if host_names.contains(spec.as_str())
-                    && resolved != "zeroship"
                     && !host_names.contains(resolved.as_str())
                 {
                     return Err(format!(

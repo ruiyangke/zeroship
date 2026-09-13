@@ -45,6 +45,10 @@ export class ZeroshipDevEnvironment extends vite.DevEnvironment {
     importer?: string,
     options?: FetchFunctionOptions,
   ): Promise<vite.FetchResult> {
+    // Preserve the runtime's reserved specifier. Vite's ordinary external
+    // resolution would turn it into the local Node stub's file URL.
+    if (id === "zeroship") return { externalize: id, type: "builtin" };
+
     // Check if this is a node:* or bare builtin we can polyfill
     const isNodeish = id.startsWith("node:") || NODEISH_IMPORT_RE.test(id);
 

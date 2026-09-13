@@ -730,7 +730,7 @@ plugins. The `build.mode` field in `zeroship.jsonc` selects the build posture.
 | SSR vs SPA catch-all detection | 🟢 | internal (probeUserDefaultExport) | `sdks/vite-plugin/src/build.ts` | — | — | Conservative default true (SSR). |
 | virtual:zeroship/client-manifest | 🟢 | `import manifest from 'virtual:zeroship/client-manifest'` | `sdks/vite-plugin/src/build.ts` | — | `examples/ssr-blog/vite.config.ts` | Reads dist/.vite/manifest.json. |
 | Node.js compat shims | 🟢 | internal (SSR/zeroship env) | `sdks/vite-plugin/src/node-compat.ts` | `docs/reference/node-compat.md` | — | Native modules external; custom polyfills. |
-| Virtual zeroship module resolution | 🟢 | `import { env } from 'zeroship'` | `sdks/vite-plugin/src/zeroship-module.ts` | — | — | Mirrors ZEROSHIP_MODULE_JS. |
+| Virtual zeroship module resolution | 🟢 | `import { env } from 'zeroship'` | `sdks/vite-plugin/src/zeroship-module.ts` | — | — | Imports the runtime-owned native module. |
 | @zeroship/bootstrap resolver | 🟢 | internal (resolveId) | `sdks/vite-plugin/src/zeroship-module.ts` | — | — | Resolves to framework-installed copy. |
 | Vite Environment API integration | 🟢 | internal (environments.zeroship) | `sdks/vite-plugin/src/environment.ts` | `docs/reference/vite-environment-api.md` | — | Intercepts node:* fetchModule. |
 | Dev server bridge (spawn + proxy) | 🟢 | internal (configureServer) | `sdks/vite-plugin/src/dev-server.ts` | `docs/reference/vite-environment-api.md` | — | Crash-restart; ZEROSHIP_BIN override. |
