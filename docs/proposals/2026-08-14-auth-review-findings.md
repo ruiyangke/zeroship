@@ -371,8 +371,8 @@ evidence belongs to that decision; whoever lands it should pick this up.
 
 `docs/feature-map.md` marked TOTP 2FA green, which that file's own legend defines
 as "Implemented, wired, and exercised end-to-end". It is implemented and it is
-exercised - `crates/zeroship-auth/tests/totp_enroll_reauth_test.rs` drives the real route,
-and there are four more TOTP test files. It is not WIRED.
+exercised - `crates/zeroship-auth/tests/second_factor/enrollment.rs` drives the
+account routes and observes credential state and removal notices. It is not WIRED.
 
 The three enrolment routes are POST-only (`/me/2fa/enroll`, `/me/2fa/confirm`,
 `/me/2fa/disable`, `server.rs:156-166`), so reaching them needs a caller, and a

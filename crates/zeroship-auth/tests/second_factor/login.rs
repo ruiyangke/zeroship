@@ -132,6 +132,10 @@ async fn concurrent_challenges_cannot_spend_the_same_backup_code_twice() {
                 .unwrap()
                 .get::<_, i32>(0),
         ];
+        assert_ne!(
+            pids[0], pids[1],
+            "the race needs independent database sessions"
+        );
         let mut admin = database.connect().await;
         let transaction = admin.transaction().await.unwrap();
         let rows = transaction
