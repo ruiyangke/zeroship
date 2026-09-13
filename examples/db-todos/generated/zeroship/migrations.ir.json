@@ -1,6 +1,6 @@
 {
   "kind": "ir",
-  "descriptor_sha256": "461c8af6412743be018395588ba772b5d3e06044c923d2a1094b92b382b2fa35",
+  "descriptor_sha256": "8395b1594c4d9254f9833bc894f8e588eb2bda5dc3e65a317f60038d8e8b8a18",
   "documents": [
     {
       "filename": "20260101000000_create_todos.ir.json",
@@ -41,7 +41,8 @@
                 "nullable": false,
                 "references": {
                   "table": "users",
-                  "column": "id"
+                  "column": "id",
+                  "relation": "user"
                 }
               },
               {

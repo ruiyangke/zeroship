@@ -121,6 +121,7 @@
           "type": "string",
           "refTarget": "users",
           "refColumn": "id",
+          "relation": "user",
           "required": true,
           "readable": true,
           "filterable": true,
