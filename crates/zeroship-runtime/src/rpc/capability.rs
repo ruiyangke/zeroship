@@ -1,69 +1,14 @@
-//! B3 runtime capability enforcement — the thread-local `CURRENT_KIND`
-//! marker + RAII guard + JS-side native callbacks (`__zsEnterKind` /
-//! `__zsExitKind`) that the synthetic SSR entry calls around each user
-//! procedure invocation.
+//! Procedure capabilities belong to the V8 continuation invoking native work.
 //!
-//! ## Threat model
-//!
-//! Defense-in-depth on top of the TypeScript types shipped in commit
-//! `7b8074e`. The TS layer catches misuse at compile time:
-//!
-//!   - `query()` handler tries `ctx.db.users.create(...)` → TS2339
-//!   - `mutation()` handler tries `await fetch(...)` → TS2339
-//!
-//! The runtime layer enforces the same boundaries at request time, so
-//! handlers compiled without strict type-checking (e.g. plain JS) still
-//! hit the rail. Consumers:
-//!
-//!   - `crates/zeroship-data-v8/src/v8_bridge.rs` — `refuse_if_query_capability`
-//!     makes write ops refuse when `current_kind() == Some(Query)`.
-//!   - `crates/zeroship-runtime/src/web/fetch/mod.rs` — fetch callback refuses
-//!     when `current_kind() == Some(Mutation)`.
-//!
-//! ## Plumbing
-//!
-//! The `__zsDispatch` dispatcher (`sdks/bootstrap/src/dispatcher.ts`, whose
-//! compiled twin the runtime splices in via
-//! `crates/zeroship-runtime/src/core/init.rs`) knows the procedure `kind`
-//! synchronously from `fn.config.kind`.
-//! Around the user handler invocation it calls:
-//!
-//!   const tok = globalThis.__zsEnterKind("query");
-//!   try { return await fn(input, ctx); }
-//!   finally { globalThis.__zsExitKind(tok); }
-//!
-//! Enter pushes the previous kind onto a per-thread stack and sets
-//! `CURRENT_KIND`. Exit pops back. Nested calls (an `action` doing
-//! `ctx.runMutation` which internally dispatches another procedure)
-//! restore correctly. A bad token (mismatched / out-of-order) is a
-//! no-op — defense in depth, not a strict protocol.
-//!
-//! Function-shape `default.rpc` (the advanced / back-compat path —
-//! see `docs/reference/zeroship-standard.md`) is the caller's responsibility:
-//! a custom dispatcher that wants this rail must call `__zsEnterKind` /
-//! `__zsExitKind` itself.
-//!
-//! ## Why not a Rust-side guard around `call_rpc_inner`?
-//!
-//! The Rust dispatcher sees only the wire id, not the procedure kind —
-//! the kind lives in `fn.config` on the JS side. `__zsDispatch` is the
-//! one place that resolves id → fn and has cheap access to kind. JS
-//! invoking the marker is the right layer; this is defense-in-depth
-//! over already-typed TS, not a sandbox boundary.
+//! The frame is stored under an isolate-private key in continuation-preserved
+//! embedder data. Updating a frame clones the surrounding map so pending
+//! requests and user AsyncLocalStorage stores keep their captured context.
 
-#![allow(unsafe_code)]
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use crate::node::async_hooks::als::{clone_map, read_context_map};
 
-/// Procedure kind, runtime-local. Wire shape lives in
-/// `zeroship_bundle::ProcedureKind`; we don't depend on bundle here to
-/// keep the dependency graph flat (bundle pulls in tar/zstd/compio-fs;
-/// runtime is upstream of bundle).
-///
-/// `Action`, `Stream`, `Subscription` all map to "no capability
-/// restriction" — they're listed individually only so callers can
-/// inspect the active kind for diagnostics / future gates.
+/// Procedure kind checked by native operations before they enqueue work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcedureKind {
     Query,
@@ -74,11 +19,8 @@ pub enum ProcedureKind {
 }
 
 impl ProcedureKind {
-    /// Parse a wire-kind string. Returns `None` for unknown variants
-    /// (silently — the marker is best-effort; on unknown kinds the
-    /// guard is simply not installed and capability checks pass).
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
+    pub fn from_wire(value: &str) -> Option<Self> {
+        match value {
             "query" => Some(Self::Query),
             "mutation" => Some(Self::Mutation),
             "action" => Some(Self::Action),
@@ -87,216 +29,170 @@ impl ProcedureKind {
             _ => None,
         }
     }
-}
 
-thread_local! {
-    /// Per-thread active kind. `None` outside any RPC dispatch frame.
-    static CURRENT_KIND: Cell<Option<ProcedureKind>> = const { Cell::new(None) };
-
-    /// Map from unique token to the saved kind to restore on exit.
-    /// `__zsEnterKind` / `__zsClearKind` mint a fresh token each call,
-    /// store the pre-call `CURRENT_KIND` under it, and return the
-    /// token to JS. `__zsExitKind(token)` removes the entry and
-    /// restores the saved value. Token-keyed lookup tolerates
-    /// non-LIFO exit order — necessary because `setInterval` fetches
-    /// (HMR poll) and `await fetch` (Vite SSR transport) can settle
-    /// out of order. The previous depth-based stack assumed strict
-    /// LIFO and corrupted on interleave.
-    static KIND_SAVES: RefCell<HashMap<u32, Option<ProcedureKind>>> =
-        RefCell::new(HashMap::new());
-
-    /// Monotonic token counter. `u32` so tokens round-trip through a
-    /// V8 `Integer` without loss.
-    static KIND_TOKEN_COUNTER: Cell<u32> = const { Cell::new(1) };
-
-    /// Monotonic count of dispatch frames entered on this thread.
-    ///
-    /// Exists so a consumer that caches per-dispatch state can tell "still
-    /// inside the handler I opened this for" from "a new handler started"
-    /// WITHOUT the runtime calling into it. `CURRENT_KIND` cannot answer that:
-    /// it reads `Some(Query)` for two consecutive query handlers just as it
-    /// does for one, and the `None` in between is only observable from a hook.
-    ///
-    /// `zeroship-data-v8`'s read-set capture is the consumer. It lives above
-    /// this crate, so an observer callback here would invert the dependency;
-    /// a generation it can pull keeps the arrow pointing one way.
-    static DISPATCH_GENERATION: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Generation of the innermost dispatch frame entered on this thread.
-///
-/// Bumped by every `__zsEnterKind` and by [`KindGuard::enter`]. Compare a
-/// cached value against this to detect a handler boundary; it never repeats
-/// within a thread (`u64`, saturating rather than wrapping so a rollover
-/// cannot make two different dispatches compare equal).
-#[inline]
-pub fn dispatch_generation() -> u64 {
-    DISPATCH_GENERATION.with(|c| c.get())
-}
-
-fn bump_dispatch_generation() {
-    DISPATCH_GENERATION.with(|c| c.set(c.get().saturating_add(1)));
-}
-
-/// Mint a fresh token. Skips 0 — the SSR-entry treats `tok < 0` as
-/// "no enter" and `tok == 0` would conflict with the previous depth=0
-/// semantics; we just stay above it.
-fn next_kind_token() -> u32 {
-    KIND_TOKEN_COUNTER.with(|c| {
-        let v = c.get();
-        c.set(v.wrapping_add(1).max(1));
-        v
-    })
-}
-
-/// Snapshot of `CURRENT_KIND`. `None` outside any RPC dispatch.
-#[inline]
-pub fn current_kind() -> Option<ProcedureKind> {
-    CURRENT_KIND.with(|c| c.get())
-}
-
-/// RAII guard. Sets `CURRENT_KIND` to `kind` on construct, restores
-/// the prior value on drop — survives panics in the handler. Use the
-/// Rust-side guard from any Rust code path that needs the marker
-/// transactionally; the JS-side `__zsEnterKind` is the equivalent
-/// for the SSR entry.
-pub struct KindGuard {
-    previous: Option<ProcedureKind>,
-}
-
-impl KindGuard {
-    pub fn enter(kind: ProcedureKind) -> Self {
-        bump_dispatch_generation();
-        let previous = CURRENT_KIND.with(|c| {
-            let prev = c.get();
-            c.set(Some(kind));
-            prev
-        });
-        Self { previous }
+    fn as_wire(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Mutation => "mutation",
+            Self::Action => "action",
+            Self::Stream => "stream",
+            Self::Subscription => "subscription",
+        }
     }
 }
 
-impl Drop for KindGuard {
-    fn drop(&mut self) {
-        let prev = self.previous;
-        CURRENT_KIND.with(|c| c.set(prev));
+struct FrameKey(v8::Global<v8::Symbol>);
+
+fn frame_key<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Symbol> {
+    if let Some(key) = scope.get_slot::<FrameKey>() {
+        return v8::Local::new(scope, key.0.clone());
+    }
+    let description = v8::String::new(scope, "zs:ProcedureFrame").unwrap();
+    let key = v8::Symbol::new(scope, Some(description));
+    let saved = v8::Global::new(scope, key);
+    scope.set_slot(FrameKey(saved));
+    key
+}
+
+fn current_frame<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Array>> {
+    let map = read_context_map(scope)?;
+    let key = frame_key(scope);
+    let value = map.get(scope, key.into())?;
+    v8::Local::<v8::Array>::try_from(value).ok()
+}
+
+fn set_frame<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>) {
+    let next = match read_context_map(scope) {
+        Some(map) => clone_map(scope, map),
+        None => v8::Map::new(scope),
+    };
+    let key = frame_key(scope);
+    if value.is_null_or_undefined() {
+        next.delete(scope, key.into());
+    } else {
+        next.set(scope, key.into(), value);
+    }
+    scope.set_continuation_preserved_embedder_data(next.into());
+}
+
+/// Kind carried by the currently executing continuation, including after await.
+pub fn current_kind(scope: &mut v8::PinScope) -> Option<ProcedureKind> {
+    let frame = current_frame(scope)?;
+    let kind = frame.get_index(scope, 0)?;
+    if !kind.is_string() {
+        return None;
+    }
+    ProcedureKind::from_wire(&kind.to_rust_string_lossy(scope))
+}
+
+/// Identity of the current procedure frame. The caller's identity is restored
+/// after a nested invocation; different isolates never share a frame identity.
+pub fn dispatch_generation(scope: &mut v8::PinScope) -> u64 {
+    let Some(frame) = current_frame(scope) else {
+        return 0;
+    };
+    let Some(value) = frame.get_index(scope, 1) else {
+        return 0;
+    };
+    v8::Local::<v8::BigInt>::try_from(value)
+        .ok()
+        .map_or(0, |value| value.u64_value().0)
+}
+
+fn enter_frame(scope: &mut v8::PinScope, kind: Option<ProcedureKind>) -> u64 {
+    static NEXT_FRAME: AtomicU64 = AtomicU64::new(1);
+    // Internal JS dispatcher tokens must round-trip through Number exactly.
+    const MAX_SAFE_INTEGER: u64 = (1_u64 << 53) - 1;
+    let generation = NEXT_FRAME
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            (value < MAX_SAFE_INTEGER).then_some(value + 1)
+        })
+        .expect("procedure frame identity exhausted");
+    let parent = current_frame(scope)
+        .map(Into::into)
+        .unwrap_or_else(|| v8::null(scope).into());
+    let kind = kind
+        .map(|kind| v8::String::new(scope, kind.as_wire()).unwrap().into())
+        .unwrap_or_else(|| v8::null(scope).into());
+    let id = v8::BigInt::new_from_u64(scope, generation);
+    let frame = v8::Array::new_with_elements(scope, &[kind, id.into(), parent]);
+    set_frame(scope, frame.into());
+    generation
+}
+
+/// Enter a native procedure call, restoring the exact caller context when the
+/// synchronous V8 call returns. Pending continuations retain their own frame.
+pub fn with_kind<'s, R>(
+    scope: &mut v8::PinScope<'s, '_>,
+    kind: ProcedureKind,
+    body: impl FnOnce(&mut v8::PinScope<'s, '_>) -> R,
+) -> R {
+    let previous = scope.get_continuation_preserved_embedder_data();
+    let previous = v8::Global::new(scope, previous);
+    enter_frame(scope, Some(kind));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(scope)));
+    let previous = v8::Local::new(scope, previous);
+    scope.set_continuation_preserved_embedder_data(previous);
+    match result {
+        Ok(value) => value,
+        Err(error) => std::panic::resume_unwind(error),
     }
 }
 
-// ---------------------------------------------------------------------------
-// V8 native callbacks: __zsEnterKind / __zsExitKind
-// ---------------------------------------------------------------------------
-
-/// `globalThis.__zsEnterKind(kindStr): number`
-///
-/// Saves the active kind under a fresh token and sets `CURRENT_KIND`
-/// to the parsed kind. Returns the token; `__zsExitKind(token)`
-/// restores the saved kind by token lookup. Unknown / non-string
-/// arguments leave `CURRENT_KIND` as-is — the matching exit still
-/// works (best-effort).
 fn enter_kind_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let kind = if args.length() >= 1 {
-        let v = args.get(0);
-        if v.is_string() {
-            ProcedureKind::from_wire(&v.to_rust_string_lossy(scope))
-        } else {
-            None
-        }
+    let value = args.get(0);
+    let kind = if value.is_string() {
+        ProcedureKind::from_wire(&value.to_rust_string_lossy(scope))
     } else {
         None
     };
-
-    // Bumped even when `kind` is unparseable: the frame was still entered, and
-    // a consumer keyed on the generation must see the boundary or it will
-    // attribute the new handler's reads to the previous one.
-    bump_dispatch_generation();
-    let token = next_kind_token();
-    let prev = CURRENT_KIND.with(|c| c.get());
-    KIND_SAVES.with(|m| {
-        m.borrow_mut().insert(token, prev);
-    });
-    if let Some(k) = kind {
-        CURRENT_KIND.with(|c| c.set(Some(k)));
-    }
-
-    rv.set(v8::Integer::new_from_unsigned(scope, token).into());
+    let kind = kind.or_else(|| current_kind(scope));
+    rv.set_double(enter_frame(scope, kind) as f64);
 }
 
-/// `globalThis.__zsExitKind(token: number): void`
-///
-/// Pops the stack down to (and not including) `token`, restoring
-/// `CURRENT_KIND` to the value saved at that depth. Out-of-range or
-/// non-numeric tokens are treated as no-ops — defense in depth, not a
-/// strict protocol.
 fn exit_kind_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _rv: v8::ReturnValue,
 ) {
-    if args.length() < 1 {
+    let value = args.get(0);
+    if !value.is_number() {
         return;
     }
-    let v = args.get(0);
-    let Some(tok_i64) = v.integer_value(scope) else {
+    let Some(token) = value.number_value(scope) else {
         return;
     };
-    if tok_i64 < 0 {
+    if token < 1.0 || token.fract() != 0.0 || token as u64 != dispatch_generation(scope) {
         return;
     }
-    let tok = tok_i64 as u32;
-
-    // Token-keyed lookup tolerates out-of-order exits — necessary
-    // when `setInterval`-scheduled fetches interleave with
-    // request-handler awaits. Missing token (already exited, or
-    // never minted) is a no-op.
-    let restored = KIND_SAVES.with(|m| m.borrow_mut().remove(&tok));
-    if let Some(saved) = restored {
-        CURRENT_KIND.with(|c| c.set(saved));
+    if let Some(frame) = current_frame(scope) {
+        if let Some(parent) = frame.get_index(scope, 2) {
+            set_frame(scope, parent);
+        }
     }
 }
 
-/// `globalThis.__zsClearKind(): number`
-///
-/// Pushes the active kind onto the stack and sets `CURRENT_KIND` to
-/// `None` for the scope, returning a token the JS shim pairs with a
-/// `__zsExitKind(token)` call.
-///
-/// Used by dev-bootstrap infrastructure code (HMR poll, Vite SSR
-/// transport) that must call `fetch` from inside a request whose
-/// active capability frame would otherwise refuse it. The fetches are
-/// part of the dev kernel, not user code, so they bypass the gate.
 fn clear_kind_callback(
     scope: &mut v8::PinScope,
     _args: v8::FunctionCallbackArguments,
     mut rv: v8::ReturnValue,
 ) {
-    let token = next_kind_token();
-    let prev = CURRENT_KIND.with(|c| c.get());
-    KIND_SAVES.with(|m| {
-        m.borrow_mut().insert(token, prev);
-    });
-    CURRENT_KIND.with(|c| c.set(None));
-    rv.set(v8::Integer::new_from_unsigned(scope, token).into());
+    rv.set_double(enter_frame(scope, None) as f64);
 }
 
-/// Wire `__zsEnterKind` / `__zsExitKind` / `__zsClearKind` onto
-/// `globalThis`. Called from `crate::rpc::dispatch::install_globals`.
-pub fn install_globals<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<v8::Object>,
-) {
+/// Install callbacks captured by the internal dispatcher and dev transport.
+/// Creator evaluation starts after the bootstrap removes these globals.
+pub fn install_globals<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v8::Object>) {
     let f = v8::Function::new(scope, enter_kind_callback).unwrap();
     let key = v8::String::new(scope, "__zsEnterKind").unwrap();
     global.set(scope, key.into(), f.into());
-
     let f = v8::Function::new(scope, exit_kind_callback).unwrap();
     let key = v8::String::new(scope, "__zsExitKind").unwrap();
     global.set(scope, key.into(), f.into());
-
     let f = v8::Function::new(scope, clear_kind_callback).unwrap();
     let key = v8::String::new(scope, "__zsClearKind").unwrap();
     global.set(scope, key.into(), f.into());
@@ -339,9 +235,8 @@ pub fn build_capability_violation<'s>(
         obj.set(scope, key.into(), val.into());
     };
 
-    let message = format!(
-        "capability_violation: {wrapper} handlers cannot call {violated}. {remediation}"
-    );
+    let message =
+        format!("capability_violation: {wrapper} handlers cannot call {violated}. {remediation}");
     set_str(scope, "name", "Error");
     set_str(scope, "message", &message);
     set_str(scope, "code", "capability_violation");
@@ -398,7 +293,10 @@ mod tests {
     /// `from_wire` mirrors the SDK's `__zsKind` tag values.
     #[test]
     fn from_wire_parses_all_kinds() {
-        assert_eq!(ProcedureKind::from_wire("query"), Some(ProcedureKind::Query));
+        assert_eq!(
+            ProcedureKind::from_wire("query"),
+            Some(ProcedureKind::Query)
+        );
         assert_eq!(
             ProcedureKind::from_wire("mutation"),
             Some(ProcedureKind::Mutation)
@@ -419,101 +317,89 @@ mod tests {
         assert_eq!(ProcedureKind::from_wire(""), None);
     }
 
-    /// Baseline: no guard means no kind.
-    #[test]
-    fn current_kind_outside_dispatch_is_none() {
-        // Note: tests share a thread, so we reset the stack first to
-        // guard against pollution from earlier failed tests.
-        KIND_SAVES.with(|m| m.borrow_mut().clear());
-        CURRENT_KIND.with(|c| c.set(None));
-        assert_eq!(current_kind(), None);
+    fn in_context(body: impl FnOnce(&mut v8::PinScope<'_, '_>)) {
+        crate::init_v8();
+        let mut isolate = v8::Isolate::new(Default::default());
+        v8::scope!(let scope, &mut isolate);
+        let context = v8::Context::new(scope, Default::default());
+        let scope = &mut v8::ContextScope::new(scope, context);
+        body(scope);
     }
 
-    /// `KindGuard::enter` sets the kind; drop restores `None`.
     #[test]
-    fn b3_runtime_kind_guard_basic() {
-        KIND_SAVES.with(|m| m.borrow_mut().clear());
-        CURRENT_KIND.with(|c| c.set(None));
-        {
-            let _g = KindGuard::enter(ProcedureKind::Query);
-            assert_eq!(current_kind(), Some(ProcedureKind::Query));
-        }
-        assert_eq!(current_kind(), None);
-    }
-
-    /// Nested guards stack — inner kind overrides; outer kind restores
-    /// on inner drop.
-    #[test]
-    fn b3_runtime_nested_calls_preserve_kind() {
-        KIND_SAVES.with(|m| m.borrow_mut().clear());
-        CURRENT_KIND.with(|c| c.set(None));
-        let _outer = KindGuard::enter(ProcedureKind::Action);
-        assert_eq!(current_kind(), Some(ProcedureKind::Action));
-        {
-            let _inner = KindGuard::enter(ProcedureKind::Mutation);
-            assert_eq!(current_kind(), Some(ProcedureKind::Mutation));
-        }
-        assert_eq!(current_kind(), Some(ProcedureKind::Action));
-    }
-
-    /// A panicking handler must still restore CURRENT_KIND. The RAII
-    /// guard runs in the panic's unwinding pass; this exercises that
-    /// path.
-    #[test]
-    fn b3_runtime_kind_guard_restores_on_panic() {
-        KIND_SAVES.with(|m| m.borrow_mut().clear());
-        CURRENT_KIND.with(|c| c.set(None));
-        let result = std::panic::catch_unwind(|| {
-            let _g = KindGuard::enter(ProcedureKind::Query);
-            assert_eq!(current_kind(), Some(ProcedureKind::Query));
-            panic!("simulated handler panic");
+    fn outside_dispatch_has_no_frame() {
+        in_context(|scope| {
+            assert_eq!(current_kind(scope), None);
+            assert_eq!(dispatch_generation(scope), 0);
         });
-        assert!(result.is_err(), "panic should propagate");
-        assert_eq!(
-            current_kind(),
-            None,
-            "CURRENT_KIND must restore after panic unwinds the guard"
-        );
     }
 
-    /// Two consecutive frames of the SAME kind must be distinguishable.
-    ///
-    /// This is the whole reason the counter exists: `current_kind()` reads
-    /// `Some(Query)` inside either of two back-to-back query handlers, so a
-    /// consumer caching per-dispatch state cannot tell them apart from it.
-    /// `zeroship-data-v8`'s read-set capture keys its reset on this, and
-    /// without a bump it would attach the first handler's reads to the
-    /// second handler's subscription.
     #[test]
-    fn dispatch_generation_advances_per_frame_even_for_the_same_kind() {
-        let before = dispatch_generation();
-        {
-            let _g = KindGuard::enter(ProcedureKind::Query);
-            assert!(dispatch_generation() > before);
-        }
-        let first = dispatch_generation();
-        {
-            let _g = KindGuard::enter(ProcedureKind::Query);
-            assert!(
-                dispatch_generation() > first,
-                "a second query frame must not reuse the first frame's generation"
-            );
-        }
+    fn native_call_restores_the_callers_frame() {
+        in_context(|scope| {
+            with_kind(scope, ProcedureKind::Action, |scope| {
+                let parent = dispatch_generation(scope);
+                assert_ne!(parent, 0);
+                with_kind(scope, ProcedureKind::Query, |scope| {
+                    assert_eq!(current_kind(scope), Some(ProcedureKind::Query));
+                    assert_ne!(dispatch_generation(scope), parent);
+                });
+                assert_eq!(current_kind(scope), Some(ProcedureKind::Action));
+                assert_eq!(dispatch_generation(scope), parent);
+            });
+            assert_eq!(current_kind(scope), None);
+            assert_eq!(dispatch_generation(scope), 0);
+        });
     }
 
-    /// The generation is not restored on exit. It identifies a frame, not a
-    /// depth - restoring it would make a sibling frame compare equal to the
-    /// one that just closed.
     #[test]
-    fn dispatch_generation_does_not_rewind_on_exit() {
-        let inside = {
-            let _g = KindGuard::enter(ProcedureKind::Mutation);
-            dispatch_generation()
-        };
-        assert_eq!(
-            dispatch_generation(),
-            inside,
-            "generation must not rewind when the frame exits"
-        );
+    fn native_call_restores_context_after_panic() {
+        in_context(|scope| {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_kind(scope, ProcedureKind::Query, |scope| {
+                    assert_eq!(current_kind(scope), Some(ProcedureKind::Query));
+                    panic!("simulated native caller panic");
+                });
+            }));
+            assert!(result.is_err());
+            assert_eq!(current_kind(scope), None);
+            assert_eq!(dispatch_generation(scope), 0);
+        });
+    }
+
+    #[test]
+    fn successive_calls_have_distinct_frame_identities() {
+        in_context(|scope| {
+            let first = with_kind(scope, ProcedureKind::Query, dispatch_generation);
+            let second = with_kind(scope, ProcedureKind::Query, dispatch_generation);
+            assert_ne!(first, second);
+            assert_ne!(first, 0);
+            assert_ne!(second, 0);
+        });
+    }
+
+    #[test]
+    fn sibling_contexts_keep_immutable_frames() {
+        in_context(|scope| {
+            let capture = |scope: &mut v8::PinScope<'_, '_>| {
+                (
+                    dispatch_generation(scope),
+                    crate::core::invocation::capture_context(scope),
+                )
+            };
+            let (query_id, query) = with_kind(scope, ProcedureKind::Query, capture);
+            let (mutation_id, mutation) = with_kind(scope, ProcedureKind::Mutation, capture);
+            for (context, kind, id) in [
+                (&query, ProcedureKind::Query, query_id),
+                (&mutation, ProcedureKind::Mutation, mutation_id),
+                (&query, ProcedureKind::Query, query_id),
+            ] {
+                crate::core::invocation::with_captured_context(scope, context, |scope| {
+                    assert_eq!(current_kind(scope), Some(kind));
+                    assert_eq!(dispatch_generation(scope), id);
+                });
+            }
+            assert_eq!(current_kind(scope), None);
+        });
     }
 }
