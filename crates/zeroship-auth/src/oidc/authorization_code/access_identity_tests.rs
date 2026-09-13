@@ -19,13 +19,27 @@ fn token_iat(token: &str) -> i64 {
 }
 
 #[compio::test]
-async fn access_token_mint_holds_the_user_lock_until_commit() {
+async fn access_token_mint_holds_the_user_lock_until_the_transaction_ends() {
     Database::run(async |database| {
         let fixture = MintFixture::seed(database).await;
         let mut mint = database.connect_as_auth().await;
         let contender = database.connect_as_auth().await;
+        let setup = mint.transaction().await.unwrap();
+        let proof = fixture.proof(&setup).await;
+        setup.commit().await.unwrap();
+        let available: bool = contender
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock($1::INT4, hashtext($2::text))",
+                &[&advisory_lock::NS_USER, &fixture.user_id.as_str()],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            available,
+            "session setup must leave the mint lock available"
+        );
         let tx = mint.transaction().await.unwrap();
-        let proof = fixture.proof(&tx).await;
         mint_access_token(
             &tx,
             &fixture.issuer,
@@ -55,16 +69,14 @@ async fn access_token_mint_holds_the_user_lock_until_commit() {
             .unwrap()
             .get(0);
         assert!(acquired);
-        assert!(
-            contender
-                .query(
-                    "SELECT app_client_id FROM zeroship.app_user_identities",
-                    &[]
-                )
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(contender
+            .query(
+                "SELECT app_client_id FROM zeroship.app_user_identities",
+                &[]
+            )
+            .await
+            .unwrap()
+            .is_empty());
     })
     .await;
 }
@@ -127,15 +139,14 @@ async fn inactive_principals_cannot_mint_with_a_previously_established_proof() {
             .await
             .unwrap_err();
             assert_eq!(error.error, "invalid_grant", "{transition}");
-            assert!(
-                tx.query(
+            assert!(tx
+                .query(
                     "SELECT app_client_id FROM zeroship.app_user_identities",
                     &[]
                 )
                 .await
                 .unwrap()
-                .is_empty()
-            );
+                .is_empty());
             tx.rollback().await.unwrap();
         })
         .await;
@@ -200,12 +211,11 @@ async fn a_deleted_principal_cannot_establish_a_session() {
         )
         .await;
         assert!(result.is_err());
-        assert!(
-            tx.query("SELECT id FROM zeroship.sessions", &[])
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(tx
+            .query("SELECT id FROM zeroship.sessions", &[])
+            .await
+            .unwrap()
+            .is_empty());
         tx.rollback().await.unwrap();
     })
     .await;
