@@ -147,7 +147,9 @@ const fn worker_operation(operation: &JobOperation) -> Result<(), Error> {
         JobOperation::Advance { .. } | JobOperation::Reconcile {} | JobOperation::Collect {} => {
             Ok(())
         }
-        JobOperation::Cron { .. } | JobOperation::Management { .. } => Err(Error::Denied),
+        JobOperation::Activate { .. }
+        | JobOperation::Cron { .. }
+        | JobOperation::Management { .. } => Err(Error::Denied),
     }
 }
 

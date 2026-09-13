@@ -1,0 +1,17 @@
+[package]
+name = "zeroship-workflow-calendar"
+version = "0.1.0"
+edition = "2021"
+description = "Pure workflow calendar and interval calculations"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono-tz = "0.10"
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

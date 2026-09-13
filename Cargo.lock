@@ -7992,6 +7992,7 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-stream",
  "zeroship-workflow",
+ "zeroship-workflow-calendar",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
  "zeroship-workflow-scheduler",
@@ -8041,6 +8042,7 @@ dependencies = [
  "zeroship-config-contract",
  "zeroship-config-macros",
  "zeroship-id",
+ "zeroship-workflow-calendar",
 ]
 
 [[package]]
@@ -8657,7 +8659,6 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "chrono-tz",
  "compio",
  "compio-postgres",
  "compio-s3",
@@ -8679,8 +8680,20 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-storage",
+ "zeroship-workflow-calendar",
  "zeroship-workflow-client",
  "zeroship-workflow-manager",
+]
+
+[[package]]
+name = "zeroship-workflow-calendar"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "chrono-tz",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -8717,6 +8730,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
+ "zeroship-workflow-calendar",
 ]
 
 [[package]]

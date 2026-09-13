@@ -15,6 +15,7 @@ thiserror = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-data-orm = { workspace = true }
+zeroship-workflow-calendar = { workspace = true }
 
 [dev-dependencies]
 compio-postgres = { workspace = true }

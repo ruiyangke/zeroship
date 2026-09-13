@@ -15,7 +15,8 @@ use serde::Deserialize;
 use serde_json::Value;
 use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id;
-use zeroship_workflow::{calendar::Calendar, store::pg::WorkflowTables};
+use zeroship_workflow::store::pg::WorkflowTables;
+use zeroship_workflow_calendar::Calendar;
 
 use crate::registry::RegistryError;
 use crate::workflow_instance_api;

@@ -35,6 +35,7 @@ fn workflow_process_dependencies_follow_crate_ownership() {
         .collect();
     for name in [
         "zeroship-workflow",
+        "zeroship-workflow-calendar",
         "zeroship-workflow-client",
         "zeroship-workflow-manager",
         "zeroship-workflow-scheduler",
@@ -53,6 +54,13 @@ fn workflow_process_dependencies_follow_crate_ownership() {
                 continue;
             }
             let dependency = packages[id];
+            if name == "zeroship-workflow-calendar" {
+                assert!(
+                    !["zeroship-core", "zeroship-workflow", "zeroship-workflow-manager", "zeroship-data-orm", "zeroship-storage", "compio", "tokio"]
+                        .contains(&dependency),
+                    "calendar calculation reaches a host or storage implementation through {dependency}"
+                );
+            }
             if matches!(name, "zeroship-workflow" | "zeroship-worker") {
                 assert!(
                     !["zeroship-workflow-manager", "zeroship-workflow-server"]

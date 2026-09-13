@@ -9,7 +9,6 @@ extern crate self as zeroship_workflow;
 pub mod advance;
 pub mod apply;
 pub mod backend;
-pub mod calendar;
 pub mod claim;
 pub mod client;
 pub mod deployment_holds;

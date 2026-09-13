@@ -8,6 +8,7 @@ use zeroship_core::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         Settlement, SettlementReceipt, SubmitJob,
     },
+    workflow_schedules::ScheduleId,
 };
 
 fn round_trip<T: Debug + PartialEq + Serialize + DeserializeOwned>(value: &T) -> Value {
@@ -26,7 +27,14 @@ fn refuses<T: DeserializeOwned>(wire: Value) {
 fn operations() -> Vec<(JobOperation, Value)> {
     let run = RunId::mint();
     let request = RequestId::mint();
+    let schedule = ScheduleId::mint();
     vec![
+        (
+            JobOperation::Activate {
+                revision: 1.try_into().unwrap(),
+            },
+            json!({"kind":"activate","revision":1}),
+        ),
         (
             JobOperation::Advance {
                 run_id: run.clone(),
@@ -37,12 +45,14 @@ fn operations() -> Vec<(JobOperation, Value)> {
         ),
         (
             JobOperation::Cron {
+                schedule_id: schedule.clone(),
+                schedule_name: "daily-report".into(),
                 request_id: request.clone(),
                 run_id: run.clone(),
                 revision: 2.try_into().unwrap(),
                 scheduled_at: 123.try_into().unwrap(),
             },
-            json!({"kind":"cron","requestId":request,"runId":run,"revision":2,"scheduledAt":123}),
+            json!({"kind":"cron","scheduleId":schedule,"scheduleName":"daily-report","requestId":request,"runId":run,"revision":2,"scheduledAt":123}),
         ),
         (
             JobOperation::Management {
@@ -299,6 +309,7 @@ fn nested_identifiers_cannot_be_replaced_with_other_entity_types() {
             ("/delivery/workerId", json!(AppId::mint())),
             ("/delivery/job/operation/runId", json!(RequestId::mint())),
             ("/delivery/job/operation/requestId", json!(RunId::mint())),
+            ("/delivery/job/operation/scheduleId", json!(RunId::mint())),
             ("/successors/0/id", json!(DeploymentId::mint())),
         ] {
             if wire.pointer(path).is_none() {
@@ -375,6 +386,67 @@ fn counters_and_deadlines_enforce_native_ranges_on_the_wire() {
             let mut boundary = wire.clone();
             *boundary.pointer_mut(path).unwrap() = json!(valid);
             round_trip(&serde_json::from_value::<Settlement>(boundary).unwrap());
+        }
+    }
+}
+
+#[test]
+fn activation_and_cron_require_typed_schedule_identity_and_native_counters() {
+    let cases: Vec<_> = operations()
+        .into_iter()
+        .filter(|(operation, _)| {
+            matches!(
+                operation,
+                JobOperation::Activate { .. } | JobOperation::Cron { .. }
+            )
+        })
+        .collect();
+    assert!(!cases.is_empty());
+    for (operation, _) in cases {
+        let wire = round_trip(&operation);
+        for bad in [
+            json!(0),
+            json!(-1),
+            json!(u64::MAX),
+            json!(1.5),
+            json!("1"),
+            Value::Null,
+        ] {
+            let mut invalid = wire.clone();
+            invalid["revision"] = bad;
+            refuses::<JobOperation>(invalid);
+        }
+        let mut maximum = wire.clone();
+        maximum["revision"] = json!(i64::MAX);
+        round_trip(&serde_json::from_value::<JobOperation>(maximum).unwrap());
+        if !matches!(operation, JobOperation::Cron { .. }) {
+            continue;
+        }
+        for bad in [json!("sch_"), json!(RunId::mint()), json!(1), Value::Null] {
+            let mut invalid = wire.clone();
+            invalid["scheduleId"] = bad;
+            refuses::<JobOperation>(invalid);
+        }
+        for bad in [json!({"input":"private"}), json!(1), Value::Null] {
+            let mut invalid = wire.clone();
+            invalid["scheduleName"] = bad;
+            refuses::<JobOperation>(invalid);
+        }
+        for bad in [
+            json!(-1),
+            json!(u64::MAX),
+            json!(0.5),
+            json!("0"),
+            Value::Null,
+        ] {
+            let mut invalid = wire.clone();
+            invalid["scheduledAt"] = bad;
+            refuses::<JobOperation>(invalid);
+        }
+        for valid in [0, i64::MAX] {
+            let mut boundary = wire.clone();
+            boundary["scheduledAt"] = json!(valid);
+            round_trip(&serde_json::from_value::<JobOperation>(boundary).unwrap());
         }
     }
 }
