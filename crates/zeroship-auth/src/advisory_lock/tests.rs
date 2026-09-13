@@ -1,5 +1,5 @@
 use super::{
-    ONE_ARGUMENT_KEYS, release_advisory_lock, try_acquire_advisory_lock, with_advisory_lock,
+    release_advisory_lock, try_acquire_advisory_lock, with_advisory_lock, ONE_ARGUMENT_KEYS,
 };
 use crate::{error::AuthError, test_database::Database};
 use futures::channel::oneshot;
@@ -21,11 +21,9 @@ fn every_declared_one_argument_key_is_registered() {
         super::OP_SIGNING_KEY_BOOTSTRAP_LOCK,
         super::ACCOUNT_REAPER_SWEEP_LOCK,
     ] {
-        assert!(
-            ONE_ARGUMENT_KEYS
-                .iter()
-                .any(|(registered, _)| *registered == key)
-        );
+        assert!(ONE_ARGUMENT_KEYS
+            .iter()
+            .any(|(registered, _)| *registered == key));
     }
 }
 

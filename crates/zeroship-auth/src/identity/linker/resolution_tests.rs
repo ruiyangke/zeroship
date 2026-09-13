@@ -1,4 +1,4 @@
-use super::{LinkOutcome, LinkResume, PendingLink, ResolvedProfile, resolve_or_link};
+use super::{resolve_or_link, LinkOutcome, LinkResume, PendingLink, ResolvedProfile};
 use crate::{
     error::AuthError,
     identity::password,
@@ -44,12 +44,10 @@ async fn require_confirmation(pg: &Client, profile: &ResolvedProfile<'_>, user_i
     assert_eq!(pending.subject, profile.subject);
     assert_eq!(pending.email, profile.email);
     assert_eq!(pending.return_to.as_deref(), Some(RETURN_TO));
-    assert!(
-        identities::list_for_user(pg, user_id)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(identities::list_for_user(pg, user_id)
+        .await
+        .unwrap()
+        .is_empty());
     assert_eq!(
         users::find_by_id(pg, user_id).await.unwrap().unwrap().name,
         "Local name"
@@ -145,12 +143,10 @@ async fn trusted_email_links_an_existing_account_without_overwriting_its_profile
             user_id, user.id,
             "a changed provider email cannot rebind the established subject"
         );
-        assert!(
-            identities::list_for_user(&pg, &other.id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(identities::list_for_user(&pg, &other.id)
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
             identities::list_for_user(&pg, &user.id)
                 .await
