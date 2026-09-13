@@ -275,6 +275,22 @@ let saved: Post = posts.upsert(
 ).await?;
 ```
 
+Typed patches support `increment`, `decrement`, `multiply`, `push`, `pull`,
+and `add_to_set`. They compose with literal assignments and derived changesets:
+
+```rust,ignore
+let changes = posts::counter.increment(1_i64)?
+    .and(posts::title.set("published")?)?;
+let updated: Option<Post> = posts.update(posts::id.eq(post_id)?, changes).await?;
+```
+
+`Changeset::into_changes` returns `Patch<Entity>`. Derives and `set` keep
+operator-shaped JSON literal; expression methods feed the shared atomic update
+planner. Arithmetic uses the column's numeric codec, and array methods use the
+schema-declared element codec. Duplicate assignments are refused. Field
+capabilities, protection, generators and transaction routing remain enforced by
+the ORM.
+
 The conflict target must belong to the entity and match database uniqueness.
 Composite unique targets use `ConflictTarget::new(field).and(other_field)`.
 These methods share the normal generators, protection passes and transaction

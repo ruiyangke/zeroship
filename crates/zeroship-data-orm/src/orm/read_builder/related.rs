@@ -1,3 +1,8 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "ORM reads use thread-local compio sessions"
+)]
+
 use super::*;
 use crate::orm::relations::PreparedRelations;
 
@@ -26,10 +31,16 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
         self.query = self.query.order_by(key);
         self
     }
+    ///
+    /// # Errors
+    /// Returns the corresponding parent query errors.
     pub fn limit(mut self, limit: i64) -> Result<Self, DbError> {
         self.query = self.query.limit(limit)?;
         Ok(self)
     }
+    ///
+    /// # Errors
+    /// Returns the corresponding parent query errors.
     pub fn offset(mut self, offset: i64) -> Result<Self, DbError> {
         self.query = self.query.offset(offset)?;
         Ok(self)
@@ -40,10 +51,16 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
         self
     }
     /// Count matching parents without loading the relation projection.
+    ///
+    /// # Errors
+    /// Returns the corresponding parent query errors.
     pub fn count(self) -> impl Future<Output = Result<i64, DbError>> + use<E, R> {
         self.query.count()
     }
     /// Test for matching parents without loading the relation projection.
+    ///
+    /// # Errors
+    /// Returns the corresponding parent query errors.
     pub fn exists(self) -> impl Future<Output = Result<bool, DbError>> + use<E, R> {
         self.query.exists()
     }
