@@ -1,9 +1,9 @@
 //! Resolved physical statements. Application policy is applied before this boundary.
 
 use super::{
-    Ident, IdentRole, SchemaName,
     compiler::CompileError,
     predicate::{CompareOp, MembershipOp, PatternOp},
+    Ident, IdentRole, SchemaName,
 };
 use crate::value::Value;
 use std::{
@@ -289,6 +289,8 @@ pub struct Comparison {
 
 #[derive(Clone, Debug)]
 pub enum ResolvedOperand {
+    /// A field-free marker for a matching row.
+    RowPresence,
     Column(Column),
     Comparison(Comparison),
     Aggregate {
@@ -308,7 +310,8 @@ impl ResolvedOperand {
                 column: None,
                 distinct: true,
             } => return Err(invalid("COUNT(DISTINCT *) is not supported")),
-            Self::Aggregate {
+            Self::RowPresence
+            | Self::Aggregate {
                 function: super::AggregateFunc::Count,
                 ..
             } => StorageType::Integer,
@@ -971,7 +974,7 @@ fn validate_grouped_operand(
     let column = match operand {
         ResolvedOperand::Column(column)
         | ResolvedOperand::Comparison(Comparison { column, .. }) => column,
-        ResolvedOperand::Aggregate { .. } => return Ok(()),
+        ResolvedOperand::RowPresence | ResolvedOperand::Aggregate { .. } => return Ok(()),
     };
     let grouped = group_by.iter().any(|group| {
         matches!(group, ResolvedOperand::Column(candidate) if Arc::ptr_eq(&column.source.0, &candidate.source.0) && column.index == candidate.index)
@@ -1300,6 +1303,7 @@ fn validate_operand(
         }
     }
     match operand {
+        ResolvedOperand::RowPresence => {}
         ResolvedOperand::Comparison(comparison) => {
             validate_operand(
                 tables,
