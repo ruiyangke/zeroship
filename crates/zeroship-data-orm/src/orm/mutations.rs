@@ -58,7 +58,8 @@ impl<E: Entity> EntityCollection<E> {
                 documents: Value::Array(records),
             }))
         });
-        async move { decode_rows::<E, R>(future?.await?) }
+        let future = self.dispatch(future);
+        async move { decode_rows::<E, R>(future.await?) }
     }
 
     /// Update matching rows and return their affected count.
@@ -77,7 +78,8 @@ impl<E: Entity> EntityCollection<E> {
                     true,
                 )
             });
-        async move { decode_count(future?.await?) }
+        let future = self.dispatch(future);
+        async move { decode_count(future.await?) }
     }
 
     /// Apply the collection's deletion lifecycle to matching rows.
@@ -135,14 +137,15 @@ impl<E: Entity> EntityCollection<E> {
                     conflict_fields: target.into_value(),
                 })
             });
+        let future = self.dispatch(future);
         async move {
-            decode_rows::<E, R>(future?.await?)?
+            decode_rows::<E, R>(future.await?)?
                 .pop()
                 .ok_or_else(|| DbError::internal("upsert returned no row"))
         }
     }
 
-    fn mutate_one<R: FromRow<E>>(
+    pub(super) fn mutate_one<R: FromRow<E>>(
         &self,
         filter: Filter<E>,
         mutation: Mutation,
@@ -151,7 +154,8 @@ impl<E: Entity> EntityCollection<E> {
             self.collection
                 .mutate_model(filter.into_predicate(), mutation, false)
         });
-        async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
+        let future = self.dispatch(future);
+        async move { Ok(decode_rows::<E, R>(future.await?)?.pop()) }
     }
 
     fn mutate_many(
@@ -163,7 +167,8 @@ impl<E: Entity> EntityCollection<E> {
             self.collection
                 .mutate_model(filter.into_predicate(), mutation, true)
         });
-        async move { decode_count(future?.await?) }
+        let future = self.dispatch(future);
+        async move { decode_count(future.await?) }
     }
 }
 
