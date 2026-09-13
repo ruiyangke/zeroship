@@ -1,10 +1,10 @@
 //! Persistent project key for the standalone development host.
 
 use std::{fs::OpenOptions, io::Write, path::Path, sync::Arc};
-use zeroship_core::{project_data_key::ProjectDataKey, project_id::ProjectId};
+use zeroship_core::{project_data_key::ProjectDataKey, project_id::ProjectId, AppId};
 use zeroship_data_orm::encryption::SuppliedProjectKeys;
 
-pub(crate) fn load(directory: &Path, app_id: &str) -> Result<Arc<SuppliedProjectKeys>, String> {
+pub(crate) fn load(directory: &Path, app_id: &AppId) -> Result<Arc<SuppliedProjectKeys>, String> {
     let material = load_material(directory).map_err(|error| {
         format!(
             "cannot open the local project key in {}: {error}",
@@ -12,7 +12,7 @@ pub(crate) fn load(directory: &Path, app_id: &str) -> Result<Arc<SuppliedProject
         )
     })?;
     let keys = Arc::new(SuppliedProjectKeys::new());
-    keys.supply(app_id, material.project_id.as_str(), *material.key())
+    keys.supply(app_id.as_str(), material.project_id.as_str(), *material.key())
         .map_err(|error| error.to_string())?;
     Ok(keys)
 }

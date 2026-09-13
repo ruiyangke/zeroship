@@ -79,13 +79,18 @@ impl NativePlugin for KvBinding {
         scope: &mut v8::PinScope<'s, '_>,
         app_id: &str,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        // Bind the process-wide meter to this isolate's server-injected
-        // `app_id` so each op emits a per-app kv metric. `None` ⇒ no
-        // metering (test harness): the dispatch layer simply skips the emit.
-        let handle = self
-            .meter
-            .as_ref()
-            .map(|m| zeroship_metering::MeterHandle::new(Arc::clone(m), app_id));
+        let handle = match self.meter.as_ref() {
+            Some(meter) => match zeroship_id::AppId::parse(app_id) {
+                Ok(app) => Some(zeroship_metering::MeterHandle::new(Arc::clone(meter), app)),
+                Err(error) => {
+                    let message = v8::String::new(scope, &error.to_string())?;
+                    let exception = v8::Exception::type_error(scope, message);
+                    scope.throw_exception(exception);
+                    return None;
+                }
+            },
+            None => None,
+        };
         let namespace = match Namespace::app(app_id) {
             Ok(namespace) => namespace,
             Err(error) => {

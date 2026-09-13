@@ -6,6 +6,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ControlError,
   createControlClient,
+  isAppId,
+  type AppId,
   type AppRecord,
   type ControlClient,
 } from "@zeroship/control";
@@ -23,7 +25,7 @@ const appInput = {
   app: z
     .string()
     .min(1)
-    .describe("App UUID or app name. Names are resolved with list_apps."),
+    .describe("App id or app name. Names are resolved with list_apps."),
 };
 
 export const TOOL_NAMES = [
@@ -95,7 +97,7 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "get_app",
     {
-      description: "Get one zeroship app by UUID or name.",
+      description: "Get one zeroship app by id or name.",
       inputSchema: appInput,
     },
     async ({ app }) =>
@@ -179,7 +181,7 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "archive_app",
     {
-      description: "Archive a zeroship app by UUID or name.",
+      description: "Archive a zeroship app by id or name.",
       inputSchema: appInput,
     },
     async ({ app }) =>
@@ -192,7 +194,7 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "restore_app",
     {
-      description: "Restore an archived zeroship app by UUID or name.",
+      description: "Restore an archived zeroship app by id or name.",
       inputSchema: appInput,
     },
     async ({ app }) =>
@@ -225,8 +227,8 @@ async function withClient(
   }
 }
 
-async function resolveAppId(client: ControlClient, app: string): Promise<string> {
-  if (isUuid(app)) return app;
+async function resolveAppId(client: ControlClient, app: string): Promise<AppId> {
+  if (isAppId(app)) return app;
   const existing = await findAppByName(client, app);
   if (!existing) {
     throw new Error(`app \`${app}\` not found`);
@@ -237,8 +239,8 @@ async function resolveAppId(client: ControlClient, app: string): Promise<string>
 async function resolveAppIdForDeploy(
   client: ControlClient,
   app: string,
-): Promise<{ id: string; created: AppRecord | null }> {
-  if (isUuid(app)) return { id: app, created: null };
+): Promise<{ id: AppId; created: AppRecord | null }> {
+  if (isAppId(app)) return { id: app, created: null };
 
   const existing = await findAppByName(client, app);
   if (existing) return { id: existing.id, created: null };
@@ -253,12 +255,6 @@ async function findAppByName(
 ): Promise<AppRecord | null> {
   const apps = await client.apps.list();
   return apps.find((app) => app.name === name) ?? null;
-}
-
-function isUuid(value: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-    value,
-  );
 }
 
 function jsonResult(value: unknown): ToolResult {

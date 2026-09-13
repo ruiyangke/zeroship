@@ -221,7 +221,7 @@ async fn unlink_preserving_credential_locked(
 fn row_to_identity(row: &compio_postgres::Row) -> Result<Identity> {
     Ok(Identity {
         id: row.get("id"),
-        user_id: crate::user_id::from_row(row, "user_id", "identity row")?,
+        user_id: crate::entity_ids::user_id_with_context(row, "user_id", "identity row")?,
         provider: row.get("provider"),
         subject: row.get("subject"),
         email_at_link: row.try_get::<_, String>("email_at_link").ok(),

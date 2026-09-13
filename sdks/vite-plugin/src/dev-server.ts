@@ -1016,6 +1016,7 @@ export function devServerPlugin(
           const childEnv: NodeJS.ProcessEnv = {
             ...dotenvVars,
             ...process.env,
+            APP_ID: DEV_APP_ID,
             DATABASE_URL: databaseUrl,
             [ENV_DEV]: "1",
             // Reaping of last resort. `killChild` below covers every teardown

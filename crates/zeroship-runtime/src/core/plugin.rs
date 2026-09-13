@@ -113,7 +113,7 @@ pub(crate) fn runtime_app_id(scope: &mut v8::PinScope<'_, '_>) -> String {
     scope
         .get_slot::<crate::state::SharedState>()
         .and_then(|state| state.borrow().env_vars.get("APP_ID").cloned())
-        .unwrap_or_else(|| "default".to_string())
+        .unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
 }
 
 /// Return the namespace object already built for a plugin on this isolate.

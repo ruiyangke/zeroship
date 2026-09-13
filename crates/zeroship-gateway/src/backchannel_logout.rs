@@ -115,6 +115,18 @@ pub async fn handle(
                 .body("invalid logout_token");
         }
     };
+    let global_user_id = match token.sub.as_deref() {
+        Some(sub) => match UserId::parse(sub) {
+            Ok(user_id) => Some(user_id),
+            Err(_) => {
+                tracing::warn!(sub = %sub, "backchannel_logout: sub is not a global user id");
+                return HttpResponse::BadRequest()
+                    .header("cache-control", "no-store")
+                    .body("invalid logout_token");
+            }
+        },
+        None => None,
+    };
 
     let now_secs = unix_now_secs();
     if state.logout_jti_cache.contains(&token.jti, now_secs) {
@@ -207,7 +219,7 @@ pub async fn handle(
                 &mut *conn,
                 &app_id,
                 sid,
-                token.sub.as_deref(),
+                global_user_id.as_ref(),
             )
             .await
             {
@@ -224,20 +236,20 @@ pub async fn handle(
             };
             revoked = users.len() as u64;
             if users.is_empty() {
-                if let Some(sub) = token.sub.as_deref() {
+                if let Some(global_user_id) = global_user_id.as_ref() {
                     tracing::warn!(
                         app_id = app_id.as_str(),
                         sid = %sid,
-                        sub = %sub,
+                        sub = global_user_id.as_str(),
                         "backchannel_logout: sid matched zero sessions; falling back to app-scoped sub revoke"
                     );
-                    revoked = match revoke_by_sub(
+                    revoked = match revoke_by_user(
                         &mut *conn,
                         &state,
                         &aud,
                         &app_id,
                         revoke_sector.as_deref(),
-                        sub,
+                        global_user_id,
                         &mut anchor_families,
                     )
                     .await
@@ -283,14 +295,14 @@ pub async fn handle(
                     return retryable_processing_error();
                 }
             }
-        } else if let Some(sub) = token.sub.as_deref() {
-            revoked = match revoke_by_sub(
+        } else if let Some(global_user_id) = global_user_id.as_ref() {
+            revoked = match revoke_by_user(
                 &mut *conn,
                 &state,
                 &aud,
                 &app_id,
                 revoke_sector.as_deref(),
-                sub,
+                global_user_id,
                 &mut anchor_families,
             )
             .await
@@ -461,39 +473,26 @@ impl Drop for LogoutJtiClaim {
     }
 }
 
-async fn revoke_by_sub(
+async fn revoke_by_user(
     conn: &mut compio_postgres::Client,
     state: &GateState,
     client_id: &str,
     app_id: &AppId,
     sector: Option<&str>,
-    sub: &str,
+    global_user_id: &UserId,
     anchor_families: &mut Vec<(UserId, crate::anchors::DeletedFamily)>,
 ) -> Result<u64, crate::error::GatewayError> {
-    let global_user_id = match UserId::parse(sub) {
-        Ok(id) => Some(id),
-        Err(_) => {
-            tracing::warn!(
-                app_id = app_id.as_str(),
-                sub = %sub,
-                "backchannel_logout: sub is not a global user id; skipping per-app teardown"
-            );
-            None
-        }
-    };
-    if let Some(global_user_id) = global_user_id.as_ref() {
-        teardown_per_app_user(
-            conn,
-            state,
-            client_id,
-            app_id,
-            sector,
-            global_user_id,
-            anchor_families,
-        )
-        .await?;
-    }
-    sessions::revoke_app_sessions_for_user(conn, app_id, sub).await
+    teardown_per_app_user(
+        conn,
+        state,
+        client_id,
+        app_id,
+        sector,
+        global_user_id,
+        anchor_families,
+    )
+    .await?;
+    sessions::revoke_app_sessions_for_user(conn, app_id, global_user_id).await
 }
 
 async fn teardown_per_app_user(

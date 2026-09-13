@@ -890,11 +890,7 @@ fn validate_target(
     collection: &str,
     route: &CapturedRoute,
 ) -> Result<(), DbError> {
-    if route.app_id() != binding.app_id() || route.schema() != binding.schema() {
-        return Err(DbError::internal(
-            "ORM binding does not match the captured database route",
-        ));
-    }
+    route.validate_binding(binding)?;
     crate::sql::mapping::validate_collection(collection)?;
     crate::descriptor::collection_schema(binding, collection)?;
     Ok(())

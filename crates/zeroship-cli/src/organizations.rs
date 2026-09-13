@@ -928,10 +928,10 @@ mod tests {
             .collect()
     }
 
-    const ORG: &str = "org_0123456789abcdefghijkl";
-    const PRJ: &str = "prj_0123456789abcdefghijkl";
-    const INVITE: &str = "ivt_0123456789abcdefghijkl";
-    const USER: &str = "usr_0000000000000000000001";
+    const ORG: &str = "org_0000000002e4nenowz3qmamtd";
+    const PRJ: &str = "prj_0000000002e4nenowz3qmamtd";
+    const INVITE: &str = "ivt_0000000002e4nenowz3qmamtd";
+    const USER: &str = "usr_0000000002e4nenowz3qmamtd";
 
     /// The routing table, stated as data. Every remote subcommand appears, and
     /// the assertion is on the METHOD, PATH and BODY - the three things a
@@ -1078,7 +1078,7 @@ mod tests {
                 &["projects", "add", PRJ, USER, "--role=developer"],
                 "POST",
                 format!("/api/projects/{PRJ}/members"),
-                Some(r#"{"user_id":"usr_0000000000000000000001","role":"developer"}"#),
+                Some(r#"{"user_id":"usr_0000000002e4nenowz3qmamtd","role":"developer"}"#),
             ),
             (
                 &["projects", "role", PRJ, USER, "--role=viewer"],
@@ -1605,7 +1605,7 @@ mod tests {
         let mut recorder = Recorder {
             calls: Vec::new(),
             status: 201,
-            body: r#"{"id":"prj_0000123456789abcdefghijkl"}"#.to_string(),
+            body: r#"{"id":"prj_0000000002e4nenowz3qmamtd"}"#.to_string(),
         };
         let call = plan(
             "projects",

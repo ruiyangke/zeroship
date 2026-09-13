@@ -514,7 +514,7 @@ pub async fn touch_last_login(conn: &Client, id: &UserId) -> Result<()> {
 
 fn row_to_user(row: &compio_postgres::Row) -> Result<UserRow> {
     Ok(UserRow {
-        id: crate::user_id::from_row(row, "id", "users row")?,
+        id: crate::entity_ids::user_id_with_context(row, "id", "users row")?,
         email: row.get::<_, String>("email"),
         email_verified_at: row.try_get("email_verified_at").ok(),
         name: row.get("name"),

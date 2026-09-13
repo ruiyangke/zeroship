@@ -136,10 +136,10 @@ pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<Rout
 }
 
 /// Derive the per-app pairwise subject (`pws_…`) the identity projection
-/// carries, so the SPA reads a per-app pseudonym, never the global user UUID
+/// carries, so the SPA reads a per-app pseudonym, never the global [`UserId`]
 /// (§6.2/G4). Hard-fails (`None`) when the route has no `sector_identifier`
 /// yet — the caller answers `503 client_not_provisioned` rather than ever
-/// project the global UUID to the browser.
+/// project the global user id to the browser.
 fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &UserId) -> Option<String> {
     let sector = route.sector_identifier.as_deref()?;
     Some(zeroship_core::auth::derive_pairwise(
@@ -592,7 +592,7 @@ pub(crate) async fn mint_session_from_code(
         let session = match crate::sessions::create(
             &mut conn,
             &crate::sessions::NewSession {
-                user_id: global_user_id.as_str(),
+                user_id: &global_user_id,
                 app_id: app_key,
                 // The REAL email is stored on the row (CITEXT); it is
                 // relay-swapped only on the READ path (the `{ user }` body
@@ -905,7 +905,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                     match crate::sessions::latest_sid_for_user(
                         &mut conn,
                         &route.app_id,
-                        rotated.global_user_id.as_str(),
+                        &rotated.global_user_id,
                     )
                     .await
                     {
@@ -929,7 +929,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 if let Err(e) = crate::sessions::create(
                     &mut conn,
                     &crate::sessions::NewSession {
-                        user_id: rotated.global_user_id.as_str(),
+                        user_id: &rotated.global_user_id,
                         app_id: &route.app_id,
                         // Real email stored on the audit row; never read back to
                         // the browser. The rotated raw access JWT does not always

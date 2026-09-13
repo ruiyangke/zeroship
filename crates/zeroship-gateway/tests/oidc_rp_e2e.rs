@@ -1181,7 +1181,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let session = create(
         &mut sess_client,
         &NewSession {
-            user_id: &claims.sub,
+            user_id: &user_id,
             sid: claims.sid.as_deref(),
             app_id: &app_id,
             email: claims.email.as_deref(),
@@ -1195,6 +1195,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     )
     .await
     .expect("session create");
+    assert_eq!(session.user_id, user_id);
 
     let live = live_session(&sess_client, session.id, &app_id)
         .await
@@ -1204,7 +1205,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let live_scopes: Vec<String> = live.try_get("granted_scopes").unwrap_or_default();
     assert_eq!(live_scopes, granted_scopes);
 
-    revoke_app_sessions_for_user(&mut sess_client, &app_id, &claims.sub)
+    revoke_app_sessions_for_user(&mut sess_client, &app_id, &user_id)
         .await
         .expect("revoke");
     assert!(

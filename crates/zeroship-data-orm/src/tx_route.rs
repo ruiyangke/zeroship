@@ -11,6 +11,7 @@
 //! the physical schema and immutable SQL registration used by query preparation.
 
 use crate::backend::BackendHandle;
+use crate::binding::DbBinding;
 use crate::sql::registration::SqlRegistration;
 use crate::sql::SchemaName;
 use crate::transaction::scope::TransactionScope;
@@ -45,12 +46,26 @@ enum CapturedConnection {
 #[derive(Debug)]
 pub struct TxRoute {
     app_id: String,
+    meter: Option<zeroship_metering::MeterHandle>,
     schema: SchemaName,
     in_tx: bool,
     scope: Option<TransactionScope>,
     backend: BackendHandle,
     registration: SqlRegistration,
     connection: crate::connection::ConnectionIdentity,
+}
+
+fn validate_binding_target(
+    app_id: &str,
+    schema: &SchemaName,
+    binding: &DbBinding,
+) -> Result<(), crate::error::DbError> {
+    if app_id != binding.app_id() || schema != binding.schema() {
+        return Err(crate::error::DbError::internal(
+            "ORM binding does not match the captured database route",
+        ));
+    }
+    Ok(())
 }
 
 impl CapturedRoute {
@@ -99,6 +114,13 @@ impl CapturedRoute {
         &self.registration
     }
 
+    pub(crate) fn validate_binding(
+        &self,
+        binding: &DbBinding,
+    ) -> Result<(), crate::error::DbError> {
+        validate_binding_target(&self.app_id, &self.schema, binding)
+    }
+
     /// Bind the frozen decision to the backend its SQL will run on.
     ///
     /// Binding consumes the captured route so it cannot be attached twice.
@@ -122,7 +144,9 @@ impl CapturedRoute {
             #[cfg(test)]
             CapturedConnection::Unbound => backend.connection_identity(),
         };
+        let meter = crate::metrics::bind(&self.app_id)?;
         Ok(TxRoute {
+            meter,
             app_id: self.app_id,
             schema: self.schema,
             in_tx: self.in_tx,
@@ -163,6 +187,17 @@ impl CapturedRoute {
 }
 
 impl TxRoute {
+    pub(crate) fn validate_binding(
+        &self,
+        binding: &DbBinding,
+    ) -> Result<(), crate::error::DbError> {
+        validate_binding_target(&self.app_id, &self.schema, binding)
+    }
+
+    pub(crate) fn meter(&self) -> Option<&zeroship_metering::MeterHandle> {
+        self.meter.as_ref()
+    }
+
     /// Validate the captured callback before admitting work to its lane.
     pub(crate) fn check_scope(&self) -> Result<(), crate::error::DbError> {
         self.scope.as_ref().map_or(Ok(()), TransactionScope::check)

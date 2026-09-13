@@ -34,9 +34,9 @@ Make sure the process environment includes `ZEROSHIP_TOKEN`, and set `ZEROSHIP_C
 ## Tools
 
 - `list_apps` - list apps visible to the token.
-- `get_app` - get an app by UUID or name.
+- `get_app` - get an app by typed ID or name.
 - `create_app` - create an app.
 - `deploy_app` - deploy a local `.zship`, creating a missing named app first.
 - `app_logs` - read recent worker logs for an app.
 - `archive_app` - stop serving an app while preserving its history and data.
-- `restore_app` - restore an archived app by UUID or name.
+- `restore_app` - restore an archived app by typed ID or name.

@@ -10,7 +10,7 @@ fn exact_decimal_strings_round_trip_through_v8() {
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                r#"CREATE TABLE "default"."ledger" ({SYSTEM_COLUMNS_SQLITE}, "amount" TEXT NOT NULL);"#
+                r#"CREATE TABLE "{LOCAL_DEV_APP_ID}"."ledger" ({SYSTEM_COLUMNS_SQLITE}, "amount" TEXT NOT NULL);"#
             ),
         );
         let schema = zeroship_data_orm::value!({
@@ -81,15 +81,13 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         let dir = tempfile::tempdir().expect("create parity dir");
         let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
 
-        // A fresh backend has attached nothing: the matrix's app database is a
-        // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
-        // alias, so re-attach it before the schema-qualified name resolves.
+        // Re-attach the matrix's app database before using its qualified name.
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         // `query` materialises every cell as `Option<String>` and renders a BLOB
         // as `<N bytes blob>`, so ask SQLite itself for the discriminant and the
         // hex - the same route `p5_*` uses for ciphertext.
         let sql = format!(
-            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"default\".\"{}\" \
+            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"{LOCAL_DEV_APP_ID}\".\"{}\" \
              WHERE title = 'typed-roundtrip'",
             snapshot.collection
         );

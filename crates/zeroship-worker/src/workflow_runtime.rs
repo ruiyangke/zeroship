@@ -365,7 +365,7 @@ mod tests {
                 descriptor
             );
             let meter = state.meter.as_ref().unwrap();
-            assert_eq!(meter.app_id(), fixture.contexts.0.borrow().app.as_str());
+            assert_eq!(meter.app_id(), &fixture.contexts.0.borrow().app);
             meter.record("egress_bytes", 7);
         }
         let events = fixture.contexts.0.borrow().meter.as_ref().unwrap().drain();

@@ -122,11 +122,10 @@ pub async fn run_statement(route: &TxRoute, sql: &str, params: &[Value]) -> Resu
 
 /// Execute a compiled read and meter a successful operation.
 pub async fn exec_query(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>, DbError> {
-    let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
     // Success arm only: one read op. Unforgeable (emitted by the primitive).
-    emit_db_metric(app_id, DB_READS, 1);
+    emit_db_metric(route.meter(), DB_READS, 1);
     Ok(rows)
 }
 
@@ -137,10 +136,9 @@ pub async fn exec_query(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>
 /// `number`).
 ///
 pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbError> {
-    let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
-    emit_db_metric(app_id, DB_READS, 1);
+    emit_db_metric(route.meter(), DB_READS, 1);
     let count = rows
         .first()
         .and_then(|row| row.get("count"))
@@ -159,12 +157,11 @@ pub async fn exec_count(route: &TxRoute, bq: CompiledQuery) -> Result<i64, DbErr
 /// encode their explicit wire contract separately.
 ///
 pub async fn exec_mutation(route: &TxRoute, bq: CompiledQuery) -> Result<Vec<Value>, DbError> {
-    let app_id = route.app_id();
     let param_refs = &bq.params;
     let rows = run_sql(route, &bq.sql, param_refs).await?;
     // Success arm only: one write op + the affected/RETURNING row count.
-    emit_db_metric(app_id, DB_WRITES, 1);
-    emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
+    emit_db_metric(route.meter(), DB_WRITES, 1);
+    emit_db_metric(route.meter(), DB_ROWS_WRITTEN, rows.len() as u64);
     Ok(rows)
 }
 
@@ -207,8 +204,8 @@ pub async fn exec_mutation_count_with_emit(
 ) -> Result<u64, DbError> {
     let affected = run_statement(route, &bq.sql, &bq.params).await?;
     let app_id = route.app_id();
-    emit_db_metric(app_id, DB_WRITES, 1);
-    emit_db_metric(app_id, DB_ROWS_WRITTEN, affected);
+    emit_db_metric(route.meter(), DB_WRITES, 1);
+    emit_db_metric(route.meter(), DB_ROWS_WRITTEN, affected);
     if affected != 0
         && !backend_publishes_committed_changes(route.backend())
         && !crate::cdc::broker::is_app_suppressed(app_id)
@@ -1025,6 +1022,50 @@ mod tests {
     // a `Meter` stamped into the per-isolate context (the same slot
     // `DbPlugin::register` populates in production).
     // -------------------------------------------------------------------
+
+    #[test]
+    fn metered_routes_validate_identity_before_execution() {
+        use std::sync::Arc;
+
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let backend = BackendHandle::new(Rc::new(
+                crate::backend_selection::new_sqlite_backend(
+                    dir.path().to_path_buf(),
+                    crate::encryption::ProjectKeySource::unavailable(),
+                )
+                .unwrap(),
+            ));
+            let meter = Arc::new(zeroship_metering::Meter::new());
+            crate::metrics::stamp(Some(Arc::clone(&meter)));
+            struct ResetMeter;
+            impl Drop for ResetMeter {
+                fn drop(&mut self) {
+                    crate::metrics::stamp(None);
+                }
+            }
+            let _reset = ResetMeter;
+
+            for invalid in ["platform", zeroship_core::UserId::mint().as_str()] {
+                let result = crate::tx_route::CapturedRoute::pool_for_tests(
+                    invalid,
+                    backend.sql_registration().clone(),
+                )
+                .bind(backend.clone());
+                let error = result.expect_err("invalid attribution must refuse the route");
+                assert!(matches!(error, DbError::Configuration { code: "invalid_meter_app_id", .. }));
+            }
+
+            let app = zeroship_core::AppId::mint();
+            let route = ambient_route_for_tests(app.as_str(), backend.clone());
+            crate::metrics::stamp(None);
+            emit_db_metric(route.meter(), DB_READS, 1);
+            assert_eq!(meter.drain()[0].subject.app.as_ref(), Some(&app));
+
+            let unmetered = ambient_route_for_tests("platform", backend);
+            assert!(unmetered.meter().is_none());
+        });
+    }
 
     #[test]
     fn metering_db_exec_emits_reads_writes_rows_and_skips_failures() {
