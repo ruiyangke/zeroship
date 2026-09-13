@@ -74,9 +74,9 @@ impl NativePlugin for StorageBinding {
     ) -> Result<(), String> {
         let has_identity = scope
             .get_slot::<zeroship_runtime::state::SharedState>()
-            .is_some_and(|state| state.borrow().env_vars.contains_key("APP_ID"));
+            .is_some_and(|state| state.borrow().app_id().is_some());
         if !has_identity {
-            return Err("storage: the host must supply APP_ID".into());
+            return Err("storage: the host must supply an app identity".into());
         }
         Namespace::app(app_id)
             .map(|_| ())

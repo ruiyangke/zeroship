@@ -595,13 +595,9 @@ pub struct RuntimeState {
 
     /// In-memory KV store.
     pub kv_store: HashMap<String, String>,
-    /// Worker-internal environment variables — NOT user-facing.
-    ///
-    /// Carries hand-injected slots like `APP_ID` (set by
-    /// `crates/zeroship-worker/src/cache.rs` so plugin-db / storage-v8 /
-    /// kv-v8 can resolve the per-tenant scope). Distinct from the
-    /// per-app `env_app_vars` / `env_app_secrets` which are the
-    /// user-controlled environment.
+    /// Host identity captured at construction, independent of mutable metadata.
+    app_id: Option<String>,
+    /// Host-supplied environment metadata, separate from creator vars and secrets.
     pub env_vars: HashMap<String, String>,
 
     /// **Migration-first cutover (P4b/P5 S2)** — the bundled
@@ -756,12 +752,16 @@ impl RuntimeState {
         }
     }
 
-    /// Create a new `RuntimeState` seeded with the given environment variables.
+    /// Capture the host identity and project an explicit AppId into the environment.
     pub fn new(
-        env_vars: HashMap<String, String>,
-        _server_handle: Option<()>,
+        mut env_vars: HashMap<String, String>,
+        app_id: Option<zeroship_core::AppId>,
         meter: Option<zeroship_metering::MeterHandle>,
     ) -> Self {
+        if let Some(app_id) = app_id {
+            env_vars.insert("APP_ID".into(), app_id.as_str().into());
+        }
+        let app_id = env_vars.get("APP_ID").cloned();
         Self {
             js_driver: None,
 
@@ -799,6 +799,7 @@ impl RuntimeState {
             request_ctx_by_id: HashMap::new(),
 
             kv_store: HashMap::new(),
+            app_id,
             env_vars,
             runtime_descriptor: None,
             env_app_vars: BTreeMap::new(),
@@ -835,6 +836,11 @@ impl RuntimeState {
             perf_epoch: std::time::Instant::now(),
             pump_notify_tx: None,
         }
+    }
+
+    /// The host identity used to bind native namespaces for this isolate.
+    pub fn app_id(&self) -> Option<&str> {
+        self.app_id.as_deref()
     }
 
     pub fn set_net_policy(&mut self, policy: crate::transport::net_policy::NetPolicy) {

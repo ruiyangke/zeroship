@@ -392,8 +392,7 @@ mod tests {
         billing_blockers: Vec<BillingBlocker>,
     ) -> ErasurePreflight {
         ErasurePreflight {
-            principal_id: UserId::parse("usr_0000000000000000000000")
-                .expect("valid user id fixture"),
+            principal_id: UserId::mint(),
             blockers,
             billing_blockers,
         }
