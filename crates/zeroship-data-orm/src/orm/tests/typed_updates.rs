@@ -1,7 +1,8 @@
 use super::fixtures::CollectionFixture;
 use super::*;
 
-schema!(pub update_schema = "../../../tests/fixtures/typed-updates.runtime.json");
+include!("../../../tests/fixtures/updates_schema.rs");
+updates_schema!(pub update_schema);
 use update_schema::documents;
 
 #[derive(Debug, FromRow)]
@@ -27,14 +28,14 @@ struct EditDocument {
 
 #[compio::test]
 async fn sqlite_typed_sets_keep_operator_shaped_json_literal() {
-    let owner = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
+    let owner = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     exercise_literal_sets(&owner.database).await;
     owner.close().await;
 }
 
 #[compio::test]
 async fn postgres_typed_sets_keep_operator_shaped_json_literal() {
-    let owner = CollectionFixture::postgres("documents", documents::Entity::schema().clone()).await;
+    let owner = CollectionFixture::postgres_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     exercise_literal_sets(&owner.database).await;
     owner.close().await;
 }
@@ -82,14 +83,14 @@ async fn exercise_literal_sets(db: &Database) {
 
 #[compio::test]
 async fn sqlite_typed_queries_keep_operator_shaped_json_literal() {
-    let owner = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
+    let owner = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     exercise_literal_filters(&owner.database).await;
     owner.close().await;
 }
 
 #[compio::test]
 async fn postgres_typed_queries_keep_operator_shaped_json_literal() {
-    let owner = CollectionFixture::postgres("documents", documents::Entity::schema().clone()).await;
+    let owner = CollectionFixture::postgres_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     exercise_literal_filters(&owner.database).await;
     owner.close().await;
 }

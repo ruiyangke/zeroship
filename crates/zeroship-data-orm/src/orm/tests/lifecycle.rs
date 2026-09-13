@@ -167,16 +167,16 @@ async fn familiar_names_are_ordinary(fixture: CollectionFixture) {
             .as_ref()
             .clone()
     });
-    for definition in schema.as_object_mut().unwrap().values_mut() {
-        let field = definition.as_object_mut().unwrap();
-        for facet in ["assign", "softDelete", "concurrency", "writable"] {
-            field.shift_remove(facet);
-        }
+    for field in schema.values_mut() {
+        field.assignment = None;
+        field.soft_delete = false;
+        field.concurrency = false;
+        field.writable = true;
     }
     let db = Database::from_schema(
         original.binding.clone(),
         original.backend.clone(),
-        vec![("entries".into(), schema)],
+        Schema::new([("entries".into(), CollectionSchema::new(schema))]),
     )
     .unwrap()
     .with_actor(Some("request_actor".into()));

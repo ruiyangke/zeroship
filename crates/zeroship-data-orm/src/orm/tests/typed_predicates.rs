@@ -2,7 +2,8 @@ use super::fixtures::CollectionFixture;
 use super::*;
 use crate::sql::Predicate;
 
-schema!(pub predicate_schema = "../../../tests/fixtures/typed-predicates.runtime.json");
+include!("../../../tests/fixtures/predicates_schema.rs");
+predicates_schema!(pub predicate_schema);
 use predicate_schema::predicate_rows as rows;
 
 #[derive(Debug, FromRow)]
@@ -14,7 +15,7 @@ struct Label {
 #[compio::test]
 async fn sqlite_typed_predicates_preserve_native_values_and_null_semantics() {
     let mut owner =
-        CollectionFixture::sqlite("predicate_rows", rows::Entity::schema().clone()).await;
+        CollectionFixture::sqlite_native("predicate_rows", rows::Entity::schema().clone(), super::fixtures::predicate_migration_fields()).await;
     owner
         .replace_from_migration(
             "predicate_rows",
@@ -28,7 +29,7 @@ async fn sqlite_typed_predicates_preserve_native_values_and_null_semantics() {
 #[compio::test]
 async fn postgres_typed_predicates_preserve_native_values_and_null_semantics() {
     let mut owner =
-        CollectionFixture::postgres("predicate_rows", rows::Entity::schema().clone()).await;
+        CollectionFixture::postgres_native("predicate_rows", rows::Entity::schema().clone(), super::fixtures::predicate_migration_fields()).await;
     owner
         .replace_from_migration(
             "predicate_rows",
@@ -69,6 +70,8 @@ fn predicate_fixture_matches_the_migration_artifact() {
         artifacts.runtime_json,
         include_str!("../../../tests/fixtures/typed-predicates.runtime.json")
     );
+    let decoded = CollectionSchema::from_fields(&super::fixtures::predicate_migration_fields()).unwrap();
+    assert_eq!(rows::Entity::schema(), &decoded);
 }
 
 async fn exercise(db: &Database) {

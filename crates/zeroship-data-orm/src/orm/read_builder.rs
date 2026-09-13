@@ -17,7 +17,7 @@ pub use scalars::*;
 pub struct EntityAlias<E: Entity> {
     database: Database,
     source: ReadSource,
-    schema: std::sync::Arc<Value>,
+    schema: std::sync::Arc<FieldMap>,
     entity: PhantomData<fn() -> E>,
 }
 impl<E: Entity> EntityCollection<E> {
@@ -189,7 +189,7 @@ pub struct ReadBuilder<P = ()> {
 #[derive(Debug)]
 struct SchemaExpectation {
     collection: &'static str,
-    schema: std::sync::Arc<Value>,
+    schema: std::sync::Arc<FieldMap>,
     scope: Option<Rc<Cell<bool>>>,
 }
 
@@ -198,7 +198,7 @@ struct ReadOrigin {
     database: Rc<()>,
     scope: Option<Rc<Cell<bool>>>,
     source: ReadSource,
-    schema: std::sync::Arc<Value>,
+    schema: std::sync::Arc<FieldMap>,
 }
 
 impl ReadOrigin {
@@ -220,7 +220,7 @@ impl ReadOrigin {
 pub(super) fn validate_bound_schema(
     database: &Database,
     collection: &str,
-    expected: &std::sync::Arc<Value>,
+    expected: &std::sync::Arc<FieldMap>,
 ) -> Result<(), DbError> {
     database.context.with(|| {
         let current = crate::descriptor::collection_schema(&database.binding, collection)?;

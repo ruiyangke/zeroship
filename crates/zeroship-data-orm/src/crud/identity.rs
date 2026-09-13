@@ -1,16 +1,22 @@
 use super::resolved::ResolvedTable;
+use crate::schema::{AssignmentEvent, AssignmentGenerator, FieldMap};
 use crate::{
     error::DbError,
     sql::{registration::SqlRegistration, statement::IdentityRequest, SchemaName},
     value::Value,
 };
 
-pub(crate) fn is_generated(schema: &Value) -> bool {
-    schema["id"]["assign"]["by"].as_str() == Some("identity")
-        && schema["id"]["assign"]["on"].as_str() == Some("insert")
+pub(crate) fn is_generated(schema: &FieldMap) -> bool {
+    schema
+        .get("id")
+        .and_then(|column| column.assignment.as_ref())
+        .is_some_and(|assignment| {
+            assignment.by == AssignmentGenerator::Identity
+                && assignment.on == AssignmentEvent::Insert
+        })
 }
 
-pub(super) fn requires_allocation(schema: &Value, payload: &Value) -> bool {
+pub(super) fn requires_allocation(schema: &FieldMap, payload: &Value) -> bool {
     is_generated(schema)
         && payload.as_array().map_or_else(
             || super::write_pipeline::upsert_requires_conflict_probe(schema, payload),
@@ -25,7 +31,7 @@ pub(super) fn requires_allocation(schema: &Value, payload: &Value) -> bool {
 pub(super) fn request(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     count: usize,
     registration: &SqlRegistration,
 ) -> Result<IdentityRequest, DbError> {

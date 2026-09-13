@@ -1,5 +1,6 @@
 //! Native plaintext encoding selected by the logical field type.
 
+use crate::schema::{ColumnSchema, LogicalType};
 use crate::value::Value;
 use base64::Engine as _;
 
@@ -14,19 +15,13 @@ pub(crate) enum PlaintextType {
 }
 
 impl PlaintextType {
-    pub(crate) fn from_field(field: &Value) -> Result<Option<Self>, DbError> {
-        let Some(flag) = field.get("encrypted") else {
-            return Ok(None);
-        };
-        let encrypted = flag.as_bool().ok_or_else(|| {
-            DbError::validation("invalid_encryption_metadata", "encrypted must be a boolean")
-        })?;
-        if !encrypted {
+    pub(crate) fn from_field(field: &ColumnSchema) -> Result<Option<Self>, DbError> {
+        if !field.encrypted {
             return Ok(None);
         }
-        match field.get("type").and_then(Value::as_str) {
-            Some("string") => Ok(Some(Self::String)),
-            Some("number") if field.get("precision").is_some() => {
+        match field.logical_type {
+            LogicalType::Text => Ok(Some(Self::String)),
+            LogicalType::Number if field.precision.is_some() => {
                 let storage = crate::sql::decimal::storage(field).map_err(|error| {
                     DbError::validation("invalid_numeric_metadata", error.to_string())
                 })?;
@@ -37,8 +32,8 @@ impl PlaintextType {
                     )
                 })?)))
             }
-            Some("number") => Ok(Some(Self::Number)),
-            Some("bytes") => Ok(Some(Self::Bytes)),
+            LogicalType::Number => Ok(Some(Self::Number)),
+            LogicalType::Bytes => Ok(Some(Self::Bytes)),
             _ => Err(DbError::validation(
                 "encrypted_type_unsupported",
                 "encrypted field type must be string, number, or bytes",
@@ -119,14 +114,14 @@ mod tests {
 
     #[test]
     fn encrypted_plaintext_round_trips_native_values_from_field_types() {
-        for (name, value) in [
-            ("string", Value::from("hello")),
-            ("number", Value::try_from(42.25).unwrap()),
-            ("bytes", Value::Bytes(vec![0, 0xff, 0x80])),
+        for (kind, value) in [
+            (LogicalType::Text, Value::from("hello")),
+            (LogicalType::Number, Value::try_from(42.25).unwrap()),
+            (LogicalType::Bytes, Value::Bytes(vec![0, 0xff, 0x80])),
         ] {
-            let codec = PlaintextType::from_field(&value!({"type": name, "encrypted": true}))
-                .unwrap()
-                .unwrap();
+            let mut field = ColumnSchema::new(kind);
+            field.encrypted = true;
+            let codec = PlaintextType::from_field(&field).unwrap().unwrap();
             let bytes = codec.encode(&value).unwrap();
             assert_eq!(codec.decode(&bytes).unwrap(), value);
         }
@@ -134,14 +129,11 @@ mod tests {
 
     #[test]
     fn encrypted_exact_decimal_round_trips_without_floating_point() {
-        let codec = PlaintextType::from_field(&value!({
-            "type": "number",
-            "precision": 30,
-            "scale": 2,
-            "encrypted": true
-        }))
-        .unwrap()
-        .unwrap();
+        let mut field = ColumnSchema::new(LogicalType::Number);
+        field.precision = Some(30);
+        field.scale = Some(2);
+        field.encrypted = true;
+        let codec = PlaintextType::from_field(&field).unwrap().unwrap();
         let value = Value::Decimal("9007199254740993.005".into());
         let bytes = codec.encode(&value).unwrap();
         assert_eq!(
@@ -167,8 +159,28 @@ mod tests {
             value!({"type":"bytes"}),
             value!({"type":"bytes", "encrypted":false}),
         ] {
+            let field = ColumnSchema::from_descriptor(&field).unwrap();
             assert!(PlaintextType::from_field(&field).unwrap().is_none());
         }
-        assert!(PlaintextType::from_field(&value!({"type":"boolean", "encrypted":true})).is_err());
+        let mut unsupported = ColumnSchema::new(LogicalType::Boolean);
+        unsupported.encrypted = true;
+        assert!(PlaintextType::from_field(&unsupported).is_err());
+    }
+
+    #[test]
+    fn native_and_decoded_encrypted_fields_select_the_same_plaintext_codec() {
+        let mut native = ColumnSchema::new(LogicalType::Text);
+        native.encrypted = true;
+        let decoded = ColumnSchema::from_descriptor(&value!({
+            "type": "text", "required": true, "encrypted": true
+        }))
+        .unwrap();
+        assert_eq!(native, decoded);
+        let value = Value::from("native plaintext");
+        for field in [native, decoded] {
+            let codec = PlaintextType::from_field(&field).unwrap().unwrap();
+            let encoded = codec.encode(&value).unwrap();
+            assert_eq!(codec.decode(&encoded).unwrap(), value);
+        }
     }
 }

@@ -1,4 +1,5 @@
 use super::{predicate, resolved::ResolvedTable};
+use crate::schema::FieldMap;
 use crate::{
     sql::{
         compiler::CompiledQuery,
@@ -21,7 +22,7 @@ const DEFAULT_SPATIAL_LIMIT: usize = 100;
 pub(crate) fn vector(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     field: &str,
     query: Vec<f32>,
     limit: usize,
@@ -54,7 +55,7 @@ pub(crate) fn vector(
 fn vector_query(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     field: &str,
     query: Vec<f32>,
     limit: usize,
@@ -104,7 +105,7 @@ fn vector_query(
 pub(crate) fn spatial(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     field: &str,
     point: GeoPoint,
     radius_m: f64,
@@ -130,7 +131,7 @@ pub(crate) fn spatial(
 fn spatial_query(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     field: &str,
     point: GeoPoint,
     radius_m: f64,
@@ -184,7 +185,7 @@ fn validate_limit(name: &str, value: usize) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn validate_read_field(field: &str, schema: &Value) -> Result<(), QueryError> {
+fn validate_read_field(field: &str, schema: &FieldMap) -> Result<(), QueryError> {
     mapping::validate_field_name(field)?;
     if crate::sql::descriptors::readable_fields(schema).contains(field) {
         Ok(())

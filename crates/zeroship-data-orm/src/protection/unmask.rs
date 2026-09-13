@@ -10,6 +10,7 @@
 //! create the table; this module performs no DDL.
 
 use crate::encryption::plaintext::PlaintextType;
+use crate::schema::FieldMap;
 use crate::value::Value;
 
 use crate::backend::{BackendHandle, ScalarRead};
@@ -97,17 +98,16 @@ fn to_camel_case_alias(column: &str) -> String {
 /// [`crate::descriptor::collection_schema`], so an undeclared collection is
 /// refused before any mask metadata is consulted. `None` here means the
 /// declared entry has no such column under any of the three spellings.
-fn resolve_schema_column(schema: &Value, column: &str) -> Option<String> {
-    let obj = schema.as_object()?;
-    if obj.contains_key(column) {
+fn resolve_schema_column(schema: &FieldMap, column: &str) -> Option<String> {
+    if schema.contains_key(column) {
         return Some(column.to_string());
     }
     let snake = to_snake_case_alias(column);
-    if snake != column && obj.contains_key(&snake) {
+    if snake != column && schema.contains_key(&snake) {
         return Some(snake);
     }
     let camel = to_camel_case_alias(column);
-    if camel != column && camel != snake && obj.contains_key(&camel) {
+    if camel != column && camel != snake && schema.contains_key(&camel) {
         return Some(camel);
     }
     None
@@ -116,10 +116,9 @@ fn resolve_schema_column(schema: &Value, column: &str) -> Option<String> {
 /// Walk the descriptor entry and return the mask metadata for `column`, or
 /// `None` if the column has no `mask` block (or is opted out via
 /// `kind: "none"`).
-fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
+fn lookup_mask_meta(schema: &FieldMap, column: &str) -> Option<ColumnMaskMeta> {
     let canonical_column = resolve_schema_column(schema, column)?;
-    let obj = schema.as_object()?;
-    let def = obj.get(&canonical_column)?;
+    let def = schema.get(&canonical_column)?;
     let mask = crate::sql::descriptors::effective_mask(def)?;
     let classification = mask.classification.to_string();
     Some(ColumnMaskMeta {
@@ -151,7 +150,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 /// creator code could reach. Also [`DbError::internal`] if the column has no
 /// mask, which is unreachable: every caller has already been through
 /// [`lookup_mask_meta`], and that is the same test.
-fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, DbError> {
+fn resolve_raw_column(schema: &FieldMap, canonical_column: &str) -> Result<String, DbError> {
     let def = schema.get(canonical_column).ok_or_else(|| {
         DbError::internal(format!("unmask: column '{canonical_column}' vanished"))
     })?;
@@ -163,7 +162,10 @@ fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, 
 }
 
 /// Select the field's plaintext decoder, or leave mask-only storage alone.
-fn lookup_encryption_meta(schema: &Value, column: &str) -> Result<Option<PlaintextType>, DbError> {
+fn lookup_encryption_meta(
+    schema: &FieldMap,
+    column: &str,
+) -> Result<Option<PlaintextType>, DbError> {
     schema
         .get(column)
         .map(PlaintextType::from_field)
@@ -392,7 +394,7 @@ async fn fetch_and_decrypt(
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
     enc_meta: &PlaintextType,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
 
@@ -451,7 +453,7 @@ async fn fetch_plaintext_raw(
     raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<Value, DbError> {
     let app_id = route.app_id();
 
@@ -1366,6 +1368,12 @@ fn require_string_with_code(
 
 #[cfg(test)]
 mod tests {
+    fn test_schema(fields: crate::value::Value) -> crate::schema::FieldMap {
+        crate::schema::CollectionSchema::from_fields(&fields)
+            .unwrap()
+            .into_fields()
+    }
+
     use super::*;
     use crate::value;
 
@@ -1606,7 +1614,7 @@ mod tests {
 
     #[test]
     fn lookup_mask_meta_accepts_field_name_alias_for_snake_case_schema() {
-        let schema = value!({
+        let schema = test_schema(value!({
             "contact_email": {
                 "type": "string",
                 "mask": {
@@ -1614,7 +1622,7 @@ mod tests {
                     "classification": "pii"
                 }
             }
-        });
+        }));
         let meta = lookup_mask_meta(&schema, "contactEmail").expect("mask metadata");
         assert_eq!(meta.canonical_column, "contact_email");
         assert_eq!(meta.classification, "pii");

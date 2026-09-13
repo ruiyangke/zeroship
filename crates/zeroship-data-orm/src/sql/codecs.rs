@@ -3,6 +3,7 @@ use crate::sql::mapping;
 use crate::value::Value;
 
 mod typed;
+use crate::schema::{ColumnSchema, FieldMap, LogicalType};
 pub(crate) use typed::prepare_value;
 pub use typed::{prepare_document, prepare_update};
 
@@ -114,7 +115,7 @@ fn validate_encoded_json_depth(field: &str, encoded: &str) -> Result<(), CodecEr
 /// Convert driver results to logical values through the selected storage codecs.
 pub(crate) fn decode_rows(
     registration: &crate::sql::registration::SqlRegistration,
-    schema: &Value,
+    schema: &FieldMap,
     rows: &mut [Value],
 ) -> Result<(), CodecError> {
     for row in rows.iter_mut() {
@@ -125,26 +126,20 @@ pub(crate) fn decode_rows(
 
 fn normalize_row_on_read(
     registration: &crate::sql::registration::SqlRegistration,
-    schema: &Value,
+    schema: &FieldMap,
     row: &mut Value,
 ) -> Result<(), CodecError> {
     let Some(obj) = row.as_object_mut() else {
         return Ok(());
     };
     for (key, value) in obj.iter_mut() {
-        let Some(def) = schema
-            .as_object()
-            .and_then(|schema_obj| schema_obj.get(key))
-            .and_then(Value::as_object)
-        else {
+        let Some(def) = schema.get(key) else {
             continue;
         };
 
         // Protected storage is decoded by the protection pipeline. A mask is
         // stored as text even when its logical field is numeric or binary.
-        if def.get("encrypted").and_then(Value::as_bool) == Some(true)
-            || mapping::column_is_masked(key, schema)
-        {
+        if def.encrypted || mapping::column_is_masked(key, schema) {
             continue;
         }
 
@@ -162,17 +157,17 @@ fn normalize_row_on_read(
                 reason: "invalid storage value",
             })?;
 
-        match def.get("type").and_then(Value::as_str) {
-            Some("boolean") => normalize_boolean_value(value)?,
-            Some("json") | Some("object") | Some("array") | Some("union") => {
+        match def.logical_type {
+            LogicalType::Boolean => normalize_boolean_value(value)?,
+            LogicalType::Json | LogicalType::Object | LogicalType::Array | LogicalType::Union => {
                 prepare_value(key, &schema[key], value).map_err(|_| CodecError::Decode {
                     column: key.clone(),
                     reason: "invalid typed JSON storage",
                 })?;
             }
-            Some("bytes") => normalize_bytes_value(value)?,
-            Some("date" | "timestamp") => normalize_timestamp_value(key, value)?,
-            Some("calendarDate") => {
+            LogicalType::Bytes => normalize_bytes_value(value)?,
+            LogicalType::Timestamp => normalize_timestamp_value(key, value)?,
+            LogicalType::CalendarDate => {
                 if !value.is_null()
                     && value.as_str().is_none_or(|date| {
                         crate::sql::temporal::parse_calendar_date(date).is_none()
@@ -184,8 +179,8 @@ fn normalize_row_on_read(
                     });
                 }
             }
-            Some("vector") => normalize_vector_value(key, def, value)?,
-            Some("geoPoint") => normalize_geopoint_value(key, value)?,
+            LogicalType::Vector => normalize_vector_value(key, def, value)?,
+            LogicalType::GeoPoint => normalize_geopoint_value(key, value)?,
             _ => {}
         }
     }
@@ -194,7 +189,7 @@ fn normalize_row_on_read(
 
 fn normalize_vector_value(
     field: &str,
-    definition: &crate::value::Map<String, Value>,
+    definition: &ColumnSchema,
     value: &mut Value,
 ) -> Result<(), CodecError> {
     let invalid = || CodecError::internal(format!("invalid vector storage for column '{field}'"));
@@ -214,10 +209,7 @@ fn normalize_vector_value(
     match value {
         Value::Null => Ok(()),
         Value::Array(values) => {
-            let dimensions = definition
-                .get("vectorDims")
-                .and_then(Value::as_u64)
-                .and_then(|n| usize::try_from(n).ok());
+            let dimensions = definition.vector_dims;
             if values.is_empty()
                 || dimensions != Some(values.len())
                 || values
@@ -328,11 +320,13 @@ mod tests {
     use super::*;
     #[test]
     fn sqlite_registration_packs_vector_and_geopoint_values() {
-        let schema = crate::value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
             "embedding": { "type": "vector", "vectorDims": 4 },
             "loc": { "type": "geoPoint" },
             "name": { "type": "string" }
-        });
+        }))
+        .unwrap()
+        .into_fields();
         let registration = crate::sql::registration::SqlRegistration::sqlite();
         let embedding = registration
             .storage_type(&schema["embedding"])
@@ -362,12 +356,14 @@ mod tests {
     }
     #[test]
     fn normalize_row_on_read_coerces_sqlite_wire_shapes() {
-        let schema = crate::value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
             "active": { "type": "boolean" },
             "prefs": { "type": "object" },
             "avatar": { "type": "bytes" },
             "published_at": { "type": "date" }
-        });
+        }))
+        .unwrap()
+        .into_fields();
         let mut row = crate::value!({
             "active": 1,
             "prefs": "{\"theme\":\"dark\"}",
@@ -389,12 +385,14 @@ mod tests {
     }
     #[test]
     fn normalize_row_on_read_skips_encrypted_columns() {
-        let schema = crate::value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
             "secret": {
                 "type": "bytes",
                 "encrypted": true
             }
-        });
+        }))
+        .unwrap()
+        .into_fields();
         let mut row = crate::value!({
             "secret": "AQID"
         });
@@ -440,11 +438,13 @@ mod tests {
     }
     #[test]
     fn declared_types_override_familiar_column_names() {
-        let schema = crate::value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
             "created_at":{"type":"string"},
             "updated_at":{"type":"int"},
             "occurred_at":{"type":"date"}
-        });
+        }))
+        .unwrap()
+        .into_fields();
         let mut rows = vec![
             crate::value!({"created_at":"ordinary text", "updated_at":9, "occurred_at":"2026-05-07T01:02:03.004Z"}),
         ];
@@ -485,9 +485,11 @@ mod tests {
     }
     #[test]
     fn normalize_row_on_read_rejects_out_of_domain_boolean_values() {
-        let schema = crate::value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&crate::value!({
             "active": { "type": "boolean" }
-        });
+        }))
+        .unwrap()
+        .into_fields();
         let mut row = crate::value!({
             "active": 2
         });
@@ -518,7 +520,10 @@ mod timestamp_tests {
     #[test]
     fn timestamp_aliases_validate_storage_without_echoing_values() {
         for kind in ["date", "timestamp"] {
-            let schema = value!({"instant":{"type":kind}});
+            let schema =
+                crate::schema::CollectionSchema::from_fields(&value!({"instant":{"type":kind}}))
+                    .unwrap()
+                    .into_fields();
             for registration in [
                 crate::sql::registration::SqlRegistration::postgres(),
                 crate::sql::registration::SqlRegistration::sqlite(),
@@ -558,10 +563,12 @@ mod timestamp_tests {
 
     #[test]
     fn protected_fields_keep_their_storage_shape_until_protection_decodes_them() {
-        let schema = value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&value!({
             "masked":{"type":"date", "mask":{"kind":"full"}},
             "encrypted":{"type":"string", "encrypted":true},
-        });
+        }))
+        .unwrap()
+        .into_fields();
         let original = value!({"masked":"***", "encrypted":Value::Bytes(vec![1, 2, 3])});
         let mut rows = [original.clone()];
         decode_rows(
@@ -581,7 +588,11 @@ mod calendar_date_tests {
 
     #[test]
     fn calendar_date_reads_reject_invalid_storage_without_echoing_it() {
-        let schema = value!({"birthday":{"type":"calendarDate"}});
+        let schema = crate::schema::CollectionSchema::from_fields(
+            &value!({"birthday":{"type":"calendarDate"}}),
+        )
+        .unwrap()
+        .into_fields();
         for stored in [
             value!("2026-02-30"),
             value!("1900-02-29"),
@@ -610,7 +621,10 @@ mod json_read_tests {
 
     #[test]
     fn native_json_strings_remain_strings() {
-        let schema = value!({"payload":{"type":"json"}});
+        let schema =
+            crate::schema::CollectionSchema::from_fields(&value!({"payload":{"type":"json"}}))
+                .unwrap()
+                .into_fields();
         for text in ["true", "null", "42", "[1]", "{\"key\":1}", "\"nested\""] {
             let mut rows = [value!({"payload":text})];
             decode_rows(
@@ -625,7 +639,10 @@ mod json_read_tests {
 
     #[test]
     fn sqlite_json_text_requires_valid_json() {
-        let schema = value!({"payload":{"type":"json"}});
+        let schema =
+            crate::schema::CollectionSchema::from_fields(&value!({"payload":{"type":"json"}}))
+                .unwrap()
+                .into_fields();
         let mut rows = [value!({"payload":"secret_invalid_json"})];
         let error = decode_rows(
             &crate::sql::registration::SqlRegistration::sqlite(),
@@ -639,7 +656,11 @@ mod json_read_tests {
 
     #[test]
     fn encoded_json_is_parsed_once_and_native_json_is_preserved() {
-        let schema = value!({"payload":{"type":"json"}, "label":{"type":"string"}});
+        let schema = crate::schema::CollectionSchema::from_fields(
+            &value!({"payload":{"type":"json"}, "label":{"type":"string"}}),
+        )
+        .unwrap()
+        .into_fields();
         let values = value!([
             "true", "null", "42", "[1]", "{\"key\":1}", "\"nested\"", "plain text",
             true, false, 42, 1.5, null, {"key":"true"}, [false,"null"],
@@ -673,8 +694,8 @@ mod binary_read_tests {
     use crate::value;
     use crate::value::Value;
 
-    fn schema() -> Value {
-        value!({"embedding":{"type":"vector", "vectorDims":2}, "location":{"type":"geoPoint"}})
+    fn schema() -> FieldMap {
+        crate::schema::CollectionSchema::from_fields(&value!({"embedding":{"type":"vector", "vectorDims":2}, "location":{"type":"geoPoint"}})).unwrap().into_fields()
     }
 
     #[test]
@@ -688,7 +709,11 @@ mod binary_read_tests {
             "date",
             "calendarDate",
         ] {
-            let schema = value!({"classified":{"type":logical_type, "mask":{"kind":"full"}}});
+            let schema = crate::schema::CollectionSchema::from_fields(
+                &value!({"classified":{"type":logical_type, "mask":{"kind":"full"}}}),
+            )
+            .unwrap()
+            .into_fields();
             let mut row = value!({"classified":"***"});
             decode_rows(
                 &crate::sql::registration::SqlRegistration::sqlite(),
@@ -698,7 +723,11 @@ mod binary_read_tests {
             .unwrap();
             assert_eq!(row, value!({"classified":"***"}));
         }
-        let unmasked = value!({"classified":{"type":"bytes", "mask":{"kind":"none"}}});
+        let unmasked = crate::schema::CollectionSchema::from_fields(
+            &value!({"classified":{"type":"bytes", "mask":{"kind":"none"}}}),
+        )
+        .unwrap()
+        .into_fields();
         let mut row = value!({"classified":"***"});
         assert!(decode_rows(
             &crate::sql::registration::SqlRegistration::sqlite(),

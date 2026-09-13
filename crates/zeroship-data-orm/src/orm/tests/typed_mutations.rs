@@ -1,7 +1,8 @@
 use super::fixtures::CollectionFixture;
 use super::*;
 
-schema!(pub mutation_schema = "../../../tests/fixtures/typed-updates.runtime.json");
+include!("../../../tests/fixtures/updates_schema.rs");
+updates_schema!(pub mutation_schema);
 use mutation_schema::documents;
 
 #[derive(Debug, FromRow)]
@@ -32,8 +33,8 @@ fn document(label: &str, payload: Value) -> NewDocument {
 
 #[compio::test]
 async fn sqlite_fixture_databases_have_independent_broker_identities() {
-    let first = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
-    let second = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
+    let first = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
+    let second = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     assert_ne!(first.sqlite_file, second.sqlite_file);
     assert_ne!(
         first.database.binding().app_id(),
@@ -65,7 +66,7 @@ async fn sqlite_fixture_databases_have_independent_broker_identities() {
 
 #[compio::test]
 async fn typed_insert_many_stops_consuming_at_the_shared_batch_budget() {
-    let fixture = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
+    let fixture = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     let documents = fixture.database.entity::<documents::Entity>().unwrap();
     let limit = crate::budgets::MAX_INSERT_MANY_BATCH;
     let consumed = Cell::new(0);
@@ -108,13 +109,13 @@ fn delete_notification_intent_follows_the_schema_lifecycle() {
             let context = crate::OrmContext::new();
             context.with(|| {
                 let binding = DbBinding::cold_start("typed_delete_intent");
-                let mut schema = documents::Entity::schema().clone();
+                let mut schema = documents::Entity::schema().fields().clone();
                 if !soft_delete {
-                    schema.as_object_mut().unwrap().shift_remove("deleted_at");
+                    schema.shift_remove("deleted_at");
                 }
                 crate::descriptor::install_collections(
                     &binding,
-                    vec![("documents".into(), schema)],
+                    Schema::new([("documents".into(), CollectionSchema::new(schema))]),
                 )
                 .unwrap();
                 for many in [false, true] {
@@ -165,7 +166,7 @@ fn delete_notification_intent_follows_the_schema_lifecycle() {
 
 #[compio::test]
 async fn sqlite_typed_bulk_and_lifecycle_mutations_share_orm_semantics() {
-    let fixture = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
+    let fixture = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     exercise_mutations(&fixture.database).await;
     fixture.close().await;
 }
@@ -173,7 +174,7 @@ async fn sqlite_typed_bulk_and_lifecycle_mutations_share_orm_semantics() {
 #[compio::test]
 async fn postgres_typed_bulk_and_lifecycle_mutations_share_orm_semantics() {
     let fixture =
-        CollectionFixture::postgres("documents", documents::Entity::schema().clone()).await;
+        CollectionFixture::postgres_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     exercise_mutations(&fixture.database).await;
     fixture.close().await;
 }
@@ -388,7 +389,7 @@ async fn exercise_mutations(db: &Database) {
 
 #[compio::test]
 async fn sqlite_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
-    let fixture = CollectionFixture::sqlite("documents", documents::Entity::schema().clone()).await;
+    let fixture = CollectionFixture::sqlite_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     fixture.add_unique_index("documents", &["label"]).await;
     fixture
         .add_unique_index("documents", &["label", "payload"])
@@ -400,7 +401,7 @@ async fn sqlite_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
 #[compio::test]
 async fn postgres_typed_upserts_use_live_unique_targets_and_atomic_inserts() {
     let fixture =
-        CollectionFixture::postgres("documents", documents::Entity::schema().clone()).await;
+        CollectionFixture::postgres_native("documents", documents::Entity::schema().clone(), super::fixtures::document_migration_fields()).await;
     fixture.add_unique_index("documents", &["label"]).await;
     fixture
         .add_unique_index("documents", &["label", "payload"])

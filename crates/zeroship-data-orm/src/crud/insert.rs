@@ -1,6 +1,7 @@
 //! Resolve inserts into physical columns before backend compilation.
 
 use super::resolved::ResolvedTable;
+use crate::schema::FieldMap;
 use crate::{
     sql::{
         compiler::{CompiledQuery, Requirements},
@@ -25,7 +26,7 @@ pub(crate) fn requirements(allocates_identity: bool) -> Requirements {
 pub(crate) fn build_one(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     document: Value,
     registration: &SqlRegistration,
 ) -> Result<CompiledQuery, QueryError> {
@@ -38,7 +39,7 @@ pub(crate) fn build_one(
 pub(crate) fn build_many(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     documents: Value,
     registration: &SqlRegistration,
 ) -> Result<Vec<CompiledQuery>, QueryError> {
@@ -96,7 +97,7 @@ fn documents_share_columns(documents: &[Record]) -> bool {
 fn compile(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     mut documents: Vec<Record>,
     registration: &SqlRegistration,
 ) -> Result<CompiledQuery, QueryError> {
@@ -155,6 +156,7 @@ fn invalid(message: &str) -> QueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::ColumnSchema;
     use crate::sql::{
         compiler::{CompileError, SqlCompiler, SqliteCompiler},
         registration::SqlStorageCodecs,
@@ -169,7 +171,7 @@ mod tests {
     struct CountingCodecs(Arc<AtomicUsize>);
 
     impl SqlStorageCodecs for CountingCodecs {
-        fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+        fn storage_type(&self, definition: &ColumnSchema) -> Result<StorageType, CompileError> {
             SqlRegistration::sqlite().storage_type(definition)
         }
 
@@ -198,10 +200,10 @@ mod tests {
         let queries = build_many(
             &SchemaName::new("app").unwrap(),
             "entries",
-            &crate::value!({
+            &crate::tests::fixtures::native_fields(crate::value!({
                 "id":{"type":"string","primaryKey":true},
                 "payload":{"type":"json"}
-            }),
+            })),
             crate::value!([{"id":"entry_a","payload":{"nested":[true]}}]),
             &registration,
         )
@@ -217,10 +219,10 @@ mod tests {
         let queries = build_many(
             &SchemaName::new("app").unwrap(),
             "entries",
-            &crate::value!({
+            &crate::tests::fixtures::native_fields(crate::value!({
                 "id":{"type":"string","primaryKey":true},
                 "nickname":{"type":"string"}
-            }),
+            })),
             crate::value!([
                 {"id":"entry_a","nickname":null},
                 {"id":"entry_b"}
@@ -242,10 +244,10 @@ mod tests {
         let queries = build_many(
             &SchemaName::new("app").unwrap(),
             "entries",
-            &crate::value!({
+            &crate::tests::fixtures::native_fields(crate::value!({
                 "id":{"type":"string","primaryKey":true},
                 "nickname":{"type":"string"}
-            }),
+            })),
             crate::value!([
                 {"id":"entry_a","nickname":null},
                 {"id":"entry_b"}

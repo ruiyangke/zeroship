@@ -1599,7 +1599,7 @@ impl SqlCompiler for OverbindingCompiler {
 struct DownstreamCodecs;
 
 impl SqlStorageCodecs for DownstreamCodecs {
-    fn storage_type(&self, _: &Value) -> Result<StorageType, CompileError> {
+    fn storage_type(&self, _: &zeroship_data_orm::schema::ColumnSchema) -> Result<StorageType, CompileError> {
         Ok(StorageType::Integer)
     }
 

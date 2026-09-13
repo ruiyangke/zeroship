@@ -408,12 +408,12 @@ mod tests {
         crate::read_set::record_if_active(
             "messages",
             &zeroship_data_orm::value!({ "userId": 42 }),
-            &zeroship_data_orm::value!({}),
+            &zeroship_data_orm::schema::FieldMap::new(),
         );
         crate::read_set::record_if_active(
             "messages",
             &zeroship_data_orm::value!({}),
-            &zeroship_data_orm::value!({}),
+            &zeroship_data_orm::schema::FieldMap::new(),
         );
 
         let entries = crate::read_set::snapshot_for("messages");
@@ -432,7 +432,7 @@ mod tests {
         crate::read_set::record_if_active(
             "messages",
             &zeroship_data_orm::value!({ "userId": 42 }),
-            &zeroship_data_orm::value!({}),
+            &zeroship_data_orm::schema::FieldMap::new(),
         );
         assert!(
             crate::read_set::snapshot_for("messages").is_empty(),
@@ -449,7 +449,7 @@ mod tests {
         crate::read_set::record_if_active(
             "messages",
             &zeroship_data_orm::value!({ "userId": 42 }),
-            &zeroship_data_orm::value!({}),
+            &zeroship_data_orm::schema::FieldMap::new(),
         );
         assert!(crate::read_set::snapshot_for("messages").is_empty());
     }

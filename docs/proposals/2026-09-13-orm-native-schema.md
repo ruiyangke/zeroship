@@ -1,6 +1,6 @@
 # Native Rust ORM schema declarations
 
-**Status: Proposed; implementation pending.**
+**Status: Implementation in progress; integration verification pending.**
 
 Rust applications should declare their ORM schema in Rust and build with Cargo.
 The macro compiles those declarations into typed query APIs and native metadata.

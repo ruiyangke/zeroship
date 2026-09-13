@@ -1293,7 +1293,7 @@ mod tests {
     fn rs_entry(collection: &str, filter: serde_json::Value) -> ReadSetEntry {
         ReadSetEntry {
             collection: collection.to_string(),
-            predicate: read_set::normalise_filter(&filter.into(), &crate::value!({})),
+            predicate: read_set::normalise_filter(&filter.into(), &crate::schema::FieldMap::new()),
         }
     }
 

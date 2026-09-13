@@ -1,5 +1,13 @@
 use crate::{metrics, protection, tx_lanes};
 
+pub(crate) fn native_fields(fields: crate::value::Value) -> crate::schema::FieldMap {
+    crate::schema::CollectionSchema::from_fields(&fields).unwrap().into_fields()
+}
+
+pub(crate) fn generated_schema(fields: crate::value::Value) -> crate::schema::FieldMap {
+    native_fields(super::schema::generated_fields(fields))
+}
+
 /// Install a descriptor for an isolated test binding.
 pub(crate) fn cache_schema(
     app_id: &str,
@@ -22,7 +30,7 @@ pub(crate) fn cache_schema_for_deploy(
     schema: crate::value::Value,
 ) {
     zeroship_data_orm::schema_cache::with_mut(|c| {
-        c.insert_one(binding, collection, super::schema::generated_fields(schema))
+        c.insert_one(binding, collection, generated_schema(schema))
     });
 }
 
@@ -93,7 +101,7 @@ mod tests {
             c.insert_one(
                 &binding,
                 "users",
-                crate::value!({ "email": { "type": "string" } }),
+                super::native_fields(crate::value!({ "email": { "type": "string" } })),
             );
         });
         assert!(zeroship_data_orm::schema_cache::with(|c| c.get(&binding, "users")).is_some());

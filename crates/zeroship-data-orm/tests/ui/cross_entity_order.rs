@@ -1,6 +1,7 @@
 use zeroship_data_orm::orm::*;
-schema!(pub schema = "../fixtures/schema.runtime.json");
-schema!(pub other = "../fixtures/typed-reads.runtime.json");
+include!("../fixtures/posts_schema.rs");
+posts_schema!(pub schema);
+posts_schema!(pub other, readings);
 
 fn invalid(db: &Database) {
     db.entity::<schema::posts::Entity>().unwrap().query()

@@ -1,109 +1,47 @@
-//! Host-installed runtime descriptors are the model-shape authority.
-//! Physical catalog evidence is read separately by protection-floor checks.
+//! Host-installed native metadata is the model-shape authority.
 
+use crate::{
+    binding::DbBinding,
+    error::DbError,
+    schema::{FieldMap, Schema},
+};
 use std::sync::Arc;
 
-use crate::value::Value;
-
-use zeroship_data_orm::binding::DbBinding;
-use zeroship_data_orm::error::DbError;
-
-/// Validate and atomically install the host's runtime field maps.
-pub fn install_collections(
-    binding: &DbBinding,
-    collections: Vec<(String, Value)>,
-) -> Result<(), DbError> {
-    let mut names = std::collections::HashSet::new();
-    for (name, schema) in &collections {
-        crate::sql::mapping::validate_collection(name)?;
-        if !names.insert(name) {
-            return Err(DbError::internal(
-                "duplicate collection in the runtime descriptor",
-            ));
-        }
-        let fields = schema
-            .as_object()
-            .ok_or_else(|| DbError::internal("collection descriptor must be an object"))?;
-        crate::sql::descriptors::validate_collection_identity(schema).map_err(|message| {
-            DbError::validation("invalid_collection_identity", format!("{name}: {message}"))
-        })?;
-        crate::sql::descriptors::relation_fields(schema).map_err(|message| {
-            DbError::validation("invalid_relation", format!("{name}: {message}"))
-        })?;
-        let assignments = crate::assignments::AssignmentPlan::from_schema(schema)?;
-        crate::sql::lifecycle::soft_delete_column(schema)?;
-        crate::sql::lifecycle::concurrency_column(schema)?;
-        for (name, definition) in fields {
-            for (role, event, generator) in [
-                (
-                    "softDelete",
-                    zeroship_migrate_policy::AssignmentEvent::Delete,
-                    "now",
-                ),
-                (
-                    "concurrency",
-                    zeroship_migrate_policy::AssignmentEvent::Write,
-                    "increment",
-                ),
-            ] {
-                if definition.get(role).and_then(Value::as_bool) == Some(true)
-                    && !assignments.columns().iter().any(|column| {
-                        column.name == *name
-                            && column.on == event
-                            && match generator {
-                                "now" => {
-                                    column.by == zeroship_migrate_policy::AssignmentGenerator::Now
-                                }
-                                _ => matches!(
-                                    column.by,
-                                    zeroship_migrate_policy::AssignmentGenerator::Increment(_)
-                                ),
-                            }
-                    })
-                {
-                    return Err(DbError::validation(
-                        "invalid_column_role",
-                        format!("'{name}' requires a matching generator for {role}"),
-                    ));
-                }
-            }
-            if crate::sql::mapping::is_schema_metadata_key(name) {
-                continue;
-            }
-            crate::sql::mapping::validate_field_name(name)?;
-            if crate::encryption::plaintext::PlaintextType::from_field(definition)?.is_some()
-                && definition.get("unique").and_then(Value::as_bool) == Some(true)
-            {
-                return Err(DbError::validation(
-                    "encrypted_unique_unsupported",
-                    "encrypted fields cannot be unique",
-                ));
-            }
-            if !definition.is_object() {
-                return Err(DbError::internal("field descriptor must be an object"));
-            }
-        }
-    }
-    zeroship_data_orm::schema_cache::with_mut(|cache| {
-        cache.replace_for_binding(binding, collections)
-    });
+/// Validate the complete schema before publishing any collection.
+pub fn install_collections(binding: &DbBinding, schema: Schema) -> Result<(), DbError> {
+    schema.validate()?;
+    let collections = schema
+        .into_collections()
+        .into_iter()
+        .map(|(name, schema)| (name, schema.into_fields()))
+        .collect();
+    crate::schema_cache::with_mut(|cache| cache.replace_for_binding(binding, collections));
     Ok(())
 }
 
-/// Require the descriptor entry for a collection served by this isolate.
-pub fn collection_schema(binding: &DbBinding, collection: &str) -> Result<Arc<Value>, DbError> {
-    zeroship_data_orm::schema_cache::with(|c| c.require(binding, collection))
+pub fn collection_schema(binding: &DbBinding, collection: &str) -> Result<Arc<FieldMap>, DbError> {
+    crate::schema_cache::with(|cache| cache.require(binding, collection))
 }
 
-/// Every collection this isolate's descriptor declares, with its field map.
-pub fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
-    zeroship_data_orm::schema_cache::with(|c| c.entries_for_binding(binding))
+pub fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<FieldMap>)> {
+    crate::schema_cache::with(|cache| cache.entries_for_binding(binding))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::value;
+    use crate::{schema::CollectionSchema, value, value::Value};
+
+    fn install_artifact(
+        binding: &DbBinding,
+        collections: Vec<(String, Value)>,
+    ) -> Result<(), DbError> {
+        install_collections(binding, Schema::from_collections(collections)?)
+    }
+
+    fn fields(value: &Value) -> FieldMap {
+        CollectionSchema::from_fields(value).unwrap().into_fields()
+    }
 
     fn identity_corpus() -> serde_json::Value {
         serde_json::from_str(include_str!(
@@ -117,12 +55,12 @@ mod tests {
         crate::tests::fixtures::reset_engine();
         let binding = DbBinding::cold_start("app_identity_contract");
         let valid = value!({"id":{"type":"string", "required":true, "primaryKey":true}});
-        install_collections(&binding, vec![("entries".into(), valid.clone())]).unwrap();
+        install_artifact(&binding, vec![("entries".into(), valid.clone())]).unwrap();
         let corpus = identity_corpus();
         let cases = corpus["invalid"].as_object().unwrap();
         assert!(!cases.is_empty(), "invalid fixtures must not be empty");
         for (name, case) in cases {
-            let err = install_collections(
+            let err = install_artifact(
                 &binding,
                 vec![
                     ("replacement".into(), valid.clone()),
@@ -130,21 +68,37 @@ mod tests {
                 ],
             )
             .unwrap_err();
-            match err {
-                DbError::ValidationFailed {
-                    code: "invalid_collection_identity",
-                    message,
-                    ..
-                } => assert_eq!(
-                    message,
-                    format!("invalid: {}", case["error"].as_str().unwrap()),
-                    "{name}"
-                ),
-                error => panic!("{name}: expected invalid_collection_identity, got {error:?}"),
+            if matches!(
+                name.as_str(),
+                "null_id" | "string_primary_key" | "string_required"
+            ) {
+                assert!(
+                    matches!(
+                        err,
+                        DbError::ValidationFailed {
+                            code: "invalid_schema",
+                            ..
+                        }
+                    ),
+                    "{name}: {err:?}"
+                );
+            } else {
+                match err {
+                    DbError::ValidationFailed {
+                        code: "invalid_collection_identity",
+                        message,
+                        ..
+                    } => assert_eq!(
+                        message,
+                        format!("invalid: {}", case["error"].as_str().unwrap()),
+                        "{name}"
+                    ),
+                    error => panic!("{name}: expected invalid_collection_identity, got {error:?}"),
+                }
             }
             assert_eq!(
                 collection_schema(&binding, "entries").unwrap().as_ref(),
-                &valid
+                &fields(&valid)
             );
             assert!(collection_schema(&binding, "replacement").is_err());
             assert!(collection_schema(&binding, "invalid").is_err());
@@ -159,7 +113,15 @@ mod tests {
             "id":{"type":"string", "required":true, "primaryKey":true},
             "owner_id":{"type":"string", "refTarget":"people", "refColumn":"id", "relation":"owner"}
         });
-        install_collections(&binding, vec![("entries".into(), valid.clone())]).unwrap();
+        let people = value!({"id":{"type":"string", "required":true, "primaryKey":true}});
+        install_artifact(
+            &binding,
+            vec![
+                ("entries".into(), valid.clone()),
+                ("people".into(), people.clone()),
+            ],
+        )
+        .unwrap();
         for relation in [
             value!(null),
             value!(true),
@@ -174,33 +136,54 @@ mod tests {
             value!("id"),
             value!("owner_id"),
         ] {
-            let mut fields = valid.clone();
-            fields["owner_id"]["relation"] = relation;
-            assert!(install_collections(&binding, vec![("entries".into(), fields)]).is_err());
+            let mut candidate = valid.clone();
+            candidate["owner_id"]["relation"] = relation;
+            assert!(install_artifact(
+                &binding,
+                vec![
+                    ("entries".into(), candidate),
+                    ("people".into(), people.clone())
+                ]
+            )
+            .is_err());
             assert_eq!(
                 collection_schema(&binding, "entries").unwrap().as_ref(),
-                &valid
+                &fields(&valid)
             );
         }
         let mut duplicate = valid.clone();
         duplicate["editor_id"] = valid["owner_id"].clone();
-        assert!(install_collections(&binding, vec![("entries".into(), duplicate)]).is_err());
+        assert!(install_artifact(
+            &binding,
+            vec![
+                ("entries".into(), duplicate),
+                ("people".into(), people.clone())
+            ]
+        )
+        .is_err());
         for required in ["refTarget", "refColumn"] {
-            let mut fields = valid.clone();
-            fields["owner_id"]
+            let mut candidate = valid.clone();
+            candidate["owner_id"]
                 .as_object_mut()
                 .unwrap()
                 .swap_remove(required);
-            assert!(install_collections(&binding, vec![("entries".into(), fields)]).is_err());
+            assert!(install_artifact(
+                &binding,
+                vec![
+                    ("entries".into(), candidate),
+                    ("people".into(), people.clone())
+                ]
+            )
+            .is_err());
         }
         assert_eq!(
             collection_schema(&binding, "entries").unwrap().as_ref(),
-            &valid
+            &fields(&valid)
         );
     }
 
     #[test]
-    fn valid_identity_descriptors_are_installed_unchanged() {
+    fn valid_identity_descriptors_are_installed_as_native_contracts() {
         crate::tests::fixtures::reset_engine();
         let binding = DbBinding::cold_start("app_explicit_identity");
         let corpus = identity_corpus();
@@ -208,11 +191,13 @@ mod tests {
         assert!(!cases.is_empty(), "valid fixtures must not be empty");
         for (name, case) in cases {
             let fields = Value::from(case["fields"].clone());
-            install_collections(&binding, vec![("entries".into(), fields.clone())])
+            install_artifact(&binding, vec![("entries".into(), fields.clone())])
                 .unwrap_or_else(|error| panic!("{name}: {error}"));
             assert_eq!(
                 collection_schema(&binding, "entries").unwrap().as_ref(),
-                &fields,
+                &CollectionSchema::from_fields(&fields)
+                    .unwrap()
+                    .into_fields(),
                 "{name}"
             );
         }
@@ -256,7 +241,7 @@ mod tests {
             c.insert_one(
                 &pinned,
                 "secrets",
-                value!({ "marker": { "type": "string" } }),
+                fields(&value!({ "marker": { "type": "string" } })),
             );
         });
         assert!(
@@ -267,12 +252,12 @@ mod tests {
             c.insert_one(
                 &current,
                 "secrets",
-                value!({ "other": { "type": "string" } }),
+                fields(&value!({ "other": { "type": "string" } })),
             );
         });
         assert_eq!(
             collection_schema(&pinned, "secrets").unwrap().as_ref(),
-            &value!({ "marker": { "type": "string" } }),
+            &fields(&value!({ "marker": { "type": "string" } })),
             "installing the current deploy redirected the pinned binding",
         );
     }

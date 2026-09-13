@@ -1,15 +1,16 @@
 //! JSON aggregate pipeline lowering into resolved select statements.
 
 use super::{predicate, read, resolved::ResolvedTable};
+use crate::schema::{ColumnSchema, FieldMap, LogicalType};
 use crate::{
     sql::{
-        AggregateFunc, CompareOp, Direction, Ident, IdentRole, NullOrder, RowLimit, SchemaName,
         mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
             ResolvedOperand, ResolvedOrder, ResolvedPredicate, ResolvedPredicateValue, SelectParts,
             SelectStatement, SelectedExpression, Statement, StorageType,
         },
+        AggregateFunc, CompareOp, Direction, Ident, IdentRole, NullOrder, RowLimit, SchemaName,
     },
     value::Value,
 };
@@ -25,7 +26,7 @@ struct AggregateOutput {
 
 pub(crate) struct AggregateProjection {
     pub columns: Vec<String>,
-    pub schema: Value,
+    pub schema: FieldMap,
 }
 
 pub(crate) fn build(
@@ -33,7 +34,7 @@ pub(crate) fn build(
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
-    schema: &Value,
+    schema: &FieldMap,
     registration: &SqlRegistration,
 ) -> Result<
     (
@@ -151,7 +152,7 @@ type GroupedProjection = (
 
 fn grouped_projection(
     group: &Value,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
 ) -> Result<GroupedProjection, QueryError> {
     let fields = group
@@ -161,7 +162,7 @@ fn grouped_projection(
     let mut group_by = Vec::new();
     let mut outputs = BTreeMap::new();
     let mut result_columns = Vec::new();
-    let mut result_schema = crate::value::Map::new();
+    let mut result_schema = FieldMap::new();
     let mut names = BTreeSet::new();
     if let Some(by) = fields.get("by") {
         let names_in = match by {
@@ -177,7 +178,7 @@ fn grouped_projection(
             _ => return Err(invalid("aggregate: $group.by must be a string or array")),
         };
         for field in names_in {
-            validate_value_field(field, schema, "filterable")?;
+            validate_value_field(field, schema, Capability::Filter)?;
             if !crate::sql::descriptors::supports_grouping(&schema[field]) {
                 return Err(invalid(format!(
                     "aggregate: field '{field}' has no portable grouping equality"
@@ -237,7 +238,7 @@ fn grouped_projection(
         let column = source_field
             .as_deref()
             .map(|field| {
-                validate_value_field(field, schema, "aggregateable")?;
+                validate_value_field(field, schema, Capability::Aggregate)?;
                 if !crate::sql::descriptors::supports_aggregate(&schema[field], function) {
                     return Err(invalid(
                         "aggregate: accumulator has no portable column type",
@@ -282,7 +283,7 @@ fn grouped_projection(
         outputs,
         Some(AggregateProjection {
             columns: result_columns,
-            schema: Value::Object(result_schema),
+            schema: result_schema,
         }),
     ))
 }
@@ -290,11 +291,11 @@ fn grouped_projection(
 fn aggregate_result_definition(
     function: AggregateFunc,
     source_field: Option<&str>,
-    schema: &Value,
-) -> Result<Value, QueryError> {
+    schema: &FieldMap,
+) -> Result<ColumnSchema, QueryError> {
     match function {
-        AggregateFunc::Count => Ok(crate::value!({"type":"integer"})),
-        AggregateFunc::Avg => Ok(crate::value!({"type":"number"})),
+        AggregateFunc::Count => Ok(ColumnSchema::new(LogicalType::Integer)),
+        AggregateFunc::Avg => Ok(ColumnSchema::new(LogicalType::Number)),
         AggregateFunc::Sum | AggregateFunc::Min | AggregateFunc::Max => source_field
             .and_then(|field| schema.get(field))
             .cloned()
@@ -304,7 +305,7 @@ fn aggregate_result_definition(
 
 fn resolve_having(
     value: &Value,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     outputs: &BTreeMap<String, AggregateOutput>,
     registration: &SqlRegistration,
@@ -333,7 +334,7 @@ fn resolve_having(
         let output = if let Some(output) = outputs.get(field) {
             output.clone()
         } else {
-            validate_value_field(field, schema, "filterable")?;
+            validate_value_field(field, schema, Capability::Filter)?;
             let selected = read::selected(table, field)?;
             AggregateOutput {
                 operand: selected.expression,
@@ -400,7 +401,7 @@ fn resolve_having(
 
 fn resolve_order(
     value: &Value,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     outputs: &BTreeMap<String, AggregateOutput>,
 ) -> Result<Vec<ResolvedOrder>, QueryError> {
@@ -432,7 +433,7 @@ fn resolve_order(
             let operand = if let Some(output) = outputs.get(field) {
                 output.operand.clone()
             } else {
-                validate_value_field(field, schema, "sortable")?;
+                validate_value_field(field, schema, Capability::Sort)?;
                 if !crate::sql::descriptors::supports_sorting(&schema[field]) {
                     return Err(invalid(format!(
                         "aggregate: field '{field}' has no portable sort order"
@@ -458,7 +459,17 @@ fn resolve_order(
         .collect()
 }
 
-fn validate_value_field(field: &str, schema: &Value, capability: &str) -> Result<(), QueryError> {
+enum Capability {
+    Filter,
+    Sort,
+    Aggregate,
+}
+
+fn validate_value_field(
+    field: &str,
+    schema: &FieldMap,
+    capability: Capability,
+) -> Result<(), QueryError> {
     mapping::validate_field_name(field)?;
     if !crate::sql::descriptors::readable_fields(schema).contains(field) {
         return Err(QueryError::InvalidIdent(format!(
@@ -466,8 +477,13 @@ fn validate_value_field(field: &str, schema: &Value, capability: &str) -> Result
         )));
     }
     mapping::validate_value_operation(field, schema)?;
-    if schema[field][capability].as_bool() == Some(false) {
-        return Err(invalid(format!("field '{field}' is not {capability}")));
+    let (allowed, name) = match capability {
+        Capability::Filter => (schema[field].filterable, "filterable"),
+        Capability::Sort => (schema[field].sortable, "sortable"),
+        Capability::Aggregate => (schema[field].aggregateable, "aggregateable"),
+    };
+    if !allowed {
+        return Err(invalid(format!("field '{field}' is not {name}")));
     }
     Ok(())
 }
@@ -510,4 +526,43 @@ fn alias(name: &str) -> Result<Ident, QueryError> {
 
 fn invalid(message: impl Into<String>) -> QueryError {
     QueryError::InvalidFilter(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_aggregate_capabilities_are_enforced_before_compilation() {
+        let mut fields: FieldMap = [
+            ("id".into(), ColumnSchema::new(LogicalType::Text)),
+            ("amount".into(), ColumnSchema::new(LogicalType::Number)),
+        ]
+        .into();
+        let pipeline = crate::value!([{"$group":{"total":{"$sum":"amount"}}}]);
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            fields["amount"].aggregateable = true;
+            assert!(build(
+                &SchemaName::new("app").unwrap(),
+                "payments",
+                &pipeline,
+                false,
+                &fields,
+                &registration,
+            )
+            .is_ok());
+            fields["amount"].aggregateable = false;
+            let error = build(
+                &SchemaName::new("app").unwrap(),
+                "payments",
+                &pipeline,
+                false,
+                &fields,
+                &registration,
+            )
+            .err()
+            .expect("aggregate permission must be enforced");
+            assert!(error.to_string().contains("not aggregateable"));
+        }
+    }
 }

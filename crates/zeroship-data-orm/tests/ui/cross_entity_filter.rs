@@ -1,6 +1,7 @@
 use zeroship_data_orm::orm::*;
-schema!(pub first = "../fixtures/schema.runtime.json");
-schema!(pub second = "../fixtures/schema.runtime.json");
+include!("../fixtures/posts_schema.rs");
+posts_schema!(pub first);
+posts_schema!(pub second);
 fn main() {
     let filter = first::posts::title.eq("first").unwrap();
     let _ = filter.and(second::posts::title.eq("second").unwrap());

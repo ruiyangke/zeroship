@@ -102,6 +102,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 })
                 .collect();
 
+            let schema = crate::tests::fixtures::native_fields(schema);
             let built = compile_insert_many(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
@@ -437,6 +438,8 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
                 "id": row_pk,
                 "ssn": plaintext,
             });
+
+            let schema = crate::tests::fixtures::native_fields(schema);
 
             // The encryption pass replaces ssn with native ciphertext bytes.
             encrypt_row_on_write(
