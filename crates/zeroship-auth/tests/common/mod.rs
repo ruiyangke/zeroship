@@ -11,23 +11,6 @@ use uuid::Uuid;
 use zeroship_auth::config::AuthConfig;
 use zeroship_core::config::{Secret, SourceKind};
 
-/// Require the configured platform database for fixtures that do not yet own one.
-///
-/// Missing or unmigrated databases fail the run. The connection preflight is
-/// memoized for these shared-database callers; owned fixtures use [`database`]
-/// instead and manage their own server lifecycle.
-#[must_use]
-pub fn test_database_url() -> String {
-    static DSN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    DSN.get_or_init(|| {
-        platform_fixture::live_db::require_configured(
-            zeroship_core::config::test_database_url_opt(),
-            platform_fixture::live_db::PLATFORM_SCHEMAS,
-        )
-    })
-    .clone()
-}
-
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
 // Build AuthConfig through the CLI resolver so unset fields retain their
@@ -106,20 +89,6 @@ pub fn test_auth_config_at(db_url: &str, public_url: &str, extra: &[&str]) -> Au
 #[must_use]
 pub fn test_secret(material: &str) -> Secret<String> {
     Secret::supplied(SourceKind::Env, Some(material.to_owned()))
-}
-
-#[allow(clippy::future_not_send)]
-pub async fn dedicated_test_db(db_url: &str) -> compio_postgres::Client {
-    let (client, connection) = compio_postgres::connect(db_url, compio_postgres::NoTls)
-        .await
-        .expect("connect dedicated test database session");
-    compio::runtime::spawn(async move {
-        if let Err(e) = connection.run().await {
-            eprintln!("dedicated test database connection error: {e}");
-        }
-    })
-    .detach();
-    client
 }
 
 // ─── PKCE ────────────────────────────────────────────────────────────────
@@ -277,41 +246,6 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
     project_id
 }
 
-// ─── DB cleanup ──────────────────────────────────────────────────────────
-
-/// Delete sessions + user row for `email`. CITEXT columns require an explicit
-/// `text→citext` cast for the bind (compio-postgres binds `&str` as TEXT; PG
-/// won't auto-cast in a WHERE). Sessions are deleted first to avoid tripping
-/// the FK from `zeroship.idp_sessions.user_id`. Errors are swallowed (best-effort).
-pub async fn cleanup_user(pg: &compio_postgres::Client, email: &str) {
-    let _ = pg
-        .execute(
-            "DELETE FROM zeroship.idp_sessions WHERE user_id IN \
-             (SELECT id FROM zeroship.users WHERE email = $1::citext)",
-            &[&email],
-        )
-        .await;
-    let _ = pg
-        .execute(
-            "DELETE FROM zeroship.users WHERE email = $1::citext",
-            &[&email],
-        )
-        .await;
-}
-
-/// Delete every rate-limit row whose `bucket_key` matches any of the given
-/// `LIKE` patterns. Best-effort — errors are swallowed.
-pub async fn cleanup_rate_limits_like(pg: &compio_postgres::Client, patterns: &[&str]) {
-    for pat in patterns {
-        let _ = pg
-            .execute(
-                "DELETE FROM zeroship.rate_limits WHERE bucket_key LIKE $1",
-                &[pat],
-            )
-            .await;
-    }
-}
-
 /// A `Mailer` that keeps every message instead of transporting it.
 ///
 /// Any handler that mails now needs `State<Arc<dyn Mailer>>` registered, so a
@@ -442,9 +376,6 @@ pub async fn validated_session(
     .expect("session created");
     (created.proof, person_id)
 }
-
-#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
-mod platform_fixture;
 
 #[path = "../../../../tests/fixtures/session_keys.rs"]
 mod session_keys;
