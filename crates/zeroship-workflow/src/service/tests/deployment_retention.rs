@@ -1,3 +1,8 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "retention tests own compio-local journals and clients"
+)]
+
 use super::*;
 use crate::deployment_holds::{
     DeploymentHoldClient, HoldGeneration, HoldReceipt, HoldScope, HoldState,

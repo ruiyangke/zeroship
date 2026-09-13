@@ -238,7 +238,7 @@ impl TaskExecution for Execution {
 
 struct Fixture {
     _directory: tempfile::TempDir,
-    _deployments: deployments::Deployments,
+    deployments: deployments::Deployments,
     service: WorkflowService,
     app: AppWorkflows,
     job: JobSpec,
@@ -305,7 +305,7 @@ impl Fixture {
         };
         Self {
             _directory: directory,
-            _deployments: deployments,
+            deployments,
             service,
             app,
             job,
