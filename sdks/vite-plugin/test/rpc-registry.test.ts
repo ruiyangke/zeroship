@@ -5,6 +5,7 @@ import {
   rpcRegistryPlugin,
   buildServerEntrySource,
   pickEntryWireId,
+  serverBindingsFromState,
   SERVER_ENTRY_VIRTUAL_ID,
   SERVER_ENTRY_RESOLVED_ID,
 } from "../src/rpc-registry.js";
@@ -44,6 +45,34 @@ describe("rpcRegistryPlugin", () => {
     const { rpc } = (await fixture.load()).default;
     assert.deepEqual(Object.keys(rpc), ["after"]);
     assert.equal(rpc.after(), "new");
+  });
+
+  test("uses discovered transform state for the live build caller", async (t) => {
+    const state = {
+      serverFunctionMap: new Map(),
+      discoveredProcedures: [{
+        filePath: "./actions.mjs",
+        exportName: "bound",
+        moduleSlug: "actions",
+        kind: "query" as const,
+        isStream: false,
+        config: { id: "todos.bound" },
+      }],
+      discoveredSchedules: [],
+      discoveredWorkflows: [],
+    };
+    const plugin = rpcRegistryPlugin({ userEntryRel: "./user.mjs", state });
+    const load = plugin.load as (id: string) => string;
+    const fixture = await buildEntryFixture(t, {
+      source: load(SERVER_ENTRY_RESOLVED_ID),
+      files: {
+        "user.mjs": "export default {};",
+        "actions.mjs": "export const bound = () => 'bound';",
+      },
+    });
+    const { rpc } = (await fixture.load()).default;
+    assert.deepEqual(Object.keys(rpc), ["todos.bound"]);
+    assert.equal(rpc["todos.bound"](), "bound");
   });
 });
 
@@ -253,4 +282,30 @@ describe("pickEntryWireId", () => {
     }
     assert.equal(pickEntryWireId({ exportName: "add" }), "add");
   });
+});
+
+test("transform records become explicit procedure bindings", () => {
+  const bindings = serverBindingsFromState({
+    discoveredProcedures: [
+      {
+        filePath: "/app/src/actions.ts",
+        exportName: "save",
+        moduleSlug: "src-actions",
+        kind: "action",
+        isStream: false,
+        config: { id: "todos.save" },
+        lazy: true,
+      },
+    ],
+  });
+  assert.deepEqual([...bindings], [[
+    "/app/src/actions.ts::save",
+    {
+      wireId: "todos.save",
+      sourceFile: "/app/src/actions.ts",
+      exportName: "save",
+      kind: "action",
+      lazy: true,
+    },
+  ]]);
 });
