@@ -1,16 +1,17 @@
 # zeroship-workflow-server
 
-A coordinator currently implementing worker registration, app placement,
-wake-up hints and high-level workflow management. Customer workers own execution,
-task leases, scheduling, history and payload storage. The server does not construct an
-execution engine or payload store. Its HTTP contract contains metadata operations
-and exposes no task-completion, input, signal-body or output-upload endpoint.
+An authenticated host for native workflow coordination. Worker registration,
+app placement, wake hints and management persist through the shared ORM in
+`zeroship-workflow-manager`. The server owns HTTP authentication, configuration,
+process lifecycle and startup database-authority checks. It constructs no customer
+execution engine or payload store.
 
 The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
 changes the target: this server will own cron, durable timers and a metadata job
-queue. Workers will pull jobs, execute against creator storage and acknowledge
-committed outcomes. That cutover is not implemented. The descriptions below
-document the current coordinator; they do not define the new role split.
+queue. Native queue and placement operations now share the manager's database
+and transaction handle. Production queue endpoints, manager scheduling and the
+worker consumer still require cutover. Existing workers still discover due
+customer work; that behavior does not define the target role split.
 
 Control authorizes placement and queues typed pause, resume, cancellation or
 restart commands. Workers authenticate with their enrolled instance key, then
@@ -26,7 +27,7 @@ missing owners expose the app for host-driven recovery and a customer-journal
 rescan, even when the previous worker never published a hint. Actual task claims
 and management application remain transactions in the customer's database.
 
-The platform migration creates `workflow_coordination` metadata under a migration
+The platform migration creates `workflow_manager` metadata under a migration
 owner and grants the `zeroship_workflow` login ordinary DML. Runtime verifies the
 schema fingerprint and rejects elevated roles, role memberships, DDL and
 mutable schema fingerprints. It can read enrolled worker verification keys and
@@ -36,10 +37,11 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 
 - `src/api.rs`: the closed metadata HTTP operations.
 - `src/auth.rs`: service assertions and enrolled worker key verification.
-- `src/coordinator/`: transactional placement and management persistence.
+- `src/coordinator.rs`: provisioned ORM composition and startup authority checks.
+- `../zeroship-workflow-manager/src/coordinator/`: native placement and management.
 - `src/config.rs`: `[workflow]` settings and generated CLI overrides.
 - `src/server.rs`: metadata pools, verification and HTTP lifecycle.
-- `schema/schema.ts`: the canonical migration DSL definition.
+- `../zeroship-workflow-manager/schema/schema.ts`: the shared migration DSL definition.
 - `tests/coordinator.rs`: native store, fencing and recovery contracts.
 - `tests/http.rs`: real server processes, replicas, revocation and restart.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.
@@ -48,7 +50,7 @@ Run `cargo test -p zeroship-workflow-server` for the host contracts. Required
 PostgreSQL fixtures are owned by Testcontainers. `cargo xtask test workflow`
 includes the coordinator alongside the engine and example suites.
 Regenerate metadata SQL with
-`node crates/zeroship-workflow-server/schema/generate.mjs`.
+`node crates/zeroship-workflow-manager/schema/generate.mjs`.
 
 The host needs a platform metadata database login and a peer verification bundle
 containing Control's key. It needs no customer connection, payload location or

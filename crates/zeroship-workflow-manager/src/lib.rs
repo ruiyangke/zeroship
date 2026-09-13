@@ -2,6 +2,7 @@
 #![cfg_attr(test, recursion_limit = "256")]
 
 mod clock;
+pub mod coordinator;
 pub mod deployments;
 mod error;
 mod models;

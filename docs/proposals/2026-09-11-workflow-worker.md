@@ -2,8 +2,8 @@
 
 **Status:** Agreed architecture with protocol decisions still identified below.
 Implementation is in progress. Native coordinator and queue operations share ORM
-transactions. Regression tests have exposed a concurrent registration conflict;
-the schema correction and server integration are being verified.
+transactions. Their database, authenticated host and platform-schema contracts
+have passed verification; broader customer-engine verification remains open.
 Manager scheduling, creator outbox publication and the simple worker consumer
 have not completed their production cutover.
 
@@ -1111,7 +1111,7 @@ fallbacks.
 | --- | --- |
 | Manager host | `WorkflowSettings` supplies listener, service peers, platform DB binding, body/page bounds and worker/assignment policy. `workflow.database_url` is a platform credential. |
 | Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
-| Native queue | `Options::{lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds delivery and metadata transactions. |
+| Native queue | `Options::{max_connections, lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
 | Customer host | Normal creator DB/storage, trusted app identity, policy snapshot and execution limits. Existing `WorkerOptions` slot/execution limits remain relevant; worker maintenance scheduling settings disappear with their loops. |
 | Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
@@ -1254,9 +1254,13 @@ metadata as well as top-level envelopes.
 Crate boundaries make authority reviewable; database grants, network isolation,
 trusted runtime bindings and transaction predicates enforce it. The protocol
 defends against stale/foreign requests and malicious app selectors. It cannot
-make a compromised process with creator DB credentials unable to damage that
-same creator's data. Such a process still must not gain Control credentials,
-other apps' contexts or a way to forge platform retention and usage authority.
+protect creator databases that a compromised native worker process is already
+authorized to access. Untrusted app code must stay behind its app-bound V8/native
+handles; the native host is trusted to select bindings and enforce those handles.
+If deployment policy requires isolation from another app's compromised host,
+place those apps in separate worker processes with disjoint credentials. A
+registration or job must never expand a process's authorized app set or give it
+Control database credentials or another holder's platform authority.
 
 ## Failure behavior and verification
 
@@ -1320,11 +1324,17 @@ The local host currently composes that journal and runner.
 
 The crate split includes the metadata client, closed job/delivery contracts,
 manager ORM queue and platform deployment ledger. Native coordinator placement
-and management now share the queue's ORM namespace and transaction handle. Initial
-native coordinator/queue regressions passed, while concurrent first-registration
-coverage exposed a PostgreSQL conflict through a redundant unique identity. The
-canonical primary-key correction and HTTP server integration are being verified.
-Storage tests do not establish a completed distributed workflow system.
+and management now share the queue's ORM namespace and transaction handle.
+Canonical parent primary keys eliminate the conflicting duplicate identities in
+concurrent first registration. Native PostgreSQL/SQLite coordinator and queue
+contracts, authenticated server processes, actual platform migration/grants and
+normal-dependency ownership checks have passed. These checks do not establish a
+completed distributed workflow system.
+
+The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
+with their database barriers still held. The broader creator management suite
+has exposed a default-stack overflow under investigation. Its complete native
+verification remains required; passing cancellation does not waive that failure.
 
 Manager cron/timer discovery, durable scope deadlines, capacity activation,
 creator job receipts/publication intents, queue HTTP delivery and the simple

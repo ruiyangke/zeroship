@@ -1,8 +1,15 @@
 # zeroship-workflow-manager
 
-Native platform workflow coordination. This crate owns the durable metadata
-queue and the deployment retention ledger through the shared Rust ORM. It has
-no customer journal, payload storage or V8 dependency.
+Native platform workflow coordination. This crate owns worker registration,
+placement, management commands, the durable metadata queue and the deployment
+retention ledger through the shared Rust ORM. It has no customer journal,
+payload storage or V8 dependency.
+
+`coordinator::Coordinator` uses the queue's bound database and app-scope lock.
+Placement changes lock the app scope before the worker row so capacity remains
+serialized across apps. Native queue claims verify stored assignments inside
+the queue transaction. Recovery pagination filters existing owners before
+ending a result page, so owned scopes cannot hide later recovery work.
 
 `Queue` binds a provisioned platform database. App locks serialize queue changes;
 delivery attempts fence retries and stale acknowledgements. Settlement writes
@@ -26,7 +33,7 @@ provisioning remain explicit host operations.
 
 The native library is being integrated into the workflow server and CLI under
 the [workflow proposal](../../docs/proposals/2026-09-11-workflow-worker.md).
-The existing coordinator and worker scheduling loop still require cutover.
+Production queue endpoints and the worker scheduling loop still require cutover.
 
 Run `cargo test -p zeroship-workflow-manager` for PostgreSQL Testcontainers and
 SQLite queue and retention contracts.

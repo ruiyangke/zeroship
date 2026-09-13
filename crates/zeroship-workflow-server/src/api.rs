@@ -166,7 +166,12 @@ async fn workers(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: WorkerPage = read_json(&request, body).await?;
-            state.service.ready_workers(command.after.as_ref()).await
+            state
+                .service
+                .manager
+                .ready_workers(command.after.as_ref())
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -188,7 +193,12 @@ async fn assign(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: AssignScope = read_json(&request, body).await?;
-            state.service.assign(&command).await
+            state
+                .service
+                .manager
+                .assign(&command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -211,7 +221,7 @@ async fn verify_assignment(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: VerifyAssignment = read_json(&request, body).await?;
-            let assignment = state.service.verify_assignment(&command).await?;
+            let assignment = state.service.manager.verify_assignment(&command).await?;
             compio::time::timeout(
                 Duration::from_secs(5),
                 state.auth.active_worker(&command.worker_id),
@@ -240,7 +250,12 @@ async fn recovery(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: ScopePage = read_json(&request, body).await?;
-            state.service.recovery_scopes(command.after.as_ref()).await
+            state
+                .service
+                .manager
+                .recovery_scopes(command.after.as_ref())
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -262,7 +277,12 @@ async fn manage(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: ManageRun = read_json(&request, body).await?;
-            state.service.manage(&actor, &command).await
+            state
+                .service
+                .manager
+                .manage(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -287,8 +307,10 @@ async fn management_status(
             let command: ManagementStatus = read_json(&request, body).await?;
             state
                 .service
+                .manager
                 .management_receipt(&command.app_id, &command.request_id)
                 .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -310,7 +332,12 @@ async fn register(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: RegisterWorker = read_json(&request, body).await?;
-            state.service.register(&actor, &command).await
+            state
+                .service
+                .manager
+                .register(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -334,8 +361,10 @@ async fn assignments(
             let command: ScopePage = read_json(&request, body).await?;
             state
                 .service
+                .manager
                 .assignments(&actor, command.after.as_ref())
                 .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -357,7 +386,12 @@ async fn renew(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: AssignedScope = read_json(&request, body).await?;
-            state.service.renew(&actor, &command).await
+            state
+                .service
+                .manager
+                .renew(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -379,7 +413,12 @@ async fn release(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: ReleaseScope = read_json(&request, body).await?;
-            state.service.release(&actor, &command).await
+            state
+                .service
+                .manager
+                .release(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -401,7 +440,12 @@ async fn wake(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: PublishWakeHint = read_json(&request, body).await?;
-            state.service.publish_wake(&actor, &command).await
+            state
+                .service
+                .manager
+                .publish_wake(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -423,7 +467,12 @@ async fn management_poll(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: AssignedScope = read_json(&request, body).await?;
-            state.service.pending_management(&actor, &command).await
+            state
+                .service
+                .manager
+                .pending_management(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )
@@ -445,7 +494,12 @@ async fn management_ack(
             .await
             .map_err(|_| Error::Unavailable)??;
             let command: AcknowledgeManagement = read_json(&request, body).await?;
-            state.service.acknowledge_management(&actor, &command).await
+            state
+                .service
+                .manager
+                .acknowledge_management(&actor, &command)
+                .await
+                .map_err(Error::from)
         }
         .await,
     )

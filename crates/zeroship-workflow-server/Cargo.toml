@@ -22,6 +22,8 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 zeroship-core = { workspace = true }
 zeroship-authn = { workspace = true }
+zeroship-data-orm = { workspace = true }
+zeroship-workflow-manager = { workspace = true }
 
 [dev-dependencies]
 zeroship-workflow-client = { workspace = true }

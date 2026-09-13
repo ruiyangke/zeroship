@@ -6,7 +6,6 @@ pub fn run() -> Result<()> {
         "crates/zeroship-workflow/schema",
         "crates/zeroship-workflow-manager/schema",
         "crates/zeroship-workflow-manager/schema/deployments",
-        "crates/zeroship-workflow-server/schema",
     ] {
         checked(
             Command::new("node")

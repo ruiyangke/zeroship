@@ -8755,8 +8755,10 @@ dependencies = [
  "tracing",
  "zeroship-authn",
  "zeroship-core",
+ "zeroship-data-orm",
  "zeroship-workflow",
  "zeroship-workflow-client",
+ "zeroship-workflow-manager",
 ]
 
 [[package]]

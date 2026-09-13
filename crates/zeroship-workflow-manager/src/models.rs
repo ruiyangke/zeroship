@@ -3,10 +3,10 @@ use zeroship_core::{
     app_id::AppId,
     workflow_jobs::{DeploymentId, JobId, JobSpec},
 };
-use zeroship_data_orm::{Value, orm::FromRow};
+use zeroship_data_orm::{orm::FromRow, Value};
 
 zeroship_data_orm::orm::schema!(pub schema = "../schema/schema.runtime.json");
-pub use schema::{jobs, queue_scopes};
+pub use schema::{assignments, jobs, management, placement_receipts, queue_scopes, workers};
 
 /// Canonical metadata for a host's native platform database binding.
 ///
@@ -56,4 +56,58 @@ impl Job {
             available_at: self.available_at.try_into().map_err(|_| Error::Storage)?,
         })
     }
+}
+
+#[derive(FromRow, serde::Deserialize)]
+#[orm(entity = workers)]
+pub struct Worker {
+    pub id: String,
+    pub capacity: i64,
+    pub state: String,
+    pub expires_at: i64,
+}
+
+#[derive(FromRow, serde::Deserialize)]
+#[orm(entity = queue_scopes)]
+pub struct Scope {
+    pub id: String,
+}
+
+#[derive(FromRow, serde::Deserialize)]
+#[orm(entity = assignments)]
+pub struct Placement {
+    pub id: String,
+    pub app_id: String,
+    pub worker_id: String,
+    pub revision: i64,
+    pub expires_at: i64,
+    pub released: bool,
+    pub wake_revision: Option<i64>,
+    pub next_due_at: Option<i64>,
+}
+
+#[derive(FromRow, serde::Deserialize)]
+#[orm(entity = placement_receipts)]
+pub struct PlacementReceipt {
+    pub operation: String,
+    pub worker_id: String,
+    pub expected_revision: Option<i64>,
+    pub wake_revision: Option<i64>,
+    pub result_revision: i64,
+    pub result_expires_at: i64,
+}
+
+#[derive(FromRow, serde::Deserialize)]
+#[orm(entity = management)]
+pub struct Management {
+    pub app_id: String,
+    pub request_id: String,
+    pub run_id: String,
+    pub actor: String,
+    pub operation: String,
+    pub restart_name: Option<String>,
+    pub restart_occurrence: Option<i64>,
+    pub restart_deploy: Option<String>,
+    pub outcome: Option<String>,
+    pub run_state: Option<String>,
 }

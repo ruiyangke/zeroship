@@ -16,7 +16,10 @@ use zeroship_core::{
         SettlementReceipt,
     },
 };
-use zeroship_data_orm::{orm::Output, value, Value};
+use zeroship_data_orm::{
+    orm::{Database, Operation, Output},
+    value, Value,
+};
 use zeroship_workflow_manager::{Error, Options, Queue};
 
 macro_rules! case {
@@ -39,6 +42,11 @@ case!(
     sqlite_submission_and_competing_claims,
     postgres_submission_and_competing_claims,
     submission_and_competing_claims
+);
+case!(
+    sqlite_concurrent_scope_registration_preserves_identity_and_queue,
+    postgres_concurrent_scope_registration_preserves_identity_and_queue,
+    concurrent_scope_registration_preserves_identity_and_queue
 );
 case!(
     sqlite_delayed_jobs_and_redelivery,
@@ -232,7 +240,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
             .settle_authorized(
                 &authority,
                 &command,
-                || {
+                |_| {
                     checks.set(checks.get() + 1);
                     let final_check = checks.get() > 1;
                     let mut observed = authority.clone();
@@ -247,7 +255,7 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
                         Ok(observed)
                     }
                 },
-                || ready(Ok(authority.worker_id.clone())),
+                |_| ready(Ok(authority.worker_id.clone())),
             )
             .await;
         let _ = send.send(result);
@@ -274,8 +282,8 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
         .settle_authorized(
             &expired_authority,
             &command,
-            || ready(Err(Error::Denied)),
-            || ready(Ok(authority.worker_id.clone())),
+            |_| ready(Err(Error::Denied)),
+            |_| ready(Ok(authority.worker_id.clone())),
         )
         .await
         .unwrap();
@@ -307,6 +315,100 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
         stored(&fixture, &successor.id).await.unwrap()["state"],
         value!("ready")
     );
+}
+
+async fn concurrent_scope_registration_preserves_identity_and_queue(fixture: &Fixture) {
+    let hosts = futures::future::join_all((0..4).map(|_| queue(fixture, Options::default()))).await;
+    let database = fixture.database().await;
+    for round in 0..32 {
+        let app = AppId::mint();
+        register_scopes_together(fixture, &hosts, &app, round).await;
+        let initial = registered_scope(&database, &app).await;
+        assert_eq!(initial["id"], value!(app.as_str()));
+        assert_eq!(initial["lock_version"], value!(0));
+        let spec = job(&app);
+        hosts[0].submit(&spec).await.unwrap();
+        let authority = assignment(fixture, &app).await;
+        let delivery = hosts[1].claim(&authority).await.unwrap().unwrap();
+        assert_eq!(delivery.job, spec);
+        assert_eq!(delivery.attempt.get(), 1);
+        let written = database
+            .collection("queue_scopes")
+            .unwrap()
+            .execute(Operation::Update {
+                filter: value!({"id":app.as_str()}),
+                patch: value!({"lock_version":7}),
+                many: true,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(written, Output::Count(1)));
+        let before_scope = registered_scope(&database, &app).await;
+        assert_eq!(before_scope["lock_version"], value!(7));
+        let before_job = stored(fixture, &spec.id).await.unwrap();
+        assert_eq!(before_scope["id"], initial["id"]);
+        assert_eq!(before_job["state"], value!("leased"));
+        register_scopes_together(fixture, &hosts, &app, round).await;
+        assert_eq!(registered_scope(&database, &app).await, before_scope);
+        assert_eq!(stored(fixture, &spec.id).await.unwrap(), before_job);
+        assert_eq!(hosts[2].claim(&authority).await.unwrap(), None);
+        let command = settlement(&delivery, Vec::new());
+        let receipt = hosts[3].settle(&authority, &command).await.unwrap();
+        assert_eq!(
+            hosts[0].settle(&authority, &command).await.unwrap(),
+            receipt
+        );
+    }
+}
+
+async fn register_scopes_together(fixture: &Fixture, hosts: &[Queue], app: &AppId, round: usize) {
+    let registrations =
+        futures::future::join_all(hosts.iter().map(|host| host.register_scope(app)));
+    let results = if let Admin::Postgres(admin) = &fixture.admin {
+        admin
+            .batch_execute("BEGIN; LOCK TABLE workflow_manager.queue_scopes IN SHARE MODE")
+            .await
+            .unwrap();
+        let release = async {
+            compio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    let blocked: i64 = admin.query(
+                        "SELECT count(DISTINCT l.pid) FROM pg_locks l WHERE NOT l.granted \
+                         AND l.mode='RowExclusiveLock' AND l.relation='workflow_manager.queue_scopes'::regclass",
+                        &[],
+                    ).await.unwrap()[0].get(0);
+                    if usize::try_from(blocked).unwrap() == hosts.len() {
+                        break;
+                    }
+                    compio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .expect("independent registrations must reach the shared table barrier");
+            admin.batch_execute("COMMIT").await.unwrap();
+        };
+        let (results, ()) = futures::join!(registrations, release);
+        results
+    } else {
+        registrations.await
+    };
+    for (host, result) in results.into_iter().enumerate() {
+        result.unwrap_or_else(|error| panic!("registration round {round}, host {host}: {error:?}"));
+    }
+}
+
+async fn registered_scope(database: &Database, app: &AppId) -> Value {
+    let Output::Rows { mut rows, .. } = database
+        .collection("queue_scopes")
+        .unwrap()
+        .find(value!({"id":app.as_str()}), value!({"limit":2}))
+        .await
+        .unwrap()
+    else {
+        panic!("scope query returned a count");
+    };
+    assert_eq!(rows.len(), 1);
+    rows.remove(0)
 }
 
 async fn submission_and_competing_claims(fixture: &Fixture) {
@@ -567,10 +669,13 @@ async fn assert_replay_authentication(
             .settle_authorized(
                 &expired,
                 command,
-                || async { panic!("receipt replay must not require live placement") },
-                || {
+                |_| async { panic!("receipt replay must not require live placement") },
+                |tx| {
                     identity_checked.set(true);
-                    ready(Ok(authority.worker_id.clone()))
+                    async move {
+                        assert_transaction_job(&tx, &command.delivery.job, "settled").await?;
+                        Ok(authority.worker_id.clone())
+                    }
                 }
             )
             .await
@@ -583,8 +688,8 @@ async fn assert_replay_authentication(
             .settle_authorized(
                 &expired,
                 command,
-                || ready(Ok(expired.clone())),
-                || ready(Ok(WorkerId::mint()))
+                |_| ready(Ok(expired.clone())),
+                |_| ready(Ok(WorkerId::mint()))
             )
             .await,
         Err(Error::Denied)
@@ -594,8 +699,8 @@ async fn assert_replay_authentication(
             .settle_authorized(
                 &expired,
                 command,
-                || ready(Ok(expired.clone())),
-                || ready(Err(Error::Denied))
+                |_| ready(Ok(expired.clone())),
+                |_| ready(Err(Error::Denied))
             )
             .await,
         Err(Error::Denied)
@@ -612,13 +717,9 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let checks = Cell::new(0);
     assert_eq!(
         queue
-            .claim_authorized(&authority, || {
+            .claim_authorized(&authority, |tx| {
                 checks.set(checks.get() + 1);
-                ready(if checks.get() == 1 {
-                    Ok(authority.clone())
-                } else {
-                    Err(Error::Denied)
-                })
+                revoke_in_transaction(tx, &authority, &spec, ["ready", "leased"], checks.get())
             })
             .await,
         Err(Error::Denied)
@@ -626,17 +727,14 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     let row = stored(fixture, &spec.id).await.unwrap();
     assert_eq!(row["state"], value!("ready"));
     assert_eq!(row["attempt"], value!(0));
+    assert_authorization_rolled_back(fixture, &app).await;
     let delivery = queue.claim(&authority).await.unwrap().unwrap();
     checks.set(0);
     assert_eq!(
         queue
-            .heartbeat_authorized(&authority, &delivery, || {
+            .heartbeat_authorized(&authority, &delivery, |tx| {
                 checks.set(checks.get() + 1);
-                ready(if checks.get() == 1 {
-                    Ok(authority.clone())
-                } else {
-                    Err(Error::Denied)
-                })
+                revoke_in_transaction(tx, &authority, &spec, ["leased", "leased"], checks.get())
             })
             .await,
         Err(Error::Denied)
@@ -645,6 +743,7 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
         stored(fixture, &spec.id).await.unwrap()["lease_deadline"],
         value!(delivery.deadline.get())
     );
+    assert_authorization_rolled_back(fixture, &app).await;
     let successor = job(&app);
     let command = settlement(&delivery, vec![successor.clone()]);
     checks.set(0);
@@ -653,26 +752,89 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
             .settle_authorized(
                 &authority,
                 &command,
-                || {
+                |tx| {
                     checks.set(checks.get() + 1);
-                    ready(if checks.get() == 1 {
-                        Ok(authority.clone())
-                    } else {
-                        Err(Error::Denied)
-                    })
+                    revoke_in_transaction(
+                        tx,
+                        &authority,
+                        &spec,
+                        ["leased", "settled"],
+                        checks.get(),
+                    )
                 },
-                || ready(Ok(authority.worker_id.clone()))
+                |_| ready(Ok(authority.worker_id.clone()))
             )
             .await,
         Err(Error::Denied)
     );
     assert!(stored(fixture, &successor.id).await.is_none());
+    assert_authorization_rolled_back(fixture, &app).await;
     assert_eq!(
         stored(fixture, &spec.id).await.unwrap()["state"],
         value!("leased")
     );
     cancellation_rolls_back_settlement(fixture, &queue, &authority, &command).await;
     claim_timeout_rolls_back(fixture).await;
+}
+
+async fn assert_transaction_job(tx: &Database, spec: &JobSpec, state: &str) -> Result<(), Error> {
+    let Output::Rows { rows, .. } = tx
+        .collection("jobs")?
+        .find(
+            value!({"app_id":spec.app_id.as_str(),"id":spec.id.as_str()}),
+            value!({"limit":1}),
+        )
+        .await?
+    else {
+        panic!("authorization job query returned a count");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["state"], value!(state));
+    Ok(())
+}
+
+async fn revoke_in_transaction(
+    tx: Database,
+    authority: &Assignment,
+    spec: &JobSpec,
+    states: [&str; 2],
+    check: i64,
+) -> Result<Assignment, Error> {
+    assert!((1..=2).contains(&check));
+    assert_transaction_job(&tx, spec, states[usize::try_from(check - 1).unwrap()]).await?;
+    let written = tx
+        .collection("queue_scopes")?
+        .execute(Operation::Update {
+            filter: value!({"id":authority.app_id.as_str(),"lock_version":check-1}),
+            patch: value!({"$inc":{"lock_version":1}}),
+            many: true,
+        })
+        .await?;
+    assert!(
+        matches!(written, Output::Count(1)),
+        "authorization must see its previous write in the same transaction"
+    );
+    if check == 1 {
+        Ok(authority.clone())
+    } else {
+        Err(Error::Denied)
+    }
+}
+
+async fn assert_authorization_rolled_back(fixture: &Fixture, app: &AppId) {
+    let Output::Rows { rows, .. } = fixture
+        .database()
+        .await
+        .collection("queue_scopes")
+        .unwrap()
+        .find(value!({"id":app.as_str()}), value!({"limit":1}))
+        .await
+        .unwrap()
+    else {
+        panic!("authorization scope query returned a count");
+    };
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["lock_version"], value!(0));
 }
 
 async fn cancellation_rolls_back_settlement(
@@ -698,7 +860,7 @@ async fn cancellation_rolls_back_settlement(
             .settle_authorized(
                 authority,
                 command,
-                || {
+                |_| {
                     checks.set(checks.get() + 1);
                     let complete = checks.get() == 1;
                     let authority = authority.clone();
@@ -710,7 +872,7 @@ async fn cancellation_rolls_back_settlement(
                         }
                     }
                 },
-                || ready(Ok(authority.worker_id.clone()))
+                |_| ready(Ok(authority.worker_id.clone()))
             )
             .await,
         Err(Error::Timeout)
@@ -744,7 +906,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
     let checks = Cell::new(0);
     let timed = compio::time::timeout(
         Duration::from_secs(1),
-        expiring.claim_authorized(&expiring_authority, || {
+        expiring.claim_authorized(&expiring_authority, |_| {
             checks.set(checks.get() + 1);
             let first = checks.get() == 1;
             let authority = expiring_authority.clone();
