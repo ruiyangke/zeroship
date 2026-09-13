@@ -10,7 +10,7 @@ export interface ServerBinding {
   wireId: string;
   sourceFile: string;
   exportName: string;
-  kind: "query" | "mutation" | "stream" | "subscription";
+  kind: "query" | "mutation" | "action" | "stream" | "subscription";
   /** Return the actual procedure through a dynamic import when Rust requests it. */
   lazy?: boolean;
 }
@@ -25,6 +25,24 @@ export function pickEntryWireId(p: {
 }): string {
   const explicit = p.config?.id;
   return typeof explicit === "string" && explicit.length > 0 ? explicit : p.exportName;
+}
+
+/** Convert the transform's current discovery records into entry imports. */
+export function serverBindingsFromState(
+  state: Pick<TransformState, "discoveredProcedures">,
+): Map<string, ServerBinding> {
+  const bindings = new Map<string, ServerBinding>();
+  for (const procedure of state.discoveredProcedures) {
+    const key = `${procedure.filePath}::${procedure.exportName}`;
+    bindings.set(key, {
+      wireId: pickEntryWireId(procedure),
+      sourceFile: procedure.filePath,
+      exportName: procedure.exportName,
+      kind: procedure.kind,
+      ...(procedure.lazy ? { lazy: true } : {}),
+    });
+  }
+  return bindings;
 }
 
 // These statements only normalize exports. The host owns schema preparation,
@@ -147,7 +165,9 @@ export function rpcRegistryPlugin(opts: {
       if (id !== SERVER_ENTRY_RESOLVED_ID) return null;
       return buildServerEntrySource({
         userEntryRel: opts.userEntryRel,
-        bindings: opts.getBindings?.(),
+        bindings: opts.getBindings?.() ?? (
+          opts.state ? serverBindingsFromState(opts.state) : undefined
+        ),
       });
     },
   };
