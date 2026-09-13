@@ -142,7 +142,7 @@ fn push_metric(out: &mut Vec<DrainedMetric>, meter: &str, value: u64) {
 #[derive(Debug)]
 pub struct Meter {
     source: String,
-    apps: RwLock<HashMap<String, AppCounters>>,
+    apps: RwLock<HashMap<AppId, AppCounters>>,
 }
 
 impl Default for Meter {
@@ -193,11 +193,11 @@ impl Meter {
     /// Increment `metric` for `app_id` by `n`. Auto-vivifies the app's counter
     /// set on first touch. A `metric` matching one of the five fixed names lands
     /// in that fixed field; everything else is a custom metric.
-    pub fn increment(&self, app_id: &str, metric: &str, n: u64) {
+    pub fn increment(&self, app_id: &AppId, metric: &str, n: u64) {
         self.with_app_counters(app_id, |counters| counters.add(metric, n));
     }
 
-    fn with_app_counters<R>(&self, app_id: &str, f: impl FnOnce(&AppCounters) -> R) -> R {
+    fn with_app_counters<R>(&self, app_id: &AppId, f: impl FnOnce(&AppCounters) -> R) -> R {
         // Fast path: read lock, app already present.
         {
             let apps = self.apps.read().unwrap();
@@ -208,13 +208,13 @@ impl Meter {
         // Slow path: write lock, insert if another thread did not already
         // create the app after the read guard was released.
         let mut apps = self.apps.write().unwrap();
-        f(apps.entry(app_id.to_string()).or_default())
+        f(apps.entry(app_id.clone()).or_default())
     }
 
     /// Record one completed request's platform counters in a single call.
     pub fn record_request(
         &self,
-        app_id: &str,
+        app_id: &AppId,
         cpu_us: u64,
         wall_us: u64,
         egress_bytes: u64,
@@ -270,33 +270,13 @@ impl Meter {
                 // growing exclusive-lock hold on every drain.
                 return false;
             }
-            // A key that is not a well-formed app id can produce no attributable
-            // event, so its counters are dropped and the entry evicted rather
-            // than carried and re-warned every drain. This arm is not reachable
-            // from the shipped producers - the worker stamps the key from the
-            // server-injected app id - and a hit means an untrusted or
-            // hand-built key reached `increment`, which is worth a warning
-            // precisely because the usage it names cannot be billed.
-            let app = match AppId::parse(app_id) {
-                Ok(id) => id,
-                Err(e) => {
-                    tracing::warn!(
-                        app_id = %app_id,
-                        error = %e,
-                        "meter: drain skipped a key that is not an app id"
-                    );
-                    return false;
-                }
-            };
-            // The worker producer has only the server-injected app id, so the
-            // subject is left UNSET and the control plane resolves the owning
-            // organization from the app registry before provider forwarding.
+            // Control resolves the owning organization before provider forwarding.
             for metric in drained {
                 events.push(UsageEvent {
                     event_id: Uuid::now_v7().to_string(),
                     source: self.source.clone(),
                     subject: UsageSubject {
-                        app: Some(app.clone()),
+                        app: Some(app_id.clone()),
                         organization: None,
                     },
                     meter: metric.meter,
@@ -322,8 +302,8 @@ fn drain_wall_clock_unix() -> i64 {
 mod tests {
     use super::*;
 
-    fn app() -> String {
-        AppId::mint().as_str().to_string()
+    fn app() -> AppId {
+        AppId::mint()
     }
 
     fn event_value(events: &[UsageEvent], app_id: &AppId, meter: &str) -> Option<u64> {
@@ -372,7 +352,7 @@ mod tests {
         assert_eq!(m.tracked_app_count(), 1);
         let events = m.drain();
         assert_eq!(
-            event_value(&events, &AppId::parse(&a).unwrap(), "requests"),
+            event_value(&events, &a, "requests"),
             Some(7),
             "a re-touched app must count from zero, not resume a stale total",
         );
@@ -386,7 +366,7 @@ mod tests {
         m.increment(&a, "requests", 4);
 
         let events = m.drain();
-        let id = AppId::parse(&a).unwrap();
+        let id = a.clone();
         let request = event(&events, &id, "requests");
         assert_eq!(request.value, 5);
         assert_eq!(request.source, "worker-a");
@@ -411,7 +391,7 @@ mod tests {
         m.increment(&a, "emails_sent", 2);
 
         let events = m.drain();
-        let id = AppId::parse(&a).unwrap();
+        let id = a.clone();
         assert_eq!(event_value(&events, &id, "emails_sent"), Some(5));
         assert_eq!(event_value(&events, &id, "requests"), None);
     }
@@ -424,7 +404,7 @@ mod tests {
         // metric, not a custom duplicate.
         m.increment(&a, "cpu_us", 100);
         let events = m.drain();
-        let id = AppId::parse(&a).unwrap();
+        let id = a.clone();
         assert_eq!(event_value(&events, &id, "cpu_us"), Some(100));
         assert_eq!(events.len(), 1);
     }
@@ -439,8 +419,8 @@ mod tests {
         m.increment(&b, "widgets", 1);
 
         let events = m.drain();
-        let ia = AppId::parse(&a).unwrap();
-        let ib = AppId::parse(&b).unwrap();
+        let ia = a.clone();
+        let ib = b.clone();
         assert_eq!(event_value(&events, &ia, "requests"), Some(10));
         assert_eq!(event_value(&events, &ia, "widgets"), None);
         assert_eq!(event_value(&events, &ib, "requests"), Some(3));
@@ -455,7 +435,7 @@ mod tests {
         m.record_request(&a, 100, 300, 64, 16);
 
         let events = m.drain();
-        let id = AppId::parse(&a).unwrap();
+        let id = a.clone();
         assert_eq!(event_value(&events, &id, "requests"), Some(2));
         assert_eq!(event_value(&events, &id, "cpu_us"), Some(600));
         assert_eq!(event_value(&events, &id, "wall_us"), Some(1500));

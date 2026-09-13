@@ -224,7 +224,7 @@ fn e2e_storage_streaming_localfs() {
 
 /// Build a Runtime over `LocalFs` + a real Meter bound to `app_id`, pump
 /// it, run the fetch handler, and return `(status, body, meter)`. Faithful:
-/// drives the REAL `StorageBinding::with_backend_and_meter` → register
+/// drives the REAL `StorageBinding::new` → register
 /// (STORAGE_METER) → callbacks path.
 fn run_app_metered(app: &'static str, app_id: &str) -> (u16, String, Arc<zeroship_metering::Meter>) {
     let meter = Arc::new(zeroship_metering::Meter::new());
@@ -303,14 +303,34 @@ export default {
 "#;
 
 #[test]
+fn metering_rejects_non_app_identity_before_binding() {
+    init_v8();
+    let dir = tempfile::tempdir().unwrap();
+    let meter = Arc::new(zeroship_metering::Meter::new());
+    let backend: Arc<dyn zeroship_storage::Backend> = Arc::new(LocalFs::new(dir.path()));
+    let plugin = StorageBinding::new(StorageStore::from_backend(backend), Some(Arc::clone(&meter)));
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    let user = zeroship_core::UserId::mint();
+    for invalid in ["00000000-0000-7000-8000-000000000001", user.as_str()] {
+        v8::tc_scope!(let tc, scope);
+        assert!(plugin.build_instance(tc, invalid).is_none());
+        assert!(tc.has_caught());
+    }
+    assert!(meter.drain().is_empty());
+}
+
+#[test]
 fn metering_storage_ops_emit_ops_and_bytes_scoped_to_app() {
-    let app_id = "00000000-0000-7000-8000-0000000000c3";
+    let id = zeroship_core::AppId::mint();
+    let app_id = id.as_str();
     let (status, body, meter) = run_app_metered(STORAGE_METER_APP, app_id);
     assert_eq!(status, 200, "storage metering app non-200; body: {body}");
     assert!(body.contains(r#""ok":true"#), "storage metering app failed; body: {body}");
 
     let events = meter.drain();
-    let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
     assert_eq!(
         usage_value(&events, &id, "storage_ops"),
         Some(4),
@@ -346,13 +366,13 @@ export default {
     },
 };
 "#;
-    let app_id = "00000000-0000-7000-8000-0000000000d4";
+    let id = zeroship_core::AppId::mint();
+    let app_id = id.as_str();
     let (status, body, meter) = run_app_metered(APP, app_id);
     assert_eq!(status, 200, "non-200; body: {body}");
     assert!(body.contains(r#""ok":true"#), "app failed; body: {body}");
 
     let events = meter.drain();
-    let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
     assert!(
         !events.iter().any(|event| event.subject.app.as_ref() == Some(&id)),
         "a failed/validation-rejected storage op must emit no metric; got {:?}",

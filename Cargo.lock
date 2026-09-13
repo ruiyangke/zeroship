@@ -8229,6 +8229,7 @@ dependencies = [
  "uuid",
  "v8",
  "zeroship-core",
+ "zeroship-id",
  "zeroship-kv",
  "zeroship-metering",
  "zeroship-runtime",

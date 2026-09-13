@@ -1695,14 +1695,7 @@ fn record_gateway_egress(state: &GateState, app_id: &AppId, response: &mut HttpR
     }
     if let BodySize::Sized(n) = response.body().size() {
         if n > 0 {
-            // `zeroship_metering::meter::Meter::drain` parses this key back
-            // with `AppId::parse` and, on failure, SKIPS AND EVICTS the
-            // counters behind a `tracing::warn!` - so an app whose key stops
-            // parsing serves traffic and is never billed, with the log noise
-            // decaying by design. The meter key is therefore the typed id's
-            // printed form, `app_id.as_str()`, which is exactly what
-            // `AppId::parse` admits.
-            state.meter.increment(app_id.as_str(), "gateway_egress_bytes", n);
+            state.meter.increment(app_id, "gateway_egress_bytes", n);
         }
     }
 }
@@ -2748,10 +2741,13 @@ async fn handle_auth_callback(
             return render_callback_error("session create failed");
         }
     };
+    let Ok(global_user_id) = UserId::parse(&claims.sub) else {
+        return render_callback_error("id_token sub is not a global user id");
+    };
     let session = match crate::sessions::create(
         &mut conn,
         &crate::sessions::NewSession {
-            user_id: &claims.sub,
+            user_id: &global_user_id,
             // `zeroship.gateway_sessions.app_id` is a `text` column that
             // holds the route table's typed id directly.
             app_id: &app_id,
@@ -2785,9 +2781,6 @@ async fn handle_auth_callback(
     //    (the SAME mint path the SDK popup flow uses — one cookie shape, one
     //    verifier). `claims.sub` is the global user id; the helper derives the
     //    per-app `pws_` + relay alias before signing.
-    let Ok(global_user_id) = UserId::parse(&claims.sub) else {
-        return render_callback_error("id_token sub is not a global user id");
-    };
     let amr = claims.amr.clone().unwrap_or_default();
     let session_cookie = match crate::auth_token::issue_interactive_session_cookie(
         &state,
@@ -5905,8 +5898,8 @@ mod tests {
         let app_id = AppId::mint();
         let first = zeroship_metering::Meter::with_source("gate-pod-3");
         let second = zeroship_metering::Meter::with_source("gate-pod-3");
-        first.increment(app_id.as_str(), "gateway_egress_bytes", 1);
-        second.increment(app_id.as_str(), "gateway_egress_bytes", 1);
+        first.increment(&app_id, "gateway_egress_bytes", 1);
+        second.increment(&app_id, "gateway_egress_bytes", 1);
 
         let first_event = first.drain().pop().expect("first usage event");
         let second_event = second.drain().pop().expect("second usage event");

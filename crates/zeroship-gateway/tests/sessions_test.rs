@@ -74,12 +74,11 @@ async fn create_validate_revoke_roundtrip() {
     let app_id = AppId::mint();
     insert_app(&client, &app_id).await;
     let user_id = insert_user(&client, "gateway-session").await;
-    let user_id_text = user_id.as_str().to_string();
 
     let session = create(
         &mut client,
         &NewSession {
-            user_id: &user_id_text,
+            user_id: &user_id,
             sid: None,
             app_id: &app_id,
             email: Some("test@zeroship.test"),
@@ -96,7 +95,7 @@ async fn create_validate_revoke_roundtrip() {
     .await
     .expect("create");
 
-    assert_eq!(session.user_id, user_id_text);
+    assert_eq!(session.user_id, user_id);
     assert_eq!(session.app_id, app_id);
     assert_eq!(session.email.as_deref(), Some("test@zeroship.test"));
     assert_eq!(session.name.as_deref(), Some("Test User"));
@@ -146,7 +145,7 @@ async fn create_validate_revoke_roundtrip() {
 
     // Revoke (per-app, the only revoke path under RLS) and confirm the row
     // stops resolving, which is what says `revoked_at` was written.
-    let revoked = revoke_app_sessions_for_user(&mut client, &app_id, &user_id_text)
+    let revoked = revoke_app_sessions_for_user(&mut client, &app_id, &user_id)
         .await
         .expect("revoke");
     assert_eq!(revoked, 1, "exactly the one session for (app_id, user) is revoked");

@@ -607,12 +607,14 @@ async fn exchange_device_code_locked(
                 tracing::error!("device token: approved grant missing principal_id");
                 return Err(OAuthError::server_error("device grant is incomplete"));
             };
-            let user_id =
-                crate::user_id::parse_stored(&raw_user_id, "device grant principal_id is invalid")
-                    .map_err(|err| {
-                        tracing::error!(error = %err, "device token: principal_id decode failed");
-                        OAuthError::server_error("device grant is incomplete")
-                    })?;
+            let user_id = crate::entity_ids::parse_user_id(
+                &raw_user_id,
+                "device grant principal_id is invalid",
+            )
+            .map_err(|err| {
+                tracing::error!(error = %err, "device token: principal_id decode failed");
+                OAuthError::server_error("device grant is incomplete")
+            })?;
             let auth_credential_version: i64 = row.get("auth_credential_version");
             lock_refresh_user_xact(db, &user_id).await.map_err(|err| {
                 tracing::error!(

@@ -1457,7 +1457,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Step 1 — upfront auth fence.
             authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["ssn".to_string()],
@@ -1514,7 +1514,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Step 3 — granted audit row lands.
             audit_query_hint_granted(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["ssn".to_string()],
@@ -1576,7 +1576,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 
             let actor = Some(crate::value!({ "kind": "user", "id": "actor_x" }));
             let err = authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["ssn".to_string()],
@@ -1621,7 +1621,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
             host.clear_mask_policy_cache(app_id);
             let actor = Some(crate::value!({ "kind": "auto" }));
             let err = authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["does_not_exist".to_string()],

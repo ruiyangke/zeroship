@@ -150,7 +150,11 @@ pub async fn redeem(
     rows.first()
         .map(|row| {
             Ok(RedeemedToken {
-                user_id: crate::user_id::from_row(row, "user_id", "verification redeem")?,
+                user_id: crate::entity_ids::user_id_with_context(
+                    row,
+                    "user_id",
+                    "verification redeem",
+                )?,
                 email: row.get("email"),
             })
         })
@@ -206,7 +210,7 @@ pub async fn redeem_and_mark_verified(
     rows.first()
         .map(|row| {
             Ok(RedeemedToken {
-                user_id: crate::user_id::from_row(
+                user_id: crate::entity_ids::user_id_with_context(
                     row,
                     "user_id",
                     "verification redeem and mark verified",

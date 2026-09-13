@@ -75,7 +75,7 @@ impl StreamEgressMeter {
     fn record(&self, n: u64) {
         if n > 0 {
             self.meter
-                .increment(self.app_id.as_str(), "gateway_egress_bytes", n);
+                .increment(&self.app_id, "gateway_egress_bytes", n);
         }
     }
 }

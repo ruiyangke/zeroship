@@ -1180,13 +1180,10 @@ impl RuntimeInner {
         );
 
         // Create RuntimeState (no server_handle -- compio, not tokio)
-        // The meter key is the PRINTED typed id. `Meter::drain` parses it back and
-        // drops the counters if it cannot, so any other rendering loses this
-        // app's billing telemetry silently - no error, just missing invoice lines.
         let meter_handle = app_id
             .as_ref()
             .zip(meter)
-            .map(|(id, meter)| zeroship_metering::MeterHandle::new(meter, id.as_str().to_string()));
+            .map(|(id, meter)| zeroship_metering::MeterHandle::new(meter, id.clone()));
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
             env_vars,
             None,

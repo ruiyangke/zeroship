@@ -4,12 +4,12 @@
 //! keyed on `(client_id, sub)` with `sub` stored as TEXT. App wrapper and
 //! bearer paths use an app client id plus the wrapper's `pws_` pairwise
 //! subject. Control's platform CLI bearer path uses the fixed `zeroship-cli`
-//! client id plus the principal UUID. Every reader rejects a token when the
+//! client id plus the principal `UserId`. Every reader rejects a token when the
 //! exact pair has `revoked_after > token.iat`.
 //!
 //! There is no global subject-only denylist. The previous
 //! `wrapper_revoked_subjects` table was write-only dead code and was removed;
-//! UUID-keyed CLI revocation remains namespaced by `zeroship-cli` in this
+//! CLI user revocation remains namespaced by `zeroship-cli` in this
 //! shared table. Account deletion writes that platform-family cutoff.
 
 use std::collections::HashMap;
@@ -25,7 +25,7 @@ pub const WRAPPER_REVOCATION_RETENTION_HOURS: i32 = 24;
 // The sole cross-node wrapper-token revocation mechanism. It holds one row
 // per `(client_id, sub)` token family, so a caller need not enumerate live
 // `jti`s. App callers use a per-app client id and `pws_` subject. Control's
-// platform CLI reader uses `zeroship-cli` and a principal UUID.
+// platform CLI reader uses `zeroship-cli` and a principal `UserId`.
 
 /// Upsert the family marker for `(client_id, sub)`, stamping
 /// `revoked_after = NOW()`. Any token in this family with `iat < NOW()` is

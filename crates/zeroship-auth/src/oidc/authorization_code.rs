@@ -712,11 +712,15 @@ async fn exchange_authorization_code(
         pkce_method: row.get("pkce_method"),
         granted_scopes: row.get("granted_scopes"),
         nonce: row.try_get("nonce").ok().flatten(),
-        user_id: crate::user_id::from_row(row, "user_id", "authorization code user_id is invalid")
-            .map_err(|err| {
-                tracing::error!(error = %err, "token: authorization code user_id decode failed");
-                OAuthError::server_error("authorization code store unavailable")
-            })?,
+        user_id: crate::entity_ids::user_id_with_context(
+            row,
+            "user_id",
+            "authorization code user_id is invalid",
+        )
+        .map_err(|err| {
+            tracing::error!(error = %err, "token: authorization code user_id decode failed");
+            OAuthError::server_error("authorization code store unavailable")
+        })?,
         auth_credential_version: row.get("auth_credential_version"),
         sid: row.get("sid"),
     };
@@ -959,7 +963,7 @@ async fn revoke_replayed_authorization_code_lineage(
         return Ok(false);
     };
     let client_id: String = row.get("client_id");
-    let user_id = crate::user_id::from_row(
+    let user_id = crate::entity_ids::user_id_with_context(
         row,
         "user_id",
         "authorization code replay user_id is invalid",

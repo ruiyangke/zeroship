@@ -369,7 +369,9 @@ async fn find_due(db: &Client) -> Result<Vec<UserId>> {
         .await
         .map_err(|e| AuthError::Db(format!("account_reaper find_due: {e}")))?;
     rows.iter()
-        .map(|row| crate::user_id::from_row(row, "id", "account reaper user_id is invalid"))
+        .map(|row| {
+            crate::entity_ids::user_id_with_context(row, "id", "account reaper user_id is invalid")
+        })
         .collect()
 }
 
