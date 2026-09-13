@@ -15,6 +15,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "check": "tsc -p tsconfig.test.json",
     "lint:pkg": "publint && attw --pack .",
     "test": "node --import tsx --test test/*.test.ts"
   },

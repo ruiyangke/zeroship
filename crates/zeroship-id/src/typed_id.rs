@@ -1,13 +1,11 @@
-//! Typed IDs — UUIDv7 with an entity-type prefix and base36 encoding.
+//! Typed IDs with an entity prefix and fixed-width lowercase Base36 body.
 //!
-//! Format: `{prefix}_{base36(uuidv7)}` — e.g. `usr_0k3m9qw1x7ry2bn5td8vc4h`
+//! Format: `{prefix}_{base36(uuid)}` — e.g.
+//! `usr_0000000002e4nenowz3qmamtd`.
 //!
-//! - UUIDv7: timestamp-ordered, globally unique, sortable by creation time
+//! - Minted IDs use UUIDv7 and sort by creation time under bytewise collation
 //! - Base36: `0-9a-z`, 25 chars for 128 bits, single-case
-//! - Prefix: entity type (`usr`, `app`, `ses`) for debuggability
-//! - Storage: the typed-id STRING, not a raw UUID. Text `id` columns inherit
-//!   the database's default collation unless told otherwise, so the entity-id
-//!   DDL pins byte ordering. See [`BASE36`].
+//! - Stored values use the complete typed-ID string rather than a raw UUID
 
 /// Base36 alphabet — ascending in byte value, so under a BYTE-ordering
 /// collation lexicographic order matches numeric order for the high bits
@@ -418,11 +416,6 @@ pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<crate::app_id::App
     crate::app_id::AppId::parse(&format!("{APP_PREFIX}_{body}")).ok()
 }
 
-/// Generate a new user ID: `usr_{base36(uuidv7)}`
-pub fn new_user_id() -> String {
-    generate(USER_PREFIX)
-}
-
 /// Generate a new session ID: `ses_{base36(uuidv7)}`
 pub fn new_session_id() -> String {
     generate(SESSION_PREFIX)
@@ -485,10 +478,7 @@ pub fn new_plan_change_event_id() -> String {
     generate(PLAN_CHANGE_EVENT_PREFIX)
 }
 
-/// Generate a new spend-state-history surrogate ID: `she_{base36(uuidv7)}`. Minted by
-/// `spend.rs::persist_transition` when it appends a `spend_state_history` row; the value
-/// becomes the `billing_notifications.transition_id` for spend-driven notification kinds
-/// for spend-driven notification kinds.
+/// Generate a new spend-state-history surrogate ID: `she_{base36(uuidv7)}`.
 pub fn new_spend_history_id() -> String {
     generate(SPEND_HISTORY_PREFIX)
 }
@@ -708,13 +698,13 @@ mod tests {
 
     #[test]
     fn roundtrip_typed_id() {
-        let id = new_user_id();
-        assert!(id.starts_with("usr_"));
-        assert_eq!(id.len(), 29); // "usr_" + 25
-        let (prefix, uuid) = parse(&id).unwrap();
+        let id = crate::UserId::mint();
+        assert!(id.as_str().starts_with("usr_"));
+        assert_eq!(id.as_str().len(), USER_PREFIX.len() + 1 + BODY_LEN);
+        let (prefix, uuid) = parse(id.as_str()).unwrap();
         assert_eq!(prefix, "usr");
         let back = from_uuid_string("usr", &uuid.to_string()).unwrap();
-        assert_eq!(id, back);
+        assert_eq!(id.as_str(), back);
     }
 
     #[test]
@@ -806,7 +796,7 @@ mod tests {
 
     #[test]
     fn all_prefixes() {
-        let u = new_user_id();
+        let u = crate::UserId::mint();
         // The app id has no `new_app_id` free function; its one minter is the
         // typed `AppId`. Swept here anyway so the registry arm stays complete
         // and so APP_PREFIX keeps a caller that proves what it spells.
@@ -814,7 +804,7 @@ mod tests {
         let s = new_session_id();
         let w = new_wake_id();
         let p = new_plan_id();
-        assert!(u.starts_with("usr_"));
+        assert!(u.as_str().starts_with("usr_"));
         assert!(a.as_str().starts_with("app_"));
         assert!(s.starts_with("ses_"));
         assert!(w.starts_with("wak_"));
@@ -1095,9 +1085,9 @@ mod tests {
 
     #[test]
     fn parse_with_prefix_rejects_wrong_prefix() {
-        let id = new_user_id(); // prefix = "usr"
+        let id = crate::UserId::mint();
         let err =
-            parse_with_prefix(&id, "sbx").expect_err("wrong prefix must error");
+            parse_with_prefix(id.as_str(), "sbx").expect_err("wrong prefix must error");
         match err {
             ParseError::WrongPrefix { expected, got } => {
                 assert_eq!(expected, "sbx");
