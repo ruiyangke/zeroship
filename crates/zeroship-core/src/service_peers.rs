@@ -142,6 +142,8 @@ pub const GATEWAY_SERVICE_NAME: &str = "svc/gateway";
 pub const WORKER_SERVICE_NAME: &str = "svc/worker";
 /// The hierarchical name of the control plane's service identity.
 pub const CONTROL_SERVICE_NAME: &str = "svc/control";
+/// The hierarchical name of the workflow manager's service identity.
+pub const WORKFLOW_SERVICE_NAME: &str = "svc/workflow";
 /// The hierarchical name of the auth service's identity.
 pub const AUTH_SERVICE_NAME: &str = "svc/auth";
 
@@ -1019,11 +1021,12 @@ mod tests {
             GATEWAY_SERVICE_NAME,
             WORKER_SERVICE_NAME,
             CONTROL_SERVICE_NAME,
+            WORKFLOW_SERVICE_NAME,
             AUTH_SERVICE_NAME,
         ];
         // The floor is the whole constant list, not a sample: a name added
         // without an issuer that parses would be an edge nobody can address.
-        assert_eq!(names.len(), 4);
+        assert_eq!(names.len(), 5);
         for name in names {
             let issuer = service_issuer(name).expect("named service issuer parses");
             assert_eq!(issuer.as_str(), format!("spiffe://zeroship.ai/{name}"));

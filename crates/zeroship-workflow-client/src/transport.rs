@@ -1,6 +1,6 @@
 use super::{Error, Options};
 use futures::StreamExt;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use std::{io::Write, sync::Arc};
 use url::{Host, Url};
 use zeroship_core::{
@@ -35,6 +35,25 @@ impl Transport {
         audience: ServiceIssuer,
         options: Options,
     ) -> Result<Self, Error> {
+        let base = Self::configuration(raw, options)?;
+        Ok(Self {
+            base,
+            auth,
+            options,
+            audience,
+            client: cyper::Client::new(),
+        })
+    }
+
+    /// Validate the origin and exchange bounds without keys, sockets or a client.
+    ///
+    /// # Errors
+    /// Rejects the same origin and bounds as [`Self::new`].
+    pub fn validate_config(raw: &str, options: Options) -> Result<(), Error> {
+        Self::configuration(raw, options).map(|_| ())
+    }
+
+    fn configuration(raw: &str, options: Options) -> Result<Url, Error> {
         let base = Url::parse(raw).map_err(|_| Error::InvalidConfig)?;
         let loopback = match base.host() {
             Some(Host::Ipv4(ip)) => ip.is_loopback(),
@@ -54,13 +73,7 @@ impl Transport {
         {
             return Err(Error::InvalidConfig);
         }
-        Ok(Self {
-            base,
-            auth,
-            options,
-            audience,
-            client: cyper::Client::new(),
-        })
+        Ok(base)
     }
 
     /// Send metadata with a fresh assertion and deserialize a bounded receipt.

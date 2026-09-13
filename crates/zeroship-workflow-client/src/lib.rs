@@ -7,10 +7,12 @@
 
 mod control;
 mod jobs;
+mod queue_holds;
 mod transport;
 
 pub use control::ControlCoordinator;
 pub use jobs::LeasedJob;
+pub use queue_holds::QueueDeploymentHolds;
 pub use transport::Transport;
 
 use std::{collections::HashSet, sync::Arc, time::Duration};

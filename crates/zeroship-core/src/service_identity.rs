@@ -455,6 +455,10 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/acquire");
     pub const CONTROL_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/release");
+    pub const CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/queue/acquire");
+    pub const CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/queue/release");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
@@ -582,7 +586,7 @@ impl ServiceAuthorization {
 /// Return the measured service-to-service machine-identity table.
 #[must_use]
 pub fn service_allowlist() -> &'static [ServiceAuthorization] {
-    static ALLOWLIST: OnceLock<[ServiceAuthorization; 5]> = OnceLock::new();
+    static ALLOWLIST: OnceLock<[ServiceAuthorization; 6]> = OnceLock::new();
 
     ALLOWLIST.get_or_init(|| {
         let principal = |name| {
@@ -619,6 +623,13 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 ],
             ),
             ServiceAuthorization::new(principal("svc/migrate-server"), &[]),
+            ServiceAuthorization::new(
+                principal("svc/workflow"),
+                &[
+                    endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
+                    endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+                ],
+            ),
             ServiceAuthorization::new(
                 principal("svc/gateway"),
                 &[
