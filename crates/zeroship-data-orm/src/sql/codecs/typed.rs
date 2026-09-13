@@ -41,11 +41,7 @@ fn vector(field: &str, definition: &ColumnSchema, value: &Value) -> Result<(), C
     let valid = value.as_array().is_some_and(|values| {
         !values.is_empty()
             && dimensions == Some(values.len())
-            && values.iter().all(|value| {
-                value
-                    .as_f64()
-                    .is_some_and(|value| (value as f32).is_finite())
-            })
+            && values.iter().all(super::is_finite_vector_element)
     });
     if valid {
         Ok(())
@@ -180,6 +176,22 @@ pub fn prepare_value(
     prepare_value_at(field, definition, value, 0)
 }
 
+fn validate_nested_scalar(field: &str, kind: LogicalType, value: &Value) -> Result<(), CodecError> {
+    let valid = match kind {
+        LogicalType::Text => value.is_string(),
+        LogicalType::Integer | LogicalType::BigInt => {
+            matches!(value, Value::Number(number) if number.as_i64().is_some())
+        }
+        LogicalType::Number => value.is_number(),
+        _ => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid(field, kind.as_str()))
+    }
+}
+
 fn prepare_value_at(
     field: &str,
     definition: &ColumnSchema,
@@ -213,17 +225,7 @@ fn prepare_value_at(
     }
     // JSON members have no column codec to enforce their primitive type.
     if depth > 0 {
-        let valid = match kind {
-            LogicalType::Text => value.is_string(),
-            LogicalType::Integer | LogicalType::BigInt => {
-                matches!(value, Value::Number(number) if number.as_i64().is_some())
-            }
-            LogicalType::Number => value.is_number(),
-            _ => true,
-        };
-        if !valid {
-            return Err(invalid(field, kind.as_str()));
-        }
+        validate_nested_scalar(field, kind, value)?;
     }
     if kind == LogicalType::Boolean && !value.is_boolean() {
         return Err(invalid(field, "a boolean"));
