@@ -58,7 +58,7 @@ pub fn identity() -> &'static WorkerTestIdentity {
                 .expect("control keyring");
         // Keep the issuer identical so an impostor is refused for its key.
         let impostor = ServiceKeyring::from_parts(
-            gateway_issuer.clone(),
+            gateway_issuer,
             ServiceSigningKey::generate(),
             ServiceTrustBundle::new(),
         )
