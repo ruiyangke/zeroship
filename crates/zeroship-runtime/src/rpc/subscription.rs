@@ -376,7 +376,6 @@ fn advance_session(scope: &mut v8::PinScope, state: &SharedState, session: &mut 
                                 close_session(scope, state, session, 1000, "", false);
                                 return false;
                             }
-                            schedule_advance(state, session.server_ws_id);
                             return true;
                         }
                     }
@@ -511,7 +510,7 @@ fn iterator_step(
         )
     })?;
     let frame = encode_data_frame(tc, value)?;
-    send_text(state, session, frame);
+    send_data_text(state, session, frame);
     Ok(false)
 }
 
@@ -596,6 +595,18 @@ fn send_text(state: &SharedState, session: &Session, text: String) {
         session.server_ws_id,
         session.client_ws_id,
         vec![WsFrame::Text(text)],
+    );
+}
+
+fn send_data_text(state: &SharedState, session: &Session, text: String) {
+    pair::deliver_to_peer_with_completion(
+        state,
+        session.server_ws_id,
+        session.client_ws_id,
+        vec![WsFrame::Text(text)],
+        OpResult::SubscriptionAdvance {
+            ws_id: session.server_ws_id,
+        },
     );
 }
 

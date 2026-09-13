@@ -28,6 +28,7 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::websocket_native::network::WsEvent;
@@ -186,6 +187,17 @@ fn global_bool(runtime: &Runtime, name: &str) -> bool {
     })
 }
 
+fn global_u32(runtime: &Runtime, name: &str) -> u32 {
+    runtime.with_scope(|scope| {
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, name).unwrap();
+        global
+            .get(scope, key.into())
+            .and_then(|value| value.uint32_value(scope))
+            .unwrap_or_default()
+    })
+}
+
 /// Run the runtime's pump until the predicate fires (or timeout).
 async fn pump_until<F: FnMut() -> bool>(runtime: &Runtime, mut predicate: F) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -241,6 +253,69 @@ fn subscription_runs_async_gen_and_emits_frames() {
         );
         let (code, _) = close.expect("expected close frame");
         assert_eq!(code, 1000, "expected normal close, got {code}");
+    });
+}
+
+#[test]
+fn subscription_waits_for_transport_drain_before_next_pull() {
+    init_v8();
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: r#"
+            globalThis.__subscriptionPulls = 0;
+            async function* sub() {
+                while (true) {
+                    globalThis.__subscriptionPulls += 1;
+                    yield globalThis.__subscriptionPulls;
+                }
+            }
+            export default { rpc: {sub} };
+        "#
+        .into(),
+    }];
+    let runtime = Runtime::builder().modules(modules).build();
+    let client_id = upgrade(&runtime);
+    let server_ws_id = server_id(client_id);
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    {
+        use zeroship_runtime::websocket_native::network as nw;
+        let state = runtime.state();
+        nw::lookup_native_ws_state(&state, client_id)
+            .expect("client socket missing")
+            .borrow_mut()
+            .kernel_outbound = Some(tx);
+    }
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        inject_server_message(&runtime, server_ws_id, r#"{"t":"hello","input":null}"#);
+
+        let first = compio::time::timeout(Duration::from_secs(2), rx.next())
+            .await
+            .expect("first transport frame timed out")
+            .expect("transport closed before first frame");
+        assert_eq!(global_u32(&runtime, "__subscriptionPulls"), 1);
+
+        compio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(
+            global_u32(&runtime, "__subscriptionPulls"),
+            1,
+            "producer advanced before the transport completed its write"
+        );
+
+        let (event, completion) = first.split();
+        assert!(matches!(event, WsEvent::MessageText(ref text) if text.contains("\"t\":\"data\"")));
+        completion.complete(&runtime.state());
+
+        let second = compio::time::timeout(Duration::from_secs(2), rx.next())
+            .await
+            .expect("second transport frame timed out")
+            .expect("transport closed before second frame");
+        assert_eq!(global_u32(&runtime, "__subscriptionPulls"), 2);
+        let (event, _) = second.split();
+        assert!(matches!(event, WsEvent::MessageText(ref text) if text.contains("\"value\":2")));
+
+        inject_server_close(&runtime, server_ws_id, 1000, "done");
     });
 }
 

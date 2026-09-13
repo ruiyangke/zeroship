@@ -1375,7 +1375,7 @@ async fn handle_websocket_upgrade(
     let kernel_rx = {
         use crate::websocket_native::network as nw;
         use futures::channel::mpsc;
-        let (tx, rx) = mpsc::unbounded::<nw::WsEvent>();
+        let (tx, rx) = mpsc::unbounded::<nw::KernelOutboundEvent>();
         let state = runtime.state();
         if let Some(ws) = nw::lookup_native_ws_state(&state, ws_id) {
             ws.borrow_mut().kernel_outbound = Some(tx);
@@ -1551,7 +1551,7 @@ async fn native_ws_pump(
     stream: &mut TcpStream,
     server_ws_id: u32,
     mut kernel_rx: futures::channel::mpsc::UnboundedReceiver<
-        crate::websocket_native::network::WsEvent,
+        crate::websocket_native::network::KernelOutboundEvent,
     >,
     runtime: &Runtime,
     ws_pending: Vec<u8>,
@@ -1617,8 +1617,8 @@ async fn native_ws_pump(
         let mut s = stream_shared;
         loop {
             futures::select! {
-                ev = kernel_rx.next().fuse() => {
-                    let Some(ev) = ev else {
+                outbound = kernel_rx.next().fuse() => {
+                    let Some(outbound) = outbound else {
                         // kernel_outbound dropped — the WS state
                         // was destroyed. Wait only on close_rx
                         // from now on.
@@ -1630,10 +1630,12 @@ async fn native_ws_pump(
                         }
                         return;
                     };
+                    let (ev, completion) = outbound.split();
                     let mut got_close = false;
                     if !write_kernel_event(&mut s, ev, &mut got_close).await {
                         return;
                     }
+                    completion.complete(&runtime.state());
                     if got_close {
                         return;
                     }
