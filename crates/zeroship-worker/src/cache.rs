@@ -497,7 +497,7 @@ fn app_visible_env_vars(app_id: &str, deploy_hash: Option<&str>) -> HashMap<Stri
     env_vars
 }
 
-fn build_runtime(
+async fn build_runtime(
     app_id: &AppId,
     modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
@@ -532,13 +532,13 @@ fn build_runtime(
         builder = builder.meter(meter);
     }
     let runtime = builder.build();
+    // Startup can await host operations; keep the isolate exited between turns.
+    runtime.exit_isolate();
 
     runtime
         .initialize(env)
+        .await
         .map_err(|e| format!("failed to initialize app runtime: {e}"))?;
-
-    // Exit isolate so other isolates can be created/entered on this thread.
-    runtime.exit_isolate();
 
     Ok(runtime)
 }
@@ -553,7 +553,7 @@ fn build_runtime(
 /// manifest pass `&Manifest::default()`, whose empty resource tree declares
 /// nothing and therefore refuses nothing.
 #[allow(clippy::too_many_arguments)]
-pub fn load_app(
+pub async fn load_app(
     app_id: AppId,
     modules: Vec<ModuleEntry>,
     app_limits: AppRuntimeLimits,
@@ -571,7 +571,7 @@ pub fn load_app(
         deploy_hash,
         runtime_descriptor,
         env,
-    )?;
+    ).await?;
     let policy = Rc::new(CompiledManifest::compile(manifest));
 
     CACHE.with(|c| {
@@ -634,7 +634,7 @@ pub fn get_declared_policy(app_id: &AppId) -> Option<Rc<CompiledManifest>> {
 /// maps hold the same shape; an entry whose policy could be absent invites a
 /// future dispatch path to reach for one and find `None`.
 #[allow(clippy::too_many_arguments)]
-pub fn load_pinned_workflow_app(
+pub async fn load_pinned_workflow_app(
     app_id: AppId,
     deploy_hash: &str,
     modules: Vec<ModuleEntry>,
@@ -653,7 +653,7 @@ pub fn load_pinned_workflow_app(
         Some(deploy_hash),
         runtime_descriptor,
         env,
-    )?;
+    ).await?;
     let policy = Rc::new(CompiledManifest::compile(manifest));
 
     CACHE.with(|c| {
@@ -1164,7 +1164,7 @@ mod tests {
                         Some("deploy_build_runtime_guard"),
                         None,
                         &EnvSnapshot::empty(),
-                    )
+                    ).await
                     .expect("the guard needs a runtime that actually built");
                     // The DSN is unreachable, so a build that DID connect would
                     // have failed above - but that is an argument about the
@@ -1765,7 +1765,7 @@ mod tests {
                     None,
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
-                )
+                ).await
                 .expect("app loads");
                 let runtime = get_runtime(&app_id).expect("runtime loaded");
                 let state = runtime.state();
@@ -1881,7 +1881,7 @@ mod tests {
                     None,
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
-                )
+                ).await
                 .expect("initial app loads");
 
                 let before = get_runtime(&app_id).expect("initial runtime cached");
@@ -1904,7 +1904,7 @@ mod tests {
                     ),
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
-                )
+                ).await
                 .expect_err("corrupt descriptor must fail the reload");
                 assert!(
                     err.contains("manifest.runtime_descriptor") && err.contains("indexes"),
@@ -1921,6 +1921,50 @@ mod tests {
         })
         .join()
         .expect("last-good preserve test thread panicked");
+    }
+
+    #[test]
+    fn async_startup_publishes_only_ready_isolates_and_preserves_a_failed_reload() {
+        std::thread::spawn(|| {
+            use futures::FutureExt;
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                init_cache(4, 4, KernelConfig {
+                    control_url: "http://127.0.0.1:1".into(),
+                    control_key: String::new(),
+                    db_service: None,
+                    kv_store: None,
+                    storage_backend: None,
+                    meter: Arc::new(zeroship_metering::Meter::new()),
+                });
+                let app_id = AppId::mint();
+                let manifest = Manifest::default();
+                let env = EnvSnapshot::empty();
+                let mut loading = Box::pin(load_app(
+                    app_id.clone(),
+                    br#"await new Promise(resolve => setTimeout(resolve, 10));
+                        export default { fetch() { return new Response("ready"); } }"#,
+                    AppRuntimeLimits::default(), AppNetPolicy::default(),
+                    Some("ready-deploy"), None, &manifest, &env,
+                ));
+                assert!(loading.as_mut().now_or_never().is_none(), "fixture must await startup");
+                assert!(get_runtime(&app_id).is_none(), "pending startup must not enter the cache");
+                loading.await.expect("ready app loads");
+                assert_eq!(fetch_body(&get_runtime(&app_id).unwrap()).await, (200, "ready".into()));
+
+                let mut reloading = Box::pin(load_app(
+                    app_id.clone(),
+                    br#"await new Promise(resolve => setTimeout(resolve, 10));
+                        throw new Error("candidate startup rejected");"#,
+                    AppRuntimeLimits::default(), AppNetPolicy::default(),
+                    Some("failed-deploy"), None, &manifest, &env,
+                ));
+                assert!(reloading.as_mut().now_or_never().is_none(), "fixture must await reload");
+                assert_eq!(fetch_body(&get_runtime(&app_id).unwrap()).await, (200, "ready".into()));
+                let error = reloading.await.expect_err("failed startup must reject the load");
+                assert!(error.contains("candidate startup rejected"), "{error}");
+                assert_eq!(fetch_body(&get_runtime(&app_id).unwrap()).await, (200, "ready".into()));
+            });
+        }).join().expect("async startup cache test thread");
     }
 
     #[test]
@@ -1961,7 +2005,7 @@ mod tests {
                     ),
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
-                )
+                ).await
                 .expect_err("first corrupt descriptor load must hard-error");
                 assert!(
                     err.contains("manifest.runtime_descriptor") && err.contains("indexes"),
@@ -2006,7 +2050,7 @@ mod tests {
                     None,
                     &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
-                )
+                ).await
                 .expect("app loads");
 
                 // Backdate the entry so a stamp would be unmistakable.

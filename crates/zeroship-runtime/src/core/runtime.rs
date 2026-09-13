@@ -92,10 +92,14 @@ use std::time::{Duration, Instant};
 
 use futures::stream::FuturesUnordered;
 
-use crate::init::{init_v8, load_polyfills_and_modules};
-use crate::http::{self, ResponseInfo, SettledResult, HTTP_CREATE_REQUEST_JS};
+use crate::init::init_v8;
+use crate::http::{self, ResponseInfo, SettledResult};
 use crate::modules::ModuleEntry;
 use crate::plugin::NativePlugin;
+use super::startup::{StartupState, WaitingRequest};
+
+#[path = "runtime_startup.rs"]
+mod startup_driver;
 use crate::state::{
     DispatchResult, OpResult, ResolveValue, RuntimeState, SharedState, SpawnedTimer,
     TimerResult,
@@ -387,10 +391,29 @@ impl Runtime {
     /// The worker calls this at load time so corrupt boot artifacts (including
     /// a present-but-invalid `manifest.runtime_descriptor`) reject the load
     /// instead of producing a stored schema-less isolate that fails later.
-    pub fn initialize(&self, env: &crate::EnvSnapshot) -> Result<(), String> {
-        self.inner
-            .borrow_mut()
-            .initialize_modules(self.modules.as_slice(), env)
+    pub async fn initialize(&self, env: &crate::EnvSnapshot) -> Result<(), String> {
+        let ready = {
+            let mut inner = self.inner.borrow_mut();
+            inner.enter_isolate();
+            let result = inner.initialize_modules(self.modules.as_slice(), env);
+            inner.exit_isolate();
+            result?
+        };
+        if ready { return Ok(()); }
+        self.start_pump();
+        futures::future::poll_fn(|cx| {
+            let mut inner = self.inner.borrow_mut();
+            match inner.startup_result() {
+                Ok(true) => std::task::Poll::Ready(Ok(())),
+                Err(error) => std::task::Poll::Ready(Err(error)),
+                Ok(false) => {
+                    if !inner.startup_waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+                        inner.startup_waiters.push(cx.waker().clone());
+                    }
+                    std::task::Poll::Pending
+                }
+            }
+        }).await
     }
 
     /// Multi-tenant identity, if the builder was supplied one.
@@ -571,12 +594,8 @@ impl Runtime {
         }
         let queued = {
             let mut inner = self.inner.borrow_mut();
-            inner.initialized = true;
-            inner.init_error = Some("runtime has been quarantined".into());
-            inner.fetch_handler_fn = None;
-            inner.fetch_fast_fn = None;
-            inner.rpc_fn = None;
-            inner.workflow_fn = None;
+            inner.fail_startup("runtime has been quarantined".into());
+            inner.advance_startup();
             for request in inner.pending_requests.values() {
                 request.cancel.cancel();
             }
@@ -968,9 +987,11 @@ pub(crate) struct RuntimeInner {
     /// Cached reference to `module.default.workflow` — the durable workflow
     /// replay entry the worker invokes with a StepRequest envelope.
     pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
-    /// Cached JS helper that constructs a Request from Rust-supplied params.
-    http_create_request_fn: Option<v8::Global<v8::Function>>,
-    pub(crate) initialized: bool,
+    startup: StartupState,
+    startup_cpu: Duration,
+    startup_cpu_started: Option<Duration>,
+    startup_waiters: Vec<std::task::Waker>,
+    waiting_startup_requests: Vec<WaitingRequest>,
     pub(crate) state: SharedState,
     /// Plugins registered on the runtime at boot.
     plugins: Vec<Arc<dyn NativePlugin>>,
@@ -983,12 +1004,9 @@ pub(crate) struct RuntimeInner {
     /// pump doesn't have to poll on a 1ms sleep.
     pump_notify_tx: Option<futures::channel::mpsc::Sender<()>>,
 
-    /// Optional per-request CPU time limit.
+    /// CPU budget for startup and request execution.
     cpu_limit: Option<Duration>,
-    /// Optional per-request wall time limit. The outer `Runtime.limits`
-    /// exposes this to external callers; the inner copy stays for
-    /// symmetry with `cpu_limit` and for future dispatch-internal uses.
-    #[allow(dead_code)]
+    /// Startup wall deadline. Dispatch hosts use the same configured limit.
     wall_timeout: Option<Duration>,
 
     /// Set by `near_heap_limit_callback` when it terminates this isolate for
@@ -1046,12 +1064,6 @@ pub(crate) struct RuntimeInner {
     /// the enforcement window's counter and is reset wholesale every 10 s;
     /// nothing is ever read back out of this one, it only holds the change.
     pump_cpu_unmetered: Duration,
-
-    /// Captured error message if `ensure_initialized` failed to load the
-    /// user's module graph (e.g. parse error, evaluation throw). Surfaced
-    /// to callers via the dispatch error path so a syntactically-broken
-    /// deploy doesn't masquerade as "No default.fetch handler exported".
-    init_error: Option<String>,
 
     /// Multi-tenant identity. When `Some`, the RPC fast-path registers
     /// every in-flight `AbortController` with `crate::rpc::abort` keyed
@@ -1114,6 +1126,9 @@ impl Drop for RuntimeInner {
     /// order would panic on the very first one because none of them is
     /// currently entered.
     fn drop(&mut self) {
+        for request in self.waiting_startup_requests.drain(..) {
+            request.reply.send(Err("Runtime dropped during startup".into()));
+        }
         if self.enter_depth == 0 {
             // SAFETY: pushes `self` onto V8's per-thread isolate stack.
             // The OwnedIsolate field drop, which runs immediately after
@@ -1295,8 +1310,11 @@ impl RuntimeInner {
             fetch_fast_fn: None,
             rpc_fn: None,
             workflow_fn: None,
-            http_create_request_fn: None,
-            initialized: false,
+            startup: StartupState::Uninitialized,
+            startup_cpu: Duration::ZERO,
+            startup_cpu_started: None,
+            startup_waiters: vec![],
+            waiting_startup_requests: vec![],
             state,
             plugins,
             pending_requests: HashMap::new(),
@@ -1316,7 +1334,6 @@ impl RuntimeInner {
             pump_cpu_accumulated: Duration::ZERO,
             pump_wall_start: Instant::now(),
             pump_cpu_unmetered: Duration::ZERO,
-            init_error: None,
             app_id,
             // `Isolate::new()` enters the isolate, so we boot with depth 1.
             enter_depth: 1,
@@ -1370,6 +1387,7 @@ impl RuntimeInner {
     /// (handled by `Runtime::build`). Prefer calling `Runtime::start_pump`
     /// on the public handle — it hides the `Rc<RefCell<_>>` plumbing.
     pub(crate) fn start_pump(self_ref: Rc<RefCell<Self>>) {
+        if self_ref.borrow().pump_notify_tx.is_some() { return; }
         let tasks = self_ref.borrow().state.borrow().tasks.clone();
         let (notify_tx, notify_rx) = futures::channel::mpsc::channel::<()>(1);
         let idle_gc_after = {
@@ -1479,6 +1497,7 @@ impl RuntimeInner {
             // them, so this iteration must not park waiting for an event —
             // nothing would ever wake it (`setTimeout` does not `notify_pump`).
             let mut ready_timers_pending = false;
+            let startup_deadline;
 
             // Upgrade the Weak back-reference for this iteration's synchronous
             // V8 work. If it returns `None`, the `Runtime` handle has been
@@ -1490,6 +1509,16 @@ impl RuntimeInner {
             // the inner immediately rather than waiting for the next event.
             {
                 let Some(runtime) = runtime.upgrade() else { return; };
+                {
+                    let mut rt = runtime.borrow_mut();
+                    if rt.startup.is_pending() || matches!(rt.startup, StartupState::Failed(_)) {
+                        rt.enter_isolate();
+                        rt.advance_startup();
+                        rt.exit_isolate();
+                    }
+                    if matches!(rt.startup, StartupState::Failed(_)) { return; }
+                    startup_deadline = rt.startup_deadline();
+                }
 
                 if runtime.borrow().host_interrupt.load(Ordering::Acquire) {
                     return;
@@ -1540,6 +1569,7 @@ impl RuntimeInner {
                     rt.drain_new_tasks_into(&mut work);
                     rt.service_forwarder_resumes();
                     rt.service_js_driver_commands(&mut work);
+                    rt.advance_startup();
                     rt.exit_isolate();
                     rt.bill_pump_cpu(
                         crate::core::init::thread_cpu_time().saturating_sub(cpu_start),
@@ -1550,7 +1580,26 @@ impl RuntimeInner {
                 // event await below.
             }
 
-            let event = if ready_timers_pending {
+            let wake_deadline = match (ready_timers_pending, startup_deadline) {
+                (true, Some(deadline)) => Some(deadline.min(Instant::now() + READY_TIMER_PASS_TICK)),
+                (true, None) => Some(Instant::now() + READY_TIMER_PASS_TICK),
+                (false, deadline) => deadline,
+            };
+            let cancel_runtime = runtime.clone();
+            let mut startup_cancel = futures::future::poll_fn(move |cx| {
+                let Some(runtime) = cancel_runtime.upgrade() else {
+                    return std::task::Poll::Ready(());
+                };
+                let rt = runtime.borrow();
+                for request in &rt.waiting_startup_requests {
+                    request.ctx.cancel.register_waker(cx.waker());
+                    if request.ctx.cancel.is_cancelled() {
+                        return std::task::Poll::Ready(());
+                    }
+                }
+                std::task::Poll::Pending
+            }).fuse();
+            let event = if let Some(deadline) = wake_deadline {
                 // PHASE 1's drain hit its bound and left zero-delay timers
                 // queued, so this iteration must come back here promptly. The
                 // wait below is therefore the same select as the steady-state
@@ -1571,7 +1620,7 @@ impl RuntimeInner {
                 // on a real deadline yields both: one reactor turn per pass, and
                 // any op/timer that completes in the meantime is picked up here
                 // and taken through PHASE 2 on its normal path.
-                let mut tick = compio::time::sleep(READY_TIMER_PASS_TICK).boxed_local().fuse();
+                let mut tick = compio::time::sleep(deadline.saturating_duration_since(Instant::now())).boxed_local().fuse();
                 let has_ops = !work.pending_ops.is_empty();
                 let has_timers = !work.pending_timers.is_empty();
 
@@ -1581,6 +1630,7 @@ impl RuntimeInner {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1588,6 +1638,7 @@ impl RuntimeInner {
                         futures::select! {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1595,12 +1646,14 @@ impl RuntimeInner {
                         futures::select! {
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                             _ = tick => None,
                         }
                     }
                     (false, false) => {
                         futures::select! {
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1615,23 +1668,28 @@ impl RuntimeInner {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                         }
                     }
                     (true, false) => {
                         futures::select! {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                         }
                     }
                     (false, true) => {
                         futures::select! {
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
                         }
                     }
                     (false, false) => {
-                        let _ = notify_rx.next().await;
-                        None
+                        futures::select! {
+                            _ = notify_rx.next() => None,
+                            _ = startup_cancel => None,
+                        }
                     }
                 }
             };
@@ -1706,6 +1764,7 @@ impl RuntimeInner {
                         }
                         rt.handle_async_event(ev, &mut work);
                     }
+                    rt.advance_startup();
                     rt.exit_isolate();
 
                     // Two independent things happen on this one window:
@@ -1776,201 +1835,22 @@ impl RuntimeInner {
     }
 
     // -----------------------------------------------------------------------
-    // Initialization
-    // -----------------------------------------------------------------------
-
-    /// Load polyfills and ES modules, then resolve `default.fetch` (once).
-    pub(crate) fn ensure_initialized(&mut self, modules: &[ModuleEntry]) {
-        if self.initialized {
-            return;
-        }
-
-        {
-            v8::scope!(let handle_scope, &mut self.isolate);
-            let context = v8::Local::new(handle_scope, &self.context);
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
-
-            // Build the composite env object FIRST — plugin namespaces
-            // overlaid on the scalar env JSON snapshot. The `zeroship`
-            // module's top-level `const env = Object.freeze(__zs_env())`
-            // captures this during module load; if the cache wasn't
-            // populated by then, the import would see only the scalar JSON
-            // and plugin namespaces would be invisible on `import { env }`.
-            //
-            // Cache on SharedState (not RuntimeInner) so the `__zs_env`
-            // callback — a free function with only scope-slot access — can
-            // retrieve the same V8 Global.
-            if self.state.borrow().env_obj.is_none() {
-                let env_json = self.state.borrow().env_json.clone();
-                let global = crate::plugin::build_env_object(scope, &self.plugins, &env_json);
-                self.state.borrow_mut().env_obj = Some(global);
-            }
-
-            // Load polyfills and the user's entry module. The returned global
-            // is the entry module's Namespace Object; the kernel reads
-            // `default.fetch` directly off it (no more `__rpc` reach-through).
-            let anonymous_context = crate::core::invocation::InvocationContext::default();
-            let load_result = crate::core::invocation::with_context_preserving_ambient(
-                scope,
-                &anonymous_context,
-                |scope| load_polyfills_and_modules(scope, modules, &self.plugins),
-            );
-            let namespace = match load_result {
-                Ok(ns) => Some(ns),
-                Err(e) => {
-                    self.init_error = Some(e);
-                    None
-                }
-            };
-
-            // Resolve `export default { fetch(...) }` on the entry module's
-            // namespace. This is the sole dispatch target of the new kernel:
-            // `call_fetch_handler` invokes this cached function for every
-            // incoming request, passing `(Request, env, ctx)` just like the
-            // Cloudflare Workers / Bun / WinterCG module-worker contract.
-            if let Some(ns_global) = namespace {
-                let ns_local = v8::Local::new(scope, &ns_global);
-                if let Some(ns_obj) = ns_local.to_object(scope) {
-                    let default_key = v8::String::new(scope, "default").unwrap();
-                    if let Some(default_val) = ns_obj.get(scope, default_key.into())
-                        && !default_val.is_undefined()
-                        && !default_val.is_null()
-                        && let Some(default_obj) = default_val.to_object(scope)
-                    {
-                        let fetch_key = v8::String::new(scope, "fetch").unwrap();
-                        if let Some(fetch_val) = default_obj.get(scope, fetch_key.into())
-                            && fetch_val.is_function()
-                        {
-                            let func = v8::Local::<v8::Function>::try_from(fetch_val).unwrap();
-                            self.fetch_handler_fn = Some(v8::Global::new(scope, func));
-                        }
-                        // Zeroship extension: cache default.fetchFast
-                        // for the non-RPC HTTP fast-path. Null when
-                        // the user module doesn't opt into the
-                        // extension.
-                        let ff_key = v8::String::new(scope, "fetchFast").unwrap();
-                        if let Some(ff_val) = default_obj.get(scope, ff_key.into())
-                            && ff_val.is_function()
-                        {
-                            let func = v8::Local::<v8::Function>::try_from(ff_val).unwrap();
-                            self.fetch_fast_fn = Some(v8::Global::new(scope, func));
-                        }
-                        // RPC standalone entry point: cache
-                        // default.rpc for the kernel-side RPC
-                        // fast path. When set, /__zeroship/v1/<id>
-                        // requests skip Request construction
-                        // and call rpc(id, input, ctx) directly.
-                        let rpc_key = v8::String::new(scope, "rpc").unwrap();
-                        if let Some(rpc_val) = default_obj.get(scope, rpc_key.into())
-                            && rpc_val.is_function()
-                        {
-                            let func = v8::Local::<v8::Function>::try_from(rpc_val).unwrap();
-                            self.rpc_fn = Some(v8::Global::new(scope, func));
-                        }
-                        let workflow_key = v8::String::new(scope, "workflow").unwrap();
-                        if let Some(workflow_val) = default_obj.get(scope, workflow_key.into())
-                            && workflow_val.is_function()
-                        {
-                            let func =
-                                v8::Local::<v8::Function>::try_from(workflow_val).unwrap();
-                            self.workflow_fn = Some(v8::Global::new(scope, func));
-                        }
-                    }
-                }
-            }
-
-            // Compile a small JS helper that constructs a Request from Rust-supplied params.
-            let helper_src = v8::String::new(scope, HTTP_CREATE_REQUEST_JS).unwrap();
-            if let Some(script) = v8::Script::compile(scope, helper_src, None)
-                && let Some(val) = script.run(scope)
-                && let Ok(func) = v8::Local::<v8::Function>::try_from(val)
-            {
-                self.http_create_request_fn = Some(v8::Global::new(scope, func));
-            }
-
-            // Build the shared `ctx` object once. Frozen so the user's
-            // fetch handler can't mutate our callbacks; reused every
-            // request. Eliminates the per-request Object::new + 2
-            // Function::new + 2 Object::Set that showed up as ~5% of
-            // fetch-path CPU in perf.
-            if self.state.borrow().ctx_obj.is_none() {
-                let obj = v8::Object::new(scope);
-
-                let wu_key = v8::String::new(scope, "waitUntil").unwrap();
-                let wu_fn = v8::Function::new(scope, wait_until_noop_callback).unwrap();
-                obj.set(scope, wu_key.into(), wu_fn.into());
-
-                let pt_key = v8::String::new(scope, "passThroughOnException").unwrap();
-                let pt_fn = v8::Function::new(scope, pass_through_on_exception_noop_callback).unwrap();
-                obj.set(scope, pt_key.into(), pt_fn.into());
-
-                // Freeze via Object.freeze to prevent user code from
-                // pointing our callbacks at their own impls (which
-                // would be a security hazard + a cache-invalidation
-                // nightmare across concurrent requests on this
-                // worker).
-                let freeze_src = v8::String::new(scope, "Object.freeze").unwrap();
-                if let Some(freeze_fn_val) = scope
-                    .get_current_context()
-                    .global(scope)
-                    .get(scope, v8::String::new(scope, "Object").unwrap().into())
-                    .and_then(|o| o.to_object(scope))
-                    .and_then(|o| o.get(scope, v8::String::new(scope, "freeze").unwrap().into()))
-                    && let Ok(freeze_fn) = v8::Local::<v8::Function>::try_from(freeze_fn_val)
-                {
-                    let undefined = v8::undefined(scope).into();
-                    let _ = freeze_fn.call(scope, undefined, &[obj.into()]);
-                }
-                let _ = freeze_src; // silence unused
-
-                self.state.borrow_mut().ctx_obj = Some(v8::Global::new(scope, obj));
-            }
-        }
-
-        self.initialized = true;
-
-        // The timer owns a unique registration token. Dropping it unregisters
-        // the isolate, so a queued expiration cannot target its replacement.
-        #[cfg(target_os = "linux")]
-        if self.cpu_limit.is_some() {
-            let v8_handle = self.isolate.thread_safe_handle();
-            self.cpu_note.store(false, std::sync::atomic::Ordering::Relaxed);
-            match crate::cpu_timer::CpuTimer::new(v8_handle, Arc::clone(&self.cpu_note)) {
-                Ok(timer) => self.cpu_timer = Some(timer),
-                Err(e) => tracing::error!(error = %e, "cpu-timer initialisation failed"),
-            }
-        }
-    }
-
-    pub(crate) fn initialize_modules(
-        &mut self,
-        modules: &[ModuleEntry],
-        env: &crate::EnvSnapshot,
-    ) -> Result<(), String> {
-        if self.host_interrupt.load(Ordering::Acquire) {
-            return Err("runtime execution interrupted".into());
-        }
-        self.state.borrow_mut().set_env_snapshot(env);
-        self.ensure_initialized(modules);
-        if self.host_interrupt.load(Ordering::Acquire) {
-            return Err("runtime execution interrupted".into());
-        }
-        match &self.init_error {
-            Some(err) => Err(format!("module init failed: {err}")),
-            None => Ok(()),
-        }
-    }
-
-    // -----------------------------------------------------------------------
     // CPU timer arm/disarm
     // -----------------------------------------------------------------------
 
     fn arm_cpu_timer(&mut self) {
+        let startup = self.startup.is_pending();
+        if startup && self.cpu_limit.is_some() && self.startup_cpu_started.is_none() {
+            self.startup_cpu_started = Some(crate::core::init::thread_cpu_time());
+        }
         #[cfg(target_os = "linux")]
         if !self.cpu_timer_active
             && let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit)
         {
-            timer.arm(limit);
+            let remaining = if startup { limit.saturating_sub(self.startup_cpu) } else { limit };
+            // A zero POSIX timer duration disarms it, so an exhausted startup
+            // budget must retain an active interrupt deadline.
+            timer.arm(remaining.max(Duration::from_nanos(1)));
             self.cpu_timer_active = true;
         }
     }
@@ -1982,6 +1862,12 @@ impl RuntimeInner {
                 timer.disarm();
             }
             self.cpu_timer_active = false;
+        }
+        if let Some(started) = self.startup_cpu_started.take() {
+            self.startup_cpu += crate::core::init::thread_cpu_time().saturating_sub(started);
+            if self.cpu_limit.is_some_and(|limit| self.startup_cpu >= limit) {
+                self.cpu_note.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
         }
     }
 
@@ -2024,6 +1910,9 @@ impl RuntimeInner {
         if self.cpu_timer.is_some() {
             self.disarm_cpu_timer();
         }
+        if self.startup.is_pending() {
+            self.fail_startup(self.termination_message().into());
+        }
         true
     }
 
@@ -2052,7 +1941,11 @@ impl RuntimeInner {
         if self.workflow_fn.is_none() || self.host_interrupt.load(Ordering::Acquire) {
             let msg = match init_result {
                 Err(err) => err,
-                Ok(()) => "No default.workflow handler exported".to_string(),
+                Ok(_) if self.host_interrupt.load(Ordering::Acquire) => {
+                    self.termination_message().to_string()
+                }
+                Ok(true) => "No default.workflow handler exported".to_string(),
+                Ok(false) => "Runtime startup is pending; await initialize before workflow dispatch".to_string(),
             };
             return crate::WorkflowOutcome::Response {
                 json: workflow_failure_json(&msg),
@@ -2152,51 +2045,28 @@ impl RuntimeInner {
         self.last_request_ts.set(Instant::now());
         crate::node::net::state::reset_dispatch_egress(&self.state);
 
-        // Stash the env JSON on state so the very first `ensure_initialized`
-        // builds the composite env object (plugin namespaces + scalar JSON)
-        // with the real scalars instead of the default `{}`. Must run BEFORE
-        // `ensure_initialized` — that call is where `build_env_object` reads
-        // `env_json`, caches the result on `state.env_obj`, and where the
-        // `zeroship` module's `const env = Object.freeze(__zs_env())`
-        // top-level binding captures that same cached object.
-        //
-        // After the first call, `env_obj` is populated and further updates
-        // to `env_json` do not refresh the cached V8 object — the scalars
-        // are effectively per-app, not per-request, matching Cloudflare /
-        // Bun / Workers semantics. Subsequent requests still overwrite
-        // `env_json` for the degraded fallback path in `zs_env_callback`
-        // (only reached if `ensure_initialized` has not yet completed,
-        // which shouldn't happen under the normal dispatch flow).
-        let init_result = self.initialize_modules(modules, env);
-
-        if self.fetch_handler_fn.is_none() || self.host_interrupt.load(Ordering::Acquire) {
-            // If module init failed (parse/runtime error) we have a real
-            // diagnostic; surface it as 500 so the deployer sees the cause
-            // rather than the symptom. Fall through to 404 only when the
-            // module loaded but didn't export `default.fetch`.
-            if let Err(err) = init_result {
-                let payload = serde_json::json!({
-                    "message": err,
-                    "name": "Error",
+        match self.initialize_modules(modules, env) {
+            Err(error) => return super::startup::failure_response(&error),
+            Ok(false) => {
+                let (reply, rx) = channel::result_slot();
+                let cancel = ctx.cancel.clone();
+                self.waiting_startup_requests.push(WaitingRequest {
+                    method: method.into(), url: url.into(), headers: headers.to_vec(),
+                    body: body.to_vec(), env: env.clone(), ctx, user_json, reply,
                 });
-                return crate::FetchOutcome::Response {
-                    status: 500,
-                    headers: vec![("content-type".into(), "application/json".into())],
-                    body: payload.to_string().into_bytes(),
-                    logs: vec![],
-                };
+                self.notify_pump();
+                return crate::FetchOutcome::Pending { rx, cancel };
             }
+            Ok(true) => {}
+        }
+        if self.fetch_handler_fn.is_none() {
             return crate::FetchOutcome::Response {
                 status: 404,
                 headers: vec![("content-type".into(), "application/json".into())],
-                body: r#"{"message":"No default.fetch handler exported","name":"Error"}"#.as_bytes().to_vec(),
+                body: br#"{"message":"No default.fetch handler exported","name":"Error"}"#.to_vec(),
                 logs: vec![],
             };
         }
-        // Note: `http_create_request_fn` is no longer required for
-        // dispatch (the kernel-side fast-path Request builder
-        // `build_kernel_request` is unconditional), but the slot stays
-        // around for back-compat with any path still referencing it.
 
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
@@ -2248,7 +2118,7 @@ impl RuntimeInner {
 
         // NOTE: the env JSON is NOT marshalled here. Every tier that needs
         // the env reads the cached `state.env_obj` V8 global (built once in
-        // `ensure_initialized`). The raw JSON is only touched in the slow
+        // `initialize_modules`). The raw JSON is only touched in the slow
         // path's *uncached* fallback (env_obj == None), where it is read
         // lazily via `env.as_json()` (a borrow, no per-request String clone).
         // Headers likewise need no JSON marshalling — the kernel-side
@@ -2405,17 +2275,8 @@ impl RuntimeInner {
                 } else {
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
                     //
-                    // Build the Request directly in Rust via
-                    // `fetch_request::build_kernel_request`. Skips:
-                    //   - the JS helper compile/run (HTTP_CREATE_REQUEST_JS),
-                    //   - JSON.parse on the headers list,
-                    //   - the WebIDL constructor algorithm (URL re-parse,
-                    //     init union dispatch, body extraction, signal
-                    //     minting).
-                    // The earlier "3–4% slower" measurement predated full-
-                    // native Request + Headers; with both classes now
-                    // backed by Box<State> in internal field 0, the V8
-                    // round trips collapse to one per Request.
+                    // Build the Request from the parsed HTTP data using the
+                    // native Request and Headers classes.
                     let request_opt = crate::fetch_request::build_kernel_request(
                         scope, method, url, headers, body,
                     );
@@ -2443,7 +2304,7 @@ impl RuntimeInner {
                         };
 
                         // Reuse the frozen ctx singleton built in
-                        // ensure_initialized. Same V8 Object across every
+                        // initialize_modules. Same V8 Object across every
                         // fetch request — no map transitions, no per-
                         // request Function allocations.
                         let ctx_val: v8::Local<v8::Value> = {
@@ -3428,7 +3289,7 @@ impl RuntimeInner {
     /// Returns true if there are pending async requests.
     #[allow(dead_code)]
     pub fn has_pending_requests(&self) -> bool {
-        !self.pending_requests.is_empty()
+        self.startup.is_pending() || !self.waiting_startup_requests.is_empty() || !self.pending_requests.is_empty()
     }
 
     // -----------------------------------------------------------------------

@@ -399,7 +399,7 @@ fn storage_requires_a_host_identity() {
             .modules(module("export default { fetch() { return new Response('ready'); } };"))
             .plugins(vec![Arc::new(StorageBinding::new(store, None))])
             .build();
-        let error = runtime.initialize(&EnvSnapshot::empty()).unwrap_err();
+        let error = runtime.initialize(&EnvSnapshot::empty()).await.unwrap_err();
         assert!(error.contains("host must supply an app identity"), "{error}");
     });
 }
@@ -422,7 +422,7 @@ fn typed_runtime_identity_scopes_storage_without_environment_duplication() {
             ))
             .plugin(StorageBinding::new(store.clone(), Some(Arc::clone(&meter))))
             .build();
-        runtime.initialize(&EnvSnapshot::empty()).unwrap();
+        runtime.initialize(&EnvSnapshot::empty()).await.unwrap();
         runtime.start_pump();
         runtime.exit_isolate();
         assert_eq!(fetch(&runtime, &[]).await, (200, app.as_str().into()));

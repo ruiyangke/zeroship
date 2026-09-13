@@ -1510,7 +1510,7 @@ async fn load_on_demand(
         executable.descriptor.as_deref(),
         manifest,
         &env_entry.snapshot,
-    )
+    ).await
     .map_err(|e| {
         crate::sync::remove_env(envs, app_id);
         format!("failed to load bundle: {e}")
@@ -1589,7 +1589,7 @@ async fn load_pinned_workflow_on_demand(
         executable.descriptor.as_deref(),
         &manifest,
         &env_entry.snapshot,
-    )
+    ).await
     .map_err(|e| format!("failed to load pinned bundle: {e}"))?;
 
     tracing::info!(
@@ -2067,7 +2067,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -2552,7 +2552,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -2747,7 +2747,7 @@ pub(crate) mod tests {
             None,
             manifest,
             &EnvSnapshot::empty(),
-        )
+        ).await
         .expect("app loads");
 
         let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -3119,7 +3119,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -3225,7 +3225,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -3346,7 +3346,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -3552,7 +3552,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -3915,7 +3915,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            )
+            ).await
             .expect("app A loads");
 
             let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
@@ -3983,7 +3983,7 @@ pub(crate) mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
-            );
+            ).await;
 
             let err = load_b.expect_err(
                 "loading a second app into a full cache whose only isolate is \

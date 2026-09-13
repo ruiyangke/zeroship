@@ -159,6 +159,10 @@ impl TaskExecution for V8Execution {
         let envelope = serde_json::to_string(&self.invocation)
             .map_err(|_| WorkflowServiceError::Internal("invalid workflow invocation".into()))?;
         loaded.runtime.start_pump();
+        // Dispatch encodes a cached startup failure in the normal workflow outcome.
+        let _ = loaded.runtime.initialize(&loaded.env).await;
+        self.budget.check()?;
+        self.payloads.check()?;
         loaded.runtime.enter_isolate();
         let outcome = loaded.runtime.call_workflow_dispatch(
             &envelope,

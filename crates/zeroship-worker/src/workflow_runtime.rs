@@ -376,7 +376,7 @@ mod tests {
                 && event.value == 7));
         // Initialization remains the executor's responsibility; this marker
         // must be reached only when the host explicitly initializes the runtime.
-        let error = runtime.initialize(&env).unwrap_err();
+        let error = runtime.initialize(&env).await.unwrap_err();
         assert!(error.contains("creator-module-evaluated"), "{error}");
         runtime.exit_isolate();
         runtime.shutdown().await;
