@@ -3,8 +3,8 @@ use quote::quote;
 use serde_json::Value;
 use std::collections::HashSet;
 use syn::{
-    parse::{Parse, ParseStream},
     Ident, LitStr, Token, Visibility,
+    parse::{Parse, ParseStream},
 };
 
 pub struct Input {
@@ -152,6 +152,8 @@ fn generate(
         validate_identity(fields)
             .map_err(|message| syn::Error::new(span, format!("{name}: {message}")))?;
         let mut columns = Vec::new();
+        let mut relations = Vec::new();
+        let mut relation_names = HashSet::new();
         let mut constants = Vec::new();
         let mut required = Vec::new();
         let mut field_names = HashSet::new();
@@ -177,6 +179,69 @@ fn generate(
             let defaultable =
                 writable && (def.get("default").is_some() || !flag(def, "required", false, span)?);
             let read = readable.then(|| quote!(impl #orm::ReadableColumn for #column {}));
+            if let Some(relation) = def.get("relation") {
+                let relation = relation.as_str().ok_or_else(|| {
+                    syn::Error::new(span, format!("{name}.{field}: relation must be a string"))
+                })?;
+                let selector = relation_identifier(relation, span)?;
+                if fields.contains_key(relation) || !relation_names.insert(selector.to_string()) {
+                    return Err(syn::Error::new(
+                        span,
+                        format!(
+                            "{name}.{field}: relation name collides with another field or relation"
+                        ),
+                    ));
+                }
+                let target = def
+                    .get("refTarget")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            span,
+                            format!("{name}.{field}: named relation requires refTarget"),
+                        )
+                    })?;
+                let target_column = def
+                    .get("refColumn")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        syn::Error::new(
+                            span,
+                            format!("{name}.{field}: named relation requires refColumn"),
+                        )
+                    })?;
+                if let Some(target_schema) = collections.get(target) {
+                    if target_schema
+                        .get("fields")
+                        .and_then(|fields| fields.get(target_column))
+                        .is_none()
+                    {
+                        return Err(syn::Error::new(
+                            span,
+                            format!(
+                                "{name}.{field}: reference target {target}.{target_column} does not exist"
+                            ),
+                        ));
+                    }
+                    if readable {
+                        let target_module = crate::identifier(target, span)?;
+                        relations.push(quote! {
+                            #[allow(non_camel_case_types)]
+                            #[derive(Debug, Clone, Copy)]
+                            pub struct #selector;
+                            impl #orm::Relation for #selector {
+                                type Source = super::Entity;
+                                type Target = super::super::#target_module::Entity;
+                                const NAME: &'static str = #relation;
+                                const FIELD: &'static str = #field;
+                                const TARGET_COLUMN: &'static str = #target_column;
+                            }
+                        });
+                    }
+                }
+            }
             let filter = filterable.then(|| quote!(impl #orm::FilterableColumn for #column {}));
             let write = writable.then(|| quote!(impl #orm::WritableColumn for #column {}));
             let update = (writable && field != "id")
@@ -220,6 +285,7 @@ fn generate(
                     }
                 }
                 pub mod columns { #(#columns)* }
+                pub mod relations { #(#relations)* }
                 #(#constants)*
                 #[doc(hidden)]
                 pub trait CompleteInsert {}
@@ -228,6 +294,20 @@ fn generate(
         });
     }
     Ok(quote!(#(#modules)*))
+}
+
+fn relation_identifier(name: &str, span: proc_macro2::Span) -> syn::Result<Ident> {
+    let lower = name.to_ascii_lowercase();
+    if name.starts_with('_')
+        || name.len() > 63
+        || matches!(name, "__proto__" | "constructor" | "prototype")
+        || ["__zs_", "__zeroship", "sqlite_"]
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+    {
+        return Err(syn::Error::new(span, "invalid or reserved relation name"));
+    }
+    crate::identifier(name, span)
 }
 
 fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::Result<TokenStream> {
@@ -285,9 +365,11 @@ mod tests {
                 });
                 let result = generate(&descriptor, &orm, proc_macro2::Span::call_site());
                 if group == "valid" {
-                    assert!(!result
-                        .unwrap_or_else(|error| panic!("{name}: {error}"))
-                        .is_empty());
+                    assert!(
+                        !result
+                            .unwrap_or_else(|error| panic!("{name}: {error}"))
+                            .is_empty()
+                    );
                 } else {
                     assert_eq!(
                         result.expect_err(name).to_string(),
@@ -297,5 +379,66 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn named_relations_require_unambiguous_declared_edges() {
+        let orm = syn::parse_quote!(::zeroship_data_orm::orm);
+        let source = serde_json::json!({
+            "version": 2,
+            "collections": {
+                "users": {"fields": {
+                    "id": {"type":"string", "required":true, "primaryKey":true}
+                }},
+                "posts": {"fields": {
+                    "id": {"type":"string", "required":true, "primaryKey":true},
+                    "authorId": {"type":"string", "relation":"author", "refTarget":"users", "refColumn":"id"},
+                    "editorId": {"type":"string", "refTarget":"users", "refColumn":"id"}
+                }}
+            }
+        });
+        assert!(
+            !generate(&source, &orm, proc_macro2::Span::call_site())
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in [
+            "",
+            "__proto__",
+            "_meta",
+            "_custom",
+            "constructor",
+            "prototype",
+            "sqlite_author",
+            "__ZS_author",
+            "__zeroship_author",
+            "author-name",
+            "id",
+            "authorId",
+        ] {
+            let mut descriptor = source.clone();
+            descriptor["collections"]["posts"]["fields"]["authorId"]["relation"] = invalid.into();
+            assert!(
+                generate(&descriptor, &orm, proc_macro2::Span::call_site()).is_err(),
+                "{invalid}"
+            );
+        }
+        for missing in ["refTarget", "refColumn"] {
+            let mut descriptor = source.clone();
+            descriptor["collections"]["posts"]["fields"]["authorId"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            assert!(
+                generate(&descriptor, &orm, proc_macro2::Span::call_site()).is_err(),
+                "{missing}"
+            );
+        }
+        let mut duplicate = source.clone();
+        duplicate["collections"]["posts"]["fields"]["editorId"]["relation"] = "author".into();
+        assert!(generate(&duplicate, &orm, proc_macro2::Span::call_site()).is_err());
+        let mut missing_target = source.clone();
+        missing_target["collections"]["posts"]["fields"]["authorId"]["refColumn"] = "absent".into();
+        assert!(generate(&missing_target, &orm, proc_macro2::Span::call_site()).is_err());
     }
 }

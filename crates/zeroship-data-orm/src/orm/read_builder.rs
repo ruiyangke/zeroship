@@ -5,6 +5,8 @@ mod predicates;
 pub use predicates::JoinType;
 mod entity_query;
 pub use entity_query::{EntityQuery, FieldOrder};
+mod related;
+pub use related::RelatedQuery;
 mod scalars;
 use crate::sql::{
     CompareOp, Direction, FieldPath, JoinKind, NullOrder, Operand, OrderKey, Predicate, RowLimit,

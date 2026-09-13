@@ -36,6 +36,9 @@ at compile time, with paths relative to the Rust source file, like `include_str!
 Cargo tracks that artifact as a compilation input. The generated modules contain
 collection identities, logical column types, typed fields, and write capabilities.
 The macro performs no database I/O.
+The artifact is a build input; a running Rust service does not need the file or
+V8. `Database::from_schema` accepts in-memory descriptors, and generated entities
+expose their embedded descriptors through `Entity::schema()`.
 
 For a descriptor declaring `posts` with required `title`, nullable `payload`,
 and nullable `nickname`, an application can write:
@@ -147,6 +150,20 @@ masked display when the protection pipeline withholds its value.
 descriptor and refuses a mismatch. A typed handle also refuses changes to that
 metadata after it was created. This checks the descriptor bound by the host;
 physical catalog protection checks remain in the shared protection pipeline.
+
+Named schema references generate relation selectors. A forward relation returns
+the parent alongside an optional protected target, preserving the scalar foreign
+key:
+
+```rust,ignore
+let rows: Vec<(Post, Option<User>)> = posts.query()
+    .with_related(models::posts::relations::author)
+    .all().await?;
+```
+
+The shared loader batches target reads on the captured transaction route and
+uses database equality when matching keys. The schema declares the name once
+on the reference; callers do not repeat the foreign-key column.
 
 Transaction callbacks commit on success and roll back on error. Nested callbacks
 use savepoints. SQL failures poison the transaction, and cancelled operations

@@ -1,5 +1,44 @@
 //! Value descriptors shared by runtime catalog readers and storage backends.
 
+/// Resolve named forward edges without inferring names from columns or tables.
+pub(crate) fn relation_fields(
+    schema: &crate::value::Value,
+) -> Result<std::collections::BTreeMap<&str, &str>, &'static str> {
+    use crate::value::Value;
+    let fields = schema
+        .as_object()
+        .ok_or("collection fields must be an object")?;
+    let mut relations = std::collections::BTreeMap::new();
+    for (field, definition) in fields {
+        let Some(name) = definition.get("relation") else {
+            continue;
+        };
+        let name = name.as_str().ok_or("relation name must be a string")?;
+        if crate::sql::Ident::parse_as(name, crate::sql::IdentRole::Alias).is_err()
+            || name.starts_with('_')
+            || matches!(name, "__proto__" | "constructor" | "prototype")
+        {
+            return Err("invalid relation name");
+        }
+        if fields.contains_key(name) {
+            return Err("relation name collides with a declared column");
+        }
+        if relations.insert(name, field.as_str()).is_some() {
+            return Err("relation name must be unique within its collection");
+        }
+        for key in ["refTarget", "refColumn"] {
+            if definition
+                .get(key)
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            {
+                return Err("named relation requires an explicit reference target and column");
+            }
+        }
+    }
+    Ok(relations)
+}
+
 /// ORM collections declare a non-null `id` as their sole primary key.
 pub fn validate_collection_identity(schema: &crate::value::Value) -> Result<(), &'static str> {
     use crate::value::Value;

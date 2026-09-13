@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `zeroship_data_orm::orm::Field<title>: Relation` is not satisfied
+ --> tests/ui/non_reference_relation.rs:7:23
+  |
+7 |         .with_related(schema::posts::title);
+  |          ------------ ^^^^^^^^^^^^^^^^^^^^ the trait `Relation` is not implemented for `zeroship_data_orm::orm::Field<title>`
+  |          |
+  |          required by a bound introduced by this call
+  |
+help: the following other types implement trait `Relation`
+ --> tests/ui/non_reference_relation.rs:2:1
+  |
+2 | schema!(pub schema = "../fixtures/typed-relations.runtime.json");
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | |
+  | `author`
+  | `authorByHandle`
+  | `authorBySerial`
+note: required by a bound in `EntityQuery::<E>::with_related`
+ --> src/orm/read_builder/entity_query.rs
+  |
+  |     pub fn with_related<R: Relation<Source = E>>(self, _: R) -> RelatedQuery<E, R> {
+  |                            ^^^^^^^^^^^^^^^^^^^^ required by this bound in `EntityQuery::<E>::with_related`
+  = note: this error originates in the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)
