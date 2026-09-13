@@ -676,7 +676,13 @@ impl PgBarrier {
     }
 
     async fn wait_for_rollback(&self, worker: i32) {
-        compio::time::timeout(Duration::from_secs(10), async {
+        let rollback_budget = Duration::from_secs(2);
+        assert!(
+            rollback_budget.as_millis()
+                < u128::from(zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS),
+            "server lock timeout must not satisfy the cancellation oracle"
+        );
+        compio::time::timeout(rollback_budget, async {
             loop {
                 let active: bool = self.observer.query_one(
                     "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND xact_start IS NOT NULL)",
