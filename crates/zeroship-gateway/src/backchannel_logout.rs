@@ -31,6 +31,9 @@ use zeroship_core::user_id::UserId;
 use crate::sessions;
 use crate::GateState;
 
+#[cfg(test)]
+mod tests;
+
 const MAX_INFLIGHT_LOGOUT_JTIS: usize = 50_000;
 
 // Process-local in-flight claims close the check-then-side-effect race before a
@@ -202,6 +205,15 @@ pub async fn handle(
             .header("cache-control", "no-store")
             .finish();
     };
+
+    // Pool acquisition can outlive another request's successful processing.
+    // Check again while holding the claim, so a completed predecessor cannot
+    // slip between this check and our side effects.
+    if state.logout_jti_cache.contains(&token.jti, unix_now_secs()) {
+        return HttpResponse::Ok()
+            .header("cache-control", "no-store")
+            .finish();
+    }
 
     // M1 fix: the anchor refresh families deleted inside the DB block, to be
     // revoked at OP AFTER the connection is released (no conn held across the

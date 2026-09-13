@@ -19,7 +19,9 @@ use crate::{
     GateConfig, GateState,
 };
 
+mod anchors;
 mod op;
+pub use anchors::*;
 pub use op::*;
 
 pub const APP_HOST: &str = "myapp.zeroship.ai";
