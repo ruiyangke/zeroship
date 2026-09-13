@@ -105,10 +105,8 @@ fn bench_pump_concurrency(c: &mut Criterion) {
         .expect("failed to create compio runtime for pump bench");
     let runtime = build_runtime();
     let env = EnvSnapshot::empty();
-    runtime
-        .initialize(&env)
-        .expect("failed to initialize pump bench module");
     compio_rt.block_on(async {
+        runtime.initialize(&env).await.expect("failed to initialize pump bench module");
         runtime.start_pump();
     });
 

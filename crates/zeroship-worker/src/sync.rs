@@ -437,7 +437,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 descriptor_json.as_deref(),
                                 &declared,
                                 &env_entry.snapshot,
-                            ) {
+                            ).await {
                                 Ok(()) => {
                                     // Record what the fresh isolate was loaded
                                     // against — the reload decision above keys
@@ -1011,7 +1011,7 @@ mod tests {
                 None,
                 &zeroship_bundle::Manifest::default(),
                 &env_v1.snapshot,
-            )
+            ).await
             .expect("app loads");
             crate::cache::set_loaded_meta(
                 app_id.clone(),
