@@ -313,8 +313,8 @@ for spec in \
   fi
 done
 
-# Pool cases live beside the gateway implementation and own their database.
-cargo test -p zeroship-gateway --lib db::tests -- \
+# Gateway library tests own their database and service fixtures.
+cargo test -p zeroship-gateway --lib --no-fail-fast -- \
   --test-threads "$TEST_THREADS" --nocapture 2>&1 | tee -a "$LOG" || status=1
 
 echo "------------------------------------------------------------------"
