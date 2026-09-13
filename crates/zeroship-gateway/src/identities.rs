@@ -25,16 +25,6 @@ use zeroship_core::user_id::UserId;
 use crate::error::{GatewayError, Result};
 use crate::rls;
 
-const fn identity_upsert_sql() -> &'static str {
-    "INSERT INTO zeroship.app_user_identities \
-        (app_client_id, global_user_id, pairwise_sub) \
-     VALUES ($1, $2, $3) \
-     ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET \
-        pairwise_sub = EXCLUDED.pairwise_sub, \
-        revoked_at = NULL \
-     WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
-}
-
 /// Idempotently record the pairwise mapping for `(app_client_id,
 /// global_user_id)`.
 ///
@@ -65,11 +55,17 @@ pub async fn upsert(
     rls::set_tenant_client(&tx, app_client_id).await?;
     let mapped = tx
         .execute(
-        identity_upsert_sql(),
-        &[&app_client_id, &global_user_id.as_str(), &pairwise_sub],
-    )
-    .await
-    .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
+            "INSERT INTO zeroship.app_user_identities \
+                (app_client_id, global_user_id, pairwise_sub) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (app_client_id, global_user_id) DO UPDATE SET \
+                pairwise_sub = EXCLUDED.pairwise_sub, \
+                revoked_at = NULL \
+             WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub",
+            &[&app_client_id, &global_user_id.as_str(), &pairwise_sub],
+        )
+        .await
+        .map_err(|e| GatewayError::Db(format!("app_user_identities upsert: {e}")))?;
     if mapped != 1 {
         return Err(GatewayError::Db(
             "app_user_identities pairwise binding changed".to_string(),
@@ -156,13 +152,4 @@ pub async fn lookup_relay_email(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::identity_upsert_sql;
-
-    #[test]
-    fn mapping_upsert_refuses_pairwise_subject_rebinding() {
-        assert!(identity_upsert_sql().contains(
-            "WHERE zeroship.app_user_identities.pairwise_sub = EXCLUDED.pairwise_sub"
-        ));
-    }
-}
+mod tests;
