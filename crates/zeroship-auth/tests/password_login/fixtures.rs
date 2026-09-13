@@ -144,7 +144,7 @@ pub(super) async fn assert_state(server: &AuthServer, id: &UserId, failures: i32
 }
 
 pub(super) async fn lock_through_login(server: &AuthServer, user: &users::UserRow) {
-    assert!(users::lockout::THRESHOLD > 0);
+    const { assert!(users::lockout::THRESHOLD > 0) };
     for failure in 1..=users::lockout::THRESHOLD {
         // Each request has its own IP so the account lock is exercised before
         // the independent per-IP limiter can reject it.
