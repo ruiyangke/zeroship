@@ -144,4 +144,4 @@ pub async fn checkout(cfg: &DbConfig) -> Result<Rc<Pool>, Error> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

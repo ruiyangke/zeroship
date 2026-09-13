@@ -3,7 +3,7 @@ use futures::{future::join_all, poll};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-mod postgres;
+pub(crate) mod postgres;
 use postgres::Database;
 
 #[test]
@@ -209,7 +209,7 @@ async fn changing_the_database_replaces_the_cache_without_breaking_existing_leas
                 .await
                 .unwrap()
                 .get::<_, String>(0),
-            "gateway_pool"
+            "gateway_tests"
         );
         assert!(Rc::ptr_eq(&next, &checkout(&next_config).await.unwrap()));
         drop(existing);
@@ -224,7 +224,11 @@ async fn a_failed_initial_connection_can_retry_after_the_database_is_created() {
         let mut url = database.url.clone();
         url.set_path("/created_later");
         let config = DbConfig::new(url.as_str(), 1);
-        assert!(checkout(&config).await.is_err());
+        let error = checkout(&config).await.unwrap_err();
+        assert_eq!(
+            error.code(),
+            Some(&compio_postgres::error::SqlState::INVALID_CATALOG_NAME)
+        );
         database
             .admin
             .batch_execute("CREATE DATABASE created_later")
