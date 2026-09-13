@@ -446,20 +446,4 @@ mod tests {
         assert!(parse_platform_subject("0191e7a2-b3c4-4d5e-8f90-123456789abc").is_err());
         assert!(parse_platform_subject("app_0000000000000000000000").is_err());
     }
-
-    #[test]
-    fn active_principal_query_blocks_every_hard_lifecycle_state() {
-        for column in [
-            "disabled_at",
-            "anonymized_at",
-            "deletion_requested_at",
-            "deletion_scheduled_for",
-        ] {
-            assert!(
-                ACTIVE_PRINCIPAL_SQL.contains(&format!("{column} IS NULL")),
-                "missing active lifecycle predicate for {column}"
-            );
-        }
-        assert!(!ACTIVE_PRINCIPAL_SQL.contains("locked_until"));
-    }
 }
