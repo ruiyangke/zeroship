@@ -211,6 +211,20 @@ fn prepare_value_at(
     if matches!(kind, LogicalType::Timestamp | LogicalType::CalendarDate) {
         return scalar(kind, field, value);
     }
+    // JSON members have no column codec to enforce their primitive type.
+    if depth > 0 {
+        let valid = match kind {
+            LogicalType::Text => value.is_string(),
+            LogicalType::Integer | LogicalType::BigInt => {
+                matches!(value, Value::Number(number) if number.as_i64().is_some())
+            }
+            LogicalType::Number => value.is_number(),
+            _ => true,
+        };
+        if !valid {
+            return Err(invalid(field, kind.as_str()));
+        }
+    }
     if kind == LogicalType::Boolean && !value.is_boolean() {
         return Err(invalid(field, "a boolean"));
     }
