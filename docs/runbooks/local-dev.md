@@ -240,7 +240,7 @@ cargo test -p zeroship-core
 cargo test -p zeroship-gateway
 # These runners prepare migrated databases and run all package tests.
 tests/run_billing_suite.sh   # control and migration service
-tests/run_worker_suite.sh
+cargo xtask test worker
 cargo test -p zeroship-runtime --lib
 cargo test -p compio-postgres -- --test-threads=1
 ./tests/e2e_platform.sh
@@ -255,15 +255,15 @@ available; no `PG_TEST_URL` or generated test overlay selects their databases.
 Ordinary `cargo test -p <package>` runs the same required cases once the
 migration host has been built.
 
-The worker shell runner still uses a database named after its migration set,
-`zeroship_worker_test_<hash>`. It creates and migrates that database if needed
-and retains it for other runs using the same schema. The runner also accepts
-`--dsn <url>` for an explicitly selected server.
+`cargo xtask test worker` builds the same migration host and runs the worker
+package. Its posture and workflow cases each own a PostgreSQL server. Workflow
+requests connect as the migrated worker role; fixture setup and observations
+use a separate administrator connection. The fixtures release connections,
+isolates and temporary storage when the case ends, including on failure.
 
 ```bash
 cargo xtask test auth
-tests/run_worker_suite.sh
-tests/run_worker_suite.sh --dsn postgres://...
+cargo xtask test worker
 tests/sweep_test_databases.sh          # inspect reclaimable shared databases
 tests/sweep_test_databases.sh --apply  # reclaim them
 ```

@@ -622,7 +622,7 @@ const UNMIGRATED_REMEDY: &str = "\
     \n\
     \x20   The suite gates do this for you and name the database after the\n\
     \x20   migration set, which is why they do not hit this:\n\
-    \x20     tests/run_billing_suite.sh   tests/run_worker_suite.sh\n";
+    \x20     tests/run_billing_suite.sh\n";
 
 fn refusal(where_: &Coordinates, what: &str, remedy: &str) -> String {
     format!(

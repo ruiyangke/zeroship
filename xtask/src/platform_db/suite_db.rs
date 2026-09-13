@@ -1,8 +1,8 @@
 //! The SHARED database the live-PostgreSQL test GATES run against, named after
 //! the schema they need rather than after whoever launched them.
 //!
-//! The remaining worker and billing shell runners use this shared database
-//! policy. Auth package tests own containers instead. Shared migration state
+//! The remaining billing shell runner uses this shared database policy.
+//! Auth and worker package tests own containers. Shared migration state
 //! establishes schema freshness; callers still need to isolate their fixtures.
 //!
 //! WHAT WAS WRONG WITH A NAME PER AGENT. Both gates used to take a database
