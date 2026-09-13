@@ -384,7 +384,8 @@ mod tests {
 
     #[test]
     fn the_instance_mints_under_its_own_name_and_is_addressed_by_the_role() {
-        let (auth, _gateway, _public) = identity_for("wkr_0000000000000000000000001");
+        let instance_id = zeroship_core::typed_id::new_worker_instance_id();
+        let (auth, _gateway, _public) = identity_for(&instance_id);
         let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
         let header = auth
             .authorization_for(&control)
@@ -396,7 +397,7 @@ mod tests {
             .and_then(|raw| serde_json::from_slice::<serde_json::Value>(&raw).ok())
             .expect("the minted assertion has a readable payload");
         assert_eq!(
-            claims["iss"], "spiffe://zeroship.ai/svc/worker/wkr_0000000000000000000001",
+            claims["iss"], format!("spiffe://zeroship.ai/svc/worker/{instance_id}"),
             "outbound assertions must name the INSTANCE, or control cannot attribute them"
         );
         assert_eq!(
@@ -426,7 +427,8 @@ mod tests {
     async fn a_gateway_dispatch_addressed_to_the_role_is_still_accepted() {
         use zeroship_core::service_identity::endpoints;
 
-        let (auth, gateway, _public) = identity_for("wkr_0000000000000000000000006");
+        let instance_id = zeroship_core::typed_id::new_worker_instance_id();
+        let (auth, gateway, _public) = identity_for(&instance_id);
         let role = service_issuer(WORKER_SERVICE_NAME).expect("role issuer");
         let addressed_to_the_role = format!(
             "Bearer {}",
@@ -443,7 +445,7 @@ mod tests {
         // endpoint, addressed to the INSTANCE name instead. It is refused, so
         // the acceptance above is `aud` equality against the role rather than
         // an audience check that is not running.
-        let instance = service_issuer(&format!("{WORKER_SERVICE_NAME}/wkr_0000000000000000000006"))
+        let instance = service_issuer(&format!("{WORKER_SERVICE_NAME}/{instance_id}"))
             .expect("instance issuer");
         let addressed_to_the_instance = format!(
             "Bearer {}",
@@ -513,7 +515,8 @@ mod tests {
     /// up inside.
     #[test]
     fn no_formatter_on_the_boot_path_can_reach_the_private_half() {
-        let (auth, _gateway, public) = identity_for("wkr_0000000000000000000000003");
+        let instance_id = zeroship_core::typed_id::new_worker_instance_id();
+        let (auth, _gateway, public) = identity_for(&instance_id);
         let rendered = format!("{auth:?}");
         // The PUBLIC half's thumbprint is a legitimate thing to print; the
         // private half is not, and the two are distinguishable only if the
@@ -525,7 +528,7 @@ mod tests {
         // The one-variable control: this is not passing because the formatter
         // prints nothing at all.
         assert!(
-            rendered.contains("spiffe://zeroship.ai/svc/worker/wkr_0000000000000000000003"),
+            rendered.contains(&format!("spiffe://zeroship.ai/svc/worker/{instance_id}")),
             "{rendered}"
         );
         let _ = thumbprint_key_id(&public);
@@ -567,9 +570,10 @@ mod tests {
         }
         // The control: a real typed id does parse, so the refusals above are
         // about the shape rather than about the format string.
-        let issuer = service_issuer(&format!("{WORKER_SERVICE_NAME}/wkr_0000000000000000000005"))
+        let instance_id = zeroship_core::typed_id::new_worker_instance_id();
+        let issuer = service_issuer(&format!("{WORKER_SERVICE_NAME}/{instance_id}"))
             .expect("a typed id parses");
-        assert_eq!(issuer.instance(), Some("wkr_0000000000000000000000005"));
+        assert_eq!(issuer.instance(), Some(instance_id.as_str()));
         // The principal an instance identifier yields is the ROLE's, which is
         // what control's endpoint allowlist is written against.
         assert_eq!(
