@@ -6,7 +6,9 @@ use zeroship_core::{
 use zeroship_data_orm::{orm::FromRow, Value};
 
 zeroship_data_orm::orm::schema!(pub schema = "../schema/schema.runtime.json");
-pub use schema::{assignments, jobs, management, placement_receipts, queue_scopes, workers};
+pub use schema::{
+    assignments, jobs, management, placement_receipts, queue_scopes, recovery_scopes, workers,
+};
 
 /// Canonical metadata for a host's native platform database binding.
 ///

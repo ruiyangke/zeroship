@@ -10,6 +10,7 @@ export const managerIdentityColumns = {
   placement_receipts: ["id", "app_id", "request_id", "worker_id"],
   management: ["id", "app_id", "request_id", "run_id", "ack_worker_id"],
   jobs: ["id", "app_id", "deployment_id", "worker_id"],
+  recovery_scopes: ["id", "deployment_id", "pending_job_id"],
 };
 
 // Queue records carry closed job metadata; customer history and payloads stay
@@ -93,6 +94,15 @@ export function workflowManagerSchema(namespace) {
   });
   jobs.index("jobs_available_idx").add({ on: ["app_id", "state", "available_at", "id"] });
   jobs.index("jobs_lease_idx").add({ on: ["app_id", "state", "lease_deadline", "id"] });
+
+  create("recovery_scopes", {
+    deployment_id: text(), activation_revision: integer(), next_due_at: integer(),
+    pending_job_id: t.text(),
+  }, ["id"], [
+    fk("recovery_scope", ["id"], "queue_scopes", ["id"]),
+    fk("recovery_job", ["pending_job_id"], "jobs", ["id"]),
+  ]);
+  index("recovery_scopes", "due", ["next_due_at", "id"]);
 
   // ColumnDef does not yet expose the engine's portable bytewise collation
   // facet. Keep this PostgreSQL-specific DDL in the migration recorder, where

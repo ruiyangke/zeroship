@@ -31,5 +31,10 @@
     "app_id",
     "deployment_id",
     "worker_id"
+  ],
+  "recovery_scopes": [
+    "id",
+    "deployment_id",
+    "pending_job_id"
   ]
 }

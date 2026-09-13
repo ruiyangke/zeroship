@@ -39,5 +39,11 @@ CREATE INDEX IF NOT EXISTS "jobs_available_idx" ON "jobs" ("app_id", "state", "a
 
 CREATE INDEX IF NOT EXISTS "jobs_lease_idx" ON "jobs" ("app_id", "state", "lease_deadline", "id");
 
+CREATE TABLE "recovery_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "deployment_id" TEXT NOT NULL, "activation_revision" INTEGER NOT NULL, "next_due_at" INTEGER NOT NULL, "pending_job_id" TEXT, CONSTRAINT "recovery_job" FOREIGN KEY (pending_job_id) REFERENCES jobs(id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "recovery_scopes" ("pending_job_id");
+
+CREATE INDEX IF NOT EXISTS "recovery_scopes_due_idx" ON "recovery_scopes" ("next_due_at", "id");
+
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'da1a9579a7e8535b894cce0b7be241cfd148e918e713108c63b08e5ed2a6344e');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '8cd3dcb758d30bcb6ae0220eef7d8994a82ae10cb6275aac2c2d7e7a0ad37c12');
