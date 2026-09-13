@@ -2673,7 +2673,8 @@ signed-cookie arms still authenticate and merely skip family-marker revocation
 `crates/zeroship-gateway/src/router/auth.rs:761-819`,
 `crates/zeroship-gateway/src/router/auth.rs:988-1021`). A test deliberately proves a
 valid cookie works without DB
-(`crates/zeroship-gateway/tests/auth_token_anchors_test.rs:762-793`).
+(`crates/zeroship-gateway/src/auth_token/tests/cookies.rs`,
+`session_get_fast_path_honors_valid_pairwise_cookie_db_free`).
 
 INFERRED impact: an operator can believe authentication is disabled while valid
 but unrevocable credentials are being accepted.

@@ -458,8 +458,9 @@ row exists" but "the stored `pairwise_sub` is byte-equal to the `sub` the
 gateway put in the cookie", and why the sector-resolution question in section 8
 had to be settled rather than left open.
 
-MEASURED. `identities::lookup_pairwise_sub` in the same module has no
-production caller; every caller is a test. It should be deleted with the upsert.
+The test-only pairwise lookup API has been removed. Private gateway tests
+observe committed identity mappings directly through their fixture's
+administrator connection.
 
 ## The `revoked_at` race, which nobody defends
 
@@ -663,8 +664,8 @@ the property behaviourally and no spelling can fake it.
 ## Step 2. Delete the gateway's `app_user_identities` writes and revoke its grant
 
 DESIGNED. Delete both `identities::upsert` call sites in
-`crates/zeroship-gateway/src/auth_token.rs`, delete `identities::upsert` and
-`identities::lookup_pairwise_sub`, and revoke `insert` and `update` on
+`crates/zeroship-gateway/src/auth_token.rs`, delete `identities::upsert`,
+and revoke `insert` and `update` on
 `zeroship.app_user_identities` from `zeroship_gateway` in a new forward
 migration under `db/migrations-ts/`.
 
@@ -885,9 +886,10 @@ reading, not by observing a kill.** What would settle it: concurrent
 `GET /__zeroship/auth/session?mint=1` requests sharing one anchor cookie against
 a live gateway with more worker threads than concurrent requests and a live
 auth, asserting whether a `kill_family` log line appears. The single-flight tests
-in `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` are in-process and
-drive `anchors::with_single_flight` directly; none exercises cross-thread
-concurrency against a real OP.
+in `crates/zeroship-gateway/src/auth_token/tests/rotation.rs` drive the real
+`rotate_family` with owned PostgreSQL and a loopback mock provider. They cover
+coalescing and cancellation on a worker thread; cross-thread concurrency
+against a real OP remains unverified.
 
 **RED TEST, conditional on the above being confirmed.** Concurrent same-anchor
 mints across worker threads, asserting no family kill and no `login_required`.

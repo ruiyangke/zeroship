@@ -432,7 +432,7 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Result<Anchor> {
 /// The result a coalesced family-rotation future resolves to. `Clone` so a
 /// `Shared` future can hand the same value to every awaiter (the underlying
 /// `Output` must be `Clone`).
-pub type RotationResult = std::result::Result<RotationOk, RotationError>;
+pub(crate) type RotationResult = std::result::Result<RotationOk, RotationError>;
 
 /// A successful reload-recovery family rotation (BFF redesign §2.2 / §3.1).
 ///
@@ -445,7 +445,7 @@ pub type RotationResult = std::result::Result<RotationOk, RotationError>;
 /// holds the route and salts), exactly as on the `/token` path, so the rotated
 /// raw OP access JWT never leaves the gateway and no JWT reaches the browser.
 #[derive(Debug, Clone)]
-pub struct RotationOk {
+pub(crate) struct RotationOk {
     pub global_user_id: UserId,
     /// Issuance time of the verified access token returned by the rotation.
     pub credential_iat: i64,
@@ -464,7 +464,7 @@ pub struct RotationOk {
 
 /// Why a coalesced family rotation failed. `Clone` so a `Shared` future can fan it out.
 #[derive(Debug, Clone)]
-pub enum RotationError {
+pub(crate) enum RotationError {
     /// The anchor is gone / its family was revoked or hit the 720h ceiling
     /// (OP `invalid_grant`). The caller deletes the anchor + clears the
     /// breadcrumb and surfaces `401 login_required`.
@@ -478,16 +478,16 @@ pub enum RotationError {
 /// A type-erased, shared, cloneable rotation future. Boxed so the map can hold
 /// futures of one concrete type regardless of the concrete `async` block.
 type RotationFuture = std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>;
-pub type SharedRotationFuture = Shared<RotationFuture>;
+pub(crate) type SharedRotationFuture = Shared<RotationFuture>;
 
 /// Per-worker-thread index of rotations owned by their awaiting callers.
 ///
 /// Weak references let cancellation of the last caller drop the rotation body
 /// and its [`EntryGuard`]. Keeping a strong future here would retain abandoned
 /// I/O and defer the guard until thread-local destruction. The map is `!Send`,
-/// matching the compio worker and its thread-local PostgreSQL pool.
+/// matching the compio worker and its thread-local database pool.
 #[derive(Default, Clone)]
-pub struct RotationSingleFlight {
+pub(crate) struct RotationSingleFlight {
     inner: Rc<RefCell<HashMap<Uuid, WeakShared<RotationFuture>>>>,
 }
 
@@ -501,7 +501,7 @@ impl std::fmt::Debug for RotationSingleFlight {
 
 impl RotationSingleFlight {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -509,7 +509,7 @@ impl RotationSingleFlight {
     /// future if one exists. `None` ⇒ the caller is the leader and must
     /// `insert` a fresh future.
     #[must_use]
-    pub fn get(&self, anchor_id: Uuid) -> Option<SharedRotationFuture> {
+    pub(crate) fn get(&self, anchor_id: Uuid) -> Option<SharedRotationFuture> {
         let mut map = self.inner.borrow_mut();
         let shared = map.get(&anchor_id).and_then(WeakShared::upgrade);
         if shared.is_none() {
@@ -522,7 +522,11 @@ impl RotationSingleFlight {
     /// clone to await. If a concurrent leader already registered one (it
     /// cannot on a single thread between two synchronous calls, but the API
     /// stays race-safe), the existing one is returned and `fut` is dropped.
-    pub fn insert(&self, anchor_id: Uuid, fut: SharedRotationFuture) -> SharedRotationFuture {
+    pub(crate) fn insert(
+        &self,
+        anchor_id: Uuid,
+        fut: SharedRotationFuture,
+    ) -> SharedRotationFuture {
         if let Some(existing) = self.get(anchor_id) {
             return existing;
         }
@@ -533,13 +537,14 @@ impl RotationSingleFlight {
     }
 
     /// Remove the in-flight entry once the rotation resolves.
-    pub fn remove(&self, anchor_id: Uuid) {
+    pub(crate) fn remove(&self, anchor_id: Uuid) {
         self.inner.borrow_mut().remove(&anchor_id);
     }
 
     /// Number of in-flight rotations (test/observability only).
     #[must_use]
-    pub fn in_flight(&self) -> usize {
+    #[cfg(test)]
+    pub(crate) fn in_flight(&self) -> usize {
         let mut map = self.inner.borrow_mut();
         map.retain(|_, future| future.upgrade().is_some());
         map.len()
@@ -558,7 +563,7 @@ thread_local! {
 /// cheap `Clone` of the per-thread map (the `Rc` clone is shared state), so
 /// it can `get`/`insert`/`remove` across `.await` points without holding a
 /// `RefCell` borrow.
-pub fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
+pub(crate) fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
     SINGLE_FLIGHT.with(|sf| f(sf.clone()))
 }
 
@@ -567,7 +572,7 @@ pub fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
 /// rotation after the leading request disconnects. Dropping every caller
 /// releases the body and guard together.
 #[derive(Debug)]
-pub struct EntryGuard {
+pub(crate) struct EntryGuard {
     anchor_id: Uuid,
 }
 
@@ -575,7 +580,7 @@ impl EntryGuard {
     /// Create a guard that will remove `anchor_id` from the per-thread
     /// single-flight map on drop.
     #[must_use]
-    pub fn new(anchor_id: Uuid) -> Self {
+    pub(crate) fn new(anchor_id: Uuid) -> Self {
         Self { anchor_id }
     }
 }

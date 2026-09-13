@@ -42,11 +42,9 @@
 // not the same as schemas being current. On 2026-09-07 the same `zeroship`
 // database on :5440 held every schema this module asks for and had never seen
 // `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`,
-// so `zeroship.apps` had no `organization_id`. Seven targets --
-// `crates/zeroship-authz/tests/{app_resolution_test,two_call_test}.rs` and
-// `crates/zeroship-gateway/tests/{sessions_test,auth_token_anchors_test,
-// backchannel_logout_test,browser_auth_test,oidc_rp_e2e}.rs` -- died on the
-// missing column and presented, again, as named tests FAILING. That is the
+// so `zeroship.apps` had no `organization_id`. Authz and gateway database
+// targets died on the missing column and presented, again, as named tests
+// FAILING. That is the
 // same void run as 2026-08-21 wearing different clothes, and the header above
 // declared it out of scope ("the journal does not record one today").
 //
