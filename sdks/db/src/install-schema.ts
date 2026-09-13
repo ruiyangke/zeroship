@@ -165,11 +165,31 @@ function runtimeDescriptorFields(
   if (v2 !== null) {
     const out = Object.create(null) as Record<string, Record<string, FieldDef>>;
     for (const [name, collection] of Object.entries(v2.collections)) {
-      out[name] = collection.fields;
+      out[name] = decodeRuntimeFields(collection.fields);
     }
     return out;
   }
   return null;
+}
+
+function decodeRuntimeFields(fields: Record<string, FieldDef>): Record<string, FieldDef> {
+  return Object.fromEntries(Object.entries(fields).map(([name, field]) => {
+    const decoded = { ...field };
+    if (field.type === "bytes" && typeof field.default === "string") {
+      let bytes: Uint8Array;
+      try {
+        const binary = atob(field.default);
+        if (btoa(binary) !== field.default) throw new Error("non-canonical base64");
+        bytes = Uint8Array.from(binary, char => char.charCodeAt(0));
+      } catch {
+        throw invalidRuntimeDescriptor(`binary default for ${JSON.stringify(name)} must be valid base64`);
+      }
+      decoded.default = () => bytes.slice();
+    }
+    if (field.shape) decoded.shape = decodeRuntimeFields(field.shape);
+    if (field.variants) decoded.variants = field.variants.map(decodeRuntimeFields);
+    return [name, decoded];
+  }));
 }
 
 /** Input form: a record of TypeBuilder instances. Field values must be

@@ -4,6 +4,47 @@ use super::fixtures::*;
 use crate::tests::fixtures::parity;
 
 #[test]
+fn artifact_binary_defaults_reach_sdk_inserts_as_native_bytes() {
+    run(async {
+        let dir = tempfile::tempdir().unwrap();
+        apply_schema_ahead_of_runtime(&dir, &format!(
+            "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".blobs (id TEXT PRIMARY KEY, payload BLOB NOT NULL DEFAULT X'00FF');"
+        ));
+        let descriptor = zeroship_data_orm::value!({
+            "version":2, "collections":{"blobs":{"fields":{
+                "id":{"type":"string", "required":true, "primaryKey":true},
+                "payload":{"type":"bytes", "required":true, "default":"AP8="}
+            }, "options":{"softDelete":false, "versioning":false, "strictness":"strict"}, "indexes":[]}}
+        });
+        let source = SqliteRuntimeSource {
+            descriptor: serde_json::to_string(&descriptor).unwrap(),
+            source: format!(
+                r#"
+import {{ env }} from "zeroship";
+const _procedures = {{
+  async insertDefault() {{
+    const inserted = await env.db.blobs.insert({{ id: "defaulted" }});
+    if (inserted.error) return {{ error: {{ code: inserted.error.code, message: inserted.error.message }} }};
+    const explicit = await env.db.blobs.insert({{ id: "explicit", payload: "AP8=" }});
+    return {{ bytes: Array.from(inserted.data.payload),
+      nativeBytes: inserted.data.payload instanceof Uint8Array,
+      rejectsExplicitText: !!explicit.error }};
+  }}
+}};
+{SQLITE_RUNTIME_RPC_SHIM}
+"#
+            ),
+        };
+        assert_eq!(
+            dispatch_sqlite_runtime(&dir, &source, "insertDefault"),
+            zeroship_data_orm::value!({"json":{
+                "bytes":[0,255], "nativeBytes":true, "rejectsExplicitText":true
+            }})
+        );
+    });
+}
+
+#[test]
 fn exact_decimal_strings_round_trip_through_v8() {
     run(async {
         let dir = tempfile::tempdir().expect("create decimal fixture dir");
