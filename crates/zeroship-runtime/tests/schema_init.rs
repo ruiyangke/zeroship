@@ -171,67 +171,10 @@ fn native_descriptor_hook_receives_none_before_schema_less_module_evaluation() {
     assert_eq!(descriptor_hook_observed(None), "none");
 }
 
-/// Build a Runtime around the given user-entry source + procedure
-/// table, dispatch a probe procedure, and return its result body.
-///
-/// `user_src` is the user-entry JS string. The shim wraps it with a
-/// hand-rolled function-shape `default.rpc` dispatcher (the documented
-/// advanced / back-compat path — see `docs/reference/zeroship-standard.md`).
-/// Using function-shape here keeps the test surface narrow: the
-/// runtime's `__zsDispatch` is exercised by `rpc_dispatch.rs`; here we
-/// just need a working dispatch path that surfaces the probe result.
+/// Dispatch the startup probe through the native procedure dictionary.
 fn dispatch_probe(user_src: &str, procs_block: &str, method: &str) -> Result<String, String> {
     init_v8();
-
-    // Synthetic entry shim — function-shape dispatcher (the advanced /
-    // back-compat path). The Vite plugin emits dict-shape; this shim
-    // intentionally exercises the function-shape branch so a regression
-    // dropping that path would surface here.
-    let src = format!(
-        r#"
-{user_src}
-
-const _procedures = {procs_block};
-function _zsRpc(name, input) {{
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {{
-        throw Object.assign(new Error("Method not found: " + name), {{ status: 404, code: "NOT_FOUND" }});
-    }}
-    return fn(input);
-}}
-async function _zsRpcAndRespond(name, input) {{
-    try {{
-        const result = await _zsRpc(name, input);
-        if (result instanceof Response) return result;
-        return new Response(JSON.stringify({{ json: result === undefined ? null : result }}), {{
-            status: 200, headers: {{ "content-type": "application/json" }},
-        }});
-    }} catch (err) {{
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        return new Response(JSON.stringify({{ message: err?.message ?? String(err), name: err?.name ?? "Error" }}), {{
-            status, headers: {{ "content-type": "application/json" }},
-        }});
-    }}
-}}
-async function _zsFetch(request) {{
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
-        return new Response("Not Found", {{ status: 404 }});
-    }}
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    let input = undefined;
-    if (request.method === "POST") {{
-        const text = await request.text();
-        if (text) {{
-            const env = JSON.parse(text);
-            input = env && typeof env === "object" && "json" in env ? env.json : env;
-        }}
-    }}
-    return await _zsRpcAndRespond(id, input);
-}}
-export default {{ fetch: _zsFetch, rpc: _zsRpc }};
-"#
-    );
+    let src = format!("{user_src}\nexport default {{ rpc: {procs_block} }};");
     let modules = vec![ModuleEntry {
         specifier: "index.js".into(),
         source: src,
@@ -308,7 +251,7 @@ async function _zsFetch(request) {
 }
 export default {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
     // No schema key — discovery should short-circuit.
 };
 "#;
@@ -381,7 +324,7 @@ async function _zsFetch(request) {
 }
 export default {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
 };
 "#;
 
@@ -461,7 +404,7 @@ async function _zsFetch(request) {
 }
 const defaultExport = {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
 };
 Object.defineProperty(defaultExport, "schema", {
     get() { throw new Error("default.schema must not be read when a descriptor is present"); },
@@ -547,7 +490,7 @@ async function _zsFetch(request) {
 }
 export default {
     fetch: _zsFetch,
-    rpc: (name, input) => _procedures[name](input),
+    rpc: _procedures,
     schema: { todos: { id: { type: "id" } } },
 };
 "#;

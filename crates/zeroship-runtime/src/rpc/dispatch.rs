@@ -125,3 +125,9 @@ pub fn install_globals<'s>(
     // user code only reaches via the ctx accessors.
     let _ = crate::rpc::ctx_holder::RpcCtx::install(scope);
 }
+mod procedure;
+mod call;
+pub(crate) mod response;
+mod stream;
+pub(crate) use call::{CallProgress, RpcCall};
+pub(crate) use procedure::ProcedureRegistry;

@@ -75,14 +75,12 @@ pub struct ResponseForwarderInner {
     pub paused: bool,
     /// Continuation context captured when the app supplied the stream.
     pub continuation_context: Option<v8::Global<v8::Value>>,
-    /// Whether this forwarder applies upload backpressure (pause/resume on
-    /// the buffer high/low-water marks). ONLY the `env.storage.putStream`
-    /// path (`begin_forward_stream`) enables it, because its consumer
-    /// (`StreamReaderSource`) calls `request_resume`. The wire response-body
-    /// path (`begin_forward`) leaves this `false`: its TCP consumer does not
-    /// re-arm, so it must keep the original eager read loop (overflow-capped),
-    /// never pausing.
+    /// Pause the producer until its consumer drains the channel. Enabled for
+    /// uploads and native RPC iterators. Ordinary Response bodies retain their
+    /// existing read scheduling.
     pub backpressure: bool,
+    cancel_requested: bool,
+    abort_guard: Option<crate::rpc::abort::AbortGuard>,
 }
 
 /// Resume the read loop on a forwarder that paused for backpressure. Called
@@ -91,6 +89,10 @@ pub struct ResponseForwarderInner {
 /// is gone, closed, not paused, or has no persisted reader.
 pub fn resume_read(scope: &mut v8::PinScope, state: &SharedState, stream_id: u32) {
     let Some(fwd) = get(state, stream_id) else { return };
+    if fwd.borrow().cancel_requested {
+        cancel_reader(scope, state, stream_id, &fwd);
+        return;
+    }
     let (reader, continuation_context) = {
         let mut inner = fwd.borrow_mut();
         if inner.closed || !inner.paused {
@@ -125,6 +127,18 @@ fn register(state: &SharedState, stream_id: u32, fwd: ResponseForwarder) {
 /// Look up a forwarder by stream_id.
 pub fn get(state: &SharedState, stream_id: u32) -> Option<ResponseForwarder> {
     state.borrow().response_forwarders.get(&stream_id).cloned()
+}
+
+/// Keep the RPC controller registered until its response stream closes.
+pub(crate) fn retain_abort_guard(
+    state: &SharedState,
+    stream_id: u32,
+    guard: Option<crate::rpc::abort::AbortGuard>,
+) {
+    if let Some(fwd) = get(state, stream_id) {
+        let mut inner = fwd.borrow_mut();
+        if !inner.closed { inner.abort_guard = guard; }
+    }
 }
 
 /// Remove a forwarder from the registry. Called by the kernel after
@@ -237,6 +251,17 @@ fn forward_from_readable(
         v8::Global::new(tc, reader_obj)
     };
 
+    let reader = v8::Local::new(scope, reader_global);
+    begin_forward_reader(scope, reader, backpressure)
+}
+
+/// Forward a host-supplied reader through the same body channel as a Response.
+pub(crate) fn begin_forward_reader(
+    scope: &mut v8::PinScope,
+    reader: v8::Local<v8::Object>,
+    backpressure: bool,
+) -> Result<u32, String> {
+    let reader_global = v8::Global::new(scope, reader);
     // Allocate stream_id.
     let state: SharedState = scope
         .get_slot::<SharedState>()
@@ -418,6 +443,9 @@ fn on_chunk_callback(
         Err(_) => return,
     };
     let captures: &OnChunkCaptures = unsafe { &*(ext.value() as *const OnChunkCaptures) };
+    if captures.fwd.borrow().closed || captures.fwd.borrow().cancel_requested {
+        return;
+    }
 
     // The argument is `{ value, done }` (the Promise resolution of
     // `reader.read()`).
@@ -515,20 +543,15 @@ fn on_chunk_callback(
     );
 }
 
-/// True if the forwarder should pause its read loop for backpressure: it has a
-/// `direct_writer` (the consumer side is live) whose buffer is at/over the
-/// high-water mark. The mark is **per-stream** — half the writer's own cap — so
-/// a large-cap upload stream (`env.storage.putStream`, 2× the S3 part size)
-/// lets the producer run a full next part ahead while the current part PUTs,
-/// while a default-cap stream keeps the small mark. Pre-attach buffering (no
-/// `direct_writer`) never pauses — `attach_writer` drains those synchronously.
+/// Pause before writer attachment or when its buffer reaches the producer
+/// watermark. Attachment and consumer draining enqueue the next pull.
 fn should_pause(fwd: &ResponseForwarder) -> bool {
     let inner = fwd.borrow();
     inner.backpressure
         && inner
             .direct_writer
             .as_ref()
-            .is_some_and(|w| w.buffered_bytes() >= w.cap() / 2)
+            .is_none_or(|w| w.buffered_bytes() >= w.cap() / 2)
 }
 
 fn on_error_callback(
@@ -591,6 +614,7 @@ fn push_chunk(
 fn close_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32) {
     let mut inner = fwd.borrow_mut();
     inner.closed = true;
+    inner.abort_guard.take();
     // If a direct writer is attached, signal EOF.
     if let Some(writer) = inner.direct_writer.as_ref() {
         writer.close();
@@ -614,6 +638,7 @@ fn error_forwarder(fwd: &ResponseForwarder, state: &SharedState, stream_id: u32,
     // the wire path; nothing reads the reason there yet.
     let mut inner = fwd.borrow_mut();
     inner.closed = true;
+    inner.abort_guard.take();
     if let Some(writer) = inner.direct_writer.as_ref() {
         writer.abort(msg);
     }
@@ -642,6 +667,20 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
         writer.close();
         return;
     };
+    let weak_state = Rc::downgrade(state);
+    writer.set_consumer_callback(Rc::new(move |event| {
+        let Some(state) = weak_state.upgrade() else { return; };
+        match event {
+            crate::channel::StreamConsumerEvent::Drained => {
+                let below_watermark = get(&state, stream_id).is_some_and(|fwd| {
+                    fwd.borrow().direct_writer.as_ref()
+                        .is_some_and(|writer| writer.buffered_bytes() <= writer.cap() / 4)
+                });
+                if below_watermark { request_resume(&state, stream_id); }
+            }
+            crate::channel::StreamConsumerEvent::Closed => request_cancel(&state, stream_id),
+        }
+    }));
     let drained_or_closed = {
         let mut inner = fwd.borrow_mut();
         for chunk in inner.buffer.drain(..) {
@@ -658,6 +697,49 @@ pub fn attach_writer(state: &SharedState, stream_id: u32, writer: StreamWriter) 
     if drained_or_closed {
         // Forwarder is done — no more chunks coming. Drop from registry.
         remove(state, stream_id);
+    } else if !should_pause(&fwd) {
+        request_resume(state, stream_id);
+    }
+}
+
+fn request_cancel(state: &SharedState, stream_id: u32) {
+    let Some(fwd) = get(state, stream_id) else { return; };
+    fwd.borrow_mut().cancel_requested = true;
+    let mut state = state.borrow_mut();
+    if !state.forwarder_resumes.contains(&stream_id) {
+        state.forwarder_resumes.push_back(stream_id);
+    }
+    state.notify_pump();
+}
+
+fn cancel_reader(
+    scope: &mut v8::PinScope,
+    state: &SharedState,
+    stream_id: u32,
+    fwd: &ResponseForwarder,
+) {
+    let (reader, frame) = {
+        let inner = fwd.borrow();
+        (inner.reader.clone(), inner.continuation_context.clone())
+    };
+    close_forwarder(fwd, state, stream_id);
+    let Some(reader) = reader else { return; };
+    let cancel = |scope: &mut v8::PinScope| {
+        v8::tc_scope!(let tc, scope);
+        let reader = v8::Local::new(tc, reader);
+        let key = v8::String::new(tc, "cancel").unwrap();
+        let Some(method) = reader.get(tc, key.into()) else { return; };
+        let Ok(method) = v8::Local::<v8::Function>::try_from(method) else { return; };
+        if let Some(result) = method.call(tc, reader.into(), &[])
+            && let Some(resolver) = v8::PromiseResolver::new(tc)
+        {
+            resolver.get_promise(tc).mark_as_handled();
+            resolver.resolve(tc, result);
+        }
+    };
+    match frame {
+        Some(frame) => crate::core::invocation::with_captured_context(scope, &frame, cancel),
+        None => cancel(scope),
     }
 }
 

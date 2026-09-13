@@ -135,9 +135,17 @@ pub fn with_kind<'s, R>(
     kind: ProcedureKind,
     body: impl FnOnce(&mut v8::PinScope<'s, '_>) -> R,
 ) -> R {
+    with_procedure_frame(scope, Some(kind), body)
+}
+
+pub(crate) fn with_procedure_frame<'s, R>(
+    scope: &mut v8::PinScope<'s, '_>,
+    kind: Option<ProcedureKind>,
+    body: impl FnOnce(&mut v8::PinScope<'s, '_>) -> R,
+) -> R {
     let previous = scope.get_continuation_preserved_embedder_data();
     let previous = v8::Global::new(scope, previous);
-    enter_frame(scope, Some(kind));
+    enter_frame(scope, kind);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(scope)));
     let previous = v8::Local::new(scope, previous);
     scope.set_continuation_preserved_embedder_data(previous);

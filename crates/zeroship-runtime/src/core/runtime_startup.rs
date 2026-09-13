@@ -185,7 +185,7 @@ impl RuntimeInner {
         self.startup = StartupState::Failed(error);
         self.fetch_handler_fn = None;
         self.fetch_fast_fn = None;
-        self.rpc_fn = None;
+        self.rpc_registry = None;
         self.workflow_fn = None;
     }
 
@@ -197,7 +197,7 @@ impl RuntimeInner {
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
-        let entries =
+        let (entries, rpc_registry) =
             with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
                 for plugin in &self.plugins {
                     let namespace =
@@ -213,7 +213,7 @@ impl RuntimeInner {
                     .get(tc, key.into())
                     .ok_or("could not read module default export")?;
                 let mut entries = Vec::new();
-                for name in ["fetch", "fetchFast", "rpc", "workflow"] {
+                for name in ["fetch", "fetchFast", "workflow"] {
                     let entry = if default.is_null_or_undefined() {
                         None
                     } else {
@@ -233,12 +233,25 @@ impl RuntimeInner {
                     };
                     entries.push(entry);
                 }
-                Ok::<_, String>(entries)
+                let rpc_registry = if default.is_null_or_undefined() {
+                    None
+                } else {
+                    let object = default.to_object(tc).ok_or("invalid module default export")?;
+                    let key = v8::String::new(tc, "rpc").unwrap();
+                    let value = object.get(tc, key.into()).ok_or("could not read default.rpc")?;
+                    if value.is_null_or_undefined() {
+                        None
+                    } else {
+                        Some(crate::rpc::dispatch::ProcedureRegistry::snapshot(tc, value)
+                            .map_err(|error| error.describe(tc))?)
+                    }
+                };
+                Ok::<_, String>((entries, rpc_registry))
             })?;
         let mut entries = entries.into_iter();
         self.fetch_handler_fn = entries.next().unwrap();
         self.fetch_fast_fn = entries.next().unwrap();
-        self.rpc_fn = entries.next().unwrap();
+        self.rpc_registry = rpc_registry;
         self.workflow_fn = entries.next().unwrap();
         Ok(())
     }

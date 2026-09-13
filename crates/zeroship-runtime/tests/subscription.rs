@@ -205,10 +205,7 @@ fn subscription_runs_async_gen_and_emits_frames() {
                 yield { tick: 2 };
             }
             export default {
-                rpc: async (name, input, _ctx) => {
-                    if (name === "sub") return sub(input);
-                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
-                },
+                rpc: {sub},
             };
         "#
         .into(),
@@ -251,10 +248,7 @@ fn subscription_emits_error_envelope_on_throw() {
                 throw err;
             }
             export default {
-                rpc: async (name, input, _ctx) => {
-                    if (name === "sub") return sub(input);
-                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
-                },
+                rpc: {sub},
             };
         "#
         .into(),
@@ -294,10 +288,7 @@ fn subscription_rejects_non_iterator_handler() {
                 return { tick: 0 };
             }
             export default {
-                rpc: async (name, input, _ctx) => {
-                    if (name === "sub") return sub(input);
-                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
-                },
+                rpc: {sub},
             };
         "#
         .into(),
@@ -342,10 +333,7 @@ fn subscription_stops_when_client_closes() {
                 }
             }
             export default {
-                rpc: async (name, input, _ctx) => {
-                    if (name === "sub") return sub(input);
-                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
-                },
+                rpc: {sub},
             };
         "#
         .into(),
@@ -398,10 +386,7 @@ fn subscription_rejects_malformed_hello() {
         source: r#"
             async function* sub() { yield 1; }
             export default {
-                rpc: async (name, input, _ctx) => {
-                    if (name === "sub") return sub(input);
-                    throw Object.assign(new Error("Method not found: " + name), { status: 404, code: "NOT_FOUND" });
-                },
+                rpc: {sub},
             };
         "#
         .into(),

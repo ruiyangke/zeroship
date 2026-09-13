@@ -1957,46 +1957,8 @@ const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
 // envelope-wrapped on the wire by the kernel; promises get awaited;
 // async iterators fall through to the slow path's stream encoder.
 //
-// Two shapes accepted (see `docs/reference/zeroship-standard.md`):
-//   - plain object (dict-shape, `{ [wireId]: handler }`): the canonical
-//     contract. Wrapped in the internal dispatcher so the runtime
-//     owns input validation, capability frame, stream framing, and
-//     dev-only output validation. The Vite plugin's
-//     synthetic entry and `examples/raw-rpc.js`-style raw deploys both
-//     emit this.
-//   - function (`(name, input, ctx) => ...`): documented advanced /
-//     back-compat path. Used directly without the runtime dispatcher
-//     — the function owns its own validation. The dev-bootstrap consumes
-//     this because HMR re-resolves the user namespace per request; raw
-//     deploys may use it for dynamic routing.
-let USER_RPC = null;
-if (user && user.default && user.default.rpc != null) {
-    const _rpc = user.default.rpc;
-    if (typeof _rpc === "function") {
-        USER_RPC = _rpc;
-    } else if (typeof _rpc === "object") {
-        USER_RPC = function dispatchRpc(name, input, ctx) {
-            // Stream/subscription handlers are `async function*` — calling
-            // them returns an AsyncIterator synchronously (not a Promise).
-            // Returning it here lets the kernel's sync FallThrough path
-            // kick in, which routes the request to `default.fetch` where
-            // the SSE encoder (`sseFromAsyncGen` / `createFetchHandler`)
-            // wraps the iterator into a streaming Response.
-            //
-            // If we let the async internal dispatcher handle these,
-            // it wraps the iterator in a Promise; the kernel's promise-
-            // settle path then sees `Promise<AsyncIterator>` and surfaces
-            // the "AsyncIterator from a Promise — unsupported" error.
-            const _fn = _rpc[name];
-            const _cfg = _fn && _fn.config;
-            const _kind = _cfg && typeof _cfg.kind === "string" ? _cfg.kind : undefined;
-            if (_kind === "stream" || _kind === "subscription") {
-                return _fn(input, ctx);
-            }
-            return __zsDispatchRpc(_rpc, name, input, ctx);
-        };
-    }
-}
+// Rust snapshots the procedure dictionary before publishing the application.
+const USER_RPC = user?.default?.rpc ?? null;
 
 const FALLBACK_ZS_V1_TAG = "/__zeroship/v1/";
 
