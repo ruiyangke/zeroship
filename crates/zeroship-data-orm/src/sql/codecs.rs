@@ -193,6 +193,16 @@ fn normalize_row_on_read(
     Ok(())
 }
 
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Vector storage rounds to f32; only non-finite results are invalid"
+)]
+fn is_finite_vector_element(value: &Value) -> bool {
+    value
+        .as_f64()
+        .is_some_and(|number| (number as f32).is_finite())
+}
+
 fn normalize_vector_value(
     field: &str,
     definition: &ColumnSchema,
@@ -218,9 +228,7 @@ fn normalize_vector_value(
             let dimensions = definition.vector_dims;
             if values.is_empty()
                 || dimensions != Some(values.len())
-                || values
-                    .iter()
-                    .any(|v| !v.as_f64().is_some_and(|n| (n as f32).is_finite()))
+                || !values.iter().all(is_finite_vector_element)
             {
                 return Err(invalid());
             }
@@ -299,7 +307,7 @@ fn normalize_boolean_value(value: &mut Value) -> Result<(), CodecError> {
     }
 }
 
-fn normalize_bytes_value(value: &mut Value) -> Result<(), CodecError> {
+fn normalize_bytes_value(value: &Value) -> Result<(), CodecError> {
     match value {
         Value::Null | Value::Bytes(_) => Ok(()),
         _ => Err(CodecError::internal(

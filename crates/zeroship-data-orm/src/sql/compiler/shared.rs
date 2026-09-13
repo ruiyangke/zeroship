@@ -922,6 +922,7 @@ pub(crate) fn write_operand(
     operand: &ResolvedOperand,
 ) -> Result<(), CompileError> {
     match operand {
+        ResolvedOperand::RowPresence => writer.sql.push('1'),
         ResolvedOperand::Column(column) => write_column_reference(writer, column),
         ResolvedOperand::Comparison(comparison) => {
             writer.sql.push('(');

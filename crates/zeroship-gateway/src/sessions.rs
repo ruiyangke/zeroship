@@ -25,6 +25,9 @@ use zeroship_core::user_id::UserId;
 use crate::error::{GatewayError, Result};
 use crate::rls;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone)]
 pub struct AppSession {
     pub id: Uuid,

@@ -35,6 +35,7 @@ mod sql_registration;
 mod timestamp;
 mod transaction_options;
 mod typed_arrays;
+mod typed_exists;
 mod typed_mutations;
 mod typed_predicates;
 mod typed_reads;
