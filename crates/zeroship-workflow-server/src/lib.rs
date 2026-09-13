@@ -12,6 +12,8 @@ use std::{rc::Rc, sync::Arc};
 pub struct WorkflowHttpState {
     pub service: coordinator::Coordinator,
     pub auth: Arc<auth::WorkflowAuth>,
+    /// Trusted finite policy observations; absent sources refuse lease requests.
+    pub policy_source: Option<Rc<dyn zeroship_workflow_manager::policy::PolicySource>>,
 }
 
 pub fn configure(config: &mut ntex::web::ServiceConfig) {

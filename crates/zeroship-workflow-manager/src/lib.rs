@@ -7,6 +7,7 @@ pub mod deployments;
 pub mod driver;
 mod error;
 mod models;
+pub mod policy;
 mod queue;
 pub mod recovery;
 pub mod retention;

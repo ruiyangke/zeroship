@@ -15,6 +15,14 @@ charging the full request exchange. A late heartbeat cannot revive an expired
 grant. The executor must also enforce its original hard execution deadline.
 Exact settlement receipts remain retryable after local lease expiry.
 
+`WorkerCoordinator::policy_lease` accepts an app assignment and verifies the
+returned app, worker, exact signing-key thumbprint and assignment revision. It
+validates the complete shared raw policy and rejects a remaining duration beyond
+that policy's lease ceiling. `LeasedPolicy` anchors expiration before transport;
+cloning preserves that deadline. The host installs it using the refresh ticket
+reserved before the request. A valid client response cannot revive a replaced
+host binding, and unavailable source authority never selects default policy.
+
 `ControlCoordinator::register_schedules` prepares input-free metadata and checks
 the complete accepted declaration. `activate_schedules` checks the returned job's
 app, deployment, operation and activation revision. These publication methods

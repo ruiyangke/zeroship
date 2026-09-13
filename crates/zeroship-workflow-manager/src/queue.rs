@@ -852,7 +852,10 @@ impl Budget {
     }
 
     pub(crate) fn cap(&self, sample: Sample, deadline: i64) -> Result<(), Error> {
-        let deadline = local_deadline(sample, deadline)?;
+        self.cap_at(local_deadline(sample, deadline)?)
+    }
+
+    pub(crate) fn cap_at(&self, deadline: Instant) -> Result<(), Error> {
         self.0.set(self.0.get().min(deadline));
         if self.0.get() <= Instant::now() {
             return Err(Error::Timeout);
@@ -861,7 +864,7 @@ impl Budget {
     }
 }
 
-fn local_deadline(sample: Sample, deadline: i64) -> Result<Instant, Error> {
+pub(crate) fn local_deadline(sample: Sample, deadline: i64) -> Result<Instant, Error> {
     // The database sample is floored. Charge its resolution so the conversion
     // cannot retain the unobserved fraction of the final clock tick.
     let remaining = deadline

@@ -210,12 +210,15 @@ finalized with the authentication owner; registration alone does not solve them.
 
 ## Policy bindings and authenticated leases
 
-**Native lifecycle implemented; transport and source integration remain open.**
+**Native lifecycle and injectable lease transport implemented; production source
+and host integration remain open.**
 The creator engine accepts trusted `PolicySnapshot` values through immutable
 `PolicyBinding` capabilities and ordered `PolicyRefresh` tickets. App handles,
 queued backend calls and delivered execution retain the original authority across
-asynchronous work. Authenticated policy lease transport and the authoritative
-Control policy source remain required integration work.
+asynchronous work. The shared closed raw policy, authenticated lease client and
+server route exist. The server requires an injected trusted policy provider and
+returns an infrastructure failure when none is configured. The authoritative
+Control source and production host refresh remain required integration work.
 
 ### Native binding identity and policy revision
 
@@ -348,8 +351,17 @@ authoritative source observation may issue a new validity bound. Unknown source
 freshness, inconsistent revisions and unavailable source storage fail closed with
 retryable infrastructure failure.
 
+`zeroship_workflow_manager::policy::PolicySource` expresses this trusted provider
+contract. `PolicyObservation` validates the raw policy, retains its original
+monotonic deadline and carries an opaque observation identity. Cached reads clone
+the retained observation. Equal values, revision and deadline do not make a new
+observation identical to an invalidated predecessor. The provider's nonblocking
+revalidation must reject that predecessor permanently across shortening,
+revocation and restoration. `PolicyGrant` retains the source through response
+construction and cannot serialize after source authority is lost.
+
 The exact Control source representation, contributing-writer coverage and revision
-publication mechanism remain unresolved prerequisites for production transport.
+publication mechanism remain unresolved prerequisites for production use.
 The existing app/plan/rollout reads do not supply this contract. Selecting a live
 platform provider avoids a policy outbox only if it establishes the required
 consistent revision and validity itself; it does not waive those requirements.
@@ -357,7 +369,8 @@ consistent revision and validity itself; it does not waive those requirements.
 The worker requests a lease using `AssignedScope`: app ID and assignment revision.
 The server authenticates the enrolled instance before buffering the body. Worker
 identity and signing-key thumbprint come from the verified assertion context, not
-request selectors. The proposed closed response binds:
+request selectors. The closed `zeroship_core::workflow_policy::PolicyLease`
+response binds:
 
 ```text
 appId
@@ -376,9 +389,11 @@ depend on the customer engine. No database address, credential, customer input o
 history is admitted into the envelope. Existing TLS, endpoint/audience assertions,
 replay protection, bounded bodies and closed failures apply.
 
-Under the manager's app-before-worker lock order, verify current placement and
-source authority, then revalidate the originally authenticated enrolled key after
-waits and before issuing the grant. A replaced key is not equivalent to another
+Under the manager's app-before-worker lock order, verify placement and enrollment
+before requesting source metadata. Release those locks for source I/O, then take
+them again to verify current placement and source authority. Revalidate the
+originally authenticated enrolled key after waits and before issuing the grant.
+A replaced key is not equivalent to another
 active key on the same instance. Cap authority by the original verified source
 deadline, assignment/registration validity and configured policy-lease ceiling.
 Later checks can shorten the issuing attempt's bound. Requesting policy never
@@ -393,6 +408,15 @@ duration and rejects a reply already exhausted by the exchange. It does not comp
 Control or manager wall-clock timestamps with worker or creator database time.
 Cloning a lease preserves its deadline. Installing it consumes the original
 request's refresh ticket; client validation alone cannot bind it to a replacement.
+
+The native `AssignedPolicies` helper supplies that installation boundary. It owns
+an immutable client and `AssignedScope`; construction explicitly allocates a new
+binding generation, and cloning retains it. `refresh` reserves the ticket before
+transport and installs the exact client deadline without rebasing. A failed old
+request cannot revoke a newer successful refresh. Failed exchanges retain only
+the previous snapshot's original authority. The production host must keep the
+helper while signer and assignment are unchanged, replace it when either changes,
+and drive its bounded refresh lifecycle alongside assignment discovery.
 
 ### Archive acknowledgement and verification
 
@@ -1585,7 +1609,7 @@ The inventory includes required semantics beyond the currently available routes.
 | Poll/renew/release assignment | Enrolled worker to manager. | Only that worker's authorized scopes and current revision outcomes; release does not retire the app's recovery duty. |
 | Register/activate deployment | Control to manager. | Idempotent immutable schedule metadata and monotonic activation state; dispatch readiness remains distinct. |
 | Disable calendar | Control to manager. | Durable app revision fence and historical receipt; accepted jobs, recovery and creator policy remain independent. |
-| Obtain policy lease | Enrolled worker under its current assignment to manager. | Validated policy bound to the exact app, worker key and placement revision, capped by original source freshness and remaining authority. Target protocol; transport remains pending. |
+| Obtain policy lease | Enrolled worker under its current assignment to manager. | Validated policy bound to the exact app, worker key and placement revision, capped by original source freshness and remaining authority. Injectable provider, server route and client exist; authoritative Control source and production host integration remain open. |
 | Establish/close ingress scope | Trusted creator host through manager policy. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an arbitrary app. |
 | Submit job/intents | Assigned worker or native manager scheduling logic to manager queue. | Receipt for the stable immutable specification; changed content under the same job identity conflicts. |
 | Claim job | Enrolled worker with current assignment to manager queue. | A persisted delivery attempt and bounded authority, or no eligible work. |
@@ -1877,8 +1901,10 @@ blocked database cancellation, queued calls retaining their original deadline,
 and returned payload streams stopping under revoked authority. Delivery tests
 revoke policy while retaining the same consumer scope and keep occupied capacity
 until native shutdown joins. Exact semantic receipts and status remain readable
-through the retained app scope after execution authority is gone. Source authority,
-authenticated transport and production composition remain required work.
+through the retained app scope after execution authority is gone. Authenticated
+transport accepts an injected finite source and retains original deadlines across
+manager transactions and HTTP. Authoritative Control source publication and
+production composition remain required work.
 
 Workflow provisioning preserves an existing creator schema's migrator ownership.
 Native PostgreSQL container tests exercise both provisioning orders, repeated
@@ -2085,9 +2111,10 @@ outside the queue cutover.
 
 ### Dependency-ordered completion
 
-- Bind creator handles to immutable host authority generations and ordered refresh
-  tickets; then supply the revisioned Control source and authenticated policy lease
-  transport before production workers depend on remote policy.
+- Supply the revisioned authoritative Control policy source and compose the
+  authenticated lease path with creator bindings before production workers depend
+  on remote policy. Native generations, refresh tickets and injectable transport
+  already exist.
 - Finalize the missing closed delivery, scope-recovery and retention contracts;
   add their manager models using the canonical migration/ORM pipeline.
 - Connect normal deployment registration, activation and queue holds to manager

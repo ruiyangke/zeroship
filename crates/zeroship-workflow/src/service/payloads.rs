@@ -6,6 +6,7 @@ use super::{
     tasks::authorized_task,
     AppWorkflows, RequestId, TaskToken, WorkerIdentity, WorkflowService,
 };
+use crate::service::policy::admit;
 use crate::{
     engine::{StepCheckpoint, WorkflowOutputRef},
     validation, WorkflowServiceError,
@@ -218,7 +219,7 @@ impl WorkflowService {
             id
         } else {
             claim.validate_live()?;
-            claim.policy.admit()?;
+            admit(&claim.policy)?;
             if reference.size > claim.policy.max_payload_bytes {
                 return Err(WorkflowServiceError::PayloadTooLarge);
             }
@@ -249,7 +250,7 @@ impl WorkflowService {
         let mut tx = self.begin().await?;
         let claim = authorized_task(&mut tx, worker, task_id, token).await?;
         claim.validate_live()?;
-        claim.policy.admit()?;
+        admit(&claim.policy)?;
         let row = payload(&tx, &claim.app, &id).await?;
         match row.state.as_str() {
             "staged" | "referenced" => {

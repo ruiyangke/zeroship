@@ -86,6 +86,11 @@ impl VerifiedWorker {
     pub const fn id(&self) -> &WorkerId {
         &self.id
     }
+
+    #[must_use]
+    pub fn signing_key_id(&self) -> String {
+        thumbprint_key_id(&self.public_key)
+    }
 }
 impl std::fmt::Debug for WorkflowAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -6,6 +6,7 @@ use super::{
     lock_run, models, parse_state, replay, value, AppId, AppPolicy, Entity, Preparation, Rejection,
     RestartOptions, RestartedRun, RunState, Transaction, WorkflowServiceError,
 };
+use crate::service::policy::admit;
 use crate::{engine::StepCheckpoint, lifecycle::RestartSafety, operations::RestartDeploy};
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -34,7 +35,7 @@ pub(in crate::service) async fn prepare(
     policy: &AppPolicy,
     now: i64,
 ) -> Result<Preparation<RestartPlan>, WorkflowServiceError> {
-    if policy.admit().is_err() {
+    if admit(policy).is_err() {
         return Ok(Preparation::Rejected(Rejection::Denied));
     }
     let deploy_policy = match crate::lifecycle::restart_deploy_policy(options) {

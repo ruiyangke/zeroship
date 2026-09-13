@@ -59,6 +59,15 @@ of the original worker even after placement expires. Claim and heartbeat replies
 transfer remaining lease duration after commit; worker wall clocks are not used
 to interpret the manager's absolute timestamps.
 
+`POST /v1/policy/lease` accepts only an `AssignedScope` from an enrolled worker.
+The response binds complete policy to that app, worker, signing-key thumbprint
+and assignment revision. The native manager validates assignment before source
+I/O and rechecks authority after waits without renewing registration or placement.
+`WorkflowHttpState::policy_source` injects the trusted platform provider. The
+binary currently leaves it absent, so policy requests fail with an infrastructure
+error until an authoritative revisioned Control source is integrated. There is
+no default-allow policy or creator database lookup.
+
 Assignments and mutation receipts survive restart. Wake revisions reject stale
 or conflicting publication. A worker cannot release the last active placement;
 missing owners expose the app for host-driven recovery and a customer-journal
@@ -83,6 +92,7 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `tests/coordinator.rs`: native store, fencing and recovery contracts.
 - `tests/http.rs`: real server processes, replicas, revocation and restart.
 - `tests/http_jobs.rs`: job delivery, scoped publication and enrollment changes during lock waits.
+- `tests/http_policy.rs`: assignment-scoped policy, source failures and enrolled-key replacement during issuance.
 - `tests/http_schedules.rs`: Control-only publication, immutable replies and schedule replacement without workers.
 - `tests/driver.rs`: process-owned scheduling and retention recovery without workers.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.

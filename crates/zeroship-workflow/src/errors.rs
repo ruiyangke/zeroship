@@ -55,6 +55,12 @@ impl std::fmt::Display for WorkflowServiceError {
 
 impl std::error::Error for WorkflowServiceError {}
 
+impl From<zeroship_core::workflow_policy::InvalidPolicy> for WorkflowServiceError {
+    fn from(error: zeroship_core::workflow_policy::InvalidPolicy) -> Self {
+        Self::InvalidRequest(error.to_string())
+    }
+}
+
 impl From<zeroship_workflow_calendar::CalendarError> for WorkflowServiceError {
     fn from(error: zeroship_workflow_calendar::CalendarError) -> Self {
         Self::InvalidRequest(error.to_string())

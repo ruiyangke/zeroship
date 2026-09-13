@@ -1,4 +1,5 @@
 use super::*;
+use crate::service::policy::admit;
 use crate::{
     operations::RunState,
     service::{ControlIntent, WorkerIdentity},
@@ -6,6 +7,23 @@ use crate::{
 use std::time::{Duration, Instant};
 
 mod lifetimes;
+
+#[test]
+fn snapshots_reject_invalid_shared_policy_values() {
+    let policy = AppPolicy {
+        lease_ms: 0,
+        ..AppPolicy::default()
+    };
+    for snapshot in [
+        PolicySnapshot::configuration(1.try_into().unwrap(), policy.clone()),
+        PolicySnapshot::lease(1.try_into().unwrap(), policy, Instant::now()),
+    ] {
+        assert!(matches!(
+            snapshot,
+            Err(WorkflowServiceError::InvalidRequest(_))
+        ));
+    }
+}
 
 #[test]
 fn authority_preserves_raw_admission_near_lease_expiry() {
@@ -33,7 +51,7 @@ fn authority_preserves_raw_admission_near_lease_expiry() {
         assert_eq!(authority.deadline, Some(until));
         assert_eq!(authority.policy, policy);
         assert!(authority.policy.admission);
-        assert!(authority.policy.admit().is_ok());
+        assert!(admit(&authority.policy).is_ok());
         assert!(
             !policies.fixture_resolve(&app).unwrap().admission,
             "the effective execution policy must exercise its expiry rounding"
@@ -151,7 +169,7 @@ fn authority_preserves_an_explicit_configured_admission_denial() {
     assert_eq!(authority.policy, policy);
     authority.check().unwrap();
     assert!(matches!(
-        authority.policy.admit(),
+        admit(&authority.policy),
         Err(WorkflowServiceError::PermissionDenied)
     ));
 }

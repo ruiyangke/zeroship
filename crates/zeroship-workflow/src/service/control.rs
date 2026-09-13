@@ -10,6 +10,7 @@ use super::{
     types::digest,
     AppPolicy, AppWorkflows, RequestId,
 };
+use crate::service::policy::admit;
 use crate::{
     operations::{RestartOptions, RestartedRun, RunOperation, RunState, TransitionedRun},
     WorkflowServiceError,
@@ -192,7 +193,7 @@ pub(super) async fn prepare_transition(
                 value!({"control":"pause", "state":"paused", "due_at":null, "task_id":null})
             }
             RunOperation::Resume => {
-                if policy.admit().is_err() {
+                if admit(policy).is_err() {
                     return Ok(Preparation::Rejected(Rejection::Denied));
                 }
                 if leased {
