@@ -4,6 +4,7 @@ pub mod assignments;
 mod budget;
 pub mod consumer;
 pub mod delivery;
+pub mod host;
 pub use budget::{ExecutionBudget, ExecutionGuard};
 mod worker;
 pub use worker::{WorkerOptions, WorkflowWorker};
