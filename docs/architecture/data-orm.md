@@ -219,8 +219,10 @@ let rows: Vec<PostSummary> = posts.query()
     .all().await?;
 ```
 
-`first` returns an optional model. `count` counts matching visible rows without
-applying ordering or page bounds. `include_deleted` opts into rows hidden by the
+`first` returns an optional model. `count` counts matching visible rows;
+`exists` returns a boolean and stops at the first match without reading model
+fields. Both ignore ordering and page bounds. Use `entity.exists(filter)` or
+`entity.query().filter(filter).exists()`. `include_deleted` opts into rows hidden by the
 declared deletion lifecycle. The existing `find(filter, options)` method uses
 the same typed query path.
 
