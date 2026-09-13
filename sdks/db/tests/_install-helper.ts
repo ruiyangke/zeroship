@@ -69,7 +69,7 @@ type FixtureSchemas<T> = {
  * vacuously.
  */
 export function descriptorFor(schemas: Record<string, unknown>): RuntimeSchemaDescriptor {
-  const collections: Record<string, unknown> = {};
+  const collections = Object.create(null) as Record<string, unknown>;
 
   for (const [name, declared] of Object.entries(schemas)) {
     const builder = declared instanceof SchemaBuilder ? declared : null;

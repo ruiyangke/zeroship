@@ -7,14 +7,14 @@
 
 use crate::common::{self, auth_server::AuthServer};
 use compio_postgres::Client;
-use uuid::Uuid;
 use zeroship_auth::{identity::verification, store::users};
+use zeroship_core::UserId;
 
-pub(super) async fn issue(pg: &Client, email: &str) -> (Uuid, String) {
+pub(super) async fn issue(pg: &Client, email: &str) -> (UserId, String) {
     let user = users::create(pg, email, "Verification", None)
         .await
         .unwrap();
-    let issued = verification::issue(pg, user.id, email).await.unwrap();
+    let issued = verification::issue(pg, &user.id, email).await.unwrap();
     (user.id, issued.raw)
 }
 
@@ -66,13 +66,13 @@ pub(super) async fn redeem(
     request.body(body).send().await.unwrap()
 }
 
-pub(super) async fn assert_state(pg: &Client, user_id: Uuid, redeemed: bool) {
+pub(super) async fn assert_state(pg: &Client, user_id: &UserId, redeemed: bool) {
     let row = pg
         .query_one(
             "SELECT u.email_verified_at IS NOT NULL, v.consumed_at IS NOT NULL \
          FROM zeroship.users u JOIN zeroship.email_verifications v ON v.user_id = u.id \
          WHERE u.id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await
         .unwrap();

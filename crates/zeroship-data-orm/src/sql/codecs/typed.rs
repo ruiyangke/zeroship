@@ -1,7 +1,7 @@
 //! Descriptor-directed temporal values and typed JSON containers.
 use super::{CodecError, Value};
 
-const MAX_TYPED_DEPTH: usize = 128;
+const MAX_TYPED_DEPTH: usize = super::MAX_JSON_DEPTH;
 
 fn invalid(field: &str, expected: &str) -> CodecError {
     CodecError::validation(
@@ -33,6 +33,51 @@ fn scalar(kind: &str, field: &str, value: &mut Value) -> Result<(), CodecError> 
         *value = Value::from(millis);
     }
     Ok(())
+}
+
+fn vector(field: &str, definition: &Value, value: &Value) -> Result<(), CodecError> {
+    let dimensions = definition
+        .get("vectorDims")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok());
+    let valid = value.as_array().is_some_and(|values| {
+        !values.is_empty()
+            && dimensions == Some(values.len())
+            && values.iter().all(|value| {
+                value
+                    .as_f64()
+                    .is_some_and(|value| (value as f32).is_finite())
+            })
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid(
+            field,
+            "a finite vector matching its declared dimensions",
+        ))
+    }
+}
+
+fn geographic_point(field: &str, value: &Value) -> Result<(), CodecError> {
+    let valid = value.as_object().is_some_and(|point| {
+        point
+            .get("lat")
+            .and_then(Value::as_f64)
+            .is_some_and(|value| (-90.0..=90.0).contains(&value))
+            && point
+                .get("lng")
+                .and_then(Value::as_f64)
+                .is_some_and(|value| (-180.0..=180.0).contains(&value))
+    });
+    if valid {
+        Ok(())
+    } else {
+        Err(invalid(
+            field,
+            "a geographic point within coordinate bounds",
+        ))
+    }
 }
 
 fn temporal_item(definition: &Value) -> Option<&str> {
@@ -113,6 +158,9 @@ fn prepare_array_element(field: &str, item: &str, value: &mut Value) -> Result<(
     if !valid {
         return Err(invalid_element(field, item));
     }
+    if item == "json" {
+        super::validate_json_value(field, value)?;
+    }
     Ok(())
 }
 
@@ -137,8 +185,35 @@ fn prepare_value_at(
         return Ok(());
     }
     let kind = definition["type"].as_str();
+    if crate::sql::descriptors::is_exact_decimal(definition) {
+        let input = match value {
+            Value::Decimal(value) | Value::String(value) if crate::sql::decimal::valid(value) => {
+                value.clone()
+            }
+            _ => return Err(invalid(field, "an exact decimal string")),
+        };
+        let storage = crate::sql::decimal::storage(definition)
+            .map_err(|_| invalid(field, "valid fixed precision metadata"))?
+            .ok_or_else(|| invalid(field, "valid fixed precision metadata"))?;
+        let encoded = crate::sql::decimal::quantize(&input, storage)
+            .map_err(|_| invalid(field, "an in-range exact decimal string"))?;
+        *value = Value::Decimal(encoded);
+        return Ok(());
+    }
     if matches!(kind, Some("date" | "timestamp" | "calendarDate")) {
         return scalar(kind.unwrap(), field, value);
+    }
+    if matches!(kind, Some("boolean" | "bool")) && !value.is_boolean() {
+        return Err(invalid(field, "a boolean"));
+    }
+    if kind == Some("vector") {
+        return vector(field, definition, value);
+    }
+    if kind == Some("geoPoint") {
+        return geographic_point(field, value);
+    }
+    if kind == Some("json") {
+        return super::validate_json_value(field, value);
     }
     if !matches!(kind, Some("array" | "object" | "union")) {
         return Ok(());
@@ -214,12 +289,6 @@ fn prepare_document_at(
     };
     for (field, value) in document {
         if let Some(definition) = schema.get(field) {
-            if !matches!(
-                definition["type"].as_str(),
-                Some("date" | "timestamp" | "calendarDate" | "array" | "object" | "union")
-            ) {
-                continue;
-            }
             let path = if prefix.is_empty() {
                 field.clone()
             } else {
@@ -275,7 +344,30 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
                     Operator::Push | Operator::Pull | Operator::AddToSet => {
                         prepare_array_operand(field, definition, operand)?;
                     }
-                    Operator::Increment | Operator::Decrement | Operator::Multiply => {}
+                    Operator::Increment | Operator::Decrement | Operator::Multiply
+                        if crate::sql::descriptors::is_exact_decimal(definition) =>
+                    {
+                        prepare_value(field, definition, operand)?;
+                    }
+                    Operator::Increment | Operator::Decrement | Operator::Multiply => {
+                        let valid = match definition["type"].as_str() {
+                            Some("int" | "integer" | "bigInt") => {
+                                matches!(operand, Value::Number(value) if value.as_i64().is_some())
+                            }
+                            Some("number" | "float") => match operand {
+                                Value::Number(_) => true,
+                                Value::Decimal(value) => crate::sql::decimal::valid(value),
+                                _ => false,
+                            },
+                            _ => false,
+                        };
+                        if !valid {
+                            return Err(CodecError::validation(
+                                "invalid_arithmetic_operand",
+                                "arithmetic requires its assigned numeric column and operand",
+                            ));
+                        }
+                    }
                 }
             }
         } else {
@@ -289,6 +381,46 @@ pub fn prepare_update(schema: &Value, patch: &mut Value) -> Result<(), CodecErro
 mod tests {
     use super::*;
     use crate::value;
+
+    #[test]
+    fn vector_and_geographic_writes_validate_the_declared_shape() {
+        let vector = value!({"type":"vector","vectorDims":2});
+        for mut value in [
+            value!([]),
+            value!([1.0]),
+            value!([1.0, 2.0, 3.0]),
+            value!([1.0, "two"]),
+            Value::Array(vec![Value::try_from(f64::MAX).unwrap(), value!(0.0)]),
+        ] {
+            assert!(prepare_value("embedding", &vector, &mut value).is_err());
+        }
+        let mut valid = value!([1.0, -2.0]);
+        prepare_value("embedding", &vector, &mut valid).unwrap();
+
+        let point = value!({"type":"geoPoint"});
+        for mut value in [
+            value!({}),
+            value!({"lat":0.0}),
+            value!({"lat":"north","lng":0.0}),
+            value!({"lat":91.0,"lng":0.0}),
+            value!({"lat":0.0,"lng":181.0}),
+        ] {
+            assert!(prepare_value("location", &point, &mut value).is_err());
+        }
+        let mut valid = value!({"lat":90.0,"lng":-180.0});
+        prepare_value("location", &point, &mut valid).unwrap();
+    }
+
+    #[test]
+    fn exact_decimal_inputs_are_quantized_before_protection() {
+        let definition = value!({"type":"number", "precision":30, "scale":2});
+        let mut value = Value::String("9007199254740993.005".into());
+        prepare_value("amount", &definition, &mut value).unwrap();
+        assert_eq!(value, Value::Decimal("9007199254740993.01".into()));
+
+        let mut overflow = Value::String("9999999999999999999999999999.995".into());
+        assert!(prepare_value("amount", &definition, &mut overflow).is_err());
+    }
 
     #[test]
     fn array_validation_preserves_native_buffers_and_encoded_numbers() {
@@ -350,6 +482,23 @@ mod tests {
             Value::Json("[1,\"text\",null,[true]]".into()),
         ] {
             prepare_value("values", &value!({"type":"array"}), &mut data).unwrap();
+        }
+    }
+
+    #[test]
+    fn documents_reject_storage_shaped_booleans_at_every_depth() {
+        let schema = value!({
+            "active": {"type":"boolean"},
+            "settings": {
+                "type":"object",
+                "shape":{"enabled":{"type":"boolean"}}
+            }
+        });
+        for mut document in [
+            value!({"active":1,"settings":{"enabled":true}}),
+            value!({"active":true,"settings":{"enabled":1}}),
+        ] {
+            assert!(prepare_document(&schema, &mut document).is_err());
         }
     }
 

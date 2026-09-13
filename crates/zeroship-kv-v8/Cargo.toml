@@ -5,6 +5,7 @@ edition = "2021"
 description = "V8 binding for zeroship-kv: env.kv primitives and platform usage metering"
 
 [dependencies]
+zeroship-id = { workspace = true }
 zeroship-kv = { workspace = true }
 zeroship-runtime = { workspace = true }
 zeroship-runtime-macros = { workspace = true }

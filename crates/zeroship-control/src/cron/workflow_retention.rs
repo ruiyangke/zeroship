@@ -405,7 +405,7 @@ where
                     )",
                     tables.signals,
                 ),
-                &[&broadcast_ids, &tables.app_id],
+                &[&broadcast_ids, &tables.app_id.as_str()],
             )
             .await
             .map_err(RegistryError::from)? as usize;

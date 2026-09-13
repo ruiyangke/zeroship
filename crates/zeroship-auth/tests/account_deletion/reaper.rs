@@ -29,16 +29,16 @@ async fn reaper_erases_a_due_user_and_cascades() {
         db.execute(
             "INSERT INTO zeroship.federated_identities (user_id, provider, subject) \
          VALUES ($1, 'google', $2)",
-            &[&user.id, &format!("sub-{tag}")],
+            &[&user.id.as_str(), &format!("sub-{tag}")],
         )
         .await
         .unwrap();
 
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
 
         let report = account_reaper::tick(&mut db, &control)
             .await
@@ -52,14 +52,17 @@ async fn reaper_erases_a_due_user_and_cascades() {
         );
 
         let remaining = db
-            .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
+            .query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()],
+            )
             .await
             .unwrap();
         assert!(remaining.is_empty(), "users row is gone");
         let idents = db
             .query(
                 "SELECT 1 FROM zeroship.federated_identities WHERE user_id = $1",
-                &[&user.id],
+                &[&user.id.as_str()],
             )
             .await
             .unwrap();
@@ -116,7 +119,7 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
                 &organization_id,
                 &format!("retain-{tag}"),
                 &format!("acctdel-retain-{tag}@zeroship.test"),
-                &user.id,
+                &user.id.as_str(),
             ],
         )
         .await
@@ -138,17 +141,20 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
         .await
         .unwrap();
 
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
         account_reaper::tick(&mut db, &control)
             .await
             .expect("reaper tick");
 
         let gone = db
-            .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
+            .query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()],
+            )
             .await
             .unwrap();
         assert!(gone.is_empty(), "the human is erased");
@@ -178,7 +184,7 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
             .await
             .unwrap();
         assert_eq!(organization.len(), 1, "the organization outlives its owner");
-        let owner: Option<Uuid> = organization[0].get("personal_owner_id");
+        let owner: Option<String> = organization[0].get("personal_owner_id");
         assert!(
             owner.is_none(),
             "the pointer to the erased human is cleared"
@@ -220,14 +226,14 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
         db.execute(
             "INSERT INTO zeroship.identity_links (principal_id, provider, provider_subject) \
          VALUES ($1, 'zeroship', $2)",
-            &[&victim.id, &format!("edge-{tag}")],
+            &[&victim.id.as_str(), &format!("edge-{tag}")],
         )
         .await
         .unwrap();
         // identity edge -> must CASCADE.
         db.execute(
         "INSERT INTO zeroship.principal_grants (principal_id, grant_name) VALUES ($1, 'apps:read')",
-        &[&victim.id],
+        &[&victim.id.as_str()],
     )
     .await
     .unwrap();
@@ -238,7 +244,7 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             "INSERT INTO zeroship.device_grants \
             (device_code_hash, user_code, status, principal_id, provider, expires_at) \
          VALUES ($1, $2, 'approved', $3, 'zeroship', NOW() + INTERVAL '10 minutes')",
-            &[&device_code_hash, &format!("uc-{tag}"), &victim.id],
+            &[&device_code_hash, &format!("uc-{tag}"), &victim.id.as_str()],
         )
         .await
         .unwrap();
@@ -249,7 +255,7 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             (client_id, client_name, redirect_uris, scopes, created_by) \
          VALUES ($1, 'Edge Probe', ARRAY['https://probe.zeroship.test/cb'], \
                  ARRAY['apps:read'], $2)",
-            &[&client_id, &victim.id],
+            &[&client_id, &victim.id.as_str()],
         )
         .await
         .unwrap();
@@ -263,13 +269,13 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
         )
         .await
         .unwrap();
-        let app_id = Uuid::new_v4();
+        let app_id = zeroship_core::AppId::mint();
         let project_id = common::unowned_project(&db).await;
         db.execute(
             "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
          SELECT $1, $2, 'free', p.id, p.organization_id \
            FROM zeroship.projects p WHERE p.id = $3",
-            &[&app_id, &format!("acctdel-edges-app-{tag}"), &project_id],
+            &[&app_id.as_str(), &format!("acctdel-edges-app-{tag}"), &project_id],
         )
         .await
         .unwrap();
@@ -279,16 +285,21 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             (app_id, migration_id, status, request_body, effective_profile, \
              ceiling_id, ceiling_version, descriptor_sha256, submitted_by) \
          VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'managed', 1, $3, $4)",
-            &[&app_id, &migration_id, &format!("sha-{tag}"), &victim.id],
+            &[
+                &app_id.as_str(),
+                &migration_id,
+                &format!("sha-{tag}"),
+                &victim.id.as_str(),
+            ],
         )
         .await
         .unwrap();
 
-        users::request_deletion(&mut db, victim.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &victim.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, victim.id).await;
+        backdate_schedule(&db, &victim.id).await;
 
         let report = account_reaper::tick(&mut db, &control)
             .await
@@ -301,10 +312,13 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             }
         );
         assert!(
-            db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&victim.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&victim.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "no inbound reference blocks the delete"
         );
 
@@ -315,11 +329,14 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
         ] {
             let sql = format!("SELECT 1 FROM zeroship.{table} WHERE {column} = $1");
             assert!(
-                db.query(&sql, &[&victim.id]).await.unwrap().is_empty(),
+                db.query(&sql, &[&victim.id.as_str()])
+                    .await
+                    .unwrap()
+                    .is_empty(),
                 "{table}.{column} is an identity edge and must CASCADE"
             );
         }
-        let created_by: Option<Uuid> = db
+        let created_by: Option<String> = db
             .query_one(
                 "SELECT created_by FROM zeroship.oauth_clients WHERE client_id = $1",
                 &[&client_id],
@@ -328,11 +345,11 @@ async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
             .expect("the oauth client survives its creator")
             .get("created_by");
         assert!(created_by.is_none(), "oauth_clients.created_by is SET NULL");
-        let submitted_by: Option<Uuid> = db
+        let submitted_by: Option<String> = db
             .query_one(
                 "SELECT submitted_by FROM zeroship.app_schema_applies \
              WHERE app_id = $1 AND migration_id = $2",
-                &[&app_id, &migration_id],
+                &[&app_id.as_str(), &migration_id],
             )
             .await
             .expect("the schema apply record survives its submitter")
@@ -375,16 +392,16 @@ async fn reaper_erases_as_the_real_auth_role() {
         db.execute(
             "INSERT INTO zeroship.identity_links (principal_id, provider, provider_subject) \
          VALUES ($1, 'zeroship', $2)",
-            &[&user.id, &format!("role-{tag}")],
+            &[&user.id.as_str(), &format!("role-{tag}")],
         )
         .await
         .unwrap();
 
-        users::request_deletion(&mut as_auth, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut as_auth, &user.id, account_reaper::GRACE_DAYS)
             .await
             .expect("the real role can open a deletion window")
             .expect("user exists");
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
 
         let report = account_reaper::tick(&mut as_auth, &control)
             .await
@@ -397,14 +414,17 @@ async fn reaper_erases_as_the_real_auth_role() {
             }
         );
         assert!(
-            db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "the users row is gone"
         );
         assert!(
-            audit_detail(&db, user.id, "account_erasure_failed")
+            audit_detail(&db, &user.id, "account_erasure_failed")
                 .await
                 .is_empty(),
             "the real role hit no permission or constraint failure"
@@ -435,11 +455,11 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
         )
         .await
         .unwrap();
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
 
         // The window opened clear; by the time the reaper runs, this human is the
         // last owner of something.
@@ -456,13 +476,16 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
         );
 
         assert!(
-            !db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            !db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "a re-blocked user is left pending, not half-erased"
         );
-        let details = audit_detail(&db, user.id, "account_erasure_failed").await;
+        let details = audit_detail(&db, &user.id, "account_erasure_failed").await;
         assert_eq!(details.len(), 1, "one durable record, on this user");
         assert_eq!(details[0]["stage"], "preflight");
         assert!(
@@ -474,7 +497,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
             details[0]
         );
         assert!(
-            mock.asked().contains(&user.id.to_string()),
+            mock.asked().contains(&user.id.as_str().to_owned()),
             "the reaper really asked about this principal"
         );
     })
@@ -514,11 +537,11 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
         )
         .await
         .unwrap();
-        users::request_deletion(&mut db, debtor.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &debtor.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, debtor.id).await;
+        backdate_schedule(&db, &debtor.id).await;
 
         // The window opened clear. The billing sweep then finalized last month's
         // invoice on an organization this human had already closed - which needs
@@ -537,13 +560,16 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
         );
 
         assert!(
-            !db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&debtor.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            !db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&debtor.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "a human who owes is left pending, not half-erased"
         );
-        let details = audit_detail(&db, debtor.id, "account_erasure_failed").await;
+        let details = audit_detail(&db, &debtor.id, "account_erasure_failed").await;
         assert_eq!(details.len(), 1, "one durable record, on this user");
         assert_eq!(
             details[0]["stage"], "billing",
@@ -556,7 +582,7 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
             "the record names the organization and what it owes: {reason}"
         );
         assert!(
-            mock.asked().contains(&debtor.id.to_string()),
+            mock.asked().contains(&debtor.id.as_str().to_owned()),
             "the reaper really asked about this principal"
         );
 
@@ -571,10 +597,13 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
             }
         );
         assert!(
-            db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&debtor.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&debtor.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "the same user is erased after settlement"
         );
     })
@@ -603,11 +632,11 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
         )
         .await
         .unwrap();
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
 
         let report = account_reaper::tick(&mut db, &control).await.expect("tick");
         assert_eq!(
@@ -618,13 +647,16 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
             }
         );
         assert!(
-            !db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            !db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "nothing is erased on an unanswerable preflight"
         );
-        let details = audit_detail(&db, user.id, "account_erasure_failed").await;
+        let details = audit_detail(&db, &user.id, "account_erasure_failed").await;
         assert_eq!(details.len(), 1);
         assert_eq!(details[0]["stage"], "preflight");
     })
@@ -659,11 +691,11 @@ async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
         )
         .await
         .unwrap();
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
 
         let report = account_reaper::tick(&mut db, &control).await.expect("tick");
         assert_eq!(
@@ -674,10 +706,13 @@ async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
             }
         );
         assert!(
-            !db.query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
-                .await
-                .unwrap()
-                .is_empty(),
+            !db.query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()]
+            )
+            .await
+            .unwrap()
+            .is_empty(),
             "an unverifiable erasure does not happen"
         );
         assert!(
@@ -703,7 +738,7 @@ async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
         db.execute(
             &format!(
                 "CREATE TABLE zeroship.{probe} ( \
-                 user_id uuid NOT NULL REFERENCES zeroship.users(id) ON DELETE RESTRICT)"
+                 user_id text NOT NULL REFERENCES zeroship.users(id) ON DELETE RESTRICT)"
             ),
             &[],
         )
@@ -720,18 +755,18 @@ async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
         .unwrap();
         db.execute(
             &format!("INSERT INTO zeroship.{probe} (user_id) VALUES ($1)"),
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap();
-        users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
 
         let report = account_reaper::tick(&mut db, &control).await.expect("tick");
-        let details = audit_detail(&db, user.id, "account_erasure_failed").await;
+        let details = audit_detail(&db, &user.id, "account_erasure_failed").await;
 
         assert_eq!(
             report,
@@ -768,11 +803,11 @@ async fn reaper_skips_cancelled_request() {
             .await
             .unwrap();
 
-        let req = users::request_deletion(&mut db, user.id, account_reaper::GRACE_DAYS)
+        let req = users::request_deletion(&mut db, &user.id, account_reaper::GRACE_DAYS)
             .await
             .unwrap()
             .unwrap();
-        backdate_schedule(&db, user.id).await;
+        backdate_schedule(&db, &user.id).await;
         // Cancel clears the schedule - even though the (now-cleared) date was in
         // the past, the reaper must not touch a cancelled request.
         deletion_cancel::redeem(&db, &req.cancel_token)
@@ -788,7 +823,10 @@ async fn reaper_skips_cancelled_request() {
             .expect("reaper tick");
 
         let remaining = db
-            .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
+            .query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()],
+            )
             .await
             .unwrap();
         assert_eq!(remaining.len(), 1, "user survives a cancelled request");
@@ -815,7 +853,7 @@ async fn reaper_ignores_a_schedule_without_a_deletion_request() {
             "UPDATE zeroship.users \
          SET deletion_scheduled_for = NOW() - INTERVAL '1 minute' \
          WHERE id = $1",
-            &[&user.id],
+            &[&user.id.as_str()],
         )
         .await
         .unwrap();
@@ -823,7 +861,10 @@ async fn reaper_ignores_a_schedule_without_a_deletion_request() {
         account_reaper::tick(&mut db, &control).await.unwrap();
 
         let still_exists = db
-            .query("SELECT 1 FROM zeroship.users WHERE id = $1", &[&user.id])
+            .query(
+                "SELECT 1 FROM zeroship.users WHERE id = $1",
+                &[&user.id.as_str()],
+            )
             .await
             .unwrap();
         assert_eq!(

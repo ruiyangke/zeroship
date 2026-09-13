@@ -39,11 +39,12 @@ use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
 use compio_postgres::{NoTls, Pool};
+use zeroship_core::AppId;
 use zeroship_data_v8::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::{CancelFlag, StreamReader};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 const PROBE: &str = "distributed-live-cross-isolate-probe";
 
@@ -255,29 +256,27 @@ const APP_SCHEMA_SLOT: &str = "APP_SCHEMA";
 
 fn runtime_for(
     url: &str,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: &str,
     relay: &RelayConfig,
     modules: Vec<ModuleEntry>,
 ) -> Runtime {
     let mut env_vars = HashMap::new();
     env_vars.insert("APP_ID".to_string(), app_id.to_string());
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
-        DbService::new(DbServiceConfig {
-            project_keys: Default::default(),
-            connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
-                .expect("valid database configuration"),
-            cdc_relay: Some(relay.clone()),
-            meter: None,
-        })
-        .expect("db service")
-        .plugin(),
-    ];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        project_keys: Default::default(),
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+            .expect("valid database configuration"),
+        cdc_relay: Some(relay.clone()),
+        meter: None,
+    })
+    .expect("db service")
+    .plugin()];
     Runtime::builder()
         .modules(modules)
         .env_vars(env_vars)
         .plugins(plugins)
-        .app_id(app_uuid)
+        .app_id(runtime_app_id)
         // The worker vector's `RuntimeState.runtime_descriptor` slot
         // (`crates/zeroship-worker/src/sync.rs:40-70` resolves the blob;
         // `crates/zeroship-runtime/src/core/init.rs:3415-3434` validates it and
@@ -385,9 +384,16 @@ function fetchHandler(request) {
     }
     if (path === "/arm") {
         return (async () => {
-            held = env.db.collection("events").openSubscription();
-            await held.ready();
-            return new Response("ready", { status: 200 });
+            try {
+                held = env.db.collection("events").openSubscription();
+                await held.ready();
+                return new Response("ready", { status: 200 });
+            } catch (error) {
+                return new Response(JSON.stringify({
+                    code: error?.code,
+                    message: error?.message,
+                }), { status: 418 });
+            }
         })();
     }
     return new Response("not found", { status: 404 });
@@ -435,7 +441,6 @@ import { createLive } from "@zeroship/db/internal";
 
 async function* todosSubscribe() {
     const live = createLive(
-        {},
         () => env.db.collection("events").find({}, {}),
         { tables: ["events"] },
     );
@@ -543,7 +548,7 @@ struct AnchorChannels {
 
 fn spawn_anchor(
     url: String,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: String,
     relay: RelayConfig,
     channels: AnchorChannels,
@@ -557,7 +562,7 @@ fn spawn_anchor(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, anchor_modules());
+        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, anchor_modules());
         let arm = call(&runtime, "GET", "/arm", "");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("anchor compio runtime: {error}"))?;
@@ -601,7 +606,7 @@ fn spawn_anchor(
 
 fn spawn_subscriber(
     url: String,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: String,
     relay: RelayConfig,
     initial: std::sync::mpsc::Sender<Result<(ThreadId, String), String>>,
@@ -609,7 +614,7 @@ fn spawn_subscriber(
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, subscriber_modules());
+        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, subscriber_modules());
         let outcome = call(
             &runtime,
             "POST",
@@ -675,14 +680,14 @@ fn spawn_subscriber(
 
 fn spawn_writer(
     url: String,
-    app_uuid: uuid::Uuid,
+    runtime_app_id: AppId,
     app_id: String,
     relay: RelayConfig,
 ) -> JoinHandle<Result<WriterResult, String>> {
     thread::spawn(move || {
         init_v8();
         let thread_id = thread::current().id();
-        let runtime = runtime_for(&url, app_uuid, &app_id, &relay, writer_modules());
+        let runtime = runtime_for(&url, runtime_app_id, &app_id, &relay, writer_modules());
         let outcome = call(&runtime, "POST", "/write", "{}");
         let io = compio::runtime::Runtime::new()
             .map_err(|error| format!("writer compio runtime: {error}"))?;
@@ -724,18 +729,9 @@ async fn slot_state(pool: &Pool, slot: &str) -> Result<Option<bool>, String> {
     Ok(rows.first().map(|row| row.get::<_, bool>("active")))
 }
 
-/// Refuse to run the exercise unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`]
-/// describe the same eight columns.
-///
-/// This is not belt-and-braces. The data plane BELIEVES the descriptor: it
-/// projects `SELECT` lists straight out of the declared field map
-/// (`crates/zeroship-data-orm/src/sql/compile.rs`) and reads no catalog at
-/// all, so a field the table lacks is a Postgres `42703` in the middle of the
-/// stream and a column the descriptor lacks is data silently never read. Either
-/// way the failure lands as a stalled or empty SSE frame, which is exactly what
-/// a real cross-isolate delivery bug looks like. Checking set equality up front
-/// makes the two indistinguishable cases distinguishable, and names which side
-/// is wrong.
+/// Refuse to run unless [`RUNTIME_DESCRIPTOR`] and [`EVENTS_DDL`] describe the
+/// same columns. The ORM compiles projections from the descriptor without
+/// consulting the catalog, so this fixture checks its two inputs directly.
 async fn assert_descriptor_matches_table(pool: &Pool, app_id: &str) -> Result<(), String> {
     let descriptor: serde_json::Value = serde_json::from_str(RUNTIME_DESCRIPTOR)
         .map_err(|error| format!("RUNTIME_DESCRIPTOR is not valid JSON: {error}"))?;
@@ -871,20 +867,21 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     test_tracing::init_test_tracing();
     let postgres = postgres::Postgres::start();
     let url = postgres.url();
-    let app_uuid = uuid::Uuid::new_v4();
-    let app_id = app_uuid.to_string();
+    let runtime_app_id = AppId::mint();
+    let app_id = runtime_app_id.as_str().to_string();
     let publication = zeroship_core::replication_names::publication_name(&app_id).unwrap();
     let slot = publication.replacen("__zs_pub_", "__zs_relay_", 1);
 
     let io = compio::runtime::Runtime::new().expect("control compio runtime");
     let pool = io.block_on(async {
-        let (probe, connection) = compio_postgres::connect(&url, NoTls).await.unwrap_or_else(
-            |error| {
-                panic!(
+        let (probe, connection) =
+            compio_postgres::connect(&url, NoTls)
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
                     "could not connect to the distributed live PostgreSQL fixture at {url}: {error}"
                 )
-            },
-        );
+                });
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })
@@ -926,7 +923,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
     let (finish_tx, finish_rx) = flume::bounded(1);
     let anchor = spawn_anchor(
         worker_url.clone(),
-        app_uuid,
+        runtime_app_id.clone(),
         app_id.clone(),
         relay.config.clone(),
         AnchorChannels {
@@ -945,7 +942,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
         let (initial_tx, initial_rx) = std::sync::mpsc::channel();
         subscriber = Some(spawn_subscriber(
             worker_url.clone(),
-            app_uuid,
+            runtime_app_id.clone(),
             app_id.clone(),
             relay.config.clone(),
             initial_tx,
@@ -959,7 +956,7 @@ fn db_live_stream_crosses_relay_and_v8_isolates_without_worker_replication() {
 
         writer = Some(spawn_writer(
             worker_url.clone(),
-            app_uuid,
+            runtime_app_id,
             app_id.clone(),
             relay.config.clone(),
         ));

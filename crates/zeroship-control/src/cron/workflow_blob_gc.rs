@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Utc;
 use compio_postgres::{Client, GenericClient};
-use uuid::Uuid;
+use zeroship_core::AppId;
 use zeroship_workflow::store::pg::WorkflowTables;
 
 use crate::cron::workflow_engine::SweepCoverage;
@@ -66,7 +66,9 @@ pub async fn run_orphan_sweep(state: Arc<AppState>, tick_secs: u64) {
     tracing::info!(tick_secs, "control workflow_blob_orphan_gc cron starting");
     loop {
         match tick_orphan_sweep(&state).await {
-            Ok(n) if n > 0 => tracing::info!(deleted = n, "workflow_blob_orphan_gc tick deleted blobs"),
+            Ok(n) if n > 0 => {
+                tracing::info!(deleted = n, "workflow_blob_orphan_gc tick deleted blobs")
+            }
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "workflow_blob_orphan_gc tick failed"),
         }
@@ -120,7 +122,7 @@ pub async fn tick_ref_sweep(state: &AppState) -> Result<RefSweepStats, RegistryE
             .query(
                 &super::workflow_engine::journal_sql(
                     &tables,
-            "SELECT b.hash \
+                    "SELECT b.hash \
                FROM zeroship.workflow_blobs b \
               WHERE b.refcount = 0 \
                 AND b.last_referenced_at <= $1 \
@@ -292,21 +294,21 @@ const BLOB_REFERENCED_BY_OUTPUT_SQL: &str = "SELECT \
 async fn workflow_blob_is_referenced<C>(
     conn: &C,
     hash: &str,
-    owner: Option<&Uuid>,
+    owner: Option<&AppId>,
 ) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
 {
     for app in super::workflow_engine::journalled_apps(conn).await? {
-        let app_id = app.app_id;
         if let Some(reason) = app.exclusion() {
             tracing::warn!(
-                app_id = %app_id,
+                app_id = %app.app_id.as_str(),
                 hash = %hash,
                 "retaining workflow blob: {reason}, so it cannot be proven unreferenced"
             );
             return Ok(true);
         }
+        let app_id = app.app_id;
         let tables = WorkflowTables::for_app_id(&app_id);
         let sql = if owner == Some(&app_id) {
             BLOB_REFERENCED_BY_OUTPUT_SQL
@@ -336,7 +338,7 @@ where
         .query(
             &super::workflow_engine::journal_sql(
                 tables,
-            "SELECT b.hash \
+                "SELECT b.hash \
                FROM zeroship.workflow_blobs b \
               WHERE b.hash = $1 \
                 AND b.refcount = 0 \

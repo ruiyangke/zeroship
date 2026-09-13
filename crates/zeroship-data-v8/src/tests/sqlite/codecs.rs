@@ -3,6 +3,66 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
+#[test]
+fn exact_decimal_strings_round_trip_through_v8() {
+    run(async {
+        let dir = tempfile::tempdir().expect("create decimal fixture dir");
+        apply_schema_ahead_of_runtime(
+            &dir,
+            &format!(
+                r#"CREATE TABLE "{LOCAL_DEV_APP_ID}"."ledger" ({SYSTEM_COLUMNS_SQLITE}, "amount" TEXT NOT NULL);"#
+            ),
+        );
+        let schema = zeroship_data_orm::value!({
+            "amount": {"type": "number", "precision": 30, "scale": 2, "required": true}
+        });
+        let source = sqlite_runtime_source(
+            "ledger",
+            &schema,
+            r#"
+const _procedures = {
+  async decimalRoundTrip() {
+    const ledger = env.db.collection(COLLECTION);
+    const inserted = await ledger.insert({ amount: "9007199254740993.00" });
+    const updated = await ledger.update(
+      { amount: "9007199254740993.000" },
+      { amount: { $inc: "0.01" } },
+    );
+    const found = await ledger.find({ amount: { $in: ["9007199254740993.010"] } });
+    let lossyNumberCode = null;
+    try {
+      await ledger.insert({ amount: 1.25 });
+    } catch (error) {
+      lossyNumberCode = error.code;
+    }
+    return {
+      inserted: inserted.amount,
+      updated: updated.amount,
+      found: found.map(row => row.amount),
+      valueType: typeof updated.amount,
+      lossyNumberCode,
+    };
+  },
+};
+"#,
+        );
+
+        let response = dispatch_sqlite_runtime(&dir, &source, "decimalRoundTrip");
+        assert_eq!(
+            response,
+            zeroship_data_orm::value!({
+                "json": {
+                    "inserted": "9007199254740993.00",
+                    "updated": "9007199254740993.01",
+                    "found": ["9007199254740993.01"],
+                    "valueType": "string",
+                    "lossyNumberCode": "invalid_typed_value"
+                }
+            })
+        );
+    });
+}
+
 /// The dev tier must store a `t.bytes()` value as a BLOB of the caller's bytes.
 ///
 /// WHY THIS IS SEPARATE FROM THE PROJECTION TEST ABOVE, and why SQLite needed a
@@ -21,15 +81,13 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         let dir = tempfile::tempdir().expect("create parity dir");
         let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
 
-        // A fresh backend has attached nothing: the matrix's app database is a
-        // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
-        // alias, so re-attach it before the schema-qualified name resolves.
+        // Re-attach the matrix's app database before using its qualified name.
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         // `query` materialises every cell as `Option<String>` and renders a BLOB
         // as `<N bytes blob>`, so ask SQLite itself for the discriminant and the
         // hex - the same route `p5_*` uses for ciphertext.
         let sql = format!(
-            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"default\".\"{}\" \
+            "SELECT typeof(payload_bytes), hex(payload_bytes) FROM \"{LOCAL_DEV_APP_ID}\".\"{}\" \
              WHERE title = 'typed-roundtrip'",
             snapshot.collection
         );

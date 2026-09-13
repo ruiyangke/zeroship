@@ -26,6 +26,7 @@
 use base64::Engine as _;
 use rand::RngCore;
 use totp_rs::{Algorithm, Secret, TotpUrlError, TOTP};
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 use crate::identity::password;
@@ -44,7 +45,7 @@ pub const BACKUP_CODE_COUNT: usize = 10;
 pub const BACKUP_CODE_DIGITS: usize = 10;
 
 /// AAD domain tag binding a TOTP ciphertext to its owning user row. The full
-/// AAD is this tag plus the user UUID bytes, so a ciphertext copied onto a
+/// AAD is this tag plus the canonical user id bytes, so a ciphertext copied onto a
 /// different `user_id` fails authentication on decrypt.
 const AAD_DOMAIN: &[u8] = b"zeroship-totp-secret-v1:";
 
@@ -88,10 +89,10 @@ pub fn generate_secret() -> Vec<u8> {
 }
 
 /// Associated data for the at-rest encryption of `user_id`'s secret.
-fn aad_for(user_id: uuid::Uuid) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + 16);
+fn aad_for(user_id: &UserId) -> Vec<u8> {
+    let mut aad = Vec::with_capacity(AAD_DOMAIN.len() + user_id.as_str().len());
     aad.extend_from_slice(AAD_DOMAIN);
-    aad.extend_from_slice(user_id.as_bytes());
+    aad.extend_from_slice(user_id.as_str().as_bytes());
     aad
 }
 
@@ -101,7 +102,7 @@ fn aad_for(user_id: uuid::Uuid) -> Vec<u8> {
 ///
 /// Returns [`AuthError::Internal`] if AES-GCM encryption fails (should not
 /// happen with a valid 32-byte key).
-pub fn encrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, secret: &[u8]) -> Result<Vec<u8>> {
+pub fn encrypt_secret(key: &[u8; 32], user_id: &UserId, secret: &[u8]) -> Result<Vec<u8>> {
     zeroship_core::crypto::encrypt(key, &aad_for(user_id), secret)
         .map_err(|e| AuthError::Internal(format!("totp secret encrypt: {e}")))
 }
@@ -112,7 +113,7 @@ pub fn encrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, secret: &[u8]) -> Res
 ///
 /// Returns [`AuthError::Internal`] if decryption/authentication fails (wrong
 /// key, tampered ciphertext, or a blob bound to a different user).
-pub fn decrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, blob: &[u8]) -> Result<Vec<u8>> {
+pub fn decrypt_secret(key: &[u8; 32], user_id: &UserId, blob: &[u8]) -> Result<Vec<u8>> {
     zeroship_core::crypto::decrypt(key, &aad_for(user_id), blob)
         .map_err(|e| AuthError::Internal(format!("totp secret decrypt: {e}")))
 }
@@ -123,7 +124,11 @@ pub fn decrypt_secret(key: &[u8; 32], user_id: uuid::Uuid, blob: &[u8]) -> Resul
 /// authenticator app shows a human-readable entry. Neither may contain `:`
 /// (RFC reserves it as the label separator) — callers pass an email + a fixed
 /// issuer, so this only errors on a misconfigured (colon-bearing) issuer.
-fn build(secret: &[u8], issuer: &str, account_name: &str) -> std::result::Result<TOTP, TotpUrlError> {
+fn build(
+    secret: &[u8],
+    issuer: &str,
+    account_name: &str,
+) -> std::result::Result<TOTP, TotpUrlError> {
     TOTP::new(
         Algorithm::SHA1,
         DIGITS,
@@ -142,11 +147,7 @@ fn build(secret: &[u8], issuer: &str, account_name: &str) -> std::result::Result
 ///
 /// Returns [`AuthError::Internal`] if `issuer`/`account_name` are invalid for an
 /// `otpauth` label (contain `:`).
-pub fn provisioning(
-    secret: &[u8],
-    issuer: &str,
-    account_name: &str,
-) -> Result<Provisioning> {
+pub fn provisioning(secret: &[u8], issuer: &str, account_name: &str) -> Result<Provisioning> {
     let totp = build(secret, issuer, account_name)
         .map_err(|e| AuthError::Internal(format!("totp provisioning: {e}")))?;
     Ok(Provisioning {
@@ -299,28 +300,28 @@ mod tests {
 
     #[test]
     fn encrypt_then_decrypt_roundtrips_bound_to_user() {
-        let user = uuid::Uuid::new_v4();
+        let user = UserId::mint();
         let secret = generate_secret();
-        let ct = encrypt_secret(&key(), user, &secret).expect("encrypt");
+        let ct = encrypt_secret(&key(), &user, &secret).expect("encrypt");
         // Ciphertext must NOT contain the plaintext secret.
         assert!(
             !ct.windows(secret.len()).any(|w| w == secret.as_slice()),
             "plaintext secret must not appear in the ciphertext"
         );
-        let pt = decrypt_secret(&key(), user, &ct).expect("decrypt");
+        let pt = decrypt_secret(&key(), &user, &ct).expect("decrypt");
         assert_eq!(pt, secret);
     }
 
     #[test]
     fn ciphertext_is_bound_to_user_id_via_aad() {
-        let user_a = uuid::Uuid::new_v4();
-        let user_b = uuid::Uuid::new_v4();
+        let user_a = UserId::mint();
+        let user_b = UserId::mint();
         let secret = generate_secret();
-        let ct = encrypt_secret(&key(), user_a, &secret).expect("encrypt");
+        let ct = encrypt_secret(&key(), &user_a, &secret).expect("encrypt");
         // The SAME key but a different user_id (AAD) must fail to decrypt — so a
         // ciphertext lifted onto another user's row is useless.
         assert!(
-            decrypt_secret(&key(), user_b, &ct).is_err(),
+            decrypt_secret(&key(), &user_b, &ct).is_err(),
             "decrypt under a different user_id must fail (AAD binding)"
         );
     }
@@ -333,7 +334,10 @@ mod tests {
         let t0 = 59u64; // step 1
         let code0 = code_at(&secret, t0);
         assert_eq!(code0.len(), DIGITS);
-        assert!(verify_code_at(&secret, &code0, t0), "code verifies at its own time");
+        assert!(
+            verify_code_at(&secret, &code0, t0),
+            "code verifies at its own time"
+        );
 
         // A code from far away (10 steps later) must NOT verify at t0 (beyond skew).
         let far = code_at(&secret, t0 + STEP_SECS * 10);
@@ -352,8 +356,14 @@ mod tests {
         let prev = code_at(&secret, base - STEP_SECS);
         let next = code_at(&secret, base + STEP_SECS);
         // A code from the previous and next window verifies at `base` (±1 skew).
-        assert!(verify_code_at(&secret, &prev, base), "previous-window code accepted");
-        assert!(verify_code_at(&secret, &next, base), "next-window code accepted");
+        assert!(
+            verify_code_at(&secret, &prev, base),
+            "previous-window code accepted"
+        );
+        assert!(
+            verify_code_at(&secret, &next, base),
+            "next-window code accepted"
+        );
     }
 
     #[test]
@@ -389,12 +399,18 @@ mod tests {
     fn provisioning_uri_is_otpauth_and_carries_issuer() {
         let secret = generate_secret();
         let p = provisioning(&secret, "zeroship", "user@example.com").expect("provisioning");
-        assert!(p.otpauth_uri.starts_with("otpauth://totp/"), "uri: {}", p.otpauth_uri);
+        assert!(
+            p.otpauth_uri.starts_with("otpauth://totp/"),
+            "uri: {}",
+            p.otpauth_uri
+        );
         assert!(p.otpauth_uri.contains("issuer=zeroship"));
         assert!(!p.secret_base32.is_empty());
         // base32 alphabet only (A-Z2-7), no padding shown to the user.
         assert!(
-            p.secret_base32.chars().all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)),
+            p.secret_base32
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || ('2'..='7').contains(&c)),
             "secret must be base32: {}",
             p.secret_base32
         );
@@ -407,7 +423,10 @@ mod tests {
         assert_eq!(hashes.len(), BACKUP_CODE_COUNT);
         // Every plaintext verifies against its own hash...
         for (code, hash) in plain.iter().zip(&hashes) {
-            assert!(verify_backup_code(code, hash).expect("verify"), "code {code} should verify");
+            assert!(
+                verify_backup_code(code, hash).expect("verify"),
+                "code {code} should verify"
+            );
             // ...but NOT against a different code's hash.
             let other = &hashes[(plain.iter().position(|c| c == code).unwrap() + 1) % hashes.len()];
             assert!(
@@ -417,8 +436,14 @@ mod tests {
         }
         // Stored hashes are PHC strings, not the cleartext code.
         for (code, hash) in plain.iter().zip(&hashes) {
-            assert!(hash.starts_with("$argon2"), "hash must be argon2 PHC: {hash}");
-            assert!(!hash.contains(code), "hash must not contain the plaintext code");
+            assert!(
+                hash.starts_with("$argon2"),
+                "hash must be argon2 PHC: {hash}"
+            );
+            assert!(
+                !hash.contains(code),
+                "hash must not contain the plaintext code"
+            );
         }
     }
 
@@ -427,7 +452,7 @@ mod tests {
         let (plain, hashes) = generate_backup_codes().expect("mint");
         let code = &plain[0];
         let bare = normalize_backup_code(code); // dashes stripped
-        // The same code with/without dashes and with spaces verifies identically.
+                                                // The same code with/without dashes and with spaces verifies identically.
         assert!(verify_backup_code(code, &hashes[0]).unwrap());
         assert!(verify_backup_code(&bare, &hashes[0]).unwrap());
         let spaced = format!("  {}  ", code.replace('-', " "));

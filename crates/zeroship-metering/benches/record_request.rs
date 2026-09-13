@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use uuid::Uuid;
+use zeroship_core::AppId;
 use zeroship_metering::Meter;
 
 const CPU_US: u64 = 500;
@@ -11,7 +11,7 @@ const EGRESS_BYTES: u64 = 2_048;
 const INGRESS_BYTES: u64 = 256;
 const THREADS: usize = 8;
 
-fn seed_meter(apps: &[String]) -> Arc<Meter> {
+fn seed_meter(apps: &[AppId]) -> Arc<Meter> {
     let meter = Arc::new(Meter::new());
     for app in apps {
         meter.increment(app, "requests", 0);
@@ -19,7 +19,7 @@ fn seed_meter(apps: &[String]) -> Arc<Meter> {
     meter
 }
 
-fn record_one(meter: &Meter, app: &str) {
+fn record_one(meter: &Meter, app: &AppId) {
     meter.record_request(
         black_box(app),
         black_box(CPU_US),
@@ -30,7 +30,7 @@ fn record_one(meter: &Meter, app: &str) {
 }
 
 fn bench_single_thread(c: &mut Criterion) {
-    let app = Uuid::new_v4().to_string();
+    let app = AppId::mint();
     let meter = seed_meter(std::slice::from_ref(&app));
 
     c.bench_function("record_request/single_thread", |b| {
@@ -39,7 +39,7 @@ fn bench_single_thread(c: &mut Criterion) {
 }
 
 fn bench_threads_same_app(c: &mut Criterion) {
-    let app = Uuid::new_v4().to_string();
+    let app = AppId::mint();
     let meter = seed_meter(std::slice::from_ref(&app));
     let mut group = c.benchmark_group("record_request/threads_same_app");
     group.throughput(Throughput::Elements(1));
@@ -53,13 +53,13 @@ fn bench_threads_same_app(c: &mut Criterion) {
 }
 
 fn bench_threads_distinct_apps(c: &mut Criterion) {
-    let apps: Vec<String> = (0..THREADS).map(|_| Uuid::new_v4().to_string()).collect();
+    let apps: Vec<AppId> = (0..THREADS).map(|_| AppId::mint()).collect();
     let meter = seed_meter(&apps);
     let mut group = c.benchmark_group("record_request/threads_distinct_apps");
     group.throughput(Throughput::Elements(1));
     group.bench_with_input(BenchmarkId::from_parameter(THREADS), &THREADS, |b, &threads| {
         b.iter_custom(|iters| parallel_elapsed(iters, threads, &meter, |thread_id| {
-            apps[thread_id].as_str()
+            &apps[thread_id]
         }));
     });
     group.finish();
@@ -69,7 +69,7 @@ fn parallel_elapsed<'a>(
     iters: u64,
     threads: usize,
     meter: &'a Arc<Meter>,
-    app_for_thread: impl Fn(usize) -> &'a str + Copy + Send + Sync,
+    app_for_thread: impl Fn(usize) -> &'a AppId + Copy + Send + Sync,
 ) -> Duration {
     let base = iters / threads as u64;
     let remainder = iters % threads as u64;

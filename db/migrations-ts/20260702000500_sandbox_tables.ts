@@ -1,5 +1,12 @@
 import { table, t, now } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  deleted_sandboxes: ["user_id"],
+  sandbox_events: ["user_id"],
+  sandboxes: ["user_id"],
+  shares: ["iss"],
+};
+
 export default {
   name: "sandbox_tables",
   schema() {
@@ -12,7 +19,6 @@ export default {
       primaryKey: ["sandbox_id"],
     });
     table("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_sandbox_id_check").add({ expr: (col) => col("sandbox_id").regex("^sbx_[0-9A-Za-z]{20,40}$") });
-    table("deleted_sandboxes", { schema: "zeroship" }).check("deleted_sandboxes_user_id_check").add({ expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") });
     table("hosts", { schema: "zeroship" }).create({
       columns: {
         host_id: t.text().notNull(),
@@ -49,7 +55,6 @@ export default {
     table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_data_check").add({ expr: (col) => col("data").columnSize().le(8192) });
     table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_event_id_check").add({ expr: (col) => col("event_id").regex("^evt_[0-9A-Za-z]{20,40}$") });
     table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_sandbox_id_check").add({ expr: (col) => col("sandbox_id").regex("^sbx_[0-9A-Za-z]{20,40}$") });
-    table("sandbox_events", { schema: "zeroship" }).check("sandbox_events_user_id_check").add({ expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") });
     table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_05").create({ from: ["2026-05-01 00:00:00+00"], to: ["2026-06-01 00:00:00+00"] });
     table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_06").create({ from: ["2026-06-01 00:00:00+00"], to: ["2026-07-01 00:00:00+00"] });
     table("sandbox_events", { schema: "zeroship" }).partition("sandbox_events_2026_07").create({ from: ["2026-07-01 00:00:00+00"], to: ["2026-08-01 00:00:00+00"] });
@@ -104,7 +109,6 @@ export default {
         ),
       ) });
     table("sandboxes", { schema: "zeroship" }).check("sandboxes_status_check").add({ expr: (col) => col("status").in(["starting", "running", "stopping", "stopped", "lost", "recreating", "orphan", "unreachable", "snapshotting", "snapshotted", "snapshotting_aborted", "snapshotted_suspect", "restoring", "restoring_cold"]) });
-    table("sandboxes", { schema: "zeroship" }).check("sandboxes_user_id_check").add({ expr: (col) => col("user_id").regex("^usr_[0-9A-Za-z]{20,40}$") });
     table("shares", { schema: "zeroship" }).create({
       columns: {
         token_id: t.text().notNull(),
@@ -124,7 +128,6 @@ export default {
     });
     table("shares", { schema: "zeroship" }).check("shares_check").add({ expr: (col) => col("expires_at").gt(col("issued_at")) });
     table("shares", { schema: "zeroship" }).check("shares_check1").add({ expr: (col) => col("revoked_at").isNull().or(col("revoked_at").ge(col("issued_at"))) });
-    table("shares", { schema: "zeroship" }).check("shares_iss_check").add({ expr: (col) => col("iss").isNull().or(col("iss").regex("^usr_[0-9A-Za-z]{20,40}$")) });
     table("shares", { schema: "zeroship" }).check("shares_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });
     table("shares", { schema: "zeroship" }).check("shares_scope_check").add({ expr: (col) => col("scope").in(["ro", "rw"]) });
     table("shares", { schema: "zeroship" }).check("shares_secret_version_check").add({ expr: (col) => col("secret_version").ge(1) });
@@ -149,5 +152,12 @@ export default {
     table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_error_code_check").add({ expr: (col) => col("error_code").isNull().or(col("error_code").in(["slot_unavailable", "source_teardown_timeout", "restore_failed", "livez_timeout", "clock_resync_failed", "register_failed", "internal", "wake_worker_aborted", "staging_path_missing", "agent_version_mismatch"])) });
     table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_sandbox_id_check").add({ expr: (col) => col("sandbox_id").regex("^sbx_[0-9A-Za-z]{20,40}$") });
     table("wake_jobs", { schema: "zeroship" }).check("wake_jobs_state_check").add({ expr: (col) => col("state").in(["pending", "reserving_slot", "restoring", "livez_polling", "clock_resyncing", "registering", "ok", "failed"]) });
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
+    }
   },
 };

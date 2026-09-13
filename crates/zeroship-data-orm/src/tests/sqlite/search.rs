@@ -13,6 +13,14 @@ use zeroship_data_orm::backend::VectorMetric;
 
 use zeroship_data_orm::backend::GeoPoint;
 
+use zeroship_data_orm::sql::{
+    statement::{
+        ResolvedPredicate, ReturnedColumn, SpatialNearParts, SpatialNearStatement, Statement,
+        StorageType, Table,
+    },
+    Ident, IdentRole,
+};
+
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
 
@@ -20,9 +28,7 @@ use zeroship_data_orm::search::Search;
 
 /// Encode a `Vec<f32>` as a SQLite `x'<hex>'` blob literal.
 ///
-/// The bytes are native-endian f32 (4 bytes per dim); all platforms
-/// we target are little-endian, so this matches what `vec_to_le_bytes`
-/// in `backend/sqlite/vector.rs` produces.
+/// Uses the same little-endian representation as the SQLite search backend.
 fn vec_to_hex_lit(v: &[f32]) -> String {
     let mut hex = String::with_capacity(v.len() * 8 + 4);
     hex.push_str("x'");
@@ -100,23 +106,25 @@ fn vector_search_returns_k_nearest_sqlite() {
             // the top-10. Assert MEMBERSHIP (not strict order) to mirror
             // the PG arm's relaxed expectation.
             let query = mk_unit_vec(0, dims);
+            let binding = DbBinding::cold_start("vector_topk");
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
+                .expect("descriptor slice for the search fixture");
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let rows = backend
                 .vector_search(
                     None,
-                    zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("vector_topk"),
-                        collection: "docs",
-                        column: "embedding",
-                        query: &query,
-                        k: 10,
-                        metric: VectorMetric::Cosine,
-                        filter: &crate::value::Value::Null,
-                        schema: &zeroship_data_orm::descriptor::collection_schema(
-                            &DbBinding::cold_start("vector_topk"),
-                            "docs",
-                        )
-                        .expect("descriptor slice for the search fixture"),
-                    },
+                    zeroship_data_orm::search::VectorSearch::compile(
+                        &binding,
+                        "docs",
+                        "embedding",
+                        &query,
+                        10,
+                        VectorMetric::Cosine,
+                        &crate::value::Value::Null,
+                        &schema,
+                        &registration,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .expect("vector_search");
@@ -124,10 +132,7 @@ fn vector_search_returns_k_nearest_sqlite() {
             assert_eq!(rows.len(), 10, "expected k=10 rows, got {}", rows.len());
             let ids: Vec<i64> = rows
                 .iter()
-                .filter_map(|r| {
-                    r.get("id")
-                        .and_then(crate::value::Value::as_i64)
-                })
+                .filter_map(|r| r.get("id").and_then(crate::value::Value::as_i64))
                 .collect();
             // SQLite's INTEGER PRIMARY KEY AUTOINCREMENT starts at 1; row
             // 1 is the i=0 insert, which has zero cosine distance to its
@@ -278,23 +283,25 @@ fn vector_search_respects_filter_sqlite() {
             // SDK already emits.
             let query = mk_unit_vec(0, 4);
             let filter = crate::value!({ "tenant": { "$eq": "a" } });
+            let binding = DbBinding::cold_start("vector_filter");
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
+                .expect("descriptor slice for the search fixture");
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let rows = backend
                 .vector_search(
                     None,
-                    zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("vector_filter"),
-                        collection: "docs",
-                        column: "embedding",
-                        query: &query,
-                        k: 10,
-                        metric: VectorMetric::Cosine,
-                        filter: &filter,
-                        schema: &zeroship_data_orm::descriptor::collection_schema(
-                            &DbBinding::cold_start("vector_filter"),
-                            "docs",
-                        )
-                        .expect("descriptor slice for the search fixture"),
-                    },
+                    zeroship_data_orm::search::VectorSearch::compile(
+                        &binding,
+                        "docs",
+                        "embedding",
+                        &query,
+                        10,
+                        VectorMetric::Cosine,
+                        &filter,
+                        &schema,
+                        &registration,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .expect("vector_search with filter");
@@ -380,43 +387,43 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 .expect("INSERT v2");
 
             // Query the cosine distance from row 1 (v1) to v2.
+            let binding = DbBinding::cold_start("vector_math");
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "docs")
+                .expect("descriptor slice for the search fixture");
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let cos_rows = backend
                 .vector_search(
                     None,
-                    zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("vector_math"),
-                        collection: "docs",
-                        column: "emb_cos",
-                        query: &v1,
-                        k: 2,
-                        metric: VectorMetric::Cosine,
-                        filter: &crate::value::Value::Null,
-                        schema: &zeroship_data_orm::descriptor::collection_schema(
-                            &DbBinding::cold_start("vector_math"),
-                            "docs",
-                        )
-                        .expect("descriptor slice for the search fixture"),
-                    },
+                    zeroship_data_orm::search::VectorSearch::compile(
+                        &binding,
+                        "docs",
+                        "emb_cos",
+                        &v1,
+                        2,
+                        VectorMetric::Cosine,
+                        &crate::value::Value::Null,
+                        &schema,
+                        &registration,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .expect("cosine search");
             let l2_rows = backend
                 .vector_search(
                     None,
-                    zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("vector_math"),
-                        collection: "docs",
-                        column: "emb_l2",
-                        query: &v1,
-                        k: 2,
-                        metric: VectorMetric::L2,
-                        filter: &crate::value::Value::Null,
-                        schema: &zeroship_data_orm::descriptor::collection_schema(
-                            &DbBinding::cold_start("vector_math"),
-                            "docs",
-                        )
-                        .expect("descriptor slice for the search fixture"),
-                    },
+                    zeroship_data_orm::search::VectorSearch::compile(
+                        &binding,
+                        "docs",
+                        "emb_l2",
+                        &v1,
+                        2,
+                        VectorMetric::L2,
+                        &crate::value::Value::Null,
+                        &schema,
+                        &registration,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .expect("l2 search");
@@ -426,15 +433,8 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
             // L2² ≈ 2 * cos_distance.
             let find = |rows: &[crate::value::Value], target_id: i64| -> f64 {
                 rows.iter()
-                    .find(|r| {
-                        r.get("id")
-                            .and_then(crate::value::Value::as_i64)
-                            == Some(target_id)
-                    })
-                    .and_then(|r| {
-                        r.get("_distance")
-                            .and_then(crate::value::Value::as_f64)
-                    })
+                    .find(|r| r.get("id").and_then(crate::value::Value::as_i64) == Some(target_id))
+                    .and_then(|r| r.get("_distance").and_then(crate::value::Value::as_f64))
                     .expect("row with target id must be present")
             };
             let cos_d = find(&cos_rows, 2);
@@ -483,10 +483,6 @@ fn near_returns_within_radius() {
                 .await
                 .expect("ensure_app_schema");
 
-            // Inline DDL — the `sqlite_geopoint_column_ddl` helper emits
-            // the same CHECK shape; we hand-write it here to keep the
-            // test self-contained against the orchestrator's PG-flavoured
-            // emitter.
             backend
                 .execute_fixture(
                     &format!(
@@ -543,33 +539,32 @@ fn near_returns_within_radius() {
                 }
             }
 
+            let binding = DbBinding::cold_start("near_radius");
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, "places")
+                .expect("descriptor slice for the search fixture");
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
             let rows = backend
                 .spatial_near(
                     None,
-                    zeroship_data_orm::search::SpatialSearch {
-                        binding: &DbBinding::cold_start("near_radius"),
-                        collection: "places",
-                        column: "location",
-                        point: london,
-                        radius_m: 1000.0,
-                        filter: &crate::value::Value::Null,
-                        limit: None,
-                        schema: &zeroship_data_orm::descriptor::collection_schema(
-                            &DbBinding::cold_start("near_radius"),
-                            "places",
-                        )
-                        .expect("descriptor slice for the search fixture"),
-                    },
+                    zeroship_data_orm::search::SpatialSearch::compile(
+                        &binding,
+                        "places",
+                        "location",
+                        london,
+                        1000.0,
+                        &crate::value::Value::Null,
+                        None,
+                        &schema,
+                        &registration,
+                    )
+                    .unwrap(),
                 )
                 .await
                 .expect("spatial_near");
 
             let returned_ids: std::collections::BTreeSet<i64> = rows
                 .iter()
-                .filter_map(|r| {
-                    r.get("id")
-                        .and_then(crate::value::Value::as_i64)
-                })
+                .filter_map(|r| r.get("id").and_then(crate::value::Value::as_i64))
                 .collect();
             let expected: std::collections::BTreeSet<i64> = expected_within.into_iter().collect();
             assert_eq!(
@@ -692,7 +687,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let near_on = async |route| {
                 let plan = zeroship_data_orm::crud::plan_near(
                     &binding,
-                    crate::sql::compile::SqlDialect::Sqlite,
+                    &zeroship_data_orm::sql::registration::SqlRegistration::sqlite(),
                     "places",
                     &args,
                 )
@@ -714,7 +709,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let outside = near_on(
                 zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
                     app,
-                    crate::sql::compile::SqlDialect::Sqlite,
+                    crate::sql::registration::SqlRegistration::sqlite(),
                 )
                 .bind(handle.clone())
                 .unwrap(),
@@ -730,7 +725,7 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
             let inside = near_on(
                 zeroship_data_orm::tx_route::CapturedRoute::tx_for_tests(
                     app,
-                    crate::sql::compile::SqlDialect::Sqlite,
+                    crate::sql::registration::SqlRegistration::sqlite(),
                 )
                 .bind(handle.clone())
                 .unwrap(),
@@ -758,6 +753,206 @@ fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
                 zeroship_data_orm::transaction::exec_settle(app, false, None).await,
                 zeroship_data_orm::transaction::SettleOutcome::Ok
             ));
+        });
+        host.reset();
+    })
+}
+
+#[test]
+fn near_uses_an_unreadable_identity_without_returning_it() {
+    Host::test(|host| {
+        host.run(async {
+            let app = "near_hidden_identity";
+            let (backend, _dir) = fresh_backend(host);
+            backend.attach_app_file(app).await.unwrap();
+            backend
+                .execute_fixture(
+                    &format!(
+                        "CREATE TABLE \"{app}\".\"places\" (\
+                         id INTEGER PRIMARY KEY, \
+                         label TEXT NOT NULL, \
+                         location BLOB NOT NULL)"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let point = GeoPoint { lat: 1.0, lng: 2.0 };
+            backend
+                .execute_fixture(
+                    &format!(
+                        "INSERT INTO \"{app}\".\"places\" (id, label, location) \
+                         VALUES (7, 'visible', {})",
+                        point_to_hex_lit(point)
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+
+            let binding = DbBinding::cold_start(app);
+            let schema = crate::value!({
+                "id":{
+                    "type":"integer",
+                    "required":true,
+                    "primaryKey":true,
+                    "readable":false
+                },
+                "label":{"type":"string"},
+                "location":{"type":"geoPoint"}
+            });
+            zeroship_data_orm::schema_cache::with_mut(|cache| {
+                cache.insert_one(&binding, "places", schema)
+            });
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
+            let route = zeroship_data_orm::tx_route::CapturedRoute::pool_for_tests(
+                app,
+                registration.clone(),
+            )
+            .bind(BackendHandle::new(std::rc::Rc::new(backend)))
+            .unwrap();
+            let plan = zeroship_data_orm::crud::plan_near(
+                &binding,
+                &registration,
+                "places",
+                &crate::value!({
+                    "field":"location",
+                    "point":{"lat":point.lat,"lng":point.lng},
+                    "radius":1.0
+                }),
+            )
+            .unwrap();
+            let rows = zeroship_data_orm::crud::run_near(
+                &route,
+                binding,
+                "places".into(),
+                plan,
+            )
+            .await
+            .unwrap()
+            .rows;
+
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0]["label"], "visible");
+            assert!(rows[0].get("id").is_none());
+            assert!(rows[0]["_distance_m"].as_f64().is_some());
+        });
+        host.reset();
+    })
+}
+
+#[test]
+fn low_level_near_preserves_public_aliases_and_hides_ranking_identity() {
+    Host::test(|host| {
+        host.run(async {
+            let app = "near_projection_aliases";
+            let (backend, _dir) = fresh_backend(host);
+            backend.attach_app_file(app).await.unwrap();
+            backend
+                .execute_fixture(
+                    &format!(
+                        "CREATE TABLE \"{app}\".\"places\" (\
+                         id INTEGER PRIMARY KEY, \
+                         label TEXT NOT NULL, \
+                         location BLOB NOT NULL)"
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+            let point = GeoPoint { lat: 1.0, lng: 2.0 };
+            backend
+                .execute_fixture(
+                    &format!(
+                        "INSERT INTO \"{app}\".\"places\" (id, label, location) \
+                         VALUES (7, 'visible', {})",
+                        point_to_hex_lit(point)
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap();
+
+            let binding = DbBinding::cold_start(app);
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::sqlite();
+            let compile = |column: &str, alias: &str| {
+                let table = Table::aliased(
+                    binding.schema().clone(),
+                    Ident::parse_as("places", IdentRole::Collection).unwrap(),
+                    Ident::parse_as("source", IdentRole::Alias).unwrap(),
+                    [
+                        ("id", StorageType::Integer),
+                        ("label", StorageType::Text),
+                        ("location", StorageType::GeoPoint),
+                    ]
+                    .map(|(name, storage)| {
+                        (
+                            Ident::parse_as(name, IdentRole::StoredColumn).unwrap(),
+                            storage,
+                        )
+                    }),
+                )
+                .unwrap();
+                registration
+                    .compile(Statement::SpatialNear(
+                        SpatialNearStatement::new(SpatialNearParts {
+                            projection: vec![
+                                ReturnedColumn {
+                                    column: table.column(column).unwrap(),
+                                    alias: Some(Ident::parse_as(alias, IdentRole::Alias).unwrap()),
+                                },
+                                ReturnedColumn {
+                                    column: table.column("location").unwrap(),
+                                    alias: None,
+                                },
+                            ],
+                            identity: table.column("id").unwrap(),
+                            spatial: table.column("location").unwrap(),
+                            point: crate::value!({"lat":point.lat,"lng":point.lng}),
+                            radius_m: 1.0,
+                            predicate: ResolvedPredicate::Const(true),
+                            limit: 1,
+                            table,
+                        })
+                        .unwrap(),
+                    ))
+                    .unwrap()
+            };
+
+            let label_as_id = backend
+                .spatial_near(
+                    None,
+                    zeroship_data_orm::search::SpatialSearch {
+                        binding: &binding,
+                        query: compile("label", "id"),
+                        column: "location",
+                        point,
+                        radius_m: 1.0,
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(label_as_id[0]["id"], "visible");
+            assert!(label_as_id[0].get("__zs_spatial_identity").is_none());
+
+            let id_as_key = backend
+                .spatial_near(
+                    None,
+                    zeroship_data_orm::search::SpatialSearch {
+                        binding: &binding,
+                        query: compile("id", "key"),
+                        column: "location",
+                        point,
+                        radius_m: 1.0,
+                        limit: 1,
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(id_as_key[0]["key"], 7);
+            assert!(id_as_key[0].get("id").is_none());
+            assert!(id_as_key[0].get("__zs_spatial_identity").is_none());
         });
         host.reset();
     })

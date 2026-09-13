@@ -3,8 +3,8 @@ use quote::quote;
 use serde_json::Value;
 use std::collections::HashSet;
 use syn::{
-    Ident, LitStr, Token, Visibility,
     parse::{Parse, ParseStream},
+    Ident, LitStr, Token, Visibility,
 };
 
 pub struct Input {
@@ -91,6 +91,20 @@ fn validate_identity(fields: &serde_json::Map<String, Value>) -> Result<(), &'st
     }
     if id.get("required").and_then(Value::as_bool) != Some(true) {
         return Err("collection 'id' must be required and non-null");
+    }
+    if !matches!(
+        id.get("type").and_then(Value::as_str),
+        Some("string" | "text" | "id" | "integer" | "int" | "bigint" | "bigInt")
+    ) {
+        return Err("collection 'id' must use text or integer storage");
+    }
+    if id.get("encrypted").and_then(Value::as_bool) == Some(true)
+        || id
+            .get("mask")
+            .and_then(Value::as_object)
+            .is_some_and(|mask| mask.get("kind").and_then(Value::as_str) != Some("none"))
+    {
+        return Err("collection 'id' cannot be encrypted or masked");
     }
     if id
         .get("assign")
@@ -225,7 +239,7 @@ fn logical_type(def: &Value, orm: &syn::Path, span: proc_macro2::Span) -> syn::R
         "string" | "text" | "id" | "ref" | "actor" => "Text",
         "int" | "integer" => "Integer",
         "bigInt" => "BigInt",
-        "number" | "float" | "decimal" | "numeric" => "Number",
+        "number" | "float" => "Number",
         "boolean" => "Boolean",
         "bytes" => "Bytes",
         "date" | "timestamp" => "Timestamp",
@@ -271,11 +285,9 @@ mod tests {
                 });
                 let result = generate(&descriptor, &orm, proc_macro2::Span::call_site());
                 if group == "valid" {
-                    assert!(
-                        !result
-                            .unwrap_or_else(|error| panic!("{name}: {error}"))
-                            .is_empty()
-                    );
+                    assert!(!result
+                        .unwrap_or_else(|error| panic!("{name}: {error}"))
+                        .is_empty());
                 } else {
                     assert_eq!(
                         result.expect_err(name).to_string(),

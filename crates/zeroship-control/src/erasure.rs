@@ -74,7 +74,7 @@ use ntex::web::{
     types::{Path, State},
 };
 use serde::Serialize;
-use uuid::Uuid;
+use zeroship_core::UserId;
 
 use crate::billing_read::{self, BillingRemedy, LocalInvoicing, OutstandingBilling};
 use crate::internal::check_service_auth;
@@ -158,7 +158,7 @@ pub struct BillingBlocker {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ErasurePreflight {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub blockers: Vec<ErasureBlocker>,
     pub billing_blockers: Vec<BillingBlocker>,
 }
@@ -191,7 +191,7 @@ impl ErasurePreflight {
 /// clear one.
 pub async fn preflight(
     db: &(impl GenericClient + Sync),
-    principal: Uuid,
+    principal: &UserId,
     invoicing: LocalInvoicing,
 ) -> Result<ErasurePreflight, RegistryError> {
     let rows = db
@@ -214,7 +214,7 @@ pub async fn preflight(
                         AND rival.role = 'owner' \
                         AND rival.user_id <> $1) \
              ORDER BY o.slug",
-            &[&principal],
+            &[&principal.as_str()],
         )
         .await?;
     let blockers = rows
@@ -235,10 +235,11 @@ pub async fn preflight(
             }
         })
         .collect();
+    let billing_blockers = billing_blockers(db, &principal, invoicing).await?;
     Ok(ErasurePreflight {
-        principal_id: principal,
+        principal_id: principal.clone(),
         blockers,
-        billing_blockers: billing_blockers(db, principal, invoicing).await?,
+        billing_blockers,
     })
 }
 
@@ -258,7 +259,7 @@ pub async fn preflight(
 /// the dissolve path needs too.
 async fn billing_blockers(
     db: &(impl GenericClient + Sync),
-    principal: Uuid,
+    principal: &UserId,
     invoicing: LocalInvoicing,
 ) -> Result<Vec<BillingBlocker>, RegistryError> {
     let rows = db
@@ -276,7 +277,7 @@ async fn billing_blockers(
                         AND rival.role = 'owner' \
                         AND rival.user_id <> $1) \
              ORDER BY o.slug",
-            &[&principal],
+            &[&principal.as_str()],
         )
         .await?;
 
@@ -342,16 +343,16 @@ pub async fn erasure_preflight(
     {
         return resp;
     }
-    let Ok(principal) = Uuid::parse_str(&principal_id) else {
+    let Ok(principal) = UserId::parse(&principal_id) else {
         return web::HttpResponse::BadRequest()
             .json(&serde_json::json!({"error": "bad principal_id"}));
     };
     let invoicing = LocalInvoicing::of(&state.billing_stack);
-    match preflight(state.control_pg.as_ref(), principal, invoicing).await {
+    match preflight(state.control_pg.as_ref(), &principal, invoicing).await {
         Ok(report) => web::HttpResponse::Ok().json(&report),
         Err(e) => {
             tracing::error!(
-                principal_id = %principal,
+                principal_id = principal.as_str(),
                 error = %e,
                 "control-internal: erasure preflight failed"
             );
@@ -391,7 +392,8 @@ mod tests {
         billing_blockers: Vec<BillingBlocker>,
     ) -> ErasurePreflight {
         ErasurePreflight {
-            principal_id: Uuid::nil(),
+            principal_id: UserId::parse("usr_0000000000000000000000")
+                .expect("valid user id fixture"),
             blockers,
             billing_blockers,
         }
@@ -399,7 +401,7 @@ mod tests {
 
     fn ownership_blocker() -> ErasureBlocker {
         ErasureBlocker {
-            organization_id: "org_0000000000000000000000".into(),
+            organization_id: "org_0000000000000000000000000".into(),
             organization_slug: "solo".into(),
             organization_name: "Solo".into(),
             personal: true,
@@ -411,7 +413,7 @@ mod tests {
 
     fn money_blocker() -> BillingBlocker {
         BillingBlocker {
-            organization_id: "org_0000000000000000000001".into(),
+            organization_id: "org_0000000000000000000000001".into(),
             organization_slug: "closed".into(),
             organization_name: "Closed".into(),
             personal: false,
@@ -422,7 +424,7 @@ mod tests {
             unbilled_period_count: 0,
             remedy: BillingRemedy::SettleInvoices,
             outstanding: OutstandingBilling {
-                organization_id: "org_0000000000000000000001".into(),
+                organization_id: "org_0000000000000000000000001".into(),
                 unpaid_invoices: vec![],
                 unbilled_periods: vec![],
                 billing_identity_on_file: false,

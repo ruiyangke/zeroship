@@ -20,8 +20,7 @@ pub mod reducer;
 pub mod scope;
 
 /// The driver: the only place a reducer action becomes I/O.
-pub mod driver;
-
+pub(crate) mod driver;
 
 #[cfg(test)]
 pub mod probe;
@@ -33,8 +32,6 @@ use zeroship_data_orm::error::DbError;
 /// Maximum savepoint nesting beneath the top-level transaction.
 /// Deeper callback nesting is refused with `savepoint_depth_exceeded`.
 pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
-
-
 
 /// Future that resolves once this app owns the top-level-transaction
 /// claim (see [`crate::context::ThreadDbContext::try_claim_tx`]).
@@ -368,7 +365,7 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
     reason = "the tests below are its only callers until exec.rs's in-transaction \
               arms move onto the reducer's operation guard"
 )]
-pub async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
+pub(crate) async fn run_on_tx_conn(app_id: &str, sql: &str) -> Result<(), DbError> {
     driver::run_operation(app_id, sql, &[]).await
 }
 
@@ -560,13 +557,7 @@ fn test_backend() -> crate::backend::BackendHandle {
 mod tests {
     use super::*;
 
-    // THE LAST V8-SHAPED NAME IN THIS FILE IS GONE. Two arms here drove the
-    // ADAPTER's `build_settle_resolve_value` through
-    // `zeroship_runtime::state::ResolveValue`, to prove the engine's outcome
-    // mapping survives lowering. They moved to `zeroship-data-v8`'s
-    // `v8_classes/transaction.rs` with the data-engine cut - the lowering is
-    // that function's, and the engine crate declares neither `v8` nor
-    // `zeroship-runtime`, so the arms could not follow the module they tested.
+    // V8 settlement lowering is tested in the adapter crate.
     use std::path::PathBuf;
     use std::rc::Rc;
 
@@ -815,21 +806,8 @@ mod tests {
     /// `ThreadDbContext::clear_pool` nulls `backend` and leaves `tx_conns`
     /// untouched, so a `register` with a changed URL puts the thread in a state
     /// where a live pinned session exists and the ambient backend does not.
-    /// Until 2026-09-02 both the operation path and the settle path read that
-    /// ambient handle to decide which vendor they were talking to:
-    /// `exec_on_session` refused with `not_configured`, and `terminal` returned
-    /// `Indeterminate`, so a transaction on a perfectly healthy connection lost
-    /// its writes and had its session withdrawn.
-    ///
-    /// The session is the authority on how to talk to itself.
-    /// [`crate::driver::Session`]'s two variants ARE the two
-    /// `DatabaseFixture::Client` associated types, so the variant already names the
-    /// vendor and no second handle is consulted.
-    ///
-    /// Restoring either read reddens this: re-add the `not_configured` guard to
-    /// `exec_on_session` and the second insert panics; restore `terminal`'s
-    /// `match (&backend, &client)` with its `_ => mismatch` arm and the commit
-    /// comes back `Indeterminate` with zero rows committed.
+    /// The pinned [`crate::driver::Session`] remains the authority for commands
+    /// and settlement; neither path consults the ambient backend.
     #[test]
     fn an_open_transaction_outlives_the_threads_backend_being_cleared() {
         run(async {

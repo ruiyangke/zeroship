@@ -31,9 +31,9 @@ describe("P7 PR 3 — IdLoader accepts typed_id strings", () => {
         return m;
       },
     );
-    const row = await loader.load("usr_01HXY3Z9PQR2STUV4WXY5Z6789");
-    assert.equal(row?.id, "usr_01HXY3Z9PQR2STUV4WXY5Z6789");
-    assert.equal(row?.name, "name-usr_01HXY3Z9PQR2STUV4WXY5Z6789");
+    const row = await loader.load("usr_0000000000000000000000001");
+    assert.equal(row?.id, "usr_0000000000000000000000001");
+    assert.equal(row?.name, "name-usr_0000000000000000000000001");
   });
 
   test("id_loader_dedupes_string_ids_in_a_microtask", async () => {
@@ -124,7 +124,7 @@ describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
     // SDK would refuse this assignment (id was `number`).
     const row: Row<UserSchema & typeof generatedSchema> = {
       name: "alice",
-      id: "usr_01HXY3Z9PQR2STUV4WXY5Z6789",
+      id: "usr_0000000000000000000000001",
       created_at: 1700000000000,
       updated_at: 1700000000000,
       created_by: "usr_actor",
@@ -134,7 +134,7 @@ describe("P7 PR 3 — Row<S>['id'] type widened to string", () => {
     };
     // Runtime sanity — value preserved.
     assert.equal(typeof row.id, "string");
-    assert.equal(row.id, "usr_01HXY3Z9PQR2STUV4WXY5Z6789");
+    assert.equal(row.id, "usr_0000000000000000000000001");
     assert.equal(row.name, "alice");
   });
 });

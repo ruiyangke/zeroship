@@ -9218,14 +9218,13 @@ fn validate_column_facets(
                     .to_string(),
             ));
         }
-        // Length bound - keep the compact typed-id shape (charset already checked).
+        // Keep the complete typed id within the platform's identifier bound.
         if prefix.len() > MAX_ID_PREFIX_LEN {
             return Err(mk(
                 CODE_INVALID_ID_PREFIX,
                 format!(
                     "column {:?} declares an internal platform-ID prefix {prefix:?} of {} bytes; the \
-                     maximum is {MAX_ID_PREFIX_LEN} (the legacy prefix is kept short so \
-                     the minted `<prefix>_<22 base62 UUIDv7>` id stays compact)",
+                     maximum is {MAX_ID_PREFIX_LEN}",
                     col.name,
                     prefix.len()
                 ),
@@ -13760,7 +13759,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uuid_id_prefix_remains_valid() {
+    fn internal_uuid_id_prefix_is_valid() {
         let ir = ir_with(vec![create_with_id_prefix("post")]);
         assert!(validate_ir_platform(&ir, &POSTGRES).is_ok());
     }
@@ -13787,8 +13786,7 @@ mod tests {
 
     #[test]
     fn p2a_create_table_rejects_an_over_long_id_prefix() {
-        // Charset-valid but longer than MAX_ID_PREFIX_LEN - refused so the minted
-        // `<prefix>_<22 base62>` typed-id keeps the compact platform shape.
+        // Charset-valid but longer than MAX_ID_PREFIX_LEN.
         let ir = ir_with(vec![create_with_id_prefix("toolong")]);
         let err = validate_ir_platform(&ir, &POSTGRES)
             .expect_err("an over-long id prefix must be refused at validate");

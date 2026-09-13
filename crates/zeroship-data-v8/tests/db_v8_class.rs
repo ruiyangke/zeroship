@@ -20,8 +20,8 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use zeroship_data_v8::v8_classes::collection::Collection;
-use zeroship_data_v8::v8_classes::db::{Db, mint_db};
-use zeroship_runtime::{RuntimeState, SharedState, init_v8};
+use zeroship_data_v8::v8_classes::db::{mint_db, Db};
+use zeroship_runtime::{init_v8, RuntimeState, SharedState};
 
 fn install_runtime_state(scope: &mut v8::PinScope<'_, '_>) {
     let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(HashMap::new(), None, None)));
@@ -114,6 +114,58 @@ fn db_collection_caches_by_name() {
         p1_proto.strict_equals(coll_proto),
         "Collection instance does not have Collection.prototype as [[Prototype]]"
     );
+}
+
+#[test]
+fn collection_exposes_direct_lookup_helpers() {
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
+
+    let db = mint_db(scope, "test_app").expect("mint_db");
+    let collection_key = v8::String::new(scope, "collection").unwrap();
+    let collection_fn: v8::Local<v8::Function> = db
+        .get(scope, collection_key.into())
+        .expect("collection prop")
+        .try_into()
+        .expect("collection is not a function");
+    let name = v8::String::new(scope, "users").unwrap();
+    let collection: v8::Local<v8::Object> = collection_fn
+        .call(scope, db.into(), &[name.into()])
+        .expect("collection call")
+        .try_into()
+        .expect("collection result");
+
+    for method in ["get", "exists"] {
+        let key = v8::String::new(scope, method).unwrap();
+        assert!(
+            collection
+                .get(scope, key.into())
+                .is_some_and(|value| value.is_function()),
+            "Collection.{method} must be a native method"
+        );
+    }
+}
+
+#[test]
+fn prefixed_creator_schema_table_can_open_a_subscription() {
+    init_v8();
+    let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+    v8::scope!(let handle_scope, &mut isolate);
+    let context = v8::Context::new(handle_scope, Default::default());
+    let scope = &mut v8::ContextScope::new(handle_scope, context);
+    install_runtime_state(scope);
+
+    let db = mint_db(scope, "test_app").expect("mint_db");
+    let result = eval_with_db(
+        scope,
+        db,
+        "(() => { const subscription = db.collection('__zeroship_mv_orders').openSubscription(); subscription.close(); return 'opened'; })()",
+    );
+    assert_eq!(result, "opened");
 }
 
 #[test]

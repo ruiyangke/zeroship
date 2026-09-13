@@ -253,9 +253,10 @@ mod tests {
         let schema = crate::sql::SchemaName::new("role_parity").expect("parity fixture");
         let role = zeroship_core::database_role::per_app_role_name(schema.as_str())
             .expect("parity fixture role name");
-        let quoted_role = crate::sql::compile::quote_ident(&role);
+        let quoted_role = crate::sql::mapping::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
             &schema,
             "zs_migrator_fixture",
         )
@@ -267,10 +268,16 @@ mod tests {
         );
 
         for setup_sql in [
-            crate::backend::postgres::pg_session_sql::tx_session_setup_sql(&schema)
-                .expect("transaction setup role name"),
-            crate::backend::postgres::pg_session_sql::autocommit_local_session_setup_sql(&schema)
-                .expect("autocommit setup role name"),
+            crate::backend::postgres::pg_session_sql::tx_session_setup_sql(
+                &schema,
+                crate::connection::SessionAuthority::PerAppRole,
+            )
+            .expect("transaction setup role name"),
+            crate::backend::postgres::pg_session_sql::autocommit_local_session_setup_sql(
+                &schema,
+                crate::connection::SessionAuthority::PerAppRole,
+            )
+            .expect("autocommit setup role name"),
         ] {
             assert!(
                 setup_sql.starts_with(&format!("SET LOCAL ROLE {quoted_role};")),
@@ -332,6 +339,7 @@ mod tests {
         const TENANT_APP_ID: &str = "0191e7a2-b3c4-4d5e-8f90-123456789abc";
         const SCHEMA_NAME: &str = "db_0191e7a2b3c44d5e8f90123456789abc";
         const MIGRATOR: &str = "zs_migrator_fixture";
+        let app_id = zeroship_core::AppId::mint();
 
         // ---- Arm 1: the blindness, demonstrated. ----
         // The shipped test's shape, run against each identity on its own. Both
@@ -340,7 +348,7 @@ mod tests {
         for single_input in [TENANT_APP_ID, SCHEMA_NAME] {
             let as_schema = SchemaName::new(single_input).expect("fixture schema name");
             let migration =
-                zeroship_migrate_server::apply::runtime_role_provisioning_sql(&as_schema, MIGRATOR)
+                zeroship_migrate_server::apply::runtime_role_provisioning_sql(&app_id, &as_schema, MIGRATOR)
                     .expect("provisioning role name");
             let data_plane = per_app_role_name(single_input).expect("data-plane role name");
             assert_eq!(
@@ -363,14 +371,17 @@ mod tests {
         // are both carried in the failure message so one assertion diagnoses it.
         let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned =
-            zeroship_migrate_server::apply::runtime_role_provisioning_sql(&schema, MIGRATOR)
+            zeroship_migrate_server::apply::runtime_role_provisioning_sql(&app_id, &schema, MIGRATOR)
                 .expect("provisioning role name");
-        let setup_sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(&schema)
-            .expect("tx setup sql");
+        let setup_sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(
+            &schema,
+            crate::connection::SessionAuthority::PerAppRole,
+        )
+        .expect("tx setup sql");
         assert!(
             setup_sql.starts_with(&format!(
                 "SET LOCAL ROLE {};",
-                crate::sql::compile::quote_ident(provisioned.role_name())
+                crate::sql::mapping::quote_ident(provisioned.role_name())
             )),
             "session setup does not name the role the migration service provisioned, so \
              SET LOCAL ROLE names an identifier that was never created.\n  provisioned \
@@ -424,6 +435,7 @@ mod tests {
 
         let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
+            &zeroship_core::app_id::AppId::mint(),
             &schema,
             "zs_migrator_fixture",
         )

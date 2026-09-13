@@ -48,8 +48,8 @@ struct Fixture {
     db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
     user_email: String,
     user_name: String,
     user_avatar_url: String,
@@ -68,16 +68,16 @@ impl Fixture {
         let db = database.connect().await;
         let issuer = Arc::new(test_issuer());
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_id = format!("oac_p3_{}", Uuid::new_v4().simple());
         let app_name = format!("p3-auth-code-{}", Uuid::new_v4().simple());
         let user_profile =
-            seed_user_client(&db, user_id, app_id, &app_name, &client_id, email_verified).await;
+            seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, email_verified).await;
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -102,7 +102,7 @@ impl Fixture {
             issuer,
             client_id,
             app_id,
-            user_id,
+            user_id: user_id.clone(),
             user_email: user_profile.email,
             user_name: user_profile.name,
             user_avatar_url: user_profile.avatar_url,
@@ -151,15 +151,12 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
             &jwks,
             &token.access_token,
             fx.issuer.issuer(),
-            &format!("app:{}", fx.app_id),
+            &format!("app:{}", fx.app_id.as_str()),
             ACCESS_TOKEN_TYP,
         )
         .expect("verify access token");
         assert_eq!(access.client_id, fx.client_id);
-        assert_eq!(
-            access.sub,
-            fx.issuer.pairwise_subject(&fx.user_id.to_string(), SECTOR)
-        );
+        assert_eq!(access.sub, fx.issuer.pairwise_subject(&fx.user_id, SECTOR));
 
         let id = verify_with_jwks::<IdTokenClaims>(
             &jwks,
@@ -224,7 +221,7 @@ async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
             &jwks,
             &token.access_token,
             fx.issuer.issuer(),
-            &format!("app:{}", fx.app_id),
+            &format!("app:{}", fx.app_id.as_str()),
             ACCESS_TOKEN_TYP,
         )
         .expect("verify access token");
@@ -420,7 +417,7 @@ async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
         let code = query_param(&location(&authorize), "code").expect("code");
 
         let mut deletion = database.connect_as_auth().await;
-        let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
+        let deletion_request = users::request_deletion(&mut deletion, &fx.user_id, 30)
             .await
             .expect("request account deletion")
             .expect("authorization code owner exists");
@@ -453,19 +450,25 @@ fn test_issuer() -> Issuer {
 
 async fn seed_user_client(
     db: &Client,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
     email_verified: bool,
 ) -> SeededUserProfile {
     let email = format!("p3-{}@zeroship.test", Uuid::new_v4().simple());
     let name = format!("P3 User {}", Uuid::new_v4().simple());
-    let avatar_url = format!("https://cdn.zeroship.test/avatars/{user_id}.png");
+    let avatar_url = format!("https://cdn.zeroship.test/avatars/{}.png", user_id.as_str());
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, avatar_url) \
          VALUES ($1, $2::citext, CASE WHEN $3 THEN NOW() ELSE NULL END, $4, $5)",
-        &[&user_id, &email, &email_verified, &name, &avatar_url],
+        &[
+            &user_id.as_str(),
+            &email,
+            &email_verified,
+            &name,
+            &avatar_url,
+        ],
     )
     .await
     .expect("seed user");
@@ -484,7 +487,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[&app_id, &app_name, &project_id],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -507,7 +510,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
@@ -516,7 +519,7 @@ async fn seed_user_client(
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
         &[
-            &user_id,
+            &user_id.as_str(),
             &client_id,
             &vec![
                 "openid".to_string(),

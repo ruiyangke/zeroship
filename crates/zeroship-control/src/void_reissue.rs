@@ -173,7 +173,7 @@ pub async fn void_and_reissue<S: StripeApi>(
             )
             .await?;
         if already_reversed.is_empty() {
-            // Mint the ids in Rust (no in-DB base62 generator) — one per consumed row.
+            // Mint the ids in Rust (no in-DB base36 generator) — one per consumed row.
             let consumed = tx
                 .query(
                     "SELECT amount_cents, currency, consumed_from_grant_id \

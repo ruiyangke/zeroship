@@ -22,6 +22,7 @@ pub struct PostgresBackend {
     pool: Rc<compio_postgres::Pool>,
     /// Configured URL, retained for backend configuration accessors.
     url: String,
+    session_authority: crate::connection::SessionAuthority,
     /// Project encryption keys supplied by the trusted host.
     key_store: zeroship_data_orm::encryption::KeyStore,
     /// Cached pgvector extension presence probe.
@@ -62,9 +63,24 @@ impl PostgresBackend {
         url: String,
         key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Self {
+        Self::new_with_session_authority(
+            pool,
+            url,
+            key_source,
+            crate::connection::SessionAuthority::PerAppRole,
+        )
+    }
+
+    fn new_with_session_authority(
+        pool: Rc<compio_postgres::Pool>,
+        url: String,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
+        session_authority: crate::connection::SessionAuthority,
+    ) -> Self {
         Self {
             pool,
             url,
+            session_authority,
             pgvector_available: RefCell::new(None),
             postgis_available: RefCell::new(None),
             key_store: zeroship_data_orm::encryption::KeyStore::new(key_source),
@@ -73,19 +89,8 @@ impl PostgresBackend {
 
     /// Connect a pool and wrap it, in one call.
     ///
-    /// **This exists so that no crate above this one has to name
-    /// `compio_postgres::Pool`.** Until 2026-09-02 the adapter connected the
-    /// pool itself and handed it to [`Self::new`], which put the vendor type in
-    /// `ThreadDbContext::set_pool`'s signature - flagged by
-    /// `tests/lib/tier_signature_census.sh` as the adapter embedding a vendor
-    /// type. Pushing the composer DOWN instead of up is the only direction that
-    /// works: an `open_postgres_backend` in the engine's `backend_selection` was
-    /// tried the same day and refused by `xtask/tests/data_architecture.rs`,
-    /// because taking `Rc<Pool>` names the vendor from a non-vendor crate just
-    /// as surely. Inside this crate the name is simply local.
-    ///
-    /// The key source stays a PARAMETER for the reason [`Self::new`] documents:
-    /// the vendor may not reach up into the engine to look it up.
+    /// Pool construction stays in the PostgreSQL adapter so higher layers do
+    /// not expose the vendor pool type. The trusted host supplies project keys.
     ///
     /// # Errors
     ///
@@ -99,6 +104,21 @@ impl PostgresBackend {
         max_size: usize,
         key_source: zeroship_data_orm::encryption::ProjectKeySource,
     ) -> Result<Self, DbError> {
+        Self::connect_with_session_authority(
+            url,
+            max_size,
+            key_source,
+            crate::connection::SessionAuthority::PerAppRole,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_with_session_authority(
+        url: &str,
+        max_size: usize,
+        key_source: zeroship_data_orm::encryption::ProjectKeySource,
+        session_authority: crate::connection::SessionAuthority,
+    ) -> Result<Self, DbError> {
         let pool = compio_postgres::Pool::connect(url, max_size)
             .await
             .map_err(|e| {
@@ -110,7 +130,12 @@ impl PostgresBackend {
                 }
                 DbError::config("db_connect_failed", msg)
             })?;
-        Ok(Self::new(Rc::new(pool), url.to_string(), key_source))
+        Ok(Self::new_with_session_authority(
+            Rc::new(pool),
+            url.to_string(),
+            key_source,
+            session_authority,
+        ))
     }
 
     /// Borrow the inner pool. Provided for the few places that still
@@ -124,113 +149,28 @@ impl PostgresBackend {
     pub fn url(&self) -> &str {
         &self.url
     }
+
+    pub(crate) fn session_authority(&self) -> crate::connection::SessionAuthority {
+        self.session_authority
+    }
 }
 
-// ---------------------------------------------------------------------------
-/// Pooled execution under this app's role fence.
-///
-/// These are the ONLY way a caller outside `backend/` reaches a pooled
-/// connection. Each one narrows the connection to `app_id`'s role before the
-/// statement runs and reverts at COMMIT; there is deliberately no entry point
-/// that hands out `&Pool`, because a caller holding the pool can open a bare
-/// checkout carrying the shared login role and reach a tenant schema unfenced.
-/// The tree records one occasion that happened - see the comment above the
-/// audit INSERT in `crud/unmask.rs`.
-///
-/// The three shapes exist because the callers want three different things; the
-/// reasoning, including why the byte reader cannot go through JSON, is in
-/// [`crate::backend::postgres::pg_autocommit`].
+/// Pooled execution under the authority fixed when this backend was opened.
 impl PostgresBackend {
-    /// Run `sql` under this app's role and render the rows as JSON objects.
-    ///
-    /// `pub` rather than `pub(crate)`: it is the AUTOCOMMIT arm of the engine's
-    /// routed search entry points, whose transaction arm issues the same
-    /// statement on the parked lane instead. Both arms have to be written where
-    /// the routing decision is, and that is `zeroship-data-orm`.
+    /// Run `sql` and decode its rows as native values.
     ///
     /// # Errors
     ///
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
-    pub async fn query_roled_values(
+    pub(crate) async fn query_scoped_values(
         &self,
         schema: &crate::sql::SchemaName,
         sql: &str,
         params: &[crate::value::Value],
     ) -> Result<Vec<crate::value::Value>, DbError> {
-        pg_autocommit::roled_json(&self.pool, schema, sql, params).await
+        pg_autocommit::scoped_json(&self.pool, schema, self.session_authority, sql, params).await
     }
 
-    /// Read column 0 of the first row as raw bytes, under this app's role.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::query_roled_values`], plus a decode failure if column 0 is not
-    /// byte-typed.
-    pub async fn read_roled_scalar_bytes(
-        &self,
-        schema: &crate::sql::SchemaName,
-        sql: &str,
-        params: &[crate::value::Value],
-    ) -> Result<pg_autocommit::ScalarRead<Vec<u8>>, DbError> {
-        pg_autocommit::roled_scalar_bytes(&self.pool, schema, sql, params).await
-    }
-
-    /// Read column 0 of the first row as text, under this app's role.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::query_roled_values`], plus a decode failure if column 0 is not
-    /// text-typed. A BYTEA column is refused rather than mis-parsed; use
-    /// [`Self::read_roled_scalar_bytes`].
-    pub async fn read_roled_scalar_text(
-        &self,
-        schema: &crate::sql::SchemaName,
-        sql: &str,
-        params: &[crate::value::Value],
-    ) -> Result<pg_autocommit::ScalarRead<String>, DbError> {
-        pg_autocommit::roled_scalar_text(&self.pool, schema, sql, params).await
-    }
-
-    /// Run a statement under this app's role, discarding any result rows.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::query_roled_values`].
-    pub async fn execute_roled(
-        &self,
-        schema: &crate::sql::SchemaName,
-        sql: &str,
-        params: &[crate::value::Value],
-    ) -> Result<(), DbError> {
-        pg_autocommit::roled_statement(&self.pool, schema, sql, params).await
-    }
-
-    /// Run `sql` under this app's role and render the rows as JSON, keeping the
-    /// `compio_postgres::Row` inside this tier.
-    ///
-    /// The missing fifth sibling of the four above until 2026-09-02. Because it
-    /// did not exist, `crate::backend::postgres::exec` fetched the pool itself - an
-    /// `ensure_postgres_pool_for_shared_sql` returning `Rc<Pool>` - and called
-    /// `pg_autocommit::roled_rows` directly, which put two vendor signatures in
-    /// an ENGINE-tiered file for want of a method that every neighbouring call
-    /// already had.
-    ///
-    /// The JSON conversion happens HERE rather than at the caller for the same
-    /// reason: `row_to_value` is this tier's business, and the engine wants
-    /// `Vec<Value>` either way - it is what the SQLite arm has always returned.
-    ///
-    /// # Errors
-    ///
-    /// As [`Self::query_roled_values`].
-    pub async fn query_roled_rows_as_json(
-        &self,
-        schema: &crate::sql::SchemaName,
-        sql: &str,
-        params: &[crate::value::Value],
-    ) -> Result<Vec<crate::value::Value>, DbError> {
-        let rows = pg_autocommit::roled_rows(&self.pool, schema, sql, params).await?;
-        super::pg_row_json::rows_to_values(&rows)
-    }
 }
 
 // Runtime access to tenant data must use a roled session. Unrestricted fixture
@@ -340,27 +280,6 @@ impl LockManager for PostgresBackend {
     }
 }
 
-// ---------------------------------------------------------------------------
-// VectorIndex — pgvector adapter
-// ---------------------------------------------------------------------------
-//
-// One method: `vector_search` — `SELECT *, col <op> $1::vector AS _distance
-// FROM ... ORDER BY col <op> $1::vector LIMIT $2` via `build_vector_search`.
-//
-// The ivfflat index it reads is NOT created here. `zeroship-migrate` authors
-// it from the declared `t.vector(dims, { metric })` field
-// (`zeroship-migrate-core/src/render/declarative.rs::vector_index_snapshot`,
-// emitted by `zeroship-migrate-postgres/src/ddl.rs::create_index` as
-// `USING ivfflat ("col" vector_<metric>_ops) WITH (lists = 100)`), and the
-// engine's drift pass compares `access_method` so it round-trips. A search
-// against a table whose migration has not been applied is a missing-index
-// sequential scan, not a correctness failure.
-//
-// The probe of `pg_extension WHERE extname='vector'` runs on first call and
-// caches on `pgvector_available`. Absence surfaces as
-// `DbError::Configuration { code: "vector_extension_missing", ... }`.
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 impl PgLockManager for PostgresBackend {
     async fn acquire_pooled_client_for_lock(
@@ -407,45 +326,28 @@ pub fn render_begin(intent: BeginIntent) -> String {
     }
 }
 
-/// Apply the §17.5 per-app PG role to a transaction's dedicated client.
-///
-/// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every
-/// statement in the surrounding transaction executes under the
-/// constrained per-app role rather than the platform login role. `SET
-/// LOCAL` auto-reverts at COMMIT / ROLLBACK, so a pooled / dedicated
-/// connection can never leak the role to a later use.
-///
-/// The per-app role is provisioned by the migration service. The WAL
-/// consumer + §17.6 watchdog + §17.7 drop step 3 deliberately do NOT
-/// call this - they stay on the platform role (the only connection
-/// crossing the per-app trust boundary).
-///
-/// **Lives here, not in the SC-1 driver, because SQLite has no roles.** The
-/// protocol says "narrow the session's authority before the creator's first
-/// statement"; `SET LOCAL ROLE` is one dialect's answer to that, and the engine
-/// asking for it by name was the last thing making `transaction/mod.rs` name
-/// `compio_postgres`.
-pub async fn apply_per_app_role(
+/// Apply the backend's immutable authority and transaction limits.
+pub(crate) async fn apply_session_authority(
     client: &compio_postgres::Client,
     schema: &crate::sql::SchemaName,
+    authority: crate::connection::SessionAuthority,
 ) -> Result<(), zeroship_data_orm::error::SessionSetupError> {
-    // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
-    // in one simple-query batch - all SET LOCAL, so they revert at the tx end.
-    // The idle-in-tx guard is the load-bearing defense: a creator callback that
-    // never resolves can no longer pin this dedicated connection forever and
-    // exhaust the shared Postgres for other tenants.
-    let sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(schema)
+    let sql = crate::backend::postgres::pg_session_sql::tx_session_setup_sql(schema, authority)
         .map_err(zeroship_data_orm::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
-        // THE SAME `schema`, not a second variable that happens to hold the same
-        // characters. The classifier derives the role it expects to see named in
-        // the failure; handing it a different identity than the setup batch used
-        // is what degrades SCHEMA_NOT_PROVISIONED into a generic failure.
-        let mut classified =
-            crate::backend::postgres::pg_error::classify_pg_per_app_session_setup(&e, schema);
+        let mut classified = match authority {
+            crate::connection::SessionAuthority::PerAppRole => {
+                crate::backend::postgres::pg_error::classify_pg_per_app_session_setup(&e, schema)
+            }
+            crate::connection::SessionAuthority::Connection => {
+                zeroship_data_orm::error::SessionSetupError::failed(
+                    crate::backend::postgres::pg_error::classify(&e),
+                )
+            }
+        };
         zeroship_data_orm::error::prefix_message(
             classified.error_mut(),
-            "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
+            "db: transaction session setup: ",
         );
         classified
     })?;
@@ -713,17 +615,9 @@ mod terminal_projection_tests {
     use compio_postgres::TransactionStatus;
     use zeroship_data_orm::error::{SettleIntent, TerminalResult};
 
-    /// **L8, without a database.** PostgreSQL answers `COMMIT` with the tag
+    /// PostgreSQL answers `COMMIT` with the tag
     /// `ROLLBACK` when the transaction is in the failed state, and reading that
     /// as success reports discarded writes as durable.
-    ///
-    /// This rule was only reachable through a live server until 2026-09-02,
-    /// when the projection was split out of `terminal`. The live arm that
-    /// covered it - `commit_that_postgres_rolled_back_must_not_report_success_l8`
-    /// in `crates/zeroship-data-v8/src/tests/postgres/transactions.rs` - had ALSO been failing for an unrelated
-    /// reason (it duplicated a platform-assigned `id`, so it never poisoned the
-    /// transaction at all), which means this rule went unbound in practice for
-    /// as long as that test was red. A pure arm cannot rot that way.
     #[test]
     fn a_commit_answered_rollback_is_a_rollback() {
         assert_eq!(

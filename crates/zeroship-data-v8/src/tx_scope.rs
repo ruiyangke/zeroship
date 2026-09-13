@@ -9,7 +9,7 @@
 use zeroship_data_orm::error::DbError;
 use zeroship_data_orm::transaction::scope::TransactionScope;
 
-const SCOPE_SYMBOL_KEY: &str = "zeroship.plugin-db.txScope";
+const SCOPE_SYMBOL_KEY: &str = "zeroship.data-v8.txScope";
 
 fn scope_symbol<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Symbol>> {
     let key = v8::String::new(scope, SCOPE_SYMBOL_KEY)?;
@@ -95,9 +95,7 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
     scope.set_continuation_preserved_embedder_data(local);
 }
 
-/// Which SQL dialect this thread's statements must be written in.
-///
-/// Capture compiler, codecs, and effective support without opening a backend.
+/// Capture this thread's compiler, codecs, and support without opening a backend.
 pub(crate) fn configured_sql_registration() -> zeroship_data_orm::sql::registration::SqlRegistration
 {
     crate::context::with(|c| c.sql_registration())
@@ -131,14 +129,16 @@ pub(crate) fn cdc_relay() -> Option<zeroship_data_orm::cdc::relay::RelayConfig> 
 pub(crate) fn capture_route(
     scope: &mut v8::PinScope<'_, '_>,
     binding: &zeroship_data_orm::binding::DbBinding,
-) -> crate::tx_route::CapturedRoute {
-    crate::tx_route::CapturedRoute::capture(
+) -> Result<crate::tx_route::CapturedRoute, DbError> {
+    let connection = crate::context::with(|context| context.connection_identity())
+        .ok_or_else(|| DbError::config("not_configured", "db: no connection is installed"))?;
+    Ok(crate::tx_route::CapturedRoute::capture(
         current_tx_scope(scope).as_ref(),
         binding.app_id(),
         binding.schema().clone(),
         configured_sql_registration(),
-        crate::context::with(|context| context.connection_identity()),
-    )
+        connection,
+    ))
 }
 
 /// Resolve the registered ORM connection and open it lazily.
@@ -165,31 +165,8 @@ pub(crate) async fn bind_route(
 
 #[cfg(test)]
 mod tests {
-    //! ## The capture arms
-    //!
-    //! ESTABLISHED: `capture_route`'s answer tracks the async-scope marker, and
-    //! it is NOT the ambient `has_tx_for` answer - `capture` says "in the
-    //! transaction" at a moment when `has_tx_for` says "no transaction parked",
-    //! so the two discriminators are provably different functions. Reverting
-    //! `CapturedRoute::capture` to the pre-fix
-    //! `tx_lanes::with(|l| l.has_tx_for(app_id))` fails three of the four.
-    //!
-    //! NOT ESTABLISHED, stated rather than implied:
-    //!   - that every `dispatch_*` actually calls `capture`. Nothing at runtime
-    //!     can check that; it is enforced by the TYPE (the exec entry points
-    //!     take `&TxRoute`, and `TxRoute` has no other production constructor)
-    //!     and end to end by `examples/db-todos/tests/database.test.ts` (`cxPlain`).
-    //!   - the OTHER direction of the #254 defect - an app with a transaction
-    //!     genuinely PARKED in the per-isolate slot while an unrelated dispatch
-    //!     runs. Reaching that state needs a real `Session` (a live
-    //!     Postgres `Client` or SQLite session handle), which these tests
-    //!     deliberately do not open. It is covered by `cxPlain` on both tiers.
-    //!   - anything about which CONNECTION the exec path then picks.
-    //!
-    //! **These five arms lived in the engine's `tx_route.rs`** and moved here
-    //! with the data-engine cut: every name they drive except `tx_lanes` is this
-    //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
-    //! per-isolate context at all.
+    //! Route capture follows the continuation scope. Database-backed tests cover
+    //! the connection selected after that captured route is bound.
 
     use zeroship_runtime::init_v8;
 
@@ -200,6 +177,8 @@ mod tests {
             v8::scope!(let handle_scope, &mut isolate);
             let context = v8::Context::new(handle_scope, Default::default());
             let $scope = &mut v8::ContextScope::new(handle_scope, context);
+            crate::tests::fixtures::reset_context();
+            crate::tests::fixtures::set_database_url("postgres://route-capture.invalid/db");
         };
     }
 
@@ -231,8 +210,11 @@ mod tests {
             "precondition: nothing has opened a backend on this thread"
         );
         assert_eq!(
-            super::capture_route(scope, &app_a_binding()).dialect(),
-            crate::compile::SqlDialect::Sqlite
+            super::capture_route(scope, &app_a_binding())
+                .unwrap()
+                .sql_registration()
+                .family(),
+            zeroship_data_orm::sql::registration::SQLITE_FAMILY
         );
         crate::tests::fixtures::reset_context();
     }
@@ -240,7 +222,7 @@ mod tests {
     #[test]
     fn top_level_dispatch_routes_to_the_pool() {
         in_scope!(let scope);
-        let route = super::capture_route(scope, &app_a_binding());
+        let route = super::capture_route(scope, &app_a_binding()).unwrap();
         assert!(!route.in_tx(), "no transaction scope entered");
         assert_eq!(route.app_id(), "app_a");
     }
@@ -252,10 +234,16 @@ mod tests {
             scope,
             &super::TransactionScope::observed("app_a".to_owned(), 1, 1),
         );
-        assert!(super::capture_route(scope, &app_a_binding()).in_tx());
+        assert!(
+            super::capture_route(scope, &app_a_binding())
+                .unwrap()
+                .in_tx()
+        );
         super::leave(scope, prev);
         assert!(
-            !super::capture_route(scope, &app_a_binding()).in_tx(),
+            !super::capture_route(scope, &app_a_binding())
+                .unwrap()
+                .in_tx(),
             "leaving the scope must stop routing to the tx"
         );
     }
@@ -268,7 +256,9 @@ mod tests {
             &super::TransactionScope::observed("app_other".to_owned(), 2, 1),
         );
         assert!(
-            !super::capture_route(scope, &app_a_binding()).in_tx(),
+            !super::capture_route(scope, &app_a_binding())
+                .unwrap()
+                .in_tx(),
             "SEC-1: app_a must not join app_other's transaction"
         );
         let other = zeroship_data_orm::binding::DbBinding::new(
@@ -276,7 +266,7 @@ mod tests {
             zeroship_data_orm::binding::COLD_START_DEPLOY_TOKEN,
             zeroship_data_orm::sql::SchemaName::new("app_other").expect("fixture schema name"),
         );
-        assert!(super::capture_route(scope, &other).in_tx());
+        assert!(super::capture_route(scope, &other).unwrap().in_tx());
         super::leave(scope, prev);
     }
 
@@ -294,7 +284,9 @@ mod tests {
             &super::TransactionScope::observed("app_a".to_owned(), 1, 1),
         );
         let ambient = zeroship_data_orm::transaction::is_active("app_a");
-        let captured = super::capture_route(scope, &app_a_binding()).in_tx();
+        let captured = super::capture_route(scope, &app_a_binding())
+            .unwrap()
+            .in_tx();
         super::leave(scope, prev);
         assert!(!ambient, "precondition: no transaction is parked for app_a");
         assert!(
@@ -315,7 +307,10 @@ mod tests {
         assert!(crate::context::with(|context| context.backend()).is_none());
         run(async {
             let backend = super::ensure_backend().await.expect("open cold backend");
-            assert_eq!(backend.dialect(), crate::compile::SqlDialect::Sqlite);
+            assert_eq!(
+                backend.sql_registration().family(),
+                zeroship_data_orm::sql::registration::SQLITE_FAMILY
+            );
             assert!(crate::context::with(|context| context.backend()).is_some());
         });
         crate::tests::fixtures::reset_context();

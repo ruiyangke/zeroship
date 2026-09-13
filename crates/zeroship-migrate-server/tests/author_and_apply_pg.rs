@@ -153,8 +153,8 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
         // deliberately NOT a JS-reachable global — Rust stamps provenance).
         {
             let global = scope.get_current_context().global(scope);
-            let k = v8::String::new(scope, "__zsMigrationName")
-                .ok_or("alloc __zsMigrationName key")?;
+            let k =
+                v8::String::new(scope, "__zsMigrationName").ok_or("alloc __zsMigrationName key")?;
             let v = v8::String::new(scope, name).ok_or("alloc __zsMigrationName value")?;
             global.set(scope, k.into(), v.into());
         }
@@ -269,14 +269,10 @@ async fn drop_schemas(session: &CompioPgSession, cfg: &ExecutorConfig) {
 /// Resolve the authored envelope's `createTable` ops through the confined
 /// table-shape policy (the platform's create-table policy) before lowering —
 /// the same normalisation Stage 1 uses.
-fn resolved_envelope_json(
-    raw: &str,
-    effective: &EffectivePolicy,
-    default_schema: &str,
-) -> String {
+fn resolved_envelope_json(raw: &str, effective: &EffectivePolicy, default_schema: &str) -> String {
     let ir: MigrationIr = serde_json::from_str(raw).expect("authored IR parses as MigrationIr");
-    let resolved = resolve_create_table_policy(&ir, effective, default_schema)
-        .expect("authored IR resolves");
+    let resolved =
+        resolve_create_table_policy(&ir, effective, default_schema).expect("authored IR resolves");
     serde_json::to_string(&resolved).expect("resolved authored IR serializes")
 }
 
@@ -404,9 +400,7 @@ async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
         .await
         .expect("idempotent re-apply");
     assert!(out2.is_noop(), "second apply is a no-op");
-    let applied2 = read_journal(&session, &cfg)
-        .await
-        .expect("journal re-read");
+    let applied2 = read_journal(&session, &cfg).await.expect("journal re-read");
     assert_eq!(
         applied2.len(),
         migrations.len(),

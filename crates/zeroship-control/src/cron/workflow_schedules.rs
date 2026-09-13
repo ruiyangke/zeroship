@@ -17,7 +17,7 @@ use chrono_tz::Tz;
 use compio_postgres::GenericClient;
 use serde::Deserialize;
 use serde_json::Value;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id;
 use zeroship_workflow::store::pg::WorkflowTables;
 
@@ -134,7 +134,7 @@ struct ClaimedSchedule {
 #[derive(Debug, Clone)]
 struct ScheduleRow {
     id: String,
-    app_id: Uuid,
+    app_id: AppId,
     deploy_id: String,
     workflow_name: String,
     descriptor: ScheduleDescriptor,
@@ -194,7 +194,7 @@ pub async fn tick_with_config(
 
 pub async fn reconcile_deploy_schedules<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_id: &str,
     deploy_hash: &str,
     manifest_json: &str,
@@ -235,7 +235,7 @@ where
     if names.is_empty() {
         conn.execute(
             "DELETE FROM zeroship.workflow_schedules WHERE app_id = $1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -243,7 +243,7 @@ where
         conn.execute(
             "DELETE FROM zeroship.workflow_schedules \
               WHERE app_id = $1 AND NOT (name = ANY($2))",
-            &[app_id, &names],
+            &[&app_id.as_str(), &names],
         )
         .await
         .map_err(RegistryError::from)?;
@@ -253,7 +253,7 @@ where
 
 async fn upsert_schedule<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
     deploy_id: &str,
     deploy_hash: &str,
     schedule: &ValidatedSchedule,
@@ -316,7 +316,7 @@ where
              updated_at = now()",
         &[
             &id,
-            app_id,
+            &app_id.as_str(),
             &deploy_id,
             &deploy_hash,
             &schedule.name,
@@ -488,7 +488,7 @@ async fn claimed_schedule_app_id<C>(
     conn: &C,
     schedule_id: &str,
     owner_id: &str,
-) -> Result<Option<Uuid>, RegistryError>
+) -> Result<Option<AppId>, RegistryError>
 where
     C: GenericClient + Sync,
 {
@@ -500,7 +500,16 @@ where
         )
         .await
         .map_err(RegistryError::from)?;
-    Ok(rows.first().map(|row| row.get("app_id")))
+    rows.first()
+        .map(|row| {
+            let raw: String = row.get("app_id");
+            AppId::parse(&raw).map_err(|e| {
+                RegistryError::Database(format!(
+                    "workflow_schedules.app_id {raw} is not a canonical app id: {e}"
+                ))
+            })
+        })
+        .transpose()
 }
 
 /// Re-read a schedule this sweeper claimed, gated on OWNERSHIP - not on lease
@@ -577,9 +586,15 @@ where
     )?;
     let activated_at: Option<DateTime<Utc>> = row.get("activated_at");
     let created_at: DateTime<Utc> = row.get("created_at");
+    let app_id_raw: String = row.get("app_id");
+    let app_id = AppId::parse(&app_id_raw).map_err(|e| {
+        RegistryError::Database(format!(
+            "workflow_schedules.app_id {app_id_raw} is not a canonical app id: {e}"
+        ))
+    })?;
     Ok(Some(ScheduleRow {
         id: row.get("id"),
-        app_id: row.get("app_id"),
+        app_id,
         deploy_id: row.get("deploy_id"),
         workflow_name: row.get("workflow_name"),
         descriptor,

@@ -14,8 +14,8 @@ serde_json = { workspace = true }
 v8 = { workspace = true }
 
 [dev-dependencies]
+zeroship-id = { workspace = true }
 tempfile = { workspace = true }
-uuid = { workspace = true }
 rusqlite = { workspace = true, features = ["bundled"] }
 
 [lints]

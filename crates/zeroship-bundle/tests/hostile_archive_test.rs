@@ -11,6 +11,7 @@
 //! production. The exception is the long-name case, which pins a bound added
 //! after the defect was measured.
 
+use zeroship_id::AppId;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -67,7 +68,7 @@ async fn a_long_entry_name_does_not_become_a_long_error_body() {
     let long_name = "a".repeat(64 * 1024);
     let archive = pack_first_entry(&long_name, b"x");
 
-    let err = ingest(&store(), &Uuid::now_v7(), &archive)
+    let err = ingest(&store(), &AppId::mint(), &archive)
         .await
         .expect_err("an archive whose first entry is not manifest.json must be refused");
 
@@ -143,7 +144,7 @@ fn pack_raw(name: &str, body: &[u8]) -> Vec<u8> {
 #[compio::test]
 async fn the_hand_rolled_header_parses_as_a_real_tar() {
     let archive = pack_raw("manifest.json", b"{not valid json");
-    let err = ingest(&store(), &Uuid::now_v7(), &archive)
+    let err = ingest(&store(), &AppId::mint(), &archive)
         .await
         .expect_err("a malformed manifest body must still be refused");
     let IngestError::BadRequest { error, .. } = &err else {
@@ -164,7 +165,7 @@ async fn the_hand_rolled_header_parses_as_a_real_tar() {
 #[compio::test]
 async fn a_traversing_entry_name_is_refused() {
     let archive = pack_raw("../../etc/passwd", b"x");
-    let err = ingest(&store(), &Uuid::now_v7(), &archive)
+    let err = ingest(&store(), &AppId::mint(), &archive)
         .await
         .expect_err("a traversing name must be refused");
     assert!(matches!(err, IngestError::BadRequest { .. }), "got {err:?}");
@@ -178,7 +179,7 @@ async fn a_traversing_entry_name_is_refused() {
 #[compio::test]
 async fn an_absolute_entry_name_is_refused() {
     let archive = pack_raw("/etc/passwd", b"x");
-    let err = ingest(&store(), &Uuid::now_v7(), &archive)
+    let err = ingest(&store(), &AppId::mint(), &archive)
         .await
         .expect_err("an absolute name must be refused");
     assert!(matches!(err, IngestError::BadRequest { .. }), "got {err:?}");
@@ -189,7 +190,7 @@ async fn an_absolute_entry_name_is_refused() {
 #[compio::test]
 async fn an_unlisted_ordinary_name_is_refused() {
     let archive = pack_raw("README.md", b"x");
-    let err = ingest(&store(), &Uuid::now_v7(), &archive)
+    let err = ingest(&store(), &AppId::mint(), &archive)
         .await
         .expect_err("an unlisted name must be refused");
     assert!(matches!(err, IngestError::BadRequest { .. }), "got {err:?}");
@@ -199,7 +200,7 @@ async fn an_unlisted_ordinary_name_is_refused() {
 /// panic and not a 500.
 #[compio::test]
 async fn a_non_zstd_body_is_refused() {
-    let err = ingest(&store(), &Uuid::now_v7(), b"this is not zstd")
+    let err = ingest(&store(), &AppId::mint(), b"this is not zstd")
         .await
         .expect_err("a non-zstd body must be refused");
     assert!(matches!(err, IngestError::BadRequest { .. }), "got {err:?}");
@@ -209,7 +210,7 @@ async fn a_non_zstd_body_is_refused() {
 #[compio::test]
 async fn a_zstd_stream_that_is_not_a_tar_is_refused() {
     let archive = zstd::encode_all(&b"definitely not a tar archive"[..], 0).unwrap();
-    let err = ingest(&store(), &Uuid::now_v7(), &archive)
+    let err = ingest(&store(), &AppId::mint(), &archive)
         .await
         .expect_err("a non-tar payload must be refused");
     assert!(matches!(err, IngestError::BadRequest { .. }), "got {err:?}");
@@ -266,7 +267,7 @@ async fn a_second_entry_is_reached_after_a_first_manifest_entry() {
     let hash = "a".repeat(64);
     let blob_name = format!("blobs/{hash}");
     let archive = pack_entries(&[("manifest.json", VALID_MANIFEST), (blob_name.as_str(), b"x")]);
-    let err = ingest(&store(), &Uuid::now_v7(), &archive).await.unwrap_err();
+    let err = ingest(&store(), &AppId::mint(), &archive).await.unwrap_err();
     let IngestError::BadRequest { error, .. } = &err else {
         panic!("expected BadRequest, got {err:?}")
     };
@@ -294,7 +295,7 @@ async fn a_second_entry_is_reached_after_a_first_manifest_entry() {
 #[compio::test]
 async fn a_traversing_name_in_a_later_entry_is_refused_by_the_allowlist() {
     let archive = pack_entries(&[("manifest.json", VALID_MANIFEST), ("blobs/../../etc/passwd", b"x")]);
-    let err = ingest(&store(), &Uuid::now_v7(), &archive).await.unwrap_err();
+    let err = ingest(&store(), &AppId::mint(), &archive).await.unwrap_err();
     let IngestError::BadRequest { error, detail } = &err else {
         panic!("expected BadRequest, got {err:?}")
     };

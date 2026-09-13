@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { t } from "@zeroship/db";
-import { installSchema, type Db } from "@zeroship/bootstrap/install-schema";
+import { t, type Db } from "@zeroship/db";
+import { installSchema } from "@zeroship/bootstrap/install-schema";
 import type { NativeDb } from "../src/native.js";
 
 const schema = {records:{id:t.bigInt().required().primaryKey(),label:t.string()}};
@@ -41,6 +41,10 @@ test("installed transaction wrappers preserve numeric identity types and values"
 
 function contracts(db: Db<typeof schema>) {
   void db.transaction(async tx => {
+    const records = tx.collection("records");
+    await records.get(1n);
+    // @ts-expect-error Transaction lookup accepts only declared collections.
+    tx.collection("missing");
     // @ts-expect-error Installed transactions reject text identities for numeric schemas.
     await tx.records.get("7");
     // @ts-expect-error Installed transaction cursors follow the same schema.
@@ -48,3 +52,36 @@ function contracts(db: Db<typeof schema>) {
   });
 }
 void contracts;
+
+const collisionSchema = {
+  collection: {id:t.string().required().primaryKey()},
+  transaction: {id:t.string().required().primaryKey()},
+  from: {id:t.string().required().primaryKey()},
+  live: {id:t.string().required().primaryKey()},
+  constructor: {id:t.string().required().primaryKey()},
+  __platform: {id:t.string().required().primaryKey()},
+  ["__proto__"]: {id:t.string().required().primaryKey()},
+  migrations: {id:t.string().required().primaryKey()},
+  openSubscription: {id:t.string().required().primaryKey()},
+};
+
+function collisionContracts(db: Db<typeof collisionSchema>) {
+  void db.transaction(async tx => {
+    await tx.collection("transaction").get("row");
+    await tx.collection("collection").get("row");
+    await tx.collection("from").get("row");
+    await tx.collection("live").get("row");
+  });
+  void db.collection("transaction").find({id:"row"});
+  void db.collection("collection").find({id:"row"});
+  void db.collection("from").find({id:"row"});
+  void db.collection("live").find({id:"row"});
+  void db.collection("constructor").find({id:"row"});
+  void db.collection("__platform").find({id:"row"});
+  void db.collection("__proto__").find({id:"row"});
+  void db.migrations.find({id:"row"});
+  void db.openSubscription.find({id:"row"});
+  // @ts-expect-error Name lookup accepts only declared collections.
+  db.collection("missing");
+}
+void collisionContracts;

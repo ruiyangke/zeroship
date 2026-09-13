@@ -53,8 +53,8 @@ struct Fixture {
     db: Client,
     issuer: Arc<Issuer>,
     client_id: String,
-    app_id: Uuid,
-    user_id: Uuid,
+    app_id: zeroship_core::AppId,
+    user_id: zeroship_core::UserId,
     session_cookie: String,
 }
 
@@ -70,8 +70,8 @@ impl Fixture {
         .expect("broker secrets");
         let issuer = Arc::new(test_issuer().with_broker_secrets(broker_secrets));
 
-        let user_id = Uuid::new_v4();
-        let app_id = Uuid::new_v4();
+        let user_id = zeroship_core::UserId::mint();
+        let app_id = zeroship_core::AppId::mint();
         let client_prefix = if kind.is_brokered() {
             "oac_p5a"
         } else {
@@ -79,12 +79,12 @@ impl Fixture {
         };
         let client_id = format!("{client_prefix}_{}", Uuid::new_v4().simple());
         let app_name = format!("p5a-brokered-{}", Uuid::new_v4().simple());
-        seed_user_client(&db, user_id, app_id, &app_name, &client_id, kind).await;
+        seed_user_client(&db, &user_id, &app_id, &app_name, &client_id, kind).await;
 
         let session = session_store::create(
             &db,
             &session_store::CreateSession {
-                user_id,
+                user_id: user_id.clone(),
                 auth_method: "pwd",
                 amr: vec!["pwd".to_string()],
                 acr: None,
@@ -109,7 +109,7 @@ impl Fixture {
             issuer,
             client_id,
             app_id,
-            user_id,
+            user_id: user_id.clone(),
             session_cookie,
         }
     }
@@ -160,20 +160,17 @@ async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_a
             ID_TOKEN_TYP,
         )
         .expect("verify id token");
-        assert_eq!(id.sub, fx.user_id.to_string());
+        assert_eq!(id.sub, fx.user_id.as_str());
 
         let access = verify_with_jwks::<AccessTokenClaims>(
             &jwks,
             &token.access_token,
             fx.issuer.issuer(),
-            &format!("app:{}", fx.app_id),
+            &format!("app:{}", fx.app_id.as_str()),
             ACCESS_TOKEN_TYP,
         )
         .expect("verify access token");
-        assert_eq!(
-            access.sub,
-            fx.issuer.pairwise_subject(&fx.user_id.to_string(), SECTOR)
-        );
+        assert_eq!(access.sub, fx.issuer.pairwise_subject(&fx.user_id, SECTOR));
         assert_ne!(id.sub, access.sub);
     })
     .await;
@@ -218,10 +215,7 @@ async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
             ID_TOKEN_TYP,
         )
         .expect("verify id token");
-        assert_eq!(
-            id.sub,
-            fx.issuer.pairwise_subject(&fx.user_id.to_string(), SECTOR)
-        );
+        assert_eq!(id.sub, fx.issuer.pairwise_subject(&fx.user_id, SECTOR));
     })
     .await;
 }
@@ -340,8 +334,8 @@ fn test_issuer() -> Issuer {
 
 async fn seed_user_client(
     db: &Client,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &zeroship_core::UserId,
+    app_id: &zeroship_core::AppId,
     app_name: &str,
     client_id: &str,
     kind: ClientKind,
@@ -350,7 +344,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name) \
          VALUES ($1, $2::citext, NOW(), 'P5a User')",
-        &[&user_id, &email],
+        &[&user_id.as_str(), &email],
     )
     .await
     .expect("seed user");
@@ -369,7 +363,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-        &[&app_id, &app_name, &project_id],
+        &[&app_id.as_str(), &app_name, &project_id],
     )
     .await
     .expect("seed app");
@@ -401,7 +395,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
@@ -409,7 +403,7 @@ async fn seed_user_client(
         "INSERT INTO zeroship.oauth_grants \
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
-        &[&user_id, &client_id, &scopes],
+        &[&user_id.as_str(), &client_id, &scopes],
     )
     .await
     .expect("seed oauth grant");

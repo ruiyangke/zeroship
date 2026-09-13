@@ -54,10 +54,8 @@ function makeMockNative(rows: Record<string, AnyRec>, opts?: { findThrows?: Erro
   for (const [k, v] of Object.entries(rows)) stringIndex[k] = v;
   const native = {
     // P9 PR 3: native `transaction(callback)` orchestrator stub. The
-    // begin tick happens when this is invoked (the bootstrap wrapper has
-    // already drained the loaders + bumped `_txDepth`); the callback runs
-    // with the tx active so id-reads dispatch directly (limit:1) rather
-    // than batching.
+    // begin tick happens after the bootstrap wrapper drains pending loaders.
+    // Transaction collection reads bypass batching explicitly.
     transaction: async (
       cb: (raw: unknown) => unknown,
       _o?: { isolationLevel?: string },
@@ -143,17 +141,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   });
 
   test("a batch of more than 100 distinct ids is chunked, never over the cap", async () => {
-    // The IdLoader is the SECOND `$in` emitter in this SDK. The first fix for
-    // this defect chunked only the relation loader
-    // (`src/collection/relations.ts`), and this path kept sending an unbounded
-    // list: `dispatch()` dedupes the whole microtask batch and calls `flush`
-    // once. The native builder REJECTS a membership list over
-    // MAX_MEMBERSHIP_LIST_LEN rather than clamping it, so an over-cap batch
-    // fails EVERY queued get(), not merely the ids past the boundary.
-    //
-    // A microtask batch is as large as the caller's concurrency, so a plain
-    // `Promise.all` over a few hundred ids reaches it with nothing unusual
-    // happening.
+    // The loader must split a microtask batch before it reaches the ORM budget.
     const N = 250;
     const rows: Record<string, { id: string; email: string; name: string }> = {};
     for (let i = 0; i < N; i++) {
@@ -432,14 +420,9 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
   });
 
   test("tx-race: get(id) queued pre-tx that flushes mid-tx is rejected", async () => {
-    // Models the residual race left after `d218e54c`'s drain-before-begin:
-    // a `get(id)` enqueues an entry, then `db.transaction(...)` runs.
-    // `_txDepth` is bumped synchronously before the native transaction(fn)
-    // is invoked, so by the time the loader's microtask fires,
-    // `_txDepth > 0` and TX_CONN is live in Rust. The loader detects the
-    // snapshot/current mismatch
-    // and rejects with a clear error instead of routing the batched
-    // find onto the tx connection.
+    // IdLoader still rejects a caller-provided scope transition between
+    // enqueue and flush. Collection transaction routing does not use this
+    // shared-depth mechanism.
     const { IdLoader } = await import("../src/loader.js");
     let currentDepth = 0;
     let flushCalls = 0;
@@ -485,11 +468,7 @@ describe("IdLoader — DataLoader batching for get(id)", () => {
     // Both enqueue-time and flush-time depth are 0 — normal path.
     const r0 = await loader.load("row1", 0);
     assert.equal(r0?.v, "row-row1");
-    // Entries enqueued inside a tx that flush inside the same tx are
-    // honoured — the caller asked for tx routing and that's what they
-    // get. (This branch is unusual in practice because Collection.get
-    // bypasses the loader when _txDepth > 0, but the loader stays
-    // correct under direct use.)
+    // A direct IdLoader user may also keep a stable nonzero scope token.
     currentDepth = 1;
     const r1 = await loader.load("row2", 1);
     assert.equal(r1?.v, "row-row2");

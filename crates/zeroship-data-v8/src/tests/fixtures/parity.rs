@@ -39,7 +39,7 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
 
 /// App identity used by the SQLite fixture, isolated by its temporary directory.
 /// PostgreSQL fixtures supply a distinct app identity for their schema.
-pub const DEV_APP_ID: &str = "default";
+pub const DEV_APP_ID: &str = zeroship_core::app_id::LOCAL_DEV_APP_ID;
 
 /// The matrix's deployed field shape. Kept beside the JS so the pre-apply, the
 /// runtime descriptor, and the procedures cannot drift.
@@ -355,7 +355,7 @@ async function typedRoundTrip(_input, _ctx) {
         payload_json: payloadJson,
     });
     const sourceRows = await coll.find(
-        { title: "typed-roundtrip", flag: 1 },
+        { title: "typed-roundtrip", flag: true },
         { limit: 1 },
     );
     const source = sourceRows[0];

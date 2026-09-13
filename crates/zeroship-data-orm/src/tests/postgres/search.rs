@@ -36,18 +36,13 @@ fn vector_search_returns_k_nearest() {
 
             let app = app.as_str();
             let coll = "docs";
-            // Provision the per-app ROLE, not just the schema. `vector_search` resolves
-            // the binding before it plans, and a schema without its role fails closed
-            // with `schema_not_provisioned` - which is what this test did from the day
-            // it was written until 2026-09-01. It never surfaced because the test was
-            // statically `#[ignore]`d, so a setup gap looked like a missing extension.
+            // Search resolves the app binding before planning, so provision its
+            // role as well as its schema.
             let _role = provision_app_with_role(&pool, app).await;
             crate::tests::fixtures::roles::ensure_per_app_role(&pool, app)
                 .await
                 .unwrap();
-            // The six non-`id` platform system columns are part of every real creator
-            // table and are named unconditionally by the implicit read projection the
-            // vector search builds, so the fixture carries them too.
+            // The fixture carries every field in its read descriptor.
             pool.execute(
                 &format!(
                     "CREATE TABLE \"{app}\".\"{coll}\" (\
@@ -129,23 +124,25 @@ fn vector_search_returns_k_nearest() {
                 coll,
                 value!({ "embedding": { "type": "vector", "vectorDims": 8 } }),
             );
+            let binding = DbBinding::cold_start(app);
+            let schema = zeroship_data_orm::descriptor::collection_schema(&binding, coll)
+                .expect("descriptor slice for the search fixture");
+            let registration = zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::vector_search(
                 &backend,
                 None,
-                zeroship_data_orm::search::VectorSearch {
-                    binding: &DbBinding::cold_start(app),
-                    collection: coll,
-                    column: "embedding",
-                    query: &query,
-                    k: 10,
-                    metric: VectorMetric::Cosine,
-                    filter: &crate::value::Value::Null,
-                    schema: &zeroship_data_orm::descriptor::collection_schema(
-                        &DbBinding::cold_start(app),
-                        coll,
-                    )
-                    .expect("descriptor slice for the search fixture"),
-                },
+                zeroship_data_orm::search::VectorSearch::compile(
+                    &binding,
+                    coll,
+                    "embedding",
+                    &query,
+                    10,
+                    VectorMetric::Cosine,
+                    &crate::value::Value::Null,
+                    &schema,
+                    &registration,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -155,10 +152,7 @@ fn vector_search_returns_k_nearest() {
             // matches the query exactly).
             let ids: Vec<i64> = rows
                 .iter()
-                .filter_map(|r| {
-                    r.get("id")
-                        .and_then(crate::value::Value::as_i64)
-                })
+                .filter_map(|r| r.get("id").and_then(crate::value::Value::as_i64))
                 .collect();
             assert!(
                 ids.contains(&1),
@@ -196,17 +190,11 @@ fn vector_search_returns_k_nearest() {
 /// extension still installed the typed-error arm is never reached, so a pass
 /// there would report a contract nobody checked.
 ///
-/// THIS COMMENT DESCRIBED THE OPPOSITE UNTIL 2026-09-08, AND IT DESCRIBED
-/// NEITHER THE CODE BELOW NOR ITS OWN REASONING. It said the test would
-/// "silently re-skip" and that "we don't fail the suite in that case because
-/// the typed-error assertion is the load-bearing part of the contract" - which
-/// is the argument FOR failing, since a re-skip is precisely the case where
-/// that load-bearing assertion did not run.
 #[test]
 fn pgvector_extension_missing_reports_typed_error() {
     Host::test(|host| {
         host.run(async {
-            use zeroship_data_orm::backend::{PostgresBackend, VectorMetric};
+            use zeroship_data_orm::backend::PostgresBackend;
             use zeroship_data_orm::error::DbError;
 
             let (_postgres, url) = require_pg(host).await;
@@ -259,18 +247,16 @@ fn pgvector_extension_missing_reports_typed_error() {
             // so the extension error must still be the one that surfaces. If the order
             // ever flipped, this would fail with `collection_not_declared` instead.
             async fn search(backend: &PostgresBackend) -> DbError {
+                let binding = DbBinding::cold_start("vector_missing");
                 zeroship_data_orm::search::Search::vector_search(
                     backend,
                     None,
                     zeroship_data_orm::search::VectorSearch {
-                        binding: &DbBinding::cold_start("vector_missing"),
-                        collection: "any",
-                        column: "any",
-                        query: &[0.0f32; 8],
-                        k: 10,
-                        metric: VectorMetric::Cosine,
-                        filter: &crate::value::Value::Null,
-                        schema: &crate::value::Value::Null,
+                        binding: &binding,
+                        query: zeroship_data_orm::sql::compiler::CompiledQuery::new(
+                            "SELECT 1".into(),
+                            Vec::new(),
+                        ),
                     },
                 )
                 .await
@@ -495,19 +481,25 @@ fn near_returns_within_radius() {
                 url.clone(),
                 host.key_source(),
             );
+            let binding = DbBinding::cold_start(app);
+            let schema = value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } });
+            let registration =
+                zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::spatial_near(
                 &backend,
                 None,
-                zeroship_data_orm::search::SpatialSearch {
-                    binding: &DbBinding::cold_start(app),
-                    collection: coll,
-                    column: "location",
-                    point: london,
-                    radius_m: 1000.0,
-                    filter: &crate::value::Value::Null,
-                    limit: None,
-                    schema: &value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }),
-                },
+                zeroship_data_orm::search::SpatialSearch::compile(
+                    &binding,
+                    coll,
+                    "location",
+                    london,
+                    1000.0,
+                    &crate::value::Value::Null,
+                    None,
+                    &schema,
+                    &registration,
+                )
+                .unwrap(),
             )
             .await
             .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
@@ -598,18 +590,20 @@ fn postgis_extension_missing_reports_typed_error() {
             // No descriptor entry, deliberately: the extension probe runs BEFORE the
             // schema resolve, so this must still surface `postgis_extension_missing`.
             async fn near(backend: &PostgresBackend) -> DbError {
+                let binding = DbBinding::cold_start("postgis_missing");
                 zeroship_data_orm::search::Search::spatial_near(
                     backend,
                     None,
                     zeroship_data_orm::search::SpatialSearch {
-                        binding: &DbBinding::cold_start("postgis_missing"),
-                        collection: "any",
+                        binding: &binding,
+                        query: zeroship_data_orm::sql::compiler::CompiledQuery::new(
+                            "SELECT 1".into(),
+                            Vec::new(),
+                        ),
                         column: "any",
                         point: GeoPoint { lat: 0.0, lng: 0.0 },
                         radius_m: 1000.0,
-                        filter: &crate::value::Value::Null,
-                        limit: None,
-                        schema: &crate::value::Value::Null,
+                        limit: 1,
                     },
                 )
                 .await

@@ -55,12 +55,12 @@ fn write_owner_only(path: &std::path::Path, body: &[u8]) {
 }
 
 /// A person, a registered client and an app-audience grant in the case database.
-async fn seed(db: &Client, tag: &str) -> (Uuid, String, String) {
+async fn seed(db: &Client, tag: &str) -> (zeroship_core::UserId, String, String) {
     let email = format!("session-object-{tag}@zeroship.test");
     let user = users::create(db, &email, "Session Object", None)
         .await
         .expect("seed person");
-    let person_id: Uuid = user.id;
+    let person_id: zeroship_core::UserId = user.id;
     let client_id = format!("oac_sessionobject{tag}");
     db.execute(
         "INSERT INTO zeroship.oauth_clients (client_id, client_name, redirect_uris, scopes) \
@@ -72,7 +72,7 @@ async fn seed(db: &Client, tag: &str) -> (Uuid, String, String) {
     let scopes = vec!["openid".to_string(), "offline_access".to_string()];
     let grant_id = session_store::upsert_grant(
         db,
-        person_id,
+        &person_id,
         &Audience::App {
             client_id: client_id.clone(),
         },
@@ -86,7 +86,7 @@ async fn seed(db: &Client, tag: &str) -> (Uuid, String, String) {
 }
 
 const fn new_session<'a>(
-    person_id: Uuid,
+    person_id: &'a zeroship_core::UserId,
     grant_id: &'a str,
     subject: &'a str,
     scopes: &'a [String],
@@ -138,7 +138,7 @@ async fn a_revoked_session_cannot_mint() {
         let created = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+            &new_session(&person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
         )
         .await
         .expect("create session")
@@ -180,7 +180,7 @@ async fn a_live_session_mints_where_a_revoked_one_does_not() {
         let created = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+            &new_session(&person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
         )
         .await
         .expect("create session")
@@ -203,7 +203,7 @@ async fn a_live_session_mints_where_a_revoked_one_does_not() {
             }) => {
                 assert_ne!(next, secret, "rotation returned the same secret");
                 assert_eq!(proof.session_id(), row.id);
-                assert_eq!(proof.person_id(), person_id);
+                assert_eq!(proof.person_id(), &person_id);
             }
             None => panic!("a live session refused to mint"),
         }
@@ -230,7 +230,7 @@ async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
         let created = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+            &new_session(&person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
         )
         .await
         .expect("create session")
@@ -293,7 +293,7 @@ async fn a_suspended_grant_cannot_create_a_session() {
             session_store::create(
                 &db,
                 &keys,
-                &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+                &new_session(&person_id, &grant_id, &subject, &scopes, &amr),
             )
             .await
             .expect("create session")
@@ -314,7 +314,7 @@ async fn a_suspended_grant_cannot_create_a_session() {
             session_store::create(
                 &db,
                 &keys,
-                &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+                &new_session(&person_id, &grant_id, &subject, &scopes, &amr),
             )
             .await
             .expect("create session")
@@ -338,7 +338,7 @@ async fn a_stale_credential_epoch_cannot_create_a_session() {
         let amr = vec!["pwd".to_string()];
         let subject = format!("pws_{tag}");
 
-        let mut params = new_session(person_id, &grant_id, &subject, &scopes, &amr);
+        let mut params = new_session(&person_id, &grant_id, &subject, &scopes, &amr);
         params.expected_credential_epoch = Some(0);
         assert!(
             session_store::create(&db, &keys, &params)
@@ -376,7 +376,7 @@ async fn advancing_the_credential_epoch_stops_the_next_mint() {
         let created = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+            &new_session(&person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
         )
         .await
         .expect("create session")
@@ -385,7 +385,7 @@ async fn advancing_the_credential_epoch_stops_the_next_mint() {
 
         db.execute(
             "UPDATE zeroship.users SET credential_version = credential_version + 1 WHERE id = $1",
-            &[&person_id],
+            &[&person_id.as_str()],
         )
         .await
         .expect("advance credential epoch");
@@ -426,7 +426,7 @@ async fn a_superseded_secret_replays_once_and_then_is_refused() {
         let created = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+            &new_session(&person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
         )
         .await
         .expect("create session")
@@ -500,7 +500,7 @@ async fn the_live_secret_is_not_replayable() {
         let created = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
+            &new_session(&person_id, &grant_id, &format!("pws_{tag}"), &scopes, &amr),
         )
         .await
         .expect("create session")
@@ -553,7 +553,7 @@ async fn a_session_with_no_secret_can_never_be_presented() {
         let amr = vec!["pwd".to_string()];
 
         let subject = format!("pws_{tag}");
-        let mut params = new_session(person_id, &grant_id, &subject, &scopes, &amr);
+        let mut params = new_session(&person_id, &grant_id, &subject, &scopes, &amr);
         params.with_secret = false;
         let created = session_store::create(&db, &keys, &params)
             .await
@@ -593,7 +593,7 @@ async fn revoking_a_person_ends_every_live_session() {
         let first = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+            &new_session(&person_id, &grant_id, &subject, &scopes, &amr),
         )
         .await
         .expect("create")
@@ -601,13 +601,13 @@ async fn revoking_a_person_ends_every_live_session() {
         let second = session_store::create(
             &db,
             &keys,
-            &new_session(person_id, &grant_id, &subject, &scopes, &amr),
+            &new_session(&person_id, &grant_id, &subject, &scopes, &amr),
         )
         .await
         .expect("create")
         .expect("created");
 
-        let revoked = session_store::revoke_person_sessions(&db, person_id, "test")
+        let revoked = session_store::revoke_person_sessions(&db, &person_id, "test")
             .await
             .expect("revoke person");
         assert_eq!(revoked, 2, "the person's live sessions were not all ended");
@@ -622,7 +622,7 @@ async fn revoking_a_person_ends_every_live_session() {
 
         // A second pass ends nothing, because nothing is live.
         assert_eq!(
-            session_store::revoke_person_sessions(&db, person_id, "test")
+            session_store::revoke_person_sessions(&db, &person_id, "test")
                 .await
                 .expect("revoke person"),
             0
@@ -651,7 +651,7 @@ async fn a_second_consent_advances_scopes_and_never_rewrites_the_subject() {
         ];
         let again = session_store::upsert_grant(
             &db,
-            person_id,
+            &person_id,
             &audience,
             "pws_a_different_subject_entirely",
             &widened,
@@ -684,9 +684,9 @@ async fn a_second_consent_advances_scopes_and_never_rewrites_the_subject() {
         // suspension inside one app.
         let platform = session_store::upsert_grant(
             &db,
-            person_id,
+            &person_id,
             &Audience::Platform,
-            &person_id.to_string(),
+            person_id.as_str(),
             &["openid".to_string()],
             None,
         )

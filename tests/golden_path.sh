@@ -3268,7 +3268,7 @@ fi
 # --- 11. `sort({ id })` must be creation order on BOTH tiers (#236 / #255) ---
 #
 # THE CLAIM UNDER TEST, and it is ABSOLUTE, not a tier disagreement. A typed id
-# is `<prefix>_<base62(uuidv7)>`, so its BYTE order IS its creation order --
+# is `<prefix>_<base36(uuidv7)>`, so its BYTE order IS its creation order --
 # that is the entire reason `sort({ id: -1 })` is spelled "newest first" in
 # every example and doc we ship. Whether a backend honours that depends on the
 # collation the `id` column sorts under. The schema now pins `BINARY` on SQLite
@@ -3277,7 +3277,7 @@ fi
 # identically-broken tiers "agreed".
 #
 # WHY THIS IS CONSTRUCTED AND NOT SAMPLED, which is the whole difficulty. The
-# base62 digit that discriminates two ids encodes the clock, so it sweeps the
+# base36 digit that discriminates two ids encodes the clock, so it sweeps the
 # alphabet as real time passes: for whole stretches of wall-clock the
 # discriminating characters are one case (order agrees, any assertion passes)
 # and for whole stretches they are mixed case (order disagrees, the same

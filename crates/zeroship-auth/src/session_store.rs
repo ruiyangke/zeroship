@@ -58,11 +58,11 @@ use chrono::{DateTime, Utc};
 use compio_postgres::{GenericClient, Row};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 use zeroship_core::auth::hmac_sha256;
 use zeroship_core::crypto;
 use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
 use zeroship_core::typed_id;
+use zeroship_core::UserId;
 
 use crate::error::{AuthError, Result};
 
@@ -87,7 +87,7 @@ const IDEM_AAD_PREFIX: &[u8] = b"zs:auth:refresh_idem:v1\0";
 #[derive(Debug)]
 pub struct ValidatedSession {
     session_id: String,
-    person_id: Uuid,
+    person_id: UserId,
     grant_id: String,
     epoch: i64,
 }
@@ -101,8 +101,8 @@ impl ValidatedSession {
 
     /// The person the session belongs to.
     #[must_use]
-    pub fn person_id(&self) -> Uuid {
-        self.person_id
+    pub fn person_id(&self) -> &UserId {
+        &self.person_id
     }
 
     /// The grant the session hangs off.
@@ -176,7 +176,7 @@ impl SessionKind {
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub id: String,
-    pub person_id: Uuid,
+    pub person_id: UserId,
     pub audience_kind: String,
     pub client_id: Option<String>,
     pub grant_id: String,
@@ -234,7 +234,7 @@ impl SessionRow {
     fn proof(&self) -> ValidatedSession {
         ValidatedSession {
             session_id: self.id.clone(),
-            person_id: self.person_id,
+            person_id: self.person_id.clone(),
             grant_id: self.grant_id.clone(),
             epoch: self.epoch,
         }
@@ -255,7 +255,7 @@ pub enum SecretSlot {
 #[derive(Debug, Clone)]
 pub struct PeekedSession {
     pub session_id: String,
-    pub person_id: Uuid,
+    pub person_id: UserId,
     pub client_id: Option<String>,
     slot: SecretSlot,
     hash: Vec<u8>,
@@ -540,7 +540,7 @@ pub fn generate_secret() -> String {
 /// `AuthError::Db` when the upsert fails.
 pub async fn upsert_grant(
     db: &(impl GenericClient + ?Sized),
-    person_id: Uuid,
+    person_id: &UserId,
     audience: &Audience,
     subject: &str,
     scopes: &[String],
@@ -561,7 +561,7 @@ pub async fn upsert_grant(
             sql,
             &[
                 &id,
-                &person_id,
+                &person_id.as_str(),
                 &kind,
                 &client_id,
                 &subject,
@@ -605,7 +605,7 @@ const GRANT_UPSERT_APP_SQL: &str = "\
 /// statement from the person and the grant it reads.
 #[derive(Debug)]
 pub struct NewSession<'a> {
-    pub person_id: Uuid,
+    pub person_id: &'a UserId,
     pub grant_id: &'a str,
     /// The grant's subject and scope ceiling, as the caller just wrote them.
     /// Carried in rather than re-read so [`create`] stays one statement.
@@ -667,7 +667,7 @@ pub async fn create(
             CREATE_SESSION_SQL,
             &[
                 &id,
-                &params.person_id,
+                &params.person_id.as_str(),
                 &params.grant_id,
                 &params.parent_session_id,
                 &kind,
@@ -691,7 +691,7 @@ pub async fn create(
         row,
         params.subject.to_string(),
         params.grant_scopes.to_vec(),
-    );
+    )?;
     let proof = row.proof();
     Ok(Some(CreatedSession { row, secret, proof }))
 }
@@ -772,7 +772,11 @@ pub async fn peek(
             };
             return Ok(Some(PeekedSession {
                 session_id: row.get("id"),
-                person_id: row.get("person_id"),
+                person_id: crate::entity_ids::user_id_with_context(
+                    row,
+                    "person_id",
+                    "session peek",
+                )?,
                 client_id: row.try_get("client_id").ok().flatten(),
                 slot,
                 hash: hash.hash,
@@ -813,7 +817,7 @@ pub async fn lock_and_read(
         )
         .await
         .map_err(|err| AuthError::Db(format!("session lock: {err}")))?;
-    Ok(rows.first().map(row_to_session))
+    rows.first().map(row_to_session).transpose()
 }
 
 /// The validating read that rotates the secret and slides the idle window.
@@ -865,7 +869,7 @@ pub async fn rotate(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    let row = row_to_session(row);
+    let row = row_to_session(row)?;
     let proof = row.proof();
     Ok(Some(RotatedSession {
         row,
@@ -948,7 +952,7 @@ pub async fn replay(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    let row = row_to_session(row);
+    let row = row_to_session(row)?;
     let Ok(cached) = keys.open_cached_response(&presented.hash, &row.id, &sealed) else {
         tracing::warn!(
             session_id = %row.id,
@@ -1045,7 +1049,7 @@ pub async fn revoke(
 /// A message naming the reason when the statement fails.
 pub async fn revoke_person_sessions(
     db: &(impl GenericClient + ?Sized),
-    person_id: Uuid,
+    person_id: &UserId,
     reason: &'static str,
 ) -> std::result::Result<u64, String> {
     let rows = db
@@ -1074,7 +1078,7 @@ pub async fn revoke_person_sessions(
                  RETURNING 1 \
              ) \
              SELECT count(*) AS revoked FROM upd",
-            &[&person_id, &PLATFORM_CLI_CLIENT_ID],
+            &[&person_id.as_str(), &PLATFORM_CLI_CLIENT_ID],
         )
         .await
         .map_err(|err| format!("session revoke for person ({reason}): {err}"))?;
@@ -1118,14 +1122,18 @@ pub async fn sweep(
 
 // ---------------------------------------------------------------------------
 
-fn row_to_session(row: &Row) -> SessionRow {
+fn row_to_session(row: &Row) -> Result<SessionRow> {
     row_to_session_with_grant(row, row.get("subject"), row.get("grant_scopes"))
 }
 
-fn row_to_session_with_grant(row: &Row, subject: String, grant_scopes: Vec<String>) -> SessionRow {
-    SessionRow {
+fn row_to_session_with_grant(
+    row: &Row,
+    subject: String,
+    grant_scopes: Vec<String>,
+) -> Result<SessionRow> {
+    Ok(SessionRow {
         id: row.get("id"),
-        person_id: row.get("person_id"),
+        person_id: crate::entity_ids::user_id_with_context(row, "person_id", "session row")?,
         audience_kind: row.get("audience_kind"),
         client_id: row.try_get("client_id").ok().flatten(),
         grant_id: row.get("grant_id"),
@@ -1146,5 +1154,5 @@ fn row_to_session_with_grant(row: &Row, subject: String, grant_scopes: Vec<Strin
         prev_secret_key_version: row.try_get("prev_secret_key_version").ok().flatten(),
         secret_hash: row.try_get("secret_hash").ok().flatten(),
         prev_secret_hash: row.try_get("prev_secret_hash").ok().flatten(),
-    }
+    })
 }

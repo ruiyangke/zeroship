@@ -1127,12 +1127,12 @@ VERIFIED walk-through:
    issuer (`crates/zeroship-cli/src/auth.rs`, `discover_authorization_server` and
    `login_device_flow`).
 6. For the reserved `zeroship-cli` client the minted access token is a PLATFORM
-   PRINCIPAL token - `sub` is the `zeroship.users` UUID, `aud` is control's
-   `oauth_audience` - and both the device redemption and the later refresh
-   rotation mint it through one helper
+   PRINCIPAL token - `sub` is the canonical `zeroship.users` `UserId`, `aud` is
+   control's `oauth_audience` - and both the device redemption and the later
+   refresh rotation mint it through one helper
    (`crates/zeroship-auth/src/oidc/device_token.rs`, `mint_grant_access_token`). The
    refresh row stores that same principal subject, so `kill_family` writes the
-   `zeroship.token_revocations` marker keyed `(zeroship-cli, principal UUID)`
+   `zeroship.token_revocations` marker keyed `(zeroship-cli, UserId)`
    that control's bearer read path consults - which is what recalls an
    outstanding access token rather than waiting out its 15 minutes.
 
@@ -2179,20 +2179,19 @@ findings.
 
 The audit snapshot originally found a second pairwise derivation in Gateway.
 Commit `290c85e0a` removed that path before the auth-suite diagnosis on
-2026-08-16. Auth derives the app access-token subject from the global UUID and
-client sector (`crates/zeroship-auth/src/oidc/authorization_code.rs:1430-1475`,
-`crates/zeroship-auth/src/oidc/issuer.rs:410-429`,
-`crates/zeroship-auth/src/oidc/issuer.rs:847-851`). Gateway now requires the verified
+2026-08-16. Auth derives the app access-token subject from the global `UserId`
+and client sector (`crates/zeroship-auth/src/oidc/authorization_code.rs` and
+`crates/zeroship-auth/src/oidc/issuer.rs`, `issue_access_token`). Gateway now requires the verified
 `claims.sub` to have the exact pairwise shape, copies it unchanged for the
 lifecycle and family-marker checks, and emits that same value in
-`ZeroShip-User` (`crates/zeroship-gateway/src/router/auth.rs:625-692`). The former
-`project_pairwise` helper no longer exists. `derive_pairwise` still hashes a
-non-UUID input verbatim (`crates/zeroship-core/src/auth/mod.rs:302-318`), but the raw
-bearer path no longer calls it.
+`ZeroShip-User` (`crates/zeroship-gateway/src/router/auth.rs`). The former
+`project_pairwise` helper no longer exists. `derive_pairwise` accepts a parsed
+`UserId`, so a raw UUID cannot enter that projection
+(`crates/zeroship-core/src/auth/mod.rs`, `derive_pairwise`).
 
 The real-OP E2E now sends the access token through a local Worker boundary,
 verifies the request-bound `ZeroShip-User` header there, and asserts that its
-`id` equals Auth's one projection from the global UUID and sector
+`id` equals Auth's one projection from the global `UserId` and sector
 (`crates/zeroship-gateway/tests/oidc_rp_e2e.rs`). The Gateway fixture deliberately uses
 a different pairwise salt, so a second Gateway derivation cannot satisfy the
 assertion.
@@ -2766,16 +2765,14 @@ not a compatibility path.
 
 VERIFIED: native app and generic public-client tokens issued through
 `issue_access_token` carry a pairwise subject, while the separate platform
-principal helper deliberately keeps the global UUID
-(`crates/zeroship-auth/src/oidc/issuer.rs:410-429`,
-`crates/zeroship-auth/src/oidc/issuer.rs:453-473`). UserInfo cannot load an app user
+principal helper deliberately keeps the global `UserId`
+(`crates/zeroship-auth/src/oidc/issuer.rs`). UserInfo cannot load an app user
 directly from the pairwise value; it first requires a live
 `app_user_identities` reverse-map row and returns `invalid_token` when none exists
-(`crates/zeroship-auth/src/oidc/userinfo.rs:109-166`). Control can register public OAuth
+(`crates/zeroship-auth/src/oidc/userinfo.rs`). Control can register public OAuth
 clients and the OP device flow can issue their tokens without any Gateway hop
 (`crates/zeroship-control/src/oauth_clients.rs`,
-`crates/zeroship-auth/src/oidc/device_token.rs:124-187`,
-`crates/zeroship-auth/src/oidc/device_token.rs:468-511`).
+`crates/zeroship-auth/src/oidc/device_token.rs`).
 
 Search method: a full-tree search for
 `INSERT INTO zeroship.app_user_identities` and `identities::upsert` found the

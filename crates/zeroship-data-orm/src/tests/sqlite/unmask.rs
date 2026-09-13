@@ -9,13 +9,13 @@ use zeroship_data_orm::backend::sqlite::SqliteBackend;
 
 use zeroship_data_orm::binding::DbBinding;
 
-use crate::sql::compile::raw_column_name;
+use crate::sql::mapping::raw_column_name;
 
 use zeroship_data_orm::protection::unmask;
 
 use zeroship_data_orm::protection::mask_policy;
 
-use zeroship_data_orm::protection::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
+use zeroship_data_orm::protection::unmask::{dispatch_bulk_unmask, BulkUnmaskArgs, BulkUnmaskItem};
 
 use zeroship_data_orm::protection::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_unmask_for_query,
@@ -112,7 +112,7 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
     // reservation. Asking for the transaction lane here contends with whatever
     // the unmask dispatch itself is holding.
     let client = backend.autocommit_client();
-    let q_app = crate::sql::compile::quote_ident(app_id);
+    let q_app = crate::sql::mapping::quote_ident(app_id);
     let sql = format!(
         r#"SELECT outcome, actor_role, classification
            FROM {q_app}."__zeroship_audit_unmask"
@@ -217,7 +217,6 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
 
             // Encrypt + insert one row inline.
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-            use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
             let row_pk = "usr_auto_01";
             let plaintext = "123-45-6789";
             let mut doc = crate::value!({
@@ -246,14 +245,13 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
                 obj.insert(raw_ssn.clone(), ciphertext);
                 obj.insert("ssn".to_string(), crate::value!("***-**-6789"));
             }
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             let client = backend
                 .fixture_session(app_id)
                 .await
@@ -360,8 +358,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
                 .execute_fixture(
                     "CREATE TABLE \"app_unmask_user\".\"users\" (\
                      id  TEXT PRIMARY KEY, \
-                     ssn BLOB, \
-                     ssn_masked TEXT NOT NULL DEFAULT '***'\
+                     ssn BLOB\
                  )",
                     &[],
                 )
@@ -386,7 +383,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
                 args,
             )
             .await
-            .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
+            .expect_err("dispatch_unmask must refuse an actor denied by policy");
             match err {
                 zeroship_data_orm::error::DbError::Coded { code, .. } => {
                     assert_eq!(code, "unmask_not_permitted");
@@ -503,7 +500,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
 
 /// The unmask SELECT names the raw column the DESCRIPTOR declares.
 ///
-/// The end-to-end half of the change `crate::sql::compile::declared_raw_column`
+/// The end-to-end half of the change `crate::sql::mapping::declared_raw_column`
 /// carries. The unit tests in `zeroship-data-orm`'s `protection::mask_pass` bind the
 /// WRITE side - which column the plaintext is relocated INTO - in the engine's
 /// default-feature build. Nothing there rules on the READ, because the read is a
@@ -645,7 +642,6 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
 
             // Encrypt + insert one row.
             use zeroship_data_orm::protection::encryption_pass::encrypt_row_on_write;
-            use crate::sql::compile::{SqlDialect, build_insert_with_dialect};
             let row_pk = "usr_grant_01";
             let plaintext = "alice@example.com";
             let mut doc = crate::value!({
@@ -672,19 +668,15 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             {
                 let obj = doc.as_object_mut().expect("doc object");
                 obj.insert(raw_email.clone(), ciphertext);
-                obj.insert(
-                    "email".to_string(),
-                    crate::value!("a****@example.com"),
-                );
+                obj.insert("email".to_string(), crate::value!("a****@example.com"));
             }
-            let bq = build_insert_with_dialect(
+            let bq = compile_insert(
                 &crate::sql::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &schema,
                 &doc,
-                SqlDialect::Sqlite,
             )
-            .expect("build_insert_with_dialect");
+            .expect("compile insert");
             let client = backend
                 .fixture_session(app_id)
                 .await
@@ -894,11 +886,8 @@ fn policy_cannot_change_after_startup() {
             "data": { "type": "string", "mask": { "kind": "full", "classification": "internal" } },
         })).await;
             let binding = DbBinding::cold_start(app_id);
-            mask_policy::install_mask_policy(
-                &binding,
-                crate::value!({ "support": ["public"] }),
-            )
-            .unwrap();
+            mask_policy::install_mask_policy(&binding, crate::value!({ "support": ["public"] }))
+                .unwrap();
             let args = unmask::UnmaskFieldArgs {
                 collection: collection.to_string(),
                 row_pk: "any".to_string(),
@@ -994,9 +983,7 @@ fn unmask_ignores_policy_sidecar_files() {
 }
 
 /// **Malformed sentinel does not poison introspection** on
-/// SQLite: a sibling carrying a garbled sentinel parses to "no mask"
-/// on the parent (and a `tracing::warn!` fires; the test only checks
-/// the introspection shape).
+/// SQLite: a field carrying a garbled sentinel parses to no mask metadata.
 #[test]
 fn malformed_mask_sentinel_skipped_on_sqlite() {
     Host::test(|host| {
@@ -1010,15 +997,18 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
             .execute_fixture(
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      \"id\" INTEGER PRIMARY KEY, \
-                     \"ssn\" TEXT, \
-                     \"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic_radiation,classification=spi */\
+                     \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic_radiation,classification=spi */\
                  )",
                 &[],
             )
             .await
             .expect("CREATE garbled");
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect garbled");
             let parent = live
@@ -1175,19 +1165,16 @@ fn cold_bulk_unmask_attaches_before_read() {
             // Plaintext recovered for every pair.
             let u1 = result.results.get("u1").expect("u1 row");
             assert_eq!(
-                u1.get("email")
-                    .and_then(crate::value::Value::as_str),
+                u1.get("email").and_then(crate::value::Value::as_str),
                 Some("alice@example.com")
             );
             assert_eq!(
-                u1.get("ssn")
-                    .and_then(crate::value::Value::as_str),
+                u1.get("ssn").and_then(crate::value::Value::as_str),
                 Some("123-45-6789")
             );
             let u2 = result.results.get("u2").expect("u2 row");
             assert_eq!(
-                u2.get("email")
-                    .and_then(crate::value::Value::as_str),
+                u2.get("email").and_then(crate::value::Value::as_str),
                 Some("bob@example.com")
             );
 
@@ -1470,7 +1457,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Step 1 — upfront auth fence.
             authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["ssn".to_string()],
@@ -1527,7 +1514,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
 
             // Step 3 — granted audit row lands.
             audit_query_hint_granted(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["ssn".to_string()],
@@ -1589,7 +1576,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
 
             let actor = Some(crate::value!({ "kind": "user", "id": "actor_x" }));
             let err = authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["ssn".to_string()],
@@ -1634,7 +1621,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
             host.clear_mask_policy_cache(app_id);
             let actor = Some(crate::value!({ "kind": "auto" }));
             let err = authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app_id, unmask_backend(host).await),
                 &DbBinding::cold_start(app_id),
                 collection,
                 &["does_not_exist".to_string()],

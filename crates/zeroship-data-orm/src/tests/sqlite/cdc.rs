@@ -15,7 +15,7 @@ use zeroship_data_orm::cdc::ChangeOp;
 
 use zeroship_data_orm::error::DbError;
 
-use zeroship_data_orm::cdc::broker::{Subscription, SubscriptionMessage, subscribe};
+use zeroship_data_orm::cdc::broker::{subscribe, Subscription, SubscriptionMessage};
 
 #[cfg(test)]
 use crate::tests::fixtures::DatabaseFixture;
@@ -119,6 +119,110 @@ fn insert_publishes_via_preupdate_hook() {
                 }
                 other => panic!("expected Change event, got {other:?}"),
             }
+        });
+    })
+}
+
+#[test]
+fn attached_creator_databases_with_the_same_table_name_are_isolated() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            for app in ["cdc_app_a", "cdc_app_b"] {
+                backend
+                    .attach_app_file(app)
+                    .await
+                    .expect("attach creator database");
+                backend
+                    .execute_fixture(
+                        &format!(
+                            "CREATE TABLE \"{app}\".\"items\" (id INTEGER PRIMARY KEY, name TEXT)"
+                        ),
+                        &[],
+                    )
+                    .await
+                    .expect("create creator table");
+            }
+
+            let app_a = subscribe_local("cdc_app_a", "items");
+            let app_b = subscribe_local("cdc_app_b", "items");
+            backend
+                .execute_fixture(
+                    "INSERT INTO \"cdc_app_a\".\"items\" (name) VALUES ('only-a')",
+                    &[],
+                )
+                .await
+                .expect("insert into first creator database");
+            drain_publisher().await;
+
+            let messages = drain(&app_a);
+            assert_eq!(
+                messages.len(),
+                1,
+                "first creator event missing: {messages:?}"
+            );
+            assert!(drain(&app_b).is_empty(), "event crossed creator databases");
+        });
+    })
+}
+
+#[test]
+fn publisher_observes_columns_added_after_first_event() {
+    Host::test(|host| {
+        host.run(async {
+            let (backend, _dir) = fresh_backend(host);
+            backend
+                .attach_app_file("cdc_schema_refresh")
+                .await
+                .expect("attach app file");
+            backend
+                .execute_fixture(
+                    "CREATE TABLE \"cdc_schema_refresh\".\"items\" (\
+                     id INTEGER PRIMARY KEY, \
+                     name TEXT NOT NULL\
+                 )",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            let sub = subscribe_local("cdc_schema_refresh", "items");
+            backend
+                .execute_fixture(
+                    "INSERT INTO \"cdc_schema_refresh\".\"items\" (id, name) VALUES (1, 'before')",
+                    &[],
+                )
+                .await
+                .expect("insert before schema change");
+            drain_publisher().await;
+            assert_eq!(drain(&sub).len(), 1);
+
+            backend
+                .execute_fixture(
+                    "ALTER TABLE \"cdc_schema_refresh\".\"items\" ADD COLUMN note TEXT",
+                    &[],
+                )
+                .await
+                .expect("add column");
+            backend
+                .execute_fixture(
+                    "INSERT INTO \"cdc_schema_refresh\".\"items\" (id, name, note) \
+                     VALUES (2, 'after', 'visible')",
+                    &[],
+                )
+                .await
+                .expect("insert after schema change");
+            drain_publisher().await;
+
+            let messages = drain(&sub);
+            assert_eq!(messages.len(), 1);
+            let SubscriptionMessage::Change(event) = &messages[0] else {
+                panic!("expected change event");
+            };
+            assert_eq!(
+                event.new_tuple.get("note").map(String::as_str),
+                Some("visible")
+            );
         });
     })
 }
@@ -386,9 +490,7 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
                 4,
                 "expected 4 events after a 4-statement tx; got {msgs:?}"
             );
-            // Per plan §8: order is `[a, b, c, d]` = INSERT, UPDATE,
-            // DELETE, INSERT. Each msg is a Change variant carrying the
-            // event.
+            // Events retain commit-buffer order.
             let ops: Vec<ChangeOp> = msgs
                 .iter()
                 .map(|m| match m {
@@ -413,12 +515,8 @@ fn mixed_ops_in_one_tx_ordered_by_buffer_index() {
 #[test]
 fn subscription_fanout_under_load() {
     Host::test(|host| {
-        // Plan §8 / §9: a single COMMIT of N rows must reach every
-        // active subscriber in INSERT order. Scaled down to 10×100 per the
-        // task spec ("100 subscribers × 1000 rows would saturate dev
-        // hardware; scale down to 10 × 100 for CI sanity"). The default
-        // queue depth is 1024 (`broker::DEFAULT_QUEUE_DEPTH`), so 100 rows
-        // fit comfortably without triggering the overflow-to-Resync path.
+        // A commit reaches every active subscriber in insert order without
+        // crossing the overflow-to-resync path exercised elsewhere.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -461,10 +559,7 @@ fn subscription_fanout_under_load() {
                 .await
                 .expect("COMMIT");
 
-            // Generous drain — 100 publishes × 10 subscribers under the
-            // single-threaded compio runtime + one PRAGMA round-trip on
-            // first touch. 200ms is comfortably above the in-process
-            // upper bound on dev hardware.
+            // Let the publisher deliver the committed batch.
             compio::time::sleep(std::time::Duration::from_millis(200)).await;
 
             for (i, sub) in subs.iter().enumerate() {
@@ -515,24 +610,14 @@ fn subscription_fanout_under_load() {
 }
 
 #[test]
-fn mv_refresh_does_not_emit_change_events() {
+fn prefixed_shadow_table_emits_change_events() {
     Host::test(|host| {
-        // Plan §6 + §9: writes to `__zeroship_mv_*` shadow tables
-        // must be filtered upstream of the broker. The plan acknowledges
-        // (§9) that the `db.materializedView(...).refresh()` SDK
-        // primitive does not exist yet, so we exercise the filter directly
-        // by writing to a shadow table whose name matches the filter
-        // prefix — the dispatcher cannot distinguish a "real" MV refresh
-        // from a hand-rolled shadow write.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
                 .attach_app_file("app_mv")
                 .await
                 .expect("ensure_app_schema");
-            // Create a shadow table that mimics what an MV refresh would
-            // emit. The CREATE itself only touches sqlite_master (already
-            // filtered); the INSERT below is the gate.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_mv\".\"__zeroship_mv_demo\" (\
@@ -544,15 +629,8 @@ fn mv_refresh_does_not_emit_change_events() {
                 .await
                 .expect("CREATE TABLE __zeroship_mv_demo");
 
-            // Subscribe to the shadow table directly so we'd observe any
-            // event that leaked past the filter. (The SDK boundary refuses
-            // such a subscription via `Db::open_subscription`; the broker
-            // primitive does NOT, and we exercise the broker level here.)
             let sub = subscribe_local("app_mv", "__zeroship_mv_demo");
 
-            // INSERT into the shadow — this is the write the filter must
-            // drop. The preupdate hook fires, `is_filtered_relation`
-            // returns `true`, no event is buffered, no packet ships.
             backend
                 .execute_fixture(
                     "INSERT INTO \"app_mv\".\"__zeroship_mv_demo\" (id, v) VALUES (1, 'a')",
@@ -564,29 +642,25 @@ fn mv_refresh_does_not_emit_change_events() {
             drain_publisher().await;
 
             let msgs = drain(&sub);
-            assert!(
-                msgs.is_empty(),
-                "writes to __zeroship_mv_* must not reach the broker; got {msgs:?}"
-            );
+            assert_eq!(msgs.len(), 1, "expected the prefixed-table event: {msgs:?}");
+            let SubscriptionMessage::Change(event) = &msgs[0] else {
+                panic!("expected a change event: {msgs:?}")
+            };
+            assert_eq!(event.collection, "__zeroship_mv_demo");
+            assert_eq!(event.op, ChangeOp::Insert);
         });
     })
 }
 
 #[test]
-fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
+fn mixed_transaction_emits_events_for_ordinary_and_prefixed_tables() {
     Host::test(|host| {
-        // Variant of the previous gate: when a transaction touches BOTH a
-        // shadow table AND a regular collection, the shadow writes are
-        // filtered and the regular writes pass through. The regular
-        // subscriber observes exactly the regular events; the shadow
-        // subscriber observes zero events.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
                 .attach_app_file("app_mv_mixed")
                 .await
                 .expect("ensure_app_schema");
-            // Regular collection.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_mv_mixed\".\"items\" (\
@@ -597,7 +671,6 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
                 )
                 .await
                 .expect("CREATE TABLE items");
-            // Shadow table.
             backend
                 .execute_fixture(
                     "CREATE TABLE \"app_mv_mixed\".\"__zeroship_mv_items\" (\
@@ -612,8 +685,6 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
             let regular_sub = subscribe_local("app_mv_mixed", "items");
             let shadow_sub = subscribe_local("app_mv_mixed", "__zeroship_mv_items");
 
-            // Single transaction touching both tables. The shadow write
-            // is filtered at the hook; the regular write reaches the broker.
             backend.execute_fixture("BEGIN", &[]).await.expect("BEGIN");
             backend
                 .execute_fixture(
@@ -657,23 +728,23 @@ fn mv_refresh_emits_no_change_events_on_base_or_shadow() {
                 }
                 other => panic!("expected Change event on regular collection, got {other:?}"),
             }
-            assert!(
-                shadow_msgs.is_empty(),
-                "shadow collection must observe zero events; got {shadow_msgs:?}"
+            assert_eq!(
+                shadow_msgs.len(),
+                1,
+                "prefixed collection should observe its INSERT: {shadow_msgs:?}"
             );
+            let SubscriptionMessage::Change(event) = &shadow_msgs[0] else {
+                panic!("expected a change event: {shadow_msgs:?}")
+            };
+            assert_eq!(event.collection, "__zeroship_mv_items");
+            assert_eq!(event.op, ChangeOp::Insert);
         });
     })
 }
 
 #[test]
-fn audit_table_writes_do_not_emit_events() {
+fn audit_table_writes_emit_events() {
     Host::test(|host| {
-        // The `is_filtered_relation` predicate covers `__zeroship_audit_*`
-        // alongside `__zeroship_mv_*`. The unit test in
-        // `cdc.rs::tests::is_filtered_relation_excludes_system_tables`
-        // already pins the predicate; this gate exercises the filter
-        // end-to-end so a regression that drops the audit-prefix arm of the
-        // predicate would fail here at the integration boundary.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -705,19 +776,17 @@ fn audit_table_writes_do_not_emit_events() {
             drain_publisher().await;
 
             let msgs = drain(&sub);
-            assert!(
-                msgs.is_empty(),
-                "writes to __zeroship_audit_* must not reach the broker; got {msgs:?}"
-            );
+            assert_eq!(msgs.len(), 1, "expected the audit-table event: {msgs:?}");
+            let SubscriptionMessage::Change(event) = &msgs[0] else {
+                panic!("expected a change event: {msgs:?}")
+            };
+            assert_eq!(event.collection, "__zeroship_audit_users");
+            assert_eq!(event.op, ChangeOp::Insert);
         });
     })
 }
 
-/// Longer drain — the new fences move ~100 events through the
-/// publisher under a paused broker. The 100 ms budget is the same
-/// upper bound `subscription_fanout_under_load` uses (200 ms there
-/// for 100 events × 10 subscribers; halved here because we only have
-/// one subscriber).
+/// Let queued publisher work settle before assertions.
 async fn drain_publisher_long() {
     compio::time::sleep(std::time::Duration::from_millis(100)).await;
 }
@@ -725,26 +794,8 @@ async fn drain_publisher_long() {
 #[test]
 fn backfill_run_pauses_broker_and_emits_one_resync() {
     Host::test(|host| {
-        // Plan §7 + §9 gate - backfill pause rail end-to-end:
-        //
-        // 1. ensure_app_schema + CREATE TABLE.
-        // 2. Subscribe BEFORE the pause window so the subscription is
-        //    visible to `resume_app_with_resync` on guard drop.
-        // 3. Engage `BrokerPauseGuard` — this calls `suppress_app(app_id)`
-        //    on the thread-local rail.
-        // 4. INSERT 100 rows. The preupdate hook still fires + buffers,
-        //    the commit_hook ships packets, BUT the publisher's per-event
-        //    suppression check drops each packet (debug-logged).
-        // 5. Drop the guard. `unsuppress_app` clears the flag +
-        //    `resume_app_with_resync` pushes ONE `Resync` per active
-        //    subscription.
-        // 6. Drain the subscriber → exactly ONE `Resync`, ZERO `Change`
-        //    messages.
-        //
-        // The asymmetry between "INSERT 100 rows" and "one Resync" is the
-        // load-bearing contract: backfill silently drops events; the
-        // single Resync tells the subscriber to refetch + catch up via
-        // the read path, NOT via the event stream.
+        // Subscribers see a resync after a paused backfill, while changes
+        // committed inside the pause window remain suppressed.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -764,18 +815,11 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
             let sub = subscribe_local("app_backfill", "items");
 
-            // Engage backfill pause. `BrokerPauseGuard::new` calls
-            // `broker::suppress_app(app_id)`; the publisher's
-            // per-event check drops every packet for this app until the
-            // guard drops.
+            // Engage the backfill pause before issuing writes.
             let guard =
                 zeroship_data_orm::cdc::broker::BrokerPauseGuard::new("app_backfill".to_string());
 
-            // INSERT 100 rows under the suppression window. Each statement
-            // routes through the session actor, the preupdate hook fires,
-            // the commit_hook ships a one-event CommitPacket — the
-            // publisher receives the packet, sees `is_app_suppressed`,
-            // drops the event + emits a debug-level trace, moves on.
+            // Queue writes inside the suppression window.
             for i in 0..100 {
                 let sql = format!(
                     "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
@@ -786,20 +830,11 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
                     .expect("INSERT under backfill pause");
             }
 
-            // Drop the guard WITHOUT draining first. This is the exposing order:
-            // the 100 packets are still queued, and the guard that covered their
-            // commits is already gone by the time the publisher dequeues them.
-            //
-            // This test drained first until 2026-09-03, which made the window a
-            // function of publisher scheduling rather than of the guard's scope.
-            // Suppression is stamped in the commit hook now, so the queued packets
-            // stay suppressed and the order below is the one worth pinning.
+            // Drop before draining to prove suppression follows commit scope
+            // rather than publisher scheduling.
             drop(guard);
 
-            // Sentinel: one INSERT *after* the window. The channel is FIFO, so
-            // observing its Change proves the publisher ran past all 100 queued
-            // packets — without it, "no Change events" would also be satisfied by
-            // a publisher that never woke at all.
+            // A later sentinel proves the publisher drained the earlier queue.
             backend
                 .execute_fixture(
                     "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES (1000, 'after')",
@@ -812,7 +847,6 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 
             let msgs = drain(&sub);
 
-            // Expected shape: [Resync, Change(1000, 'after')].
             assert_eq!(
                 msgs.len(),
                 2,
@@ -835,9 +869,6 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
                 }
                 other => panic!("expected the sentinel Change; got {other:?}"),
             }
-            // Defensive: NO in-window Change leaked past the suppression stamp.
-            // (Implied by len==2 plus the sentinel match, restated so a future
-            // change that interleaves window events surfaces the intent.)
             let in_window_changes = msgs
                 .iter()
                 .filter_map(|m| match m {
@@ -858,25 +889,8 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
 #[test]
 fn schema_pending_decoder_drops_then_resyncs() {
     Host::test(|host| {
-        // Plan §7 + §16.7 + §9 gate - schema-pending decoder rail
-        // end-to-end:
-        //
-        // 1. ensure_app_schema + CREATE TABLE.
-        // 2. Subscribe via the broker BEFORE engaging schema-pending.
-        // 3. Engage `SchemaPendingGuard`. This sets the thread-local
-        //    `schema_pending_apps` flag AND ensures the publisher's
-        //    per-event check drops every packet for the app.
-        // 4. INSERT 50 rows — every packet is dropped at the publisher
-        //    (debug-logged).
-        // 5. While engaged, `broker::try_subscribe(app_id, "other")` MUST
-        //    return `DbError::Coded { code: "schema_pending" }`. This is
-        //    the LOUD rail (vs the silent backfill rail above).
-        // 6. Drop the guard — clears the schema-pending flag + emits one
-        //    `Resync` per active subscription.
-        // 7. Subsequent INSERT publishes normally (the flag is cleared).
-        // 8. Drain: the subscriber observes (a) one Resync from the
-        //    guard's drop, then (b) one Change from the post-disengage
-        //    INSERT. No events from the pre-disengage window.
+        // Schema-pending blocks new subscriptions, suppresses queued changes,
+        // and resyncs existing subscribers when the schema becomes available.
         host.run(async {
             let (backend, _dir) = fresh_backend(host);
             backend
@@ -896,15 +910,11 @@ fn schema_pending_decoder_drops_then_resyncs() {
 
             let sub = subscribe_local("app_pending", "items");
 
-            // Engage schema-pending. `SchemaPendingGuard::new` calls
-            // `broker::engage_schema_pending(app_id)`; both the publisher
-            // suppression check AND the `Broker::try_subscribe` rejection
-            // branch activate.
+            // Engage schema-pending before issuing writes.
             let guard =
                 zeroship_data_orm::cdc::broker::SchemaPendingGuard::new("app_pending".to_string());
 
-            // INSERT 50 rows under the schema-pending window. Same shape
-            // as the backfill test above — packets ship, publisher drops.
+            // Queue writes inside the schema-pending window.
             for i in 0..50 {
                 let sql = format!(
                     "INSERT INTO \"app_pending\".\"items\" (id, name) VALUES ({i}, 'r{i}')"
@@ -915,13 +925,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
                     .expect("INSERT under schema-pending");
             }
 
-            // The loud-rail invariant: while engaged, a NEW subscribe call
-            // (via `try_subscribe`) MUST return the typed conflict
-            // envelope. We don't use the legacy `subscribe()` here because
-            // it is infallible by design (back-compat with ~40 in-crate
-            // callers); the SDK boundary that lands later wires
-            // `try_subscribe` so the JS layer can branch on
-            // `e.code === "schema_pending"`.
+            // New subscriptions receive the typed schema-pending refusal.
             let attempt =
                 zeroship_data_orm::cdc::broker::try_subscribe("app_pending", "other_collection");
             match &attempt {
@@ -935,13 +939,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
                 other => panic!("expected Err(Coded {{ code: schema_pending }}); got {other:?}"),
             }
 
-            // Drop the guard WITHOUT draining first — the exposing order. The 50
-            // packets are still queued and the guard that covered their commits is
-            // gone before the publisher dequeues them. The post-disengage INSERT
-            // below is the FIFO sentinel that proves the publisher ran past them.
-            //
-            // This test drained first until 2026-09-03, which hid the window
-            // behind publisher scheduling.
+            // Drop before draining to prove suppression follows commit scope.
             drop(guard);
 
             // Post-disengage: a fresh INSERT must publish normally.

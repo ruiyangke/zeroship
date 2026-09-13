@@ -3,14 +3,14 @@ use super::fixtures::*;
 
 use crate::tests::fixtures::parity;
 
-use zeroship_data_orm::sql::compile::raw_column_name;
+use zeroship_data_orm::sql::mapping::raw_column_name;
 
 #[test]
 fn bulk_mutations_return_counts_without_returning_records_sqlite_runtime() {
     run(async {
         let dir = tempfile::tempdir().unwrap();
         apply_schema_ahead_of_runtime(&dir, &users_encrypted_ssn_ddl());
-        let total = zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 17;
+        let total = zeroship_data_orm::sql::MAX_ROW_LIMIT + 17;
         let body = r#"
 async function bulk() {
     const users = env.db.collection(COLLECTION);
@@ -67,7 +67,7 @@ const _procedures = { bulk };
 
 #[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"7".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"7".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -121,7 +121,7 @@ const _procedures = { seed, updateByEmail };
             .query_typed(
                 &format!(
                     r#"SELECT id, "{raw_ssn}", ssn
-                   FROM "default"."users"
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE email = 'alice@example.com'"#
                 ),
                 &[],
@@ -152,11 +152,11 @@ const _procedures = { seed, updateByEmail };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve("default").await.expect("resolve key");
+        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
+            &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", row_id.as_bytes()),
         )
         .expect("decrypt updated ciphertext");
         assert_eq!(
@@ -169,7 +169,7 @@ const _procedures = { seed, updateByEmail };
 
 #[test]
 fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"8".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"8".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -243,12 +243,15 @@ const _procedures = { seed, updateManyByName };
             !counters.is_empty(),
             "the target-resolution SQL set must be non-empty: {counters:?}"
         );
-        let expected_limit = format!(" LIMIT {}", zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT + 1);
-        for sql in &counters {
+        let expected_limit = zeroship_data_orm::value::Value::from(
+            zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS + 1,
+        );
+        for query in &counters {
             assert!(
-                sql.ends_with(&expected_limit),
-                "updateMany target resolution must carry the row ceiling; sql={sql}"
+                query.sql.ends_with(" LIMIT $2"),
+                "updateMany target resolution must bind the row ceiling; query={query:?}"
             );
+            assert_eq!(query.params.last(), Some(&expected_limit));
         }
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
@@ -257,7 +260,7 @@ const _procedures = { seed, updateManyByName };
             .query_typed(
                 &format!(
                     r#"SELECT id, name, "{raw_ssn}", ssn
-                   FROM "default"."users"
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE name = 'Red Team'
                    ORDER BY id"#
                 ),
@@ -269,7 +272,7 @@ const _procedures = { seed, updateManyByName };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve("default").await.expect("resolve key");
+        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
         for row in &typed.rows {
             let row_id = match &row[0] {
                 TypedCell::Text(id) => id.clone(),
@@ -296,7 +299,7 @@ const _procedures = { seed, updateManyByName };
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
+                &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", row_id.as_bytes()),
             )
             .expect("decrypt updated ciphertext");
             assert_eq!(
@@ -310,14 +313,13 @@ const _procedures = { seed, updateManyByName };
 
 #[test]
 fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"c".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"c".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
 
         let dir = tempfile::tempdir().expect("tempdir");
-        let target_cap = usize::try_from(zeroship_data_orm::sql::compile::MAX_QUERY_LIMIT)
-            .expect("MAX_QUERY_LIMIT must fit usize");
+        let target_cap = zeroship_data_orm::budgets::MAX_PER_ROW_UPDATE_TARGETS;
         let seeded = target_cap + 1;
         let values = (0..seeded)
             .map(|index| format!("('user_{index:04}', 'user_{index:04}@example.com', 'Red Team')"))
@@ -325,7 +327,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         assert!(!values.is_empty(), "overflow fixture must seed target rows");
         let mut ddl = users_encrypted_ssn_ddl();
         ddl.push_str(&format!(
-            "INSERT INTO \"default\".\"users\" (id, email, name) VALUES {};",
+            "INSERT INTO \"{LOCAL_DEV_APP_ID}\".\"users\" (id, email, name) VALUES {};",
             values.join(",")
         ));
         apply_schema_ahead_of_runtime(&dir, &ddl);
@@ -373,18 +375,21 @@ const _procedures = { overflow };
             1,
             "the overflow SQL witness set must contain exactly the exercised probe"
         );
-        let expected_limit = format!(" LIMIT {}", target_cap + 1);
+        let expected_limit = zeroship_data_orm::value::Value::from(target_cap + 1);
         assert!(
-            counters[0].ends_with(&expected_limit),
+            counters[0].sql.ends_with(" LIMIT $2"),
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
+        assert_eq!(counters[0].params.last(), Some(&expected_limit));
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let state = client
             .query_typed(
-                r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
-                   FROM "default"."users"
-                   WHERE name = 'Red Team'"#,
+                &format!(
+                    r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   WHERE name = 'Red Team'"#
+                ),
                 &[],
             )
             .await
@@ -413,7 +418,7 @@ const _procedures = { overflow };
 
 #[test]
 fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"a".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"a".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -543,10 +548,12 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let typed = client
             .query_typed(
-                r#"SELECT email, version
-                   FROM "default"."users"
+                &format!(
+                    r#"SELECT email, version
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE name = 'Red Team'
-                   ORDER BY id"#,
+                   ORDER BY id"#
+                ),
                 &[],
             )
             .await
@@ -596,10 +603,12 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         );
         let after_nested = client
             .query_typed(
-                r#"SELECT email, version
-                   FROM "default"."users"
+                &format!(
+                    r#"SELECT email, version
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE name = 'Red Team'
-                   ORDER BY id"#,
+                   ORDER BY id"#
+                ),
                 &[],
             )
             .await
@@ -622,7 +631,9 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         let control = client
             .query_typed(
                 // Find the control insert by its unique fixture email.
-                r#"SELECT COUNT(*) FROM "default"."users" WHERE email = 'control@example.com'"#,
+                &format!(
+                    r#"SELECT COUNT(*) FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'control@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -643,7 +654,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
 
 #[test]
 fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"9".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"9".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -720,7 +731,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
 #[test]
 fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let _keys = with_project_key(&["default"], &"1".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"1".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -781,14 +792,16 @@ const _procedures = { seed, nestedCasUpdate };
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
-            Some("version_filter_must_be_top_level"),
+            Some("concurrency_filter_must_be_top_level"),
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
-                r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
+                &format!(
+                    r#"SELECT name, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'alice@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -809,7 +822,7 @@ const _procedures = { seed, nestedCasUpdate };
 
 #[test]
 fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let _keys = with_project_key(&["default"], &"2".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"2".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -864,14 +877,16 @@ const _procedures = { seed, nestedCasUpdateMany };
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
         assert_eq!(
             body.get("code").and_then(|v| v.as_str()),
-            Some("version_filter_must_be_top_level"),
+            Some("concurrency_filter_must_be_top_level"),
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
-                r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
+                &format!(
+                    r#"SELECT name, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'alice@example.com'"#
+                ),
                 &[],
             )
             .await

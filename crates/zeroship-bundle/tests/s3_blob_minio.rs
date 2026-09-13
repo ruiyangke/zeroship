@@ -13,6 +13,7 @@
 
 #![allow(clippy::future_not_send)]
 
+use zeroship_id::AppId;
 use std::process::Command;
 use std::time::Duration;
 
@@ -521,8 +522,8 @@ async fn run_contract<S: BlobStore + ?Sized>(store: &S, tag: &str) {
     );
 
     // ---- manifest keyspace: put → get → immutable, plus app purge ----
-    let app_a = Uuid::new_v4();
-    let app_b = Uuid::new_v4();
+    let app_a = AppId::mint();
+    let app_b = AppId::mint();
     let manifest_a1 = br#"{"v":1,"app":"a","deploy":"one"}"#.to_vec();
     let manifest_a2 = br#"{"v":1,"app":"a","deploy":"two"}"#.to_vec();
     let manifest_b1 = br#"{"v":1,"app":"b","deploy":"one"}"#.to_vec();
@@ -591,5 +592,5 @@ async fn run_contract<S: BlobStore + ?Sized>(store: &S, tag: &str) {
     // Idempotent: purge again (now empty) is success; purge an app that never
     // had manifests is success.
     store.delete_app_manifests(&app_a).await.expect("[{tag}] repeat purge ok");
-    store.delete_app_manifests(&Uuid::new_v4()).await.expect("[{tag}] purge empty app ok");
+    store.delete_app_manifests(&AppId::mint()).await.expect("[{tag}] purge empty app ok");
 }

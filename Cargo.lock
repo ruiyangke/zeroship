@@ -7842,8 +7842,8 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tracing",
- "uuid",
  "zeroship-core",
+ "zeroship-id",
 ]
 
 [[package]]
@@ -7863,6 +7863,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
+ "zeroship-id",
  "zstd",
 ]
 
@@ -8026,6 +8027,7 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-config-contract",
  "zeroship-config-macros",
+ "zeroship-id",
 ]
 
 [[package]]
@@ -8082,6 +8084,7 @@ dependencies = [
  "futures",
  "hmac 0.12.1",
  "indexmap 2.14.0",
+ "num-bigint",
  "rusqlite",
  "rustls",
  "scoped-tls",
@@ -8190,6 +8193,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-id"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "zeroship-kv"
 version = "0.1.0"
 dependencies = [
@@ -8217,6 +8229,7 @@ dependencies = [
  "uuid",
  "v8",
  "zeroship-core",
+ "zeroship-id",
  "zeroship-kv",
  "zeroship-metering",
  "zeroship-runtime",
@@ -8451,6 +8464,7 @@ dependencies = [
  "zeroship-authn",
  "zeroship-authz",
  "zeroship-core",
+ "zeroship-id",
  "zeroship-migrate",
  "zeroship-migrate-backend",
  "zeroship-migrate-ir",
@@ -8669,8 +8683,8 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tempfile",
- "uuid",
  "v8",
+ "zeroship-id",
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-workflow",

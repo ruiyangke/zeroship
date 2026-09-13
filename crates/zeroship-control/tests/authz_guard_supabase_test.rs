@@ -13,12 +13,11 @@ use uuid::Uuid;
 use zeroship_authz::{Action, Resource};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_control::{
-    authz_guard::AuthzGuard, AppState, EnvStore, Quota, RateLimiter, Registry,
-    SecretString, StripeStore,
+    authz_guard::AuthzGuard, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
+    StripeStore,
 };
-use zeroship_core::auth_provider::{
-    AuthProvider, SupabaseConfig, SupabaseProvider,
-};
+use zeroship_core::auth_provider::{AuthProvider, SupabaseConfig, SupabaseProvider};
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -80,9 +79,9 @@ struct Fixture {
     state: Arc<AppState>,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
-    users: Vec<Uuid>,
+    users: Vec<UserId>,
     subjects: Vec<String>,
-    apps: Vec<Uuid>,
+    apps: Vec<AppId>,
 }
 
 impl Fixture {
@@ -129,8 +128,7 @@ impl Fixture {
         zeroship_control::plan_catalog::seed_plans(&registry)
             .await
             .expect("seed built-in plans");
-        let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY)
-            .expect("env store");
+        let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
         let stripe_store = StripeStore::new(registry.clone());
         let blob_root = tmpdir(&format!("blob-{label}"));
         let deploy_tmp_dir = tmpdir(&format!("deploy-{label}"));
@@ -153,7 +151,9 @@ impl Fixture {
         )));
 
         let state = Arc::new(AppState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(
+                zeroship_core::service_peers::ServiceAuth::unconfigured(),
+            ),
             registry,
             env_store,
             stripe_store,
@@ -179,11 +179,11 @@ impl Fixture {
             static_policies: zeroship_authz::load_platform_policies()
                 .expect("bundled authz policies parse"),
             auth_provider,
-        // No platform deploy-token mint here: that is control's OUTBOUND
-        // destination for the device flow, and no fixture below drives one.
-        provider_registry: zeroship_control::metering::provider::builtin_registry(),
-        billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
-        billing_stream: None,
+            // No platform deploy-token mint here: that is control's OUTBOUND
+            // destination for the device flow, and no fixture below drives one.
+            provider_registry: zeroship_control::metering::provider::builtin_registry(),
+            billing_stack: zeroship_control::metering::provider::BillingStack::for_tests(),
+            billing_stream: None,
             tax_provider: zeroship_control::tax::build_tax_provider(
                 &zeroship_control::tax::TaxProviderConfig::native(),
             )
@@ -206,15 +206,15 @@ impl Fixture {
         }
     }
 
-    async fn seed_linked_principal(&mut self, subject: &str, grants: &[&str]) -> Uuid {
-        let principal_id = Uuid::new_v4();
-        let email = format!("supabase-{principal_id}@zeroship.test");
+    async fn seed_linked_principal(&mut self, subject: &str, grants: &[&str]) -> UserId {
+        let principal_id = UserId::mint();
+        let email = format!("supabase-{}@zeroship.test", principal_id.as_str());
         self.state
             .control_pg
             .execute(
                 "INSERT INTO zeroship.users (id, email, name, email_verified_at) \
                  VALUES ($1, $2::citext, 'Supabase Test User', NOW())",
-                &[&principal_id, &email],
+                &[&principal_id.as_str(), &email],
             )
             .await
             .expect("insert supabase test user");
@@ -224,7 +224,7 @@ impl Fixture {
                 "INSERT INTO zeroship.identity_links \
                     (principal_id, provider, provider_subject, email) \
                  VALUES ($1, 'supabase', $2, $3)",
-                &[&principal_id, &subject, &email],
+                &[&principal_id.as_str(), &subject, &email],
             )
             .await
             .expect("insert supabase identity link");
@@ -234,29 +234,29 @@ impl Fixture {
                 .execute(
                     "INSERT INTO zeroship.principal_grants (principal_id, grant_name) \
                      VALUES ($1, $2)",
-                    &[&principal_id, grant],
+                    &[&principal_id.as_str(), grant],
                 )
                 .await
                 .expect("insert principal grant");
         }
-        self.users.push(principal_id);
+        self.users.push(principal_id.clone());
         self.subjects.push(subject.to_string());
         principal_id
     }
 
-    async fn create_owned_app(&mut self, owner_id: Uuid, label: &str) -> Uuid {
+    async fn create_owned_app(&mut self, owner_id: &UserId, label: &str) -> AppId {
         let record = self
             .state
             .registry
             .create_app(
                 &format!("{label}-{}", Uuid::new_v4().simple()),
                 &zeroship_control::plan_catalog::free_plan_id(),
-                &owner_id,
+                owner_id,
                 None,
             )
             .await
             .expect("create owned app");
-        self.apps.push(record.id);
+        self.apps.push(record.id.clone());
         record.id
     }
 
@@ -267,7 +267,7 @@ impl Fixture {
                 .control_pg
                 .execute(
                     "DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1",
-                    &[user_id],
+                    &[&user_id.as_str()],
                 )
                 .await;
         }
@@ -275,14 +275,20 @@ impl Fixture {
             let _ = self
                 .state
                 .control_pg
-                .execute("DELETE FROM zeroship.organization_members om \
+                .execute(
+                    "DELETE FROM zeroship.organization_members om \
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
-                 WHERE om.organization_id = p.organization_id AND a.id = $1", &[app_id])
+                 WHERE om.organization_id = p.organization_id AND a.id = $1",
+                    &[&app_id.as_str()],
+                )
                 .await;
             let _ = self
                 .state
                 .control_pg
-                .execute("DELETE FROM zeroship.apps WHERE id = $1", &[app_id])
+                .execute(
+                    "DELETE FROM zeroship.apps WHERE id = $1",
+                    &[&app_id.as_str()],
+                )
                 .await;
         }
         for subject in &self.subjects {
@@ -302,13 +308,16 @@ impl Fixture {
                 .control_pg
                 .execute(
                     "DELETE FROM zeroship.principal_grants WHERE principal_id = $1",
-                    &[user_id],
+                    &[&user_id.as_str()],
                 )
                 .await;
             let _ = self
                 .state
                 .control_pg
-                .execute("DELETE FROM zeroship.users WHERE id = $1", &[user_id])
+                .execute(
+                    "DELETE FROM zeroship.users WHERE id = $1",
+                    &[&user_id.as_str()],
+                )
                 .await;
         }
     }
@@ -324,8 +333,7 @@ impl Drop for Fixture {
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(web::App::new().state($fx.state.clone()).service(
-            web::resource("/raw-app/{id}/deploy-check")
-                .route(web::post().to(raw_app_deploy_check)),
+            web::resource("/raw-app/{id}/deploy-check").route(web::post().to(raw_app_deploy_check)),
         ))
         .await
     }};
@@ -336,18 +344,19 @@ async fn raw_app_deploy_check(
     authz: AuthzGuard,
     state: web::types::State<Arc<AppState>>,
 ) -> web::HttpResponse {
+    let Ok(id) = AppId::parse(&path.into_inner()) else {
+        return web::HttpResponse::BadRequest().finish();
+    };
     match authz
         .require(
             Action::AppsDeploy,
-            Resource::App {
-                id: path.into_inner(),
-            },
+            Resource::App { id },
             &state,
         )
         .await
     {
         Ok(()) => web::HttpResponse::Ok().json(&json!({
-            "principal_id": authz.principal_id.to_string(),
+            "principal_id": authz.principal_id.as_str(),
         })),
         Err(resp) => resp,
     }
@@ -360,19 +369,20 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
     let principal_id = fx
         .seed_linked_principal(&subject, &["apps:deploy", "apps:read"])
         .await;
-    let app_id = fx.create_owned_app(principal_id, "supabase-positive").await;
+    let app_id = fx
+        .create_owned_app(&principal_id, "supabase-positive")
+        .await;
     let app = init_control!(fx);
     let token = gotrue_token(&subject, "authenticated");
 
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer(&token))
         .to_request();
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let body: Value =
-        serde_json::from_slice(&test::read_body(resp).await).expect("body json");
-    assert_eq!(body["principal_id"], principal_id.to_string());
+    let body: Value = serde_json::from_slice(&test::read_body(resp).await).expect("body json");
+    assert_eq!(body["principal_id"], principal_id.as_str());
 
     fx.cleanup().await;
 
@@ -389,11 +399,9 @@ async fn gotrue_authenticated_token_resolves_linked_principal_and_deploy_grant()
 async fn gotrue_token_linked_to_anonymized_user_returns_401() {
     let mut fx = Fixture::new("anonymized-owner").await;
     let subject = Uuid::new_v4().to_string();
-    let principal_id = fx
-        .seed_linked_principal(&subject, &["apps:deploy"])
-        .await;
+    let principal_id = fx.seed_linked_principal(&subject, &["apps:deploy"]).await;
     let app_id = fx
-        .create_owned_app(principal_id, "supabase-anonymized")
+        .create_owned_app(&principal_id, "supabase-anonymized")
         .await;
     let app = init_control!(fx);
     let token = gotrue_token(&subject, "authenticated");
@@ -405,12 +413,12 @@ async fn gotrue_token_linked_to_anonymized_user_returns_401() {
              SET disabled_at = NOW(), anonymized_at = NOW(), \
                  credential_version = credential_version + 1 \
              WHERE id = $1",
-            &[&principal_id],
+            &[&principal_id.as_str()],
         )
         .await
         .expect("anonymize GoTrue principal");
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer(&token))
         .to_request();
     let status = test::call_service(&app, req).await.status();
@@ -472,12 +480,14 @@ async fn gotrue_principal_without_deploy_grant_is_forbidden() {
     let mut fx = Fixture::new("no-deploy").await;
     let subject = Uuid::new_v4().to_string();
     let principal_id = fx.seed_linked_principal(&subject, &["apps:read"]).await;
-    let app_id = fx.create_owned_app(principal_id, "supabase-no-deploy").await;
+    let app_id = fx
+        .create_owned_app(&principal_id, "supabase-no-deploy")
+        .await;
     let app = init_control!(fx);
     let token = gotrue_token(&subject, "authenticated");
 
     let req = test::TestRequest::post()
-        .uri(&format!("/raw-app/{app_id}/deploy-check"))
+        .uri(&format!("/raw-app/{}/deploy-check", app_id.as_str()))
         .header("authorization", bearer(&token))
         .to_request();
     let status = test::call_service(&app, req).await.status();

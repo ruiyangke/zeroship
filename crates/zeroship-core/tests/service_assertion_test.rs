@@ -276,12 +276,12 @@ fn issuer_identifiers_reject_everything_that_is_not_one() {
     // The ADMITTED shapes, first, so the refusals below are a statement about
     // what is wrong with them rather than about a parser that takes nothing.
     // The instance path is what per-instance service identity rests on: a worker
-    // instance mints under `svc/worker/<wkr_id>`, and a typed id is base62 with
+    // instance mints under `svc/worker/<wkr_id>`, and a typed id is base36 with
     // an underscore-joined prefix. If either of these stopped parsing, that
     // identity would need a wire change rather than a name.
     for admitted in [
         "spiffe://zeroship.ai/svc/worker",
-        "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB",
+        "spiffe://zeroship.ai/svc/worker/wkr_0000000000000000000000001",
     ] {
         let parsed = ServiceIssuer::parse(admitted)
             .unwrap_or_else(|_| panic!("{admitted:?} must parse as a service issuer identifier"));
@@ -322,7 +322,7 @@ fn issuer_identifiers_reject_everything_that_is_not_one() {
     // Nothing in the tree mints one; admitting them would make the arity rule
     // undecidable in exchange for a shape no caller wants.
     for too_deep in [
-        "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB/thread-7",
+        "spiffe://zeroship.ai/svc/worker/wkr_0000000000000000000000001/thread-7",
         "spiffe://zeroship.ai/a/b/c/d/e",
         // Fewer segments than a role is the same rule read the other way: admit
         // it and a two-segment path becomes ambiguous between a role and an
@@ -348,8 +348,10 @@ fn issuer_identifiers_reject_everything_that_is_not_one() {
 /// and a test that renamed `THIRD_PARTY` would otherwise silently change what
 /// the instance cases are about.
 const WORKER_ROLE: &str = "spiffe://zeroship.ai/svc/worker";
-const WORKER_INSTANCE: &str = "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB";
-const OTHER_WORKER_INSTANCE: &str = "spiffe://zeroship.ai/svc/worker/wkr_7Rm2FpQt9Ycd";
+const WORKER_INSTANCE: &str =
+    "spiffe://zeroship.ai/svc/worker/wkr_0000000000000000000000001";
+const OTHER_WORKER_INSTANCE: &str =
+    "spiffe://zeroship.ai/svc/worker/wkr_0000000000000000000000002";
 
 fn worker_role_principal() -> ServicePrincipal {
     ServicePrincipal::new(
@@ -403,12 +405,12 @@ fn an_instance_issuer_names_its_role_and_keeps_its_own_identifier() {
 
     assert_eq!(
         instance.instance(),
-        Some("wkr_3Kd9QmZp2XvB"),
+        Some("wkr_0000000000000000000000001"),
         "the instance segment is reachable on its own, away from authorization"
     );
     assert_eq!(
         sibling.instance(),
-        Some("wkr_7Rm2FpQt9Ycd"),
+        Some("wkr_0000000000000000000000002"),
         "and it is the segment this identifier carries, not the other one's"
     );
     assert_eq!(role.instance(), None, "a role is an instance of nothing");

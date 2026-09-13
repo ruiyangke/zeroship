@@ -16,6 +16,35 @@ export type PlainObject = Record<string, unknown>;
 /** A JSON column can hold an object, array, or scalar at its root. */
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
 
+declare const decimalBrand: unique symbol;
+export type Decimal = string & { readonly [decimalBrand]: "Decimal" };
+
+const DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const MAX_DECIMAL_INPUT_DIGITS = 4096;
+const MAX_DECIMAL_EXPONENT = 4096;
+
+export function decimal(value: string): Decimal {
+  if (value.length > MAX_DECIMAL_INPUT_DIGITS) {
+    throw new TypeError("decimal value must be a bounded JSON decimal string");
+  }
+  const exponent = /[eE]([+-]?\d+)$/.exec(value)?.[1];
+  const fraction = /\.(\d+)/.exec(value)?.[1] ?? "";
+  const digits = value.replace(/^-/, "").split(/[eE]/, 1)[0].replace(".", "");
+  const exponentValue = exponent === undefined ? 0 : Number(exponent);
+  const scale = fraction.length - exponentValue;
+  if (
+    !DECIMAL_PATTERN.test(value) ||
+    digits.length > MAX_DECIMAL_INPUT_DIGITS ||
+    !Number.isSafeInteger(exponentValue) ||
+    Math.abs(exponentValue) > MAX_DECIMAL_EXPONENT ||
+    scale > MAX_DECIMAL_INPUT_DIGITS ||
+    (scale < 0 && digits.length - scale > MAX_DECIMAL_INPUT_DIGITS)
+  ) {
+    throw new TypeError("decimal value must be a bounded JSON decimal string");
+  }
+  return value as Decimal;
+}
+
 /** PostgreSQL transaction isolation levels. */
 /**
  * Postgres transaction isolation level. Alias of the ambient
@@ -41,7 +70,7 @@ export type Result<T> = { data: T; error: null } | { data: null; error: Error };
  * declared field appears, with the masked-value wrapper around it.
  */
 export type InferFieldDef<T> =
-  T extends TypeBuilder<infer U, any, infer M, any, any>
+  T extends TypeBuilder<infer U, any, infer M, any, any, any>
     ? M extends MaskKind
       ? M extends "none"
         ? U
@@ -102,7 +131,10 @@ type IsSchemaDict<S> =
       // Otherwise it's already an inferred shape (top-level union
       // variant) and we return S unchanged.
       true extends {
-        [K in keyof S]-?: NonNullable<S[K]> extends TypeBuilder<any, any, any, any, any> ? true : false;
+        [K in keyof S]-?: NonNullable<S[K]> extends {
+          readonly _type: unknown;
+          toFieldDef(): Readonly<FieldDef>;
+        } ? true : false;
       }[keyof S]
       ? true
       : false
@@ -167,19 +199,29 @@ export type UpsertOptions<S> = {
 // Filter types — typed query operators per field type
 // ---------------------------------------------------------------------------
 
-/** Comparison operators available on any field type. */
-type ComparisonOps<T> = {
+type EqualityOps<T> = {
   $eq?: T;
   $ne?: T | null;
-  $gt?: T;
-  $gte?: T;
-  $lt?: T;
-  $lte?: T;
   $in?: T[];
   $nin?: T[];
   $exists?: boolean;
 };
 
+type OrderingOps<T> = {
+  $gt?: T;
+  $gte?: T;
+  $lt?: T;
+  $lte?: T;
+};
+
+type FilterKind = "text" | "ordered" | "equality" | "exact" | "json" | "search";
+type InferredFilterKind<T> = NonNullable<T> extends Decimal
+  ? "exact"
+  : NonNullable<T> extends string
+  ? "text"
+  : NonNullable<T> extends number | bigint
+    ? "ordered"
+    : "equality";
 
 /** String-specific operators. */
 type StringOps = {
@@ -191,15 +233,20 @@ type StringOps = {
  * Filter value for an ordinary field — either a direct value, null, or
  * operator object.
  *
- * `$like` / `$ilike` are real backend operators: plugin-db's query builder
+ * `$like` / `$ilike` are real backend operators: the ORM query builder
  * validates them and lowers them to SQL predicates.
  */
-type PlainFilterValue<T> =
-  T | null |
-  (NonNullable<T> extends string ? ComparisonOps<NonNullable<T>> & StringOps :
-   NonNullable<T> extends number ? ComparisonOps<NonNullable<T>> :
-   NonNullable<T> extends boolean ? ComparisonOps<NonNullable<T>> :
-   ComparisonOps<NonNullable<T>>);
+type PlainFilterValue<T, K extends FilterKind = InferredFilterKind<T>> =
+  K extends "search"
+    ? never
+    : (K extends "json" ? null : T | null) | (
+      EqualityOps<NonNullable<T>> &
+      (K extends "text"
+        ? OrderingOps<NonNullable<T>> & StringOps
+        : K extends "ordered"
+          ? OrderingOps<NonNullable<T>>
+          : object)
+    );
 
 
 /**
@@ -211,36 +258,136 @@ type PlainFilterValue<T> =
  * - plain fields keep the normal operator surface
  */
 type FilterValueForFieldBuilder<F> =
-  F extends TypeBuilder<infer U, any, any, infer E, any>
-    ? E extends true
+  F extends {
+    readonly _type: unknown;
+    readonly _encryption: true | undefined;
+    readonly _filterKind: FilterKind;
+  }
+    ? true extends F["_encryption"]
       ? never
-      : PlainFilterValue<NonNullable<U>>
+      : PlainFilterValue<NonNullable<F["_type"]>, F["_filterKind"]>
     : never;
 
-type FilterValueForKey<S, K extends keyof Row<S>> =
-  IsSchemaDict<S> extends true
-    ? K extends keyof S
-      ? FilterValueForFieldBuilder<NonNullable<S[K]>>
-      : PlainFilterValue<NonNullable<Row<S>[K]>>
-    : PlainFilterValue<NonNullable<Row<S>[K]>>;
+type FieldFilters<S> = IsSchemaDict<S> extends true
+  ? { [K in keyof S]?: FilterValueForFieldBuilder<NonNullable<S[K]>> }
+  : { [K in keyof Row<S>]?: PlainFilterValue<NonNullable<Row<S>[K]>> };
 
 /** Typed filter for a document — each field accepts its value type or operators.
  *  Field values use `NonNullable<Row<S>[K]>` so `undefined` is rejected at the
  *  type layer; pass `null` to match SQL NULL explicitly. */
-export type Filter<S> = {
-  [K in keyof Row<S>]?: FilterValueForKey<S, K>
-} & {
+export type Filter<S> = FieldFilters<S> & {
   $and?: Filter<S>[];
   $or?: Filter<S>[];
   $not?: Filter<S>;
 };
+
+type SortableBuilder<F> = F extends {
+  readonly _encryption: infer E;
+  readonly _mask: infer M;
+  readonly _filterKind: infer K;
+}
+  ? true extends E
+    ? false
+    : M extends Exclude<MaskKind, "none">
+      ? true
+      : K extends "text" | "ordered"
+        ? true
+        : false
+  : false;
+
+type DistinctBuilder<F> = F extends {
+  readonly _encryption: infer E;
+  readonly _filterKind: infer K;
+}
+  ? true extends E
+    ? false
+    : K extends "json" | "search" | "exact"
+      ? false
+      : true
+  : false;
+
+/** Fields with the same order on every supported database. */
+export type SortableField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: SortableBuilder<NonNullable<S[K]>> extends true ? K : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends
+          | string
+          | number
+          | bigint
+          | MaskedValue<string | number | bigint | Uint8Array>
+          ? K
+          : never;
+      }[keyof Row<S>] | "id");
+
+/** Fields with portable database equality for grouping and deduplication. */
+export type DistinctField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: DistinctBuilder<NonNullable<S[K]>> extends true ? K : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends
+          | string
+          | number
+          | bigint
+          | boolean
+          | Uint8Array
+          | MaskedValue<string | number | bigint | Uint8Array>
+          ? K
+          : never;
+      }[keyof Row<S>] | "id");
+
+type SearchField<S, Shape> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: NonNullable<S[K]> extends {
+        readonly _filterKind: "search";
+        readonly _type: infer T;
+      }
+        ? T extends Shape ? K : never
+        : never;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: NonNullable<Row<S>[K]> extends Shape ? K : never;
+      }[keyof Row<S>]);
+
+/** Fields accepted as vector-search inputs. */
+export type VectorField<S> = SearchField<S, readonly number[]>;
+/** Fields accepted as within-radius spatial-search inputs. */
+export type GeoField<S> = SearchField<S, { lat: number; lng: number }>;
+
+type AtLeastOne<T> = {
+  [K in keyof T]-?: Required<Pick<T, K>> & Partial<Omit<T, K>>;
+}[keyof T];
+
+export type SortSpec<S> = [SortableField<S>] extends [never]
+  ? never
+  : AtLeastOne<Record<SortableField<S>, 1 | -1>>;
+export type SortInput<S> = SortSpec<S> | SortableField<S> | `-${SortableField<S>}`;
+
+/** Fields exposed by a typed projection. */
+export type SelectableField<S> = string & keyof Row<S>;
+export type SelectSpec<S> = string extends SelectableField<S>
+  ? Record<string, number | boolean>
+  : [SelectableField<S>] extends [never]
+    ? never
+    : AtLeastOne<Record<SelectableField<S>, 1 | true>>;
+export type SelectInput<S> = string extends SelectableField<S>
+  ? string | readonly string[] | Record<string, number | boolean>
+  : SelectableField<S> | readonly SelectableField<S>[] | SelectSpec<S>;
 
 // ---------------------------------------------------------------------------
 // Update expression types — typed operators per field type
 // ---------------------------------------------------------------------------
 
 /** Numeric update operators. */
-type NumericUpdateOps<T extends number | bigint> = {
+type NumericUpdateOps<T extends number | bigint | Decimal> = {
   $inc?: T;
   $dec?: T;
   $mul?: T;
@@ -256,7 +403,7 @@ type ArrayUpdateOps<T> = {
 /** Update value for a single field — direct value or typed operator. */
 type UpdateFieldValue<T> =
   T |
-  (NonNullable<T> extends number | bigint ? NumericUpdateOps<NonNullable<T>> : never) |
+  (NonNullable<T> extends number | bigint | Decimal ? NumericUpdateOps<NonNullable<T>> : never) |
   (NonNullable<T> extends readonly unknown[] ? ArrayUpdateOps<NonNullable<T>[number]> : never);
 
 type UpdateKeys<S> = Exclude<keyof InferSchema<S>, AssignedKeys<S> | "id">;
@@ -267,9 +414,9 @@ export type UpdateExpression<S> = {
 } & {
   // Document operators share the ORM's assignment grammar.
   $set?: Partial<Pick<InferSchema<S>, UpdateKeys<S>>>;
-  $inc?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $dec?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
-  $mul?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint ? NonNullable<InferSchema<S>[K]> : never };
+  $inc?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $dec?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
+  $mul?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends number | bigint | Decimal ? NonNullable<InferSchema<S>[K]> : never };
   $push?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
   $pull?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
   $addToSet?: { [K in UpdateKeys<S>]?: NonNullable<InferSchema<S>[K]> extends readonly unknown[] ? NonNullable<InferSchema<S>[K]>[number] : never };
@@ -330,7 +477,24 @@ export type InferId<C> =
  * (eager-load the full target row). Future shapes — column narrowing,
  * relation-level filters — slot in as `{ columns: K[] } | { where: Filter }`.
  */
-export type WithSpec = Record<string, true>;
+export type RelationField<S> = string & (IsSchemaDict<S> extends true
+  ? {
+      [K in keyof S]-?: [ExtractRefTarget<NonNullable<S[K]>>] extends [never] ? never : K;
+    }[keyof S]
+  : string extends keyof Row<S>
+    ? string
+    : {
+        [K in keyof Row<S>]-?: [ExtractRefTarget<NonNullable<Row<S>[K]>>] extends [never]
+          ? never
+          : K;
+      }[keyof Row<S>]);
+
+export type WithSpec<S = PlainObject> = [RelationField<S>] extends [never]
+  ? never
+  : AtLeastOne<Record<RelationField<S>, true>>;
+
+export type ExactWithSpec<S, W extends WithSpec<S>> = W &
+  Record<Exclude<keyof W, RelationField<S>>, never>;
 
 /**
  * Extract the target table name (e.g. `"users"`) from whatever shape the
@@ -349,9 +513,11 @@ export type ExtractRefTarget<X> =
     ? U extends Id<infer T>
       ? T
       : never
-    : X extends { type: "ref"; refTarget: infer T extends string }
+    : X extends Id<infer T, any>
       ? T
-      : never;
+      : X extends { type: "ref"; refTarget: infer T extends string }
+        ? T
+        : never;
 
 /**
  * Unwrap whatever shape an `AllSchemas[name]` slot holds into the raw
@@ -371,11 +537,8 @@ export type UnwrapSchemaForRelation<T> =
 
 /**
  * Resolve the target table's `Row<...>` given the field type at `S[K]`
- * and the parent db's schema map. Falls back to `PlainObject` when the
- * target name can't be matched against any declared collection — that
- * preserves the v1 behaviour for unknown targets without breaking
- * compilation. Tightens to the real `Row<TargetSchema>` whenever
- * `installSchema`'s schema map carries the target name (the common case).
+ * and the parent database's schema map. Standalone models without that map
+ * use `PlainObject`; installed schemas resolve the declared target row.
  */
 export type ResolveTargetRow<X, AllSchemas> =
   ExtractRefTarget<X> extends infer Target
@@ -394,10 +557,9 @@ export type ResolveTargetRow<X, AllSchemas> =
  * threading it through `Collection<S, N, AllSchemas>` lets us look up each key's
  * `t.ref(target)` and resolve `target` to the target collection's `Row`.
  * The default `Record<string, unknown>` keeps direct `Collection`/`Query`
- * users (e.g. `model("users", ...)`) compiling — they degrade to
- * `PlainObject` per relation, exactly the v1 behaviour.
+ * users (e.g. `model("users", ...)`) compiling with `PlainObject` relations.
  */
-export type WithRelations<S, W extends WithSpec, AllSchemas = Record<string, unknown>> = {
+export type WithRelations<S, W extends WithSpec<S>, AllSchemas = Record<string, unknown>> = {
   [K in keyof W & keyof S]: ResolveTargetRow<S[K], AllSchemas> | null;
 };
 
@@ -434,7 +596,7 @@ export type PrimitiveTypeName = "string" | "number" | "boolean" | "date" | "json
  *
  * No raw user-defined JS functions for masking — they would let an
  * AI-generated `mask: v => v` defeat the purpose. Adding a new
- * mask kind is a platform PR, not creator config.
+ * mask kind requires a platform release.
  */
 export type MaskKind =
   | "full"
@@ -447,9 +609,7 @@ export type MaskKind =
   | "none";
 
 /**
- * sensitivity classification used by the unmask
- * authorization (PR 4) and audit (PR 4) machinery. Mirrors
- * `crate::diff::Classification` on the Rust side.
+ * Sensitivity classification used for unmask authorization and auditing.
  *
  * - `public`   — usernames, display names, public profile data.
  * - `pii`      — full name, email, address, phone, IP, date of birth.
@@ -459,11 +619,10 @@ export type MaskKind =
  *                "sensitive PI").
  * - `phi`      — health records, medical IDs, diagnosis (HIPAA scope).
  * - `pci`      — card numbers, CVV, magnetic stripe (PCI-DSS scope).
- * - `internal` — platform-internal metadata, system-field overrides.
+ * - `internal` — application-internal metadata.
  *
- * The six names are also reserved as column names by
- * `crates/zeroship-data-orm/src/sql/compile.rs::validate_field_name` so creator
- * schemas cannot accidentally collide with the taxonomy.
+ * These names are reserved as columns by the ORM identifier policy so creator
+ * schemas cannot collide with the taxonomy.
  */
 export type Classification =
   | "public"
@@ -478,7 +637,6 @@ export type Classification =
  *
  * - `kind`            — required. The mask transform; see {@link MaskKind}.
  * - `classification`  — optional. Defaults to `"pii"` when omitted.
- *                       Drives unmask authorization (PR 4).
  */
 export interface MaskOpts {
   kind: MaskKind;
@@ -517,12 +675,7 @@ export interface MaskedValueRepr {
   sentinel: "__zsmask__";
 }
 
-/**
- * opaque actor descriptor passed to
- * `MaskedValue.unmask({ actor? })`. PR 4 will wire the round-trip
- * through the unmask RPC; today the type stays minimal (any plain
- * object) so PR 5 (`defineMaskPolicy`) can land the concrete shape.
- */
+/** Actor descriptor passed to unmask authorization. */
 export type Actor = Record<string, unknown>;
 
 /**
@@ -767,6 +920,8 @@ export interface FieldDef {
   writable?: boolean;
   min?: number;
   max?: number;
+  precision?: number;
+  scale?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
   /**
@@ -933,6 +1088,7 @@ export class TypeBuilder<
   M extends MaskKind | undefined = undefined,
   E extends true | undefined = undefined,
   D extends boolean = false,
+  F extends FilterKind = FilterKind,
 > {
   /** @internal Type-level brand — do not access at runtime. */
   declare readonly _type: T;
@@ -944,6 +1100,8 @@ export class TypeBuilder<
   declare readonly _encryption: E;
   /** @internal Type-level brand for `.default()`-backed insert optionality. */
   declare readonly _hasDefault: D;
+  /** @internal Type-level brand for portable filter operators. */
+  declare readonly _filterKind: F;
 
   readonly [TYPE_BUILDER_BRAND] = true;
 
@@ -980,9 +1138,9 @@ export class TypeBuilder<
   }
 
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E, D> & AssignmentBrand<this> {
+  required(): TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -1006,9 +1164,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true> & AssignmentBrand<this> {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this> {
     this._def.default = val;
-    return this as unknown as TypeBuilder<T, R, M, E, true> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1026,9 +1184,9 @@ export class TypeBuilder<
   /** Restricts the field to a fixed set of allowed values. */
   enum<const Values extends readonly (T & (string | number))[]>(
     ...values: Values
-  ): TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this> {
+  ): TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this> {
     this._def.enum = [...values];
-    return this as unknown as TypeBuilder<Values[number], R, M, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** For strings: a RegExp the value must match. */
@@ -1074,7 +1232,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D> & AssignmentBrand<this> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1117,11 +1275,7 @@ export class TypeBuilder<
         { code: "MASK_INVALID_CLASSIFICATION" as const },
       );
     }
-    // `t.ref()` columns must not carry a mask — see Q-P5-I in the
-    // sensitive-field-masking proposal. The FK column is an integer
-    // typed id; masking it would defeat the JOIN integrity check
-    // and the sibling column would itself participate in the FK
-    // semantics (incoherent).
+    // Reference columns must remain visible to foreign-key joins.
     if (this._def.type === "ref") {
       throw Object.assign(
         new Error(
@@ -1145,12 +1299,12 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E, D> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this>;
   }
 
   /** Allow null in the field's value type. */
-  nullable(): TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this> {
-    return this as TypeBuilder<T | null, R, M, E, D> & AssignmentBrand<this>;
+  nullable(): TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this> {
+    return this as TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this>;
   }
 
   /** Assign the database timestamp on insert. */
@@ -1193,20 +1347,36 @@ export class TypeBuilder<
  */
 export const t = {
   /** Creates a string field definition. */
-  string(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "string" });
+  string(): TypeBuilder<string, false, undefined, undefined, false, "text"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "string" });
   },
   /** Creates a number field definition. */
-  number(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "number" });
+  number(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "number" });
+  },
+  /** Creates a fixed precision decimal represented as exact text. */
+  numeric(opts: { precision?: number; scale?: number } = {}): TypeBuilder<Decimal, false, undefined, undefined, false, "exact"> {
+    const precision = opts.precision ?? 38;
+    const scale = opts.scale ?? 9;
+    if (!Number.isSafeInteger(precision) || precision < 1 || precision > 1000) {
+      throw new TypeError("t.numeric precision is outside the portable range");
+    }
+    if (!Number.isSafeInteger(scale) || scale < 0 || scale > precision) {
+      throw new TypeError("t.numeric scale must be between zero and precision");
+    }
+    return new TypeBuilder<Decimal, false, undefined, undefined, false, "exact">({
+      type: "number",
+      precision,
+      scale,
+    });
   },
   /** Creates an integer field with exact bigint input and output beyond the safe number range. */
-  bigInt(): TypeBuilder<number | bigint> {
-    return new TypeBuilder<number | bigint>({ type: "bigInt" });
+  bigInt(): TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number | bigint, false, undefined, undefined, false, "ordered">({ type: "bigInt" });
   },
   /** Creates a boolean field definition. */
-  boolean(): TypeBuilder<boolean> {
-    return new TypeBuilder<boolean>({ type: "boolean" });
+  boolean(): TypeBuilder<boolean, false, undefined, undefined, false, "equality"> {
+    return new TypeBuilder<boolean, false, undefined, undefined, false, "equality">({ type: "boolean" });
   },
   /**
    * Creates a timestamp field — `TIMESTAMPTZ` in Postgres, Unix-ms
@@ -1215,12 +1385,12 @@ export const t = {
    * `number` (millisecond epoch). For wall-clock dates without a
    * time-of-day component, use {@link calendarDate} instead.
    */
-  timestamp(): TypeBuilder<number> {
-    return new TypeBuilder<number>({ type: "date" });
+  timestamp(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "date" });
   },
   /** Creates a JSON field definition for objects, arrays, and scalars. */
-  json(): TypeBuilder<JsonValue> {
-    return new TypeBuilder<JsonValue>({ type: "json" });
+  json(): TypeBuilder<JsonValue, false, undefined, undefined, false, "json"> {
+    return new TypeBuilder<JsonValue, false, undefined, undefined, false, "json">({ type: "json" });
   },
   /**
    * Creates an array field definition. Pass the item type builder as the argument:
@@ -1234,7 +1404,7 @@ export const t = {
    * malformed `FieldDef`s (e.g. dropping `refTarget` so `validateRefTargets`
    * could not visit array items).
    */
-  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[]> {
+  array<U>(items: TypeBuilder<U, any, any, any, any>): TypeBuilder<U[], false, undefined, undefined, false, "json"> {
     if (!(items instanceof TypeBuilder)) {
       throw Object.assign(
         new Error("t.array(items) requires a TypeBuilder (use t.string(), t.number(), ...)"),
@@ -1257,17 +1427,17 @@ export const t = {
       );
     }
     const itemType = itemDef.type as PrimitiveTypeName;
-    return new TypeBuilder<U[]>({ type: "array", items: itemType });
+    return new TypeBuilder<U[], false, undefined, undefined, false, "json">({ type: "array", items: itemType });
   },
   /** Declare a branded reference, optionally naming its target column and FK actions. */
-  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>> {
+  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>, false, undefined, undefined, false, "text"> {
     if (typeof table !== "string" || table.length === 0) {
       throw Object.assign(
         new Error("t.ref(table) requires a non-empty table name"),
         { code: "REF_EMPTY_TABLE" as const },
       );
     }
-    return new TypeBuilder<Id<T>>({
+    return new TypeBuilder<Id<T>, false, undefined, undefined, false, "text">({
       type: "ref",
       refTarget: table,
       ...(opts?.column !== undefined ? { refColumn: opts.column } : {}),
@@ -1296,7 +1466,7 @@ export const t = {
    * `string | undefined` — the same rules as the top-level schema apply
    * recursively (`required()` keeps a key required, otherwise optional).
    */
-  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>> {
+  object<S extends Record<string, TypeBuilder<any, any, any, any, any>>>(shape: S): TypeBuilder<InferSchema<S>, false, undefined, undefined, false, "json"> {
     if (shape === null || typeof shape !== "object" || Array.isArray(shape)) {
       throw Object.assign(
         new Error("t.object(shape) requires a record of nested type builders"),
@@ -1313,7 +1483,7 @@ export const t = {
       }
       nested[key] = { ...val.toFieldDef() };
     }
-    return new TypeBuilder<InferSchema<S>>({ type: "object", shape: nested });
+    return new TypeBuilder<InferSchema<S>, false, undefined, undefined, false, "json">({ type: "object", shape: nested });
   },
   /**
    * vector embedding field. Stored as pgvector's
@@ -1337,7 +1507,7 @@ export const t = {
    * back as the same shape. Use `collection.search({ vector, k })` for
    * nearest-neighbour queries.
    */
-  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[]> {
+  vector(dims: number, opts?: { metric?: VectorMetric }): TypeBuilder<number[], false, undefined, undefined, false, "search"> {
     if (typeof dims !== "number" || !Number.isInteger(dims) || dims < 1 || dims > 16000) {
       throw Object.assign(
         new Error(
@@ -1355,7 +1525,7 @@ export const t = {
         { code: "VECTOR_INVALID_METRIC" as const },
       );
     }
-    return new TypeBuilder<number[]>({
+    return new TypeBuilder<number[], false, undefined, undefined, false, "search">({
       type: "vector",
       vectorDims: dims,
       vectorMetric: metric,
@@ -1363,8 +1533,8 @@ export const t = {
   },
   /**
    * geographic point field (WGS84, EPSG:4326). Stored as
-   * PostGIS's `geography(POINT, 4326)` column on PG; on SQLite (P4 PR 5)
-   * a `BLOB` packed `(lat, lng)` × `f64` = 16 bytes.
+   * PostGIS's `geography(POINT, 4326)` column on PostgreSQL and as a packed
+   * coordinate pair on SQLite.
    *
    * ```ts
    * const fields = {
@@ -1381,8 +1551,8 @@ export const t = {
    * the database; the runtime probes `pg_extension WHERE extname='postgis'`
    * and surfaces a typed `POSTGIS_EXTENSION_MISSING` error when absent.
    */
-  geoPoint(): TypeBuilder<{ lat: number; lng: number }> {
-    return new TypeBuilder<{ lat: number; lng: number }>({ type: "geoPoint" });
+  geoPoint(): TypeBuilder<{ lat: number; lng: number }, false, undefined, undefined, false, "search"> {
+    return new TypeBuilder<{ lat: number; lng: number }, false, undefined, undefined, false, "search">({ type: "geoPoint" });
   },
   /**
    * D3 — calendar-date validator. Accepts a `YYYY-MM-DD` string and
@@ -1394,12 +1564,12 @@ export const t = {
    * birthday: t.calendarDate(),
    * ```
    */
-  calendarDate(): TypeBuilder<string> {
-    return new TypeBuilder<string>({ type: "calendarDate" });
+  calendarDate(): TypeBuilder<string, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "ordered">({ type: "calendarDate" });
   },
   /** Native binary column, also usable as an encrypted field's wrap. */
-  bytes(): TypeBuilder<Uint8Array> {
-    return new TypeBuilder<Uint8Array>({ type: "bytes" });
+  bytes(): TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality"> {
+    return new TypeBuilder<Uint8Array, false, undefined, undefined, false, "equality">({ type: "bytes" });
   },
   /**
    * Encrypt string, number or byte values with a fresh random nonce per write.
@@ -1427,6 +1597,8 @@ export const t = {
   ): TypeBuilder<T, false, "full", true, false> {
     const innerBuilder = opts?.of;
     let plaintextType: "string" | "number" | "bytes" = "string";
+    let precision: number | undefined;
+    let scale: number | undefined;
     if (innerBuilder !== undefined) {
       if (!(innerBuilder instanceof TypeBuilder)) {
         throw Object.assign(
@@ -1436,8 +1608,11 @@ export const t = {
       }
       const def = innerBuilder.toFieldDef();
       if (def.type === "string") plaintextType = "string";
-      else if (def.type === "number") plaintextType = "number";
-      else if (def.type === "bytes") plaintextType = "bytes";
+      else if (def.type === "number") {
+        plaintextType = "number";
+        precision = def.precision;
+        scale = def.scale;
+      } else if (def.type === "bytes") plaintextType = "bytes";
       else {
         throw Object.assign(
           new Error(
@@ -1458,6 +1633,7 @@ export const t = {
     // builder's `.mask` method (assigns `_def.mask` unconditionally).
     return new TypeBuilder<T, false, "full", true>({
       type: plaintextType,
+      ...(precision === undefined ? {} : { precision, scale }),
       encrypted: true,
       mask: { kind: "full", classification: "pii" },
     });
@@ -1576,7 +1752,7 @@ export const t = {
   actor(): TypeBuilder<string | null> & { readonly _assigned: true } {
     return new TypeBuilder<string | null>({ type: "string" }).assigned({ by: "actor", on: "insert" });
   },
-  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>> {
+  union<V extends readonly TypeBuilder<any, any, any, any, any>[]>(...variants: V): TypeBuilder<InferUnion<V>, false, undefined, undefined, false, "json"> {
     if (variants.length < 2) {
       throw Object.assign(
         new Error(
@@ -1617,7 +1793,7 @@ export const t = {
     // key that is `t.literal()` in EVERY variant AND has distinct
     // literal values across variants.
     const discriminator = detectDiscriminator(normalized);
-    return new TypeBuilder<InferUnion<V>>({
+    return new TypeBuilder<InferUnion<V>, false, undefined, undefined, false, "json">({
       type: "union",
       variants: normalized,
       discriminator,
@@ -1725,7 +1901,7 @@ export type InferUnion<V extends readonly TypeBuilder<any, any, any, any, any>[]
  *   at module-init time so the app fails fast.
  * - `lenient` — log violations but allow the push (warning only).
  * - `off`     — skip validation entirely (equivalent of Convex's
- *   `schemaValidation: false`); intended for legacy/imported data.
+ *   `schemaValidation: false`); intended for externally managed data.
  */
 export type Strictness = "strict" | "lenient" | "off";
 
@@ -1734,11 +1910,9 @@ export interface SchemaOptions {
   softDelete: boolean;
   strictness: Strictness;
   /**
-   * D4 — optimistic concurrency. When `true` the collection auto-injects
-   * an `INTEGER NOT NULL DEFAULT 1` `version` column at DDL time and
-   * `updateOne`/`updateMany` honour a `{ version: N }` filter clause for
-   * compare-and-swap updates (mismatch returns an
-   * `OPTIMISTIC_CONCURRENCY` error).
+   * Enables the migration generator that emits a descriptor-declared
+   * concurrency column. Runtime compare-and-swap behavior follows the
+   * field carrying `concurrency: true`, including when that field is renamed.
    */
   versioning: boolean;
 }

@@ -17,6 +17,8 @@ mod common;
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
 
 /// The test's OWN oracle for "is this audit row still live". It replaces the
@@ -31,7 +33,7 @@ use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSessio
 async fn live_session(
     client: &compio_postgres::Client,
     id: Uuid,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Option<compio_postgres::Row> {
     client
         .query(
@@ -44,7 +46,7 @@ async fn live_session(
                AND revoked_at IS NULL \
                AND idle_expires_at > NOW() \
                AND abs_expires_at > NOW()",
-            &[&id, &app_id],
+            &[&id, &app_id.as_str()],
         )
         .await
         .expect("read gateway_sessions row")
@@ -68,18 +70,17 @@ async fn create_validate_revoke_roundtrip() {
     // test should still work standalone against a freshly migrated database.
 
     // Random ids — keeps the test repeatable on a shared DB. `app_id` is the
-    // app's stable UUID (the column is UUID, bound natively).
-    let app_id = Uuid::new_v4();
-    insert_app(&client, app_id).await;
+    // app's stable typed id (the column is `text`, `apps_id_shape`-checked).
+    let app_id = AppId::mint();
+    insert_app(&client, &app_id).await;
     let user_id = insert_user(&client, "gateway-session").await;
-    let user_id_text = user_id.to_string();
 
     let session = create(
         &mut client,
         &NewSession {
-            user_id: &user_id_text,
+            user_id: &user_id,
             sid: None,
-            app_id,
+            app_id: &app_id,
             email: Some("test@zeroship.test"),
             name: Some("Test User"),
             avatar_url: None,
@@ -94,7 +95,7 @@ async fn create_validate_revoke_roundtrip() {
     .await
     .expect("create");
 
-    assert_eq!(session.user_id, user_id_text);
+    assert_eq!(session.user_id, user_id);
     assert_eq!(session.app_id, app_id);
     assert_eq!(session.email.as_deref(), Some("test@zeroship.test"));
     assert_eq!(session.name.as_deref(), Some("Test User"));
@@ -112,7 +113,7 @@ async fn create_validate_revoke_roundtrip() {
     // one `create` stamped. NOTHING SLIDES IT: the read-and-slide function this
     // test used to call is deleted, so equality here is the assertion, not the
     // `>=` a sliding window would need.
-    let live = live_session(&client, session.id, app_id)
+    let live = live_session(&client, session.id, &app_id)
         .await
         .expect("session row must be live immediately after creation");
     let live_idle: chrono::DateTime<chrono::Utc> = live.get("idle_expires_at");
@@ -130,7 +131,7 @@ async fn create_validate_revoke_roundtrip() {
     // Wrong app_id → no row (defends against confused-deputy across apps
     // sharing the gateway PG instance).
     assert!(
-        live_session(&client, session.id, Uuid::new_v4())
+        live_session(&client, session.id, &AppId::mint())
             .await
             .is_none(),
         "app mismatch must not resolve a row"
@@ -138,18 +139,18 @@ async fn create_validate_revoke_roundtrip() {
 
     // Wrong session id → no row.
     assert!(
-        live_session(&client, Uuid::new_v4(), app_id).await.is_none(),
+        live_session(&client, Uuid::new_v4(), &app_id).await.is_none(),
         "unknown id must not resolve a row"
     );
 
     // Revoke (per-app, the only revoke path under RLS) and confirm the row
     // stops resolving, which is what says `revoked_at` was written.
-    let revoked = revoke_app_sessions_for_user(&mut client, app_id, &user_id_text)
+    let revoked = revoke_app_sessions_for_user(&mut client, &app_id, &user_id)
         .await
         .expect("revoke");
     assert_eq!(revoked, 1, "exactly the one session for (app_id, user) is revoked");
     assert!(
-        live_session(&client, session.id, app_id).await.is_none(),
+        live_session(&client, session.id, &app_id).await.is_none(),
         "a revoked session must not resolve as live"
     );
 
@@ -162,16 +163,16 @@ async fn create_validate_revoke_roundtrip() {
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await
         .ok();
     client
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await
         .ok();
 }
 
-async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
+async fn insert_app(client: &compio_postgres::Client, app_id: &AppId) {
     client
         .execute(
             "INSERT INTO zeroship.plans \
@@ -189,8 +190,8 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
              SELECT $1, $2, p.id, p.organization_id \
                FROM zeroship.projects p WHERE p.id = $3",
             &[
-                &app_id,
-                &format!("gateway-session-app-{}", app_id.simple()),
+                &app_id.as_str(),
+                &format!("gateway-session-app-{}", app_id.as_str()),
                 &project_id
             ],
         )
@@ -198,16 +199,16 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
         .expect("insert app");
 }
 
-async fn insert_user(client: &compio_postgres::Client, label: &str) -> Uuid {
+async fn insert_user(client: &compio_postgres::Client, label: &str) -> UserId {
+    let user_id = UserId::mint();
     let email = format!("{label}-{}@zeroship.test", Uuid::new_v4().simple());
-    let rows = client
-        .query(
-            "INSERT INTO zeroship.users (email, name, email_verified_at)
-             VALUES ($1, $2, NOW())
-             RETURNING id",
-            &[&email, &label],
+    client
+        .execute(
+            "INSERT INTO zeroship.users (id, email, name, email_verified_at)
+             VALUES ($1, $2, $3, NOW())",
+            &[&user_id.as_str(), &email, &label],
         )
         .await
         .expect("insert user");
-    rows[0].get("id")
+    user_id
 }

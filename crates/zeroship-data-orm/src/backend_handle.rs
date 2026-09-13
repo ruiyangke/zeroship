@@ -1,8 +1,5 @@
 //! Runtime registration and routed backend extensions for the shared ORM.
-use crate::sql::{
-    SchemaName,
-    descriptors::{GeoPoint, VectorMetric},
-};
+use crate::sql::{descriptors::GeoPoint, SchemaName};
 use crate::value::Value;
 use crate::{
     backend::Backend,
@@ -14,7 +11,7 @@ use crate::{
 };
 use std::{any::Any, ops::Deref, rc::Rc, sync::Arc};
 
-pub use crate::sql::internal::AUDIT_UNMASK_TABLE;
+pub use crate::crud::internal::AUDIT_UNMASK_TABLE;
 
 /// A registered backend, erased once at the host boundary. Models never name it.
 #[derive(Clone, Debug)]
@@ -22,36 +19,38 @@ pub struct BackendHandle(
     Rc<dyn Backend>,
     Rc<()>,
     Arc<crate::sql::registration::SqlRegistration>,
-    Option<crate::connection::ConnectionIdentity>,
+    crate::connection::ConnectionIdentity,
 );
 impl BackendHandle {
     pub fn new<B: Backend>(backend: Rc<B>) -> Self {
-        let registration = crate::sql::registration::SqlRegistration::builtin(backend.dialect());
-        Self(backend, Rc::new(()), Arc::new(registration), None)
+        let registration = backend.sql_registration();
+        let identity = crate::connection::ConnectionIdentity::for_backend(registration.identity());
+        Self(backend, Rc::new(()), Arc::new(registration), identity)
     }
     pub fn with_sql<B: Backend>(
         backend: Rc<B>,
         registration: crate::sql::registration::SqlRegistration,
     ) -> Result<Self, DbError> {
-        if backend.dialect() != registration.dialect() {
+        if backend.sql_registration().family() != registration.family() {
             return Err(DbError::config(
                 "backend_sql_mismatch",
-                "backend execution and SQL registration use different dialects",
+                "backend execution and SQL registration use different SQL families",
             ));
         }
-        Ok(Self(backend, Rc::new(()), Arc::new(registration), None))
+        let identity = crate::connection::ConnectionIdentity::for_backend(registration.identity());
+        Ok(Self(backend, Rc::new(()), Arc::new(registration), identity))
     }
     pub fn sql_registration(&self) -> &crate::sql::registration::SqlRegistration {
         &self.2
     }
-    pub fn connection_identity(&self) -> Option<crate::connection::ConnectionIdentity> {
+    pub fn connection_identity(&self) -> crate::connection::ConnectionIdentity {
         self.3
     }
     pub(crate) fn bind_connection_identity(
         mut self,
         identity: crate::connection::ConnectionIdentity,
     ) -> Self {
-        self.3 = Some(identity);
+        self.3 = identity;
         self
     }
     pub async fn open_tx_session(
@@ -82,7 +81,8 @@ impl BackendHandle {
         attach_alias: &str,
         row: &UnmaskAuditRow<'_>,
     ) -> Result<(), DbError> {
-        let namespace = self.namespace(attach_alias, schema);
+        let namespace = SchemaName::new(self.namespace(attach_alias, schema))
+            .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
         let params = vec![
             row.actor_id.into(),
             row.actor_role.into(),
@@ -94,7 +94,8 @@ impl BackendHandle {
             row.reason.into(),
             row.outcome.into(),
         ];
-        let query = crate::sql::internal::unmask_audit(namespace, self.dialect(), params);
+        let query =
+            crate::crud::internal::unmask_audit(&namespace, params, self.sql_registration())?;
         self.query(attach_alias, schema, &query.sql, &query.params)
             .await?;
         Ok(())
@@ -111,13 +112,7 @@ impl Deref for BackendHandle {
 pub async fn routed_vector_search(
     route: &TxRoute,
     binding: &DbBinding,
-    collection: &str,
-    column: &str,
-    query: &[f32],
-    k: usize,
-    metric: VectorMetric,
-    filter: &Value,
-    schema: &Value,
+    query: crate::sql::compiler::CompiledQuery,
 ) -> Result<Vec<Value>, DbError> {
     read_on_route(route, async {
         let lane = if route.in_tx() {
@@ -132,16 +127,7 @@ pub async fn routed_vector_search(
             .backend()
             .vector_search(
                 lane.as_ref().map(|l| l.client()),
-                VectorSearch {
-                    binding,
-                    collection,
-                    column,
-                    query,
-                    k,
-                    metric,
-                    filter,
-                    schema,
-                },
+                VectorSearch { binding, query },
             )
             .await
     })
@@ -151,13 +137,11 @@ pub async fn routed_vector_search(
 pub async fn routed_spatial_near(
     route: &TxRoute,
     binding: &DbBinding,
-    collection: &str,
+    query: crate::sql::compiler::CompiledQuery,
     column: &str,
     point: GeoPoint,
     radius_m: f64,
-    filter: &Value,
-    limit: Option<usize>,
-    schema: &Value,
+    limit: usize,
 ) -> Result<Vec<Value>, DbError> {
     read_on_route(route, async {
         let lane = if route.in_tx() {
@@ -174,13 +158,11 @@ pub async fn routed_spatial_near(
                 lane.as_ref().map(|l| l.client()),
                 SpatialSearch {
                     binding,
-                    collection,
+                    query,
                     column,
                     point,
                     radius_m,
-                    filter,
                     limit,
-                    schema,
                 },
             )
             .await
@@ -199,14 +181,15 @@ async fn read_on_route<T>(
     }
 }
 
-pub async fn read_raw_column_value(
+pub(crate) async fn read_raw_column_value(
     route: &TxRoute,
     collection: &str,
     raw_column: &str,
     row_pk: &str,
     schema: &Value,
 ) -> Result<ScalarRead<Value>, DbError> {
-    let namespace = route.backend().namespace(route.app_id(), route.schema());
+    let namespace = SchemaName::new(route.backend().namespace(route.app_id(), route.schema()))
+        .map_err(|error| DbError::internal(format!("invalid backend namespace: {error}")))?;
     let key_column = "id";
     let key_value = match schema[key_column]["type"].as_str() {
         Some("int" | "integer" | "bigInt" | "bigint") => {
@@ -216,21 +199,18 @@ pub async fn read_raw_column_value(
         }
         _ => Value::from(row_pk),
     };
-    let physical_key = schema[key_column]["storage"]["valueColumn"]
-        .as_str()
-        .unwrap_or(key_column);
-    let query = crate::sql::internal::raw_column(
-        namespace,
+    let query = crate::crud::internal::raw_column(
+        &namespace,
         collection,
         raw_column,
-        physical_key,
         key_value,
-        route.dialect(),
-    );
+        schema,
+        route.sql_registration(),
+    )?;
     let rows = crate::exec::run_sql(route, &query.sql, &query.params).await?;
-    Ok(native_scalar(rows, raw_column))
+    Ok(native_scalar(rows, "_raw"))
 }
-pub async fn read_raw_column_bytes(
+pub(crate) async fn read_raw_column_bytes(
     route: &TxRoute,
     collection: &str,
     raw_column: &str,
@@ -261,16 +241,7 @@ fn native_scalar(rows: Vec<Value>, column: &str) -> ScalarRead<Value> {
 
 #[cfg(test)]
 mod routed_read_tests {
-    //! The SQLite half of the routed raw-column read.
-    //!
-    //! The PostgreSQL half is bound live by
-    //! `zeroship-data-v8/tests/unmask_tx_lane.rs`, which needs a server.
-    //! SQLite needs none, and it is the tier `pnpm dev` runs on - so the arm
-    //! that would otherwise ship unbound is this one. It is a REAL divergence
-    //! there and not a formality: SC-2 Decision 1 gave the session actor a
-    //! shared `op_conn` plus a transaction connection per app, so an unmask
-    //! sent to `op_conn` inside a transaction cannot see that transaction's
-    //! writes, exactly as on PostgreSQL.
+    //! SQLite transaction routing for protected raw-column reads.
 
     use std::path::PathBuf;
     use std::rc::Rc;
@@ -279,7 +250,7 @@ mod routed_read_tests {
     use crate::tests::fixtures::DatabaseFixture;
     use crate::tx_route::CapturedRoute;
 
-    /// A raw-sibling read inside a transaction must see that transaction's own
+    /// A raw-column read inside a transaction must see that transaction's own
     /// write; the same read outside it must not.
     ///
     /// The two arms differ in ONE token - `in_tx` on the route - so a failure
@@ -316,6 +287,14 @@ mod routed_read_tests {
                 .expect("CREATE TABLE people");
 
             let handle = BackendHandle::new(Rc::clone(&backend));
+            let schema = crate::value!({
+                "id": {"type":"string", "primaryKey":true},
+                "ssn": {
+                    "type":"string",
+                    "mask":{"kind":"last4", "classification":"spi"},
+                    "storage":{"valueColumn":"ssn", "rawColumn":"__zs_raw__ssn"}
+                }
+            });
 
             let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
             crate::transaction::exec_begin_or_savepoint(false, None, app,
@@ -327,13 +306,16 @@ mod routed_read_tests {
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_value(
-                &CapturedRoute::pool_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
+                &CapturedRoute::pool_for_tests(
+                    app,
+                    crate::sql::registration::SqlRegistration::sqlite(),
+                )
                     .bind(handle.clone())
                     .unwrap(),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
+                &schema,
             )
             .await
             .expect("the pooled read itself must succeed");
@@ -345,13 +327,16 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_value(
-                &CapturedRoute::tx_for_tests(app, crate::sql::compile::SqlDialect::Sqlite)
+                &CapturedRoute::tx_for_tests(
+                    app,
+                    crate::sql::registration::SqlRegistration::sqlite(),
+                )
                     .bind(handle.clone())
                     .unwrap(),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
-                &crate::value!({"id":{"type":"string", "primaryKey":true}}),
+                &schema,
             )
             .await
             .expect("a routed read inside the transaction must reach the row");

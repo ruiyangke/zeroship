@@ -312,7 +312,7 @@ impl AccountStatusStore {
             .conn()
             .await
             .map_err(|e| StripeError::Db(format!("{e}")))?;
-        // `id` is the PR-6 surrogate PK (`obh_<base62>`) = the
+        // `id` is the PR-6 surrogate PK (`obh_<base36>`) = the
         // `billing_notifications.transition_id` for the dunning-driven notification kinds
         // (payment_failed/past_due/suspended/recovered). Minted in Rust here (no SQL
         // DEFAULT — the disjoint prefix the notify dedup relies on cannot come from

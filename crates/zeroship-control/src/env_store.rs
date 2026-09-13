@@ -5,7 +5,7 @@
 //! BYTEA column holds `nonce(12) || ciphertext || tag(16)` exactly as
 //! produced by `zeroship_core::crypto::encrypt`.
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::crypto::{self, CryptoError};
 
 use crate::registry::Registry;
@@ -98,8 +98,10 @@ fn valid_key(k: &str) -> bool {
         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
 }
 
-fn app_secret_aad(app_id: Uuid, key_name: &str) -> Vec<u8> {
-    let mut aad = Vec::with_capacity(APP_SECRET_AAD_PREFIX.len() + 16 + 1 + key_name.len());
+fn app_secret_aad(app_id: &AppId, key_name: &str) -> Vec<u8> {
+    let app_id = app_id.as_str();
+    let mut aad =
+        Vec::with_capacity(APP_SECRET_AAD_PREFIX.len() + app_id.len() + 1 + key_name.len());
     aad.extend_from_slice(APP_SECRET_AAD_PREFIX);
     aad.extend_from_slice(app_id.as_bytes());
     aad.push(0);
@@ -140,12 +142,12 @@ impl std::fmt::Debug for EnvStore {
 /// into an error.
 async fn lock_live_app(
     tx: &compio_postgres::Transaction<'_>,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Result<(), EnvError> {
     let rows = tx
         .query(
             "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -192,7 +194,7 @@ impl EnvStore {
     #[doc(hidden)]
     pub async fn __raw_ciphertext_for_test(
         &self,
-        app_id: uuid::Uuid,
+        app_id: &AppId,
         key_name: &str,
     ) -> Result<Option<Vec<u8>>, EnvError> {
         let conn = self
@@ -203,7 +205,7 @@ impl EnvStore {
         let rows = conn
             .query(
                 "SELECT ciphertext FROM zeroship.app_secrets WHERE app_id = $1 AND key_name = $2",
-                &[&app_id, &key_name],
+                &[&app_id.as_str(), &key_name],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -214,7 +216,7 @@ impl EnvStore {
     // Vars (plaintext)
     // ------------------------------------------------------------------
 
-    pub async fn list_vars(&self, app_id: Uuid) -> Result<Vec<(String, String)>, EnvError> {
+    pub async fn list_vars(&self, app_id: &AppId) -> Result<Vec<(String, String)>, EnvError> {
         let conn = self
             .registry
             .conn()
@@ -223,7 +225,7 @@ impl EnvStore {
         let rows = conn
             .query(
                 "SELECT key_name, value FROM zeroship.app_vars WHERE app_id = $1 ORDER BY key_name",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -234,7 +236,7 @@ impl EnvStore {
         Ok(out)
     }
 
-    pub async fn set_var(&self, app_id: Uuid, key: &str, value: &str) -> Result<(), EnvError> {
+    pub async fn set_var(&self, app_id: &AppId, key: &str, value: &str) -> Result<(), EnvError> {
         if !valid_key(key) {
             return Err(EnvError::BadKey(key.into()));
         }
@@ -260,7 +262,7 @@ impl EnvStore {
              )
              UPDATE zeroship.apps SET env_version = env_version + 1
              WHERE id = (SELECT app_id FROM upsert) AND deleted_at IS NULL",
-            &[&app_id, &key, &value],
+            &[&app_id.as_str(), &key, &value],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -268,7 +270,7 @@ impl EnvStore {
         Ok(())
     }
 
-    pub async fn delete_var(&self, app_id: Uuid, key: &str) -> Result<bool, EnvError> {
+    pub async fn delete_var(&self, app_id: &AppId, key: &str) -> Result<bool, EnvError> {
         let conn = self
             .registry
             .conn()
@@ -290,7 +292,7 @@ impl EnvStore {
                  )
                  UPDATE zeroship.apps SET env_version = env_version + 1
                  WHERE id = (SELECT app_id FROM del)",
-                &[&app_id, &key],
+                &[&app_id.as_str(), &key],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -310,7 +312,7 @@ impl EnvStore {
     // Secrets (encrypted at rest)
     // ------------------------------------------------------------------
 
-    pub async fn list_secret_names(&self, app_id: Uuid) -> Result<Vec<String>, EnvError> {
+    pub async fn list_secret_names(&self, app_id: &AppId) -> Result<Vec<String>, EnvError> {
         let conn = self
             .registry
             .conn()
@@ -319,14 +321,14 @@ impl EnvStore {
         let rows = conn
             .query(
                 "SELECT key_name FROM zeroship.app_secrets WHERE app_id = $1 ORDER BY key_name",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         Ok(rows.iter().map(|r| r.get::<_, String>("key_name")).collect())
     }
 
-    pub async fn set_secret(&self, app_id: Uuid, key: &str, value: &str) -> Result<(), EnvError> {
+    pub async fn set_secret(&self, app_id: &AppId, key: &str, value: &str) -> Result<(), EnvError> {
         if !valid_key(key) {
             return Err(EnvError::BadKey(key.into()));
         }
@@ -354,7 +356,7 @@ impl EnvStore {
              )
              UPDATE zeroship.apps SET env_version = env_version + 1
              WHERE id = (SELECT app_id FROM upsert) AND deleted_at IS NULL",
-            &[&app_id, &key, &ct],
+            &[&app_id.as_str(), &key, &ct],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -362,7 +364,7 @@ impl EnvStore {
         Ok(())
     }
 
-    pub async fn delete_secret(&self, app_id: Uuid, key: &str) -> Result<bool, EnvError> {
+    pub async fn delete_secret(&self, app_id: &AppId, key: &str) -> Result<bool, EnvError> {
         let conn = self
             .registry
             .conn()
@@ -379,7 +381,7 @@ impl EnvStore {
                  )
                  UPDATE zeroship.apps SET env_version = env_version + 1
                  WHERE id = (SELECT app_id FROM del)",
-                &[&app_id, &key],
+                &[&app_id.as_str(), &key],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -394,7 +396,7 @@ impl EnvStore {
     /// authenticated by the control/master key.
     pub async fn merged_env(
         &self,
-        app_id: Uuid,
+        app_id: &AppId,
     ) -> Result<serde_json::Map<String, serde_json::Value>, EnvError> {
         // Distinguish "app exists, empty env" from "app deleted." The
         // latter should 404 on /internal/apps/:id/env so workers don't
@@ -405,7 +407,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let exists = conn
-            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         if exists.is_empty() {
@@ -419,7 +421,7 @@ impl EnvStore {
         let rows = conn
             .query(
                 "SELECT key_name, ciphertext FROM zeroship.app_secrets WHERE app_id = $1",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -452,7 +454,7 @@ impl EnvStore {
     /// Read the list of secret names the creator has opted to surface in
     /// `process.env`. Sorted, deterministic — used both for the worker
     /// wire format and the admin API readback.
-    pub async fn list_expose(&self, app_id: Uuid) -> Result<Vec<String>, EnvError> {
+    pub async fn list_expose(&self, app_id: &AppId) -> Result<Vec<String>, EnvError> {
         let conn = self
             .registry
             .conn()
@@ -461,7 +463,7 @@ impl EnvStore {
         let rows = conn
             .query(
                 "SELECT key_name FROM zeroship.app_env_expose WHERE app_id = $1 ORDER BY key_name",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -476,7 +478,7 @@ impl EnvStore {
     /// (no partial application). Two-statement transaction ensures the
     /// list is replaced atomically; a worker fetching env mid-replace
     /// sees either the old set or the new set, never a torn state.
-    pub async fn set_expose(&self, app_id: Uuid, keys: &[String]) -> Result<Vec<String>, EnvError> {
+    pub async fn set_expose(&self, app_id: &AppId, keys: &[String]) -> Result<Vec<String>, EnvError> {
         // Validate all names first — fail loud before touching the DB.
         for k in keys {
             if !valid_key(k) {
@@ -505,7 +507,7 @@ impl EnvStore {
         lock_live_app(&tx, app_id).await?;
         tx.execute(
             "DELETE FROM zeroship.app_env_expose WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -513,7 +515,7 @@ impl EnvStore {
             tx.execute(
                 "INSERT INTO zeroship.app_env_expose(app_id, key_name) VALUES($1, $2)
                  ON CONFLICT (app_id, key_name) DO NOTHING",
-                &[&app_id, &name],
+                &[&app_id.as_str(), &name],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -525,7 +527,7 @@ impl EnvStore {
         tx.execute(
             "UPDATE zeroship.apps SET env_version = env_version + 1 \
              WHERE id = $1 AND deleted_at IS NULL",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -553,7 +555,7 @@ impl EnvStore {
     /// authenticated by the control/master key.
     pub async fn merged_env_for_worker(
         &self,
-        app_id: Uuid,
+        app_id: &AppId,
     ) -> Result<serde_json::Value, EnvError> {
         let conn = self
             .registry
@@ -561,7 +563,7 @@ impl EnvStore {
             .await
             .map_err(|e| EnvError::Db(format!("{e}")))?;
         let exists = conn
-            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[&app_id])
+            .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
         if exists.is_empty() {
@@ -579,7 +581,7 @@ impl EnvStore {
         let secret_rows = conn
             .query(
                 "SELECT key_name, ciphertext FROM zeroship.app_secrets WHERE app_id = $1",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -617,14 +619,14 @@ impl EnvStore {
     /// primary key alone. If that succeeds, the ciphertext is already
     /// bound to the primary key and re-encryption is wasted work.
     /// Stack-local key copies are zeroized on scope exit.
-    pub async fn rotate_app(&self, app_id: Uuid) -> Result<usize, EnvError> {
+    pub async fn rotate_app(&self, app_id: &AppId) -> Result<usize, EnvError> {
         use zeroize::{Zeroize, Zeroizing};
 
         let conn = self.registry.conn().await.map_err(|e| EnvError::Db(format!("{e}")))?;
         let rows = conn
             .query(
                 "SELECT key_name, ciphertext FROM zeroship.app_secrets WHERE app_id = $1",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;
@@ -664,7 +666,7 @@ impl EnvStore {
             conn.execute(
                 "UPDATE zeroship.app_secrets SET ciphertext = $1, updated_at = NOW()
                  WHERE app_id = $2 AND key_name = $3",
-                &[&new_ct, &app_id, &k],
+                &[&new_ct, &app_id.as_str(), &k],
             )
             .await
             .map_err(|e| EnvError::Db(e.to_string()))?;

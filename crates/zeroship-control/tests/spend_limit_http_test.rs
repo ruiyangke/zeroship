@@ -31,6 +31,7 @@ use zeroship_control::spend::SpendEngine;
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::{AppId, UserId};
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -72,7 +73,7 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
         env_store,
         stripe_store,
         blob_store,
-            workflow_blob_store,
+        workflow_blob_store,
         control_key: SecretString::new("test-control-key".to_string()),
         master_key: SecretString::new(TEST_MASTER_KEY.to_string()),
         stripe_webhook_secret: SecretString::new(String::new()),
@@ -92,7 +93,10 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
         expected_oauth_audience: "control.zeroship.ai".to_string(),
         static_policies: zeroship_authz::load_platform_policies()
             .expect("bundled authz policies parse"),
-        auth_provider: zeroship_control::platform_auth_provider("https://auth.zeroship.test/oauth2", Some(common::platform_jwks_url())),
+        auth_provider: zeroship_control::platform_auth_provider(
+            "https://auth.zeroship.test/oauth2",
+            Some(common::platform_jwks_url()),
+        ),
         // No platform deploy-token mint here: that is control's OUTBOUND
         // destination for the device flow, and no fixture below drives one.
         provider_registry: zeroship_control::metering::provider::builtin_registry(),
@@ -122,8 +126,8 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
 async fn make_app_with_plan_default(
     state: &AppState,
     plan_default: i64,
-    owner_id: uuid::Uuid,
-) -> Uuid {
+    owner_id: &UserId,
+) -> AppId {
     let plan_id = format!("pln_sl_{}", Uuid::new_v4().simple());
     state
         .control_pg
@@ -137,20 +141,19 @@ async fn make_app_with_plan_default(
         )
         .await
         .expect("seed plan");
-    let app_id: Uuid = common::seed_app(
+    let app_id = common::seed_app(
         &state.control_pg,
         &format!("sl-{}", Uuid::new_v4()),
         &plan_id,
     )
     .await;
-    common::seat_app_organization_member(&state.control_pg, &app_id, &owner_id, "owner").await;
+    common::seat_app_organization_member(&state.control_pg, &app_id, owner_id, "owner").await;
     app_id
 }
 
 fn spend_limit_route(cfg: &mut web::ServiceConfig) {
     cfg.service(
-        web::resource("/api/apps/{id}/spend-limit")
-            .route(web::get().to(api::get_spend_limit)),
+        web::resource("/api/apps/{id}/spend-limit").route(web::get().to(api::get_spend_limit)),
     );
 }
 
@@ -161,29 +164,41 @@ async fn get_spend_limit_returns_the_app_spend_limit_override() {
     let pat = common::authz_fixture::seeded_principal(&state).await;
 
     // Plan default 1000c; no override yet ⇒ effective == plan default.
-    let app = make_app_with_plan_default(&state, 1000, pat.user_id).await;
+    let app = make_app_with_plan_default(&state, 1000, &pat.user_id).await;
 
     let svc = test::init_service(
-        web::App::new().state(state.clone()).configure(spend_limit_route),
+        web::App::new()
+            .state(state.clone())
+            .configure(spend_limit_route),
     )
     .await;
 
     let req = test::TestRequest::get()
-        .uri(&format!("/api/apps/{app}/spend-limit"))
+        .uri(&format!("/api/apps/{}/spend-limit", app.as_str()))
         .header("authorization", pat.bearer())
         .to_request();
     let body: serde_json::Value = test::read_response_json(&svc, req).await;
-    assert_eq!(body["override_cents"], serde_json::Value::Null, "no override yet");
+    assert_eq!(
+        body["override_cents"],
+        serde_json::Value::Null,
+        "no override yet"
+    );
     assert_eq!(body["plan_default_cents"], 1000);
-    assert_eq!(body["effective_limit_cents"], 1000, "effective == plan default when no override");
+    assert_eq!(
+        body["effective_limit_cents"], 1000,
+        "effective == plan default when no override"
+    );
 
     // Set an override via the REAL SpendEngine (writes app_spend_limit ONLY).
     let engine = SpendEngine::new(state.registry.clone());
-    engine.set_limit(&app, Some(250)).await.expect("set override");
+    engine
+        .set_limit(&app, Some(250))
+        .await
+        .expect("set override");
 
     // The endpoint must now reflect the override read from app_spend_limit.
     let req2 = test::TestRequest::get()
-        .uri(&format!("/api/apps/{app}/spend-limit"))
+        .uri(&format!("/api/apps/{}/spend-limit", app.as_str()))
         .header("authorization", pat.bearer())
         .to_request();
     let body2: serde_json::Value = test::read_response_json(&svc, req2).await;

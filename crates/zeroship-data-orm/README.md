@@ -22,6 +22,11 @@ collection descriptors. `Database::new` takes an explicit `OrmContext` with inst
 opens the configured backend through `ConnectOptions`, using the same URL grammar
 as the worker. Application functions take a backend-independent `&Database`. Schema changes and
 physical table creation belong to the migration engine and its service.
+Native platform services call `ConnectOptions::connection_authority` with a URL
+that authenticates as their provisioned service role. This preserves the login
+role while keeping the ORM's transaction-local resource limits. The option does
+not accept a role name or grant privileges, and worker connections retain the
+default per-app role narrowing.
 SQLite requires filesystem storage. Memory selectors and URI options are
 rejected; tests create and own their temporary database files explicitly.
 
@@ -155,14 +160,14 @@ same `PreparedOperation` path as those operations and the V8 adapter.
 Implementation: `src/orm.rs`, `src/orm/`, `src/crud/`, `src/transaction/`, and
 `src/exec.rs`, `src/executor.rs`, `src/protection/`, and `src/search.rs`. Macro implementations live in `crates/zeroship-data-macros/`.
 
-Run the engine tests and compiler contracts with:
+Run the ORM tests and compiler contracts with:
 
 ```sh
 cargo test -p zeroship-data-orm --lib
 cargo test -p zeroship-data-orm --test derive_contract
 ```
 
-The engine suite starts PostgreSQL through an owned testcontainer. Docker is
+The ORM suite starts PostgreSQL through an owned testcontainer. Docker is
 required; startup failure fails the test. No external database URL is needed:
 
 ```sh

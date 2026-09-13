@@ -25,6 +25,7 @@ use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 
 use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanPrice, FX_SCALE};
+use zeroship_core::AppId;
 
 fn db_url() -> String {
     common::require_control_db()
@@ -40,7 +41,7 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
 }
 
 /// Seed a user → organization_billing → app, returning `(organization_id, app_id)`.
-async fn seed_organization_app(client: &compio_postgres::Client) -> (String, Uuid) {
+async fn seed_organization_app(client: &compio_postgres::Client) -> (String, AppId) {
     let slug = format!("redesign-{}", Uuid::new_v4().simple());
     let organization = zeroship_core::typed_id::generate("org");
     client
@@ -71,8 +72,7 @@ async fn seed_organization_app(client: &compio_postgres::Client) -> (String, Uui
         )
         .await
         .expect("seed plan");
-    let app: Uuid =
-        common::seed_app(client, &format!("rd-{}", Uuid::new_v4()), &plan_id).await;
+    let app = common::seed_app(client, &format!("rd-{}", Uuid::new_v4()), &plan_id).await;
     (organization, app)
 }
 
@@ -135,7 +135,10 @@ async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
         .await
         .expect("atomic finalize is accepted");
     let status: String = client
-        .query("SELECT status FROM zeroship.invoices WHERE id = $1", &[&inv])
+        .query(
+            "SELECT status FROM zeroship.invoices WHERE id = $1",
+            &[&inv],
+        )
         .await
         .unwrap()[0]
         .get("status");
@@ -166,7 +169,13 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
     let mut usage: HashMap<String, i64> = HashMap::new();
     usage.insert("requests".to_string(), 750);
     let mut weights: MetricWeights = HashMap::new();
-    weights.insert("requests".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
+    weights.insert(
+        "requests".to_string(),
+        MetricWeight {
+            units_per_op: 1,
+            per_units: 1,
+        },
+    );
     let fx = 2 * FX_SCALE as u64;
     let price = PlanPrice {
         base_fee_cents: 50,
@@ -199,7 +208,7 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
                      $3, $4, $5, $6, $7, $8)",
             &[
                 &inv,
-                &app,
+                &app.as_str(),
                 &(price.included_units as i64),
                 &(fx as i64),
                 &(price.base_fee_cents as i64),
@@ -227,7 +236,7 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
             "SELECT included_units, fx_pico_cents_per_unit, base_fee_cents, amount_cents, \
                     usage_snapshot, weights_snapshot \
              FROM zeroship.invoice_lines WHERE invoice_id = $1 AND app_id = $2",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await
         .expect("read line")
@@ -335,7 +344,10 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
         .expect("lookup draft")
         .first()
         .map(|r| r.get::<_, String>("external_id"));
-    assert!(none.is_none(), "a draft invoice does not resolve a finalized id");
+    assert!(
+        none.is_none(),
+        "a draft invoice does not resolve a finalized id"
+    );
 
     drop(client);
     common::drain_pg().await;
@@ -349,7 +361,7 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
 async fn finalized_invoice_with_line(
     client: &compio_postgres::Client,
     organization: &str,
-    app: Uuid,
+    app: &AppId,
 ) -> String {
     let inv = claim_draft(client, organization).await;
     client
@@ -359,7 +371,7 @@ async fn finalized_invoice_with_line(
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
                      0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await
         .expect("insert line");
@@ -380,7 +392,7 @@ async fn finalized_invoice_rejects_nonvoid_update() {
     let client = pg(&url).await;
     let (organization, app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
-    let inv = finalized_invoice_with_line(&client, organization, app).await;
+    let inv = finalized_invoice_with_line(&client, organization, &app).await;
 
     // Any non-void mutation of a finalized invoice is rejected by the trigger.
     let res = client
@@ -389,13 +401,22 @@ async fn finalized_invoice_rejects_nonvoid_update() {
             &[&inv],
         )
         .await;
-    assert!(res.is_err(), "a finalized invoice rejects a money UPDATE (immutable)");
+    assert!(
+        res.is_err(),
+        "a finalized invoice rejects a money UPDATE (immutable)"
+    );
 
     // A bare status change to anything but void is rejected.
     let res2 = client
-        .execute("UPDATE zeroship.invoices SET status = 'draft' WHERE id = $1", &[&inv])
+        .execute(
+            "UPDATE zeroship.invoices SET status = 'draft' WHERE id = $1",
+            &[&inv],
+        )
         .await;
-    assert!(res2.is_err(), "finalized→draft is rejected (only finalized→void is legal)");
+    assert!(
+        res2.is_err(),
+        "finalized→draft is rejected (only finalized→void is legal)"
+    );
 
     drop(client);
     common::drain_pg().await;
@@ -407,7 +428,7 @@ async fn finalized_to_void_is_the_only_legal_transition() {
     let client = pg(&url).await;
     let (organization, app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
-    let inv = finalized_invoice_with_line(&client, organization, app).await;
+    let inv = finalized_invoice_with_line(&client, organization, &app).await;
 
     // finalized → void (money columns unchanged) is the ONE permitted transition.
     client
@@ -418,7 +439,10 @@ async fn finalized_to_void_is_the_only_legal_transition() {
         .await
         .expect("finalized→void is permitted");
     let status: String = client
-        .query("SELECT status FROM zeroship.invoices WHERE id = $1", &[&inv])
+        .query(
+            "SELECT status FROM zeroship.invoices WHERE id = $1",
+            &[&inv],
+        )
         .await
         .unwrap()[0]
         .get("status");
@@ -434,7 +458,7 @@ async fn finalized_invoice_line_amount_update_is_rejected() {
     let client = pg(&url).await;
     let (organization, app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
-    let inv = finalized_invoice_with_line(&client, organization, app).await;
+    let inv = finalized_invoice_with_line(&client, organization, &app).await;
 
     // The reproducibility record is frozen: UPDATE of a finalized invoice's line
     // amount is rejected by the line immutability trigger.
@@ -442,16 +466,19 @@ async fn finalized_invoice_line_amount_update_is_rejected() {
         .execute(
             "UPDATE zeroship.invoice_lines SET amount_cents = 1 \
              WHERE invoice_id = $1 AND app_id = $2",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await;
-    assert!(res.is_err(), "UPDATE of a finalized line's amount_cents is rejected");
+    assert!(
+        res.is_err(),
+        "UPDATE of a finalized line's amount_cents is rejected"
+    );
 
     // DELETE of a finalized line is likewise rejected.
     let res_del = client
         .execute(
             "DELETE FROM zeroship.invoice_lines WHERE invoice_id = $1 AND app_id = $2",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await;
     assert!(res_del.is_err(), "DELETE of a finalized line is rejected");
@@ -474,7 +501,7 @@ async fn finalized_invoice_rejects_line_insert() {
     let (organization, app) = seed_organization_app(&client).await;
     let organization = organization.as_str();
     // Finalize an invoice that has one line.
-    let inv = finalized_invoice_with_line(&client, organization, app).await;
+    let inv = finalized_invoice_with_line(&client, organization, &app).await;
 
     // Appending a SECOND line to the now-finalized invoice must be rejected.
     let (_creator2, app2) = seed_organization_app(&client).await;
@@ -485,7 +512,7 @@ async fn finalized_invoice_rejects_line_insert() {
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
                      0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
-            &[&inv, &app2],
+            &[&inv, &app2.as_str()],
         )
         .await;
     assert!(
@@ -504,7 +531,7 @@ async fn finalized_invoice_rejects_line_insert() {
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
                      0, 1000, 0, 50, '{}'::jsonb, '{}'::jsonb)",
-            &[&draft, &app3],
+            &[&draft, &app3.as_str()],
         )
         .await
         .expect("a draft invoice still accepts a line INSERT");
@@ -527,7 +554,7 @@ async fn draft_invoice_lines_stay_mutable_until_finalize() {
                 fx_pico_cents_per_unit, base_fee_cents, amount_cents, usage_snapshot, weights_snapshot) \
              VALUES ($1, $2, 0, (SELECT plan_id FROM zeroship.apps WHERE id = $2), \
                      0, 1000, 0, 100, '{}'::jsonb, '{}'::jsonb)",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await
         .expect("insert line");
@@ -536,14 +563,14 @@ async fn draft_invoice_lines_stay_mutable_until_finalize() {
         .execute(
             "UPDATE zeroship.invoice_lines SET amount_cents = 200 \
              WHERE invoice_id = $1 AND app_id = $2",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await
         .expect("a draft invoice's line stays mutable");
     let amt: i64 = client
         .query(
             "SELECT amount_cents FROM zeroship.invoice_lines WHERE invoice_id = $1 AND app_id = $2",
-            &[&inv, &app],
+            &[&inv, &app.as_str()],
         )
         .await
         .unwrap()[0]

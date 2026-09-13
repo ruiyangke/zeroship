@@ -1,5 +1,13 @@
 import { grant, now, raw, t, table } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  organizations: ["personal_owner_id", "created_by"],
+  projects: ["created_by"],
+  organization_members: ["user_id", "added_by", "changed_by"],
+  project_members: ["user_id", "added_by", "changed_by"],
+  organization_invites: ["invited_by", "consumed_by"],
+};
+
 // The ownership root. An ORGANIZATION owns projects, a project owns apps, and an
 // app reaches its organization through exactly ONE path: apps.project_id ->
 // projects.organization_id. There is no second edge to keep in agreement,
@@ -59,10 +67,8 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // and `(organization_id, user_id)` is consumed by the `organization_members`
 // primary key, so the two agree on every write to either side.
 //
-// USER AND APP FOREIGN KEYS POINT AT uuid COLUMNS, ON PURPOSE. `zeroship.users`
-// and `zeroship.apps` still key on uuid; converting them to typed ids is a
-// separate sweep with its own consumers. The new tables use typed-id TEXT for
-// their OWN ids and keep uuid where they reference those two.
+// User references use the same internal `usr` ID contract as `zeroship.users.id`.
+// App references remain UUIDs because `zeroship.apps.id` is still a UUID.
 //
 // `apps.project_id` IS ADDED NOT NULL WITH NO BACKFILL. Pre-launch, no deployed
 // database holds app rows to carry across, so a default-less NOT NULL add is the
@@ -137,8 +143,8 @@ export default {
         // The billed party and the notified party separate here for the first
         // time.
         billing_email: t.text({ caseSensitive: false }).notNull(),
-        personal_owner_id: t.uuid(),
-        created_by: t.uuid(),
+        personal_owner_id: t.text(),
+        created_by: t.text(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
       },
@@ -146,7 +152,7 @@ export default {
     });
     table("organizations", { schema: "zeroship" })
       .check("organizations_id_shape")
-      .add({ expr: (col) => col("id").regex("^org_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^org_[0-9a-z]{25}$") });
     table("organizations", { schema: "zeroship" })
       .unique("organizations_slug_key")
       .add({ columns: ["slug"] });
@@ -186,7 +192,7 @@ export default {
         organization_id: t.text().notNull(),
         slug: t.text({ caseSensitive: false }).notNull(),
         name: t.text().notNull(),
-        created_by: t.uuid(),
+        created_by: t.text(),
         created_at: t.timestamp().notNull().default(now()),
         updated_at: t.timestamp().notNull().default(now()),
       },
@@ -194,7 +200,7 @@ export default {
     });
     table("projects", { schema: "zeroship" })
       .check("projects_id_shape")
-      .add({ expr: (col) => col("id").regex("^prj_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^prj_[0-9a-z]{25}$") });
     // A project slug is organization-local. Only `apps.name` stays globally
     // unique, because it is the Host label the gateway routes on.
     table("projects", { schema: "zeroship" })
@@ -234,12 +240,12 @@ export default {
     table("organization_members", { schema: "zeroship" }).create({
       columns: {
         organization_id: t.text().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
-        added_by: t.uuid(),
+        added_by: t.text(),
         changed_at: t.timestamp().notNull().default(now()),
-        changed_by: t.uuid(),
+        changed_by: t.text(),
       },
       primaryKey: ["organization_id", "user_id"],
     });
@@ -303,12 +309,12 @@ export default {
       columns: {
         project_id: t.text().notNull(),
         organization_id: t.text().notNull(),
-        user_id: t.uuid().notNull(),
+        user_id: t.text().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
-        added_by: t.uuid(),
+        added_by: t.text(),
         changed_at: t.timestamp().notNull().default(now()),
-        changed_by: t.uuid(),
+        changed_by: t.text(),
       },
       primaryKey: ["project_id", "user_id"],
     });
@@ -390,14 +396,14 @@ export default {
         role: t.text().notNull(),
         role_rank: t.int().notNull(),
         role_billing_rank: t.int().notNull(),
-        invited_by: t.uuid(),
+        invited_by: t.text(),
         invited_by_rank: t.int().notNull(),
         invited_by_billing_rank: t.int().notNull(),
         purpose: t.text().notNull(),
         issued_at: t.timestamp().notNull().default(now()),
         expires_at: t.timestamp().notNull(),
         consumed_at: t.timestamp(),
-        consumed_by: t.uuid(),
+        consumed_by: t.text(),
         // NULL until a delivery attempt resolves. The row is written BEFORE the
         // mail is sent, so that a redemption can never arrive before the hash it
         // is matched against exists; the outcome is recorded by a later update.
@@ -407,7 +413,7 @@ export default {
     });
     table("organization_invites", { schema: "zeroship" })
       .check("organization_invites_id_shape")
-      .add({ expr: (col) => col("id").regex("^ivt_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("id").regex("^ivt_[0-9a-z]{25}$") });
     table("organization_invites", { schema: "zeroship" })
       .unique("organization_invites_token_key")
       .add({ columns: ["token_hash"] });
@@ -489,7 +495,7 @@ export default {
       .add({ type: t.text().notNull() });
     table("apps", { schema: "zeroship" })
       .check("apps_project_id_shape")
-      .add({ expr: (col) => col("project_id").regex("^prj_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("project_id").regex("^prj_[0-9a-z]{25}$") });
     // RESTRICT: an app is the deployable unit and a project delete must not take
     // one silently. There is no `apps.organization_id` -- the organization is
     // reached through the project, and one path cannot disagree with itself.
@@ -513,7 +519,7 @@ export default {
     // ---- sortable typed-id collations -------------------------------------
     // Every column above whose whole semantic domain is a canonical typed id,
     // plus every foreign-key copy of one. PostgreSQL's locale collation does not
-    // keep the base62 alphabet in numeric order, so a sortable entity id needs
+    // keep the base36 alphabet in numeric order, so a sortable entity id needs
     // bytewise ordering -- and the COPIES need the identical collation even
     // though nothing orders them, because a join against the collated id cannot
     // use a copy's ordinary index when the two collations differ. A missed copy
@@ -529,11 +535,11 @@ export default {
     // altering them to a collated `text` would destroy their case-insensitive
     // comparison.
     const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-      organizations: ["id"],
-      projects: ["id", "organization_id"],
-      organization_members: ["organization_id"],
-      project_members: ["project_id", "organization_id"],
-      organization_invites: ["id", "organization_id"],
+      organizations: ["id", "created_by", "personal_owner_id"],
+      projects: ["id", "organization_id", "created_by"],
+      organization_members: ["organization_id", "user_id", "added_by", "changed_by"],
+      project_members: ["project_id", "organization_id", "user_id", "added_by", "changed_by"],
+      organization_invites: ["id", "organization_id", "invited_by", "consumed_by"],
       apps: ["project_id"],
     };
     for (const [tableName, columns] of Object.entries(typedIdColumnsByTable)) {
@@ -546,6 +552,13 @@ export default {
           "typed-id text domains need bytewise comparison, including matching copies used by "
           + "indexed joins",
       });
+    }
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
     }
 
     // ---- grants ------------------------------------------------------------

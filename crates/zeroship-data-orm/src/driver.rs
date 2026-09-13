@@ -5,10 +5,9 @@
 //! Implementations must pass the database conformance suite before registration.
 
 use crate::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
+use crate::value::Value;
 use async_trait::async_trait;
 use std::{any::Any, fmt::Debug, ops::Deref, rc::Rc};
-use crate::value::Value;
-use crate::sql::{compile::SqlDialect};
 
 /// Cancellation can either deliver an interrupt or also finish rollback.
 #[derive(Debug)]
@@ -105,7 +104,6 @@ pub enum LeaseKind {
 /// install authority, begin transactions, or implement application features.
 #[async_trait(?Send)]
 pub trait Driver: Any + Debug {
-    fn dialect(&self) -> SqlDialect;
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         None
     }

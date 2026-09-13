@@ -5,13 +5,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use compio_postgres::Client;
 use ntex::http::StatusCode;
-use uuid::Uuid;
 use zeroship_authn::BearerVerifier;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
+use zeroship_id::{AppId, UserId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -33,7 +33,7 @@ pub trait Authenticator: Send + Sync {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
         request_ip: Option<IpAddr>,
         request_id: &str,
@@ -64,7 +64,7 @@ impl ControlPlaneAuthenticator {
     pub async fn verify_bearer(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_scope: Scope,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
@@ -75,19 +75,17 @@ impl ControlPlaneAuthenticator {
     async fn authorize(
         &self,
         seed: VerifiedSeed,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
     ) -> Result<VerifiedCaller, AuthError> {
-        let resource = Resource::App {
-            id: app_id.to_string(),
-        };
+        let resource = Resource::App { id: app_id.clone() };
         resource
             .validate_ids()
             .map_err(|message| AuthError::Infrastructure(message.to_owned()))?;
 
         let now = now_unix().map_err(AuthError::Infrastructure)?;
         let ctx = AuthzContext {
-            principal_id: seed.principal_id,
+            principal_id: seed.principal_id.clone(),
             token_policy: seed.token_policy,
             action: required_action,
             resource,
@@ -103,12 +101,8 @@ impl ControlPlaneAuthenticator {
         }
 
         if requires_organization_owner(required_action)
-            && !caller_holds_organization_ownership(
-                &self.control_pg,
-                seed.principal_id,
-                app_id,
-            )
-            .await?
+            && !caller_holds_organization_ownership(&self.control_pg, &seed.principal_id, app_id)
+                .await?
         {
             return Err(AuthError::Forbidden);
         }
@@ -124,7 +118,7 @@ impl Authenticator for ControlPlaneAuthenticator {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
         request_ip: Option<IpAddr>,
         request_id: &str,
@@ -137,7 +131,7 @@ impl Authenticator for ControlPlaneAuthenticator {
         if verified.seed_platform_cli_grants {
             let materialization = zeroship_authn::platform_cli::materialize_default_grants(
                 self.control_pg.as_ref(),
-                verified.principal_id,
+                &verified.principal_id,
             )
             .await
             .map_err(|error| {
@@ -171,7 +165,7 @@ impl Authenticator for ControlPlaneAuthenticator {
 
 #[derive(Debug)]
 struct VerifiedSeed {
-    principal_id: Uuid,
+    principal_id: UserId,
     token_policy: Option<authz::Policy>,
     request_id: String,
     request_ip: Option<IpAddr>,
@@ -195,10 +189,20 @@ struct VerifiedSeed {
 /// requiring the ORGANIZATION rank means only somebody who answers for the whole
 /// organization can. Read this as the ceiling being organization-level on
 /// purpose, not as an oversight about `project_members`.
+///
+/// # The app id is bound as `text`, and that is a requirement on the column
+///
+/// [`AppId`] exposes no route to any embedded bits, so text against text is the
+/// only comparison this join can make. A database whose `zeroship.apps.id` is
+/// still `uuid` fails this query outright with a type error rather than matching
+/// no row - which matters, because no row here is indistinguishable from a
+/// caller who holds no organization seat, and this function's `false` denies the
+/// apply. `zeroship_authz::authority` binds the same column the same way and
+/// spells out the same requirement.
 async fn caller_holds_organization_ownership(
     pg: &Client,
-    principal_id: Uuid,
-    app_id: Uuid,
+    principal_id: &UserId,
+    app_id: &AppId,
 ) -> Result<bool, AuthError> {
     let rows = pg
         .query(
@@ -208,9 +212,9 @@ async fn caller_holds_organization_ownership(
                JOIN zeroship.organization_members m \
                     ON m.organization_id = p.organization_id AND m.user_id = $2 \
                JOIN zeroship.organization_roles r ON r.role = m.role \
-              WHERE a.id = $1 \
+              WHERE a.id = $1::text \
                 AND r.rank >= (SELECT rank FROM zeroship.organization_roles WHERE role = 'owner')",
-            &[&app_id, &principal_id],
+            &[&app_id.as_str(), &principal_id.as_str()],
         )
         .await
         .map_err(|err| {

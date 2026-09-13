@@ -1283,7 +1283,7 @@ mod pooled_retry_tests {
     }
 
     async fn dispatch(worker_url: &str) -> Result<HttpResponse, String> {
-        let app_id = zeroship_core::app_id::canonical_app_id_for(&Uuid::new_v4());
+        let app_id = AppId::mint();
         let request_id = Uuid::new_v4();
         forward_to_worker_path(
             worker_url,

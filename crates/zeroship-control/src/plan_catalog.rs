@@ -1,7 +1,7 @@
 //! Plan catalog — the operator-editable, server-side pricing catalog.
 //!
 //! Replaces the free-text, self-escalatable `plan_id`: every plan is a row in
-//! `zeroship.plans` keyed by a `pln_<base62>` typed id, and `apps.plan_id` is
+//! `zeroship.plans` keyed by a `pln_<base36>` typed id, and `apps.plan_id` is
 //! an FK into it. An app cannot pick an
 //! unpriced or oversized plan — the FK + the [`Registry`]'s existence check
 //! reject any id that is not a real, unarchived plan.
@@ -25,7 +25,7 @@ use crate::registry::{Registry, RegistryError};
 /// plans stay resolvable for historical FKs but can't be assigned to new apps).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
-    /// `pln_<base62>` typed id.
+    /// `pln_<base36>` typed id.
     pub id: String,
     pub name: String,
     pub price: PlanPrice,
@@ -333,7 +333,7 @@ fn row_to_plan(row: &Row) -> Result<Plan, RegistryError> {
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Deterministic `pln_<base62>` id for a built-in tier.
+/// Deterministic `pln_<base36>` id for a built-in tier.
 ///
 /// The hash input is FROZEN: SHA-256(label || 0x00 || "builtin"), with the
 /// RFC-4122 variant and version-8 nibbles stamped in. Changing any part of it
@@ -473,7 +473,7 @@ impl std::error::Error for PlanSeedError {}
 /// Idempotently seed the built-in plan tiers into the catalog.
 ///
 /// Every write is an `ON CONFLICT (id) DO UPDATE` keyed on the deterministic
-/// `pln_<base62>` ids, so re-running is a no-op. `main.rs` calls this on every
+/// `pln_<base36>` ids, so re-running is a no-op. `main.rs` calls this on every
 /// boot, before anything can write an app row, because `apps.plan_id` is an FK
 /// into `zeroship.plans`.
 ///
@@ -515,8 +515,8 @@ mod builtin_tier_tests {
     /// sense, only that they have not moved.
     #[test]
     fn builtin_plan_ids_are_frozen() {
-        assert_eq!(free_plan_id(), "pln_0MgUI3oStlZHqAUhhcPFQT");
-        assert_eq!(pro_plan_id(), "pln_3nxwAuzO7Wr5LYwwyIi5Ww");
-        assert_eq!(unlimited_plan_id(), "pln_2EchEFipZZLsHlnE6BkZXJ");
+        assert_eq!(free_plan_id(), "pln_0pmepeesn0v30md0sick7lo65");
+        assert_eq!(pro_plan_id(), "pln_7einr1yv1u9nabqjohrit3f7y");
+        assert_eq!(unlimited_plan_id(), "pln_4cklt6kbysmsugjft40bdetjx");
     }
 }

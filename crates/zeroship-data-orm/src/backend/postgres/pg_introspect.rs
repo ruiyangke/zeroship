@@ -6,10 +6,8 @@
 //! module populates those values from PostgreSQL without embedding the driver
 //! in the shared schema floor.
 
+use crate::sql::catalog::{ColumnInfo, ForeignKeyInfo, IndexInfo, LiveSchema, MaskMeta};
 use compio_postgres::Pool;
-use crate::sql::catalog::{
-    ColumnInfo, EncryptionMeta, ForeignKeyInfo, IndexInfo, LiveSchema, MaskMeta,
-};
 
 /// Error from the live-schema introspection helpers.
 ///
@@ -55,28 +53,18 @@ fn coded_sql(context: &str, e: compio_postgres::Error) -> SchemaError {
     SchemaError::new(context, e)
 }
 
-/// Introspect the live schema for the given app + collection. Returns an
-/// empty [`LiveSchema`] if the schema itself does not exist yet (first deploy).
-///
-/// We restrict the catalog scan to the app's namespace (`nspname = <app_id>`)
-/// to avoid leaking cross-tenant metadata. The query joins
-/// `pg_namespace -> pg_class -> pg_attribute / pg_index` and pulls
-/// `pg_get_expr(adbin, adrelid)` for default expressions along with
-/// `provolatile` for any function the default invokes.
-pub(crate) async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, SchemaError> {
+/// Read catalog metadata for the bound physical schema on the supplied connection.
+pub(crate) async fn read_live_schema(
+    client: &compio_postgres::Client,
+    schema: &str,
+) -> Result<LiveSchema, SchemaError> {
     let mut out = LiveSchema::default();
-    let app_param = app_id.to_string();
-    let params: Vec<&str> = vec![app_param.as_str()];
+    let params = [schema];
 
     // ----- columns -----
     //
-    // The LEFT JOIN against `pg_description` pulls the
-    // per-column comment populated by the
-    // `COMMENT ON COLUMN <coll>.<sibling> IS 'zero-migrate:mask:...'`
-    // statements the DDL emitter writes alongside CREATE TABLE +
-    // ALTER ADD COLUMN. We hand the raw description string back as
-    // `pg_comment`; the second pass below parses sentinel-tagged
-    // sibling columns and back-attaches a `MaskMeta` onto the parent.
+    // Read protection metadata from column comments and attach it after the
+    // complete column map is available.
     let col_sql = r#"
 SELECT c.relname AS table_name,
        a.attname AS column_name,
@@ -103,12 +91,12 @@ SELECT c.relname AS table_name,
    AND NOT a.attisdropped
  ORDER BY c.relname, a.attnum
 "#;
-    let rows = pool
+    let rows = client
         .query_text_params(col_sql, &params)
         .await
         .map_err(|e| coded_sql("read columns failed", e))?;
     // Collect mask sentinels, then attach their metadata to the completed column map.
-    let mut sibling_sentinels: std::collections::HashMap<(String, String), String> =
+    let mut mask_sentinels: std::collections::HashMap<(String, String), String> =
         std::collections::HashMap::new();
     for row in &rows {
         let table: String = row.try_get("table_name").unwrap_or_default();
@@ -123,26 +111,13 @@ SELECT c.relname AS table_name,
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
         // Recover protection markers from persisted column comments.
         // Mask metadata is attached after all columns have been collected.
-        let mut encryption: Option<EncryptionMeta> = None;
+        let mut encrypted = false;
         if let Some(comment) = &pg_comment {
             // The mask sentinel belongs to the visible field column.
             if comment.starts_with(crate::sql::mask_codec::MASK_SENTINEL_PREFIX) {
-                sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
-            } else if comment.starts_with(crate::sql::mask_codec::ENC_SENTINEL_PREFIX) {
-                match crate::sql::mask_codec::parse_encryption_sentinel(comment) {
-                    Ok(meta) => encryption = Some(meta),
-                    Err(e) => {
-                        // Malformed sentinels are logged and omitted from the recovered metadata.
-                        tracing::warn!(
-                            table = %table,
-                            column = %column,
-                            comment = %comment,
-                            error = %e,
-                            "diff: malformed zero-migrate:enc sentinel on PG column; \
-                             treating column as unencrypted"
-                        );
-                    }
-                }
+                mask_sentinels.insert((table.clone(), column.clone()), comment.clone());
+            } else if crate::sql::mask_codec::is_encryption_sentinel(comment) {
+                encrypted = true;
             }
         }
         out.tables.entry(table).or_default().insert(
@@ -152,59 +127,52 @@ SELECT c.relname AS table_name,
                 not_null,
                 default_expr,
                 default_volatility,
-                encryption,
+                encrypted,
                 // Remaining fields default; vector/geo are populated
                 // from `information_schema` + `pg_indexes` introspection.
                 ..Default::default()
             },
         );
     }
-    // Second pass: for every column carrying a `zero-migrate:mask:…` sentinel, parse
-    // the kind+classification and stamp `MaskMeta` on it. The column carrying
-    // the sentinel IS the declared field - the mask lives under the field's own
-    // name - so there is nothing to resolve. The diff classifier reads
-    // `col.mask` to decide whether to emit a backfill, rewrite, or removal op.
-    for ((table, masked_column), sentinel) in sibling_sentinels {
+    // Attach each mask sentinel to the declared display column that carries it.
+    for ((table, display_column), sentinel) in mask_sentinels {
         let Some(table_cols) = out.tables.get_mut(&table) else {
             continue;
         };
-        let Some(parent_col) = table_cols.get_mut(&masked_column) else {
+        let Some(column) = table_cols.get_mut(&display_column) else {
             tracing::warn!(
                 table = %table,
-                column = %masked_column,
+                column = %display_column,
                 "diff: mask sentinel on a column the introspection did not \
                  return; ignoring",
             );
             continue;
         };
-        let sibling = masked_column;
-        let (kind, classification) =
-            match crate::sql::mask_codec::parse_mask_sentinel(&sentinel) {
-                Ok(p) => p,
-                Err(e) => {
-                    // Surface a malformed sentinel as a tracing::warn.
-                    // the diff will then treat the parent as
-                    // `mask: None` and a re-deploy would re-emit the
-                    // sentinel via the AddColumn / CreateTable path.
-                    // We don't propagate as an Err because a transient
-                    // hand-edit shouldn't take the entire deploy down;
-                    // operators get a loud warn instead.
-                    tracing::warn!(
-                        table = %table,
-                        column = %sibling,
-                        sentinel = %sentinel,
-                        error = %e,
-                        "diff: malformed mask sentinel on a PG column; \
-                         treating it as unmasked"
-                    );
-                    continue;
-                }
-            };
-        parent_col.mask = Some(MaskMeta {
+        let (kind, classification) = match crate::sql::mask_codec::parse_mask_sentinel(&sentinel) {
+            Ok(p) => p,
+            Err(e) => {
+                // Surface a malformed sentinel as a tracing::warn.
+                // the diff will then treat the parent as
+                // `mask: None` and a re-deploy would re-emit the
+                // sentinel via the AddColumn / CreateTable path.
+                // We don't propagate as an Err because a transient
+                // hand-edit shouldn't take the entire deploy down;
+                // operators get a loud warn instead.
+                tracing::warn!(
+                    table = %table,
+                    column = %display_column,
+                    sentinel = %sentinel,
+                    error = %e,
+                    "diff: malformed mask sentinel on a PG column; \
+                     treating it as unmasked"
+                );
+                continue;
+            }
+        };
+        column.mask = Some(MaskMeta {
             kind,
             classification,
-            // The OTHER column of the pair: the one holding the real value.
-            sibling_column: crate::sql::compile::raw_column_name(&sibling),
+            raw_column: crate::sql::mapping::raw_column_name(&display_column),
         });
     }
 
@@ -230,7 +198,7 @@ SELECT con.conname AS constraint_name,
   JOIN pg_namespace n ON n.oid = cl.relnamespace
  WHERE n.nspname = $1 AND con.contype = 'f'
 "#;
-    let rows = pool
+    let rows = client
         .query_text_params(fk_sql, &params)
         .await
         .map_err(|e| coded_sql("read foreign_keys failed", e))?;
@@ -279,7 +247,7 @@ SELECT c.relname AS table_name,
  WHERE n.nspname = $1
    AND NOT i.indisprimary
 "#;
-    let rows = pool
+    let rows = client
         .query_text_params(idx_sql, &params)
         .await
         .map_err(|e| coded_sql("read indexes failed", e))?;

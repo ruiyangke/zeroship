@@ -154,19 +154,16 @@ export function devEntry(options: DevEntryOptions): DevEntry {
   const log = options.logger?.log ?? ((m) => console.log(m));
   const logError = options.logger?.error ?? ((m) => console.error(m));
 
-  // **P9 §8** — capture the platform-handle resolver NOW, at devEntry()
-  // call time (dev-bootstrap module init). The production `runtime-entry`
-  // that wraps the dev-bootstrap deletes `globalThis.__zsDbPlatform`
-  // during ITS module evaluation — which runs AFTER this module's
-  // top-level (ESM import hoisting) but BEFORE dev's lazy schema install
-  // (first request). Capturing the reference here, module-locally (and
-  // therefore invisible to user code, which lives in a separate module),
-  // lets the lazy install still resolve the `__platform` handle after the
-  // global is gone. `setMaskPolicy` lives on that handle; without this
-  // capture, the dev mask-policy flush would silently no-op.
+  // Capture and remove the resolver while the trusted dev bootstrap evaluates.
+  // Creator code loads later through the module runner and cannot retain it.
   const platformResolver = (globalThis as unknown as {
     __zsDbPlatform?: (db: unknown) => unknown;
   }).__zsDbPlatform;
+  try {
+    delete (globalThis as unknown as { __zsDbPlatform?: unknown }).__zsDbPlatform;
+  } catch {
+    // The runtime installs this as a configurable property.
+  }
 
   // Module-local handle on the most recent mask-policy flush.
   // Stage 6 of the @zeroship/db refactor replaced the cross-module
@@ -219,7 +216,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
         typeof (value as { collections?: unknown }).collections === "object" &&
         !Array.isArray((value as { collections?: unknown }).collections)
       ) {
-        const out: Record<string, unknown> = {};
+        const out = Object.create(null) as Record<string, unknown>;
         for (const [name, collection] of Object.entries(
           (value as { collections: Record<string, unknown> }).collections,
         )) {
@@ -274,10 +271,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     const installSchema = options.getInstallSchema
       ? await options.getInstallSchema()
       : bundledInstallSchema;
-    // **P9 §8** — resolve the `__platform` handle via the captured
-    // resolver (the global may already be deleted by the production
-    // runtime-entry; the module-local capture survives). It is used only
-    // for the mask-policy flush below.
+    // Resolve the handle through the module-local capability captured at boot.
     const platform =
       typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
     installSchema(

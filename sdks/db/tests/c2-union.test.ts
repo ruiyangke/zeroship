@@ -5,8 +5,7 @@
  * discriminator, validation dispatch, and the normalized flat-column
  * expansion that hands off to the Rust DDL emitter.
  *
- * Postgres-side DDL coverage lives in
- * `crates/zeroship-data-orm/src/sql/compile.rs` golden tests.
+ * ORM value validation is covered by the typed codec tests.
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

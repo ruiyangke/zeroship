@@ -26,7 +26,7 @@
 # derived as client_id_for_app(console_app_id("console.zeroship.localhost")):
 #   console_app_id(host)   = uuid8(SHA-256("zeroship:console:app:v1\0" || host))
 #                          = 5819848e-dc81-819a-bb81-7ef736a413d5
-#   client_id_for_app(uuid)= "oac_" + base62(uuid) = oac_2gEz9tHlodeyWPNRtQsLsT
+#   client_id_for_app(uuid)= "oac_" + base36(uuid) = oac_57rkd1lczibx53osdvrjq2z11
 # `console_app_id` lived in the console seed, which was REMOVED when the console
 # stopped being a built-in app, so there is no `--bootstrap-console` log line to
 # verify it against and no code that reproduces the first line. The console is
@@ -36,7 +36,7 @@
 # replace it with the client id the console's own deploy actually produces.
 # Trusting a client id nothing mints is inert today, not dangerous, but it will
 # read as configured trust to the next person.
-trusted_oauth_clients = ["oac_2gEz9tHlodeyWPNRtQsLsT"]
+trusted_oauth_clients = ["oac_57rkd1lczibx53osdvrjq2z11"]
 # Console origin(s) the auth-service login/signup/consent documents admit via CSP
 # `frame-ancestors` so the console's immersive iframe login can embed them
 # (design sec. 4.3/sec. 10.1). Browser-enforced anti-clickjacking: ONLY a listed origin

@@ -36,7 +36,7 @@ import { createFunction, grant, now, raw, t, table, uuidV4 } from "@zeroship/mig
 //
 // ---- the billing subject stops being a human ----
 //
-// `creator_id` was a `users.id` uuid: the billing and Connect roots pointed at
+// `creator_id` was a `users.id` value: the billing and Connect roots pointed at
 // it directly and every child reached it through one of them. The subject is
 // now `organizations.id`, which is TEXT, so this is a retarget, a rename AND a
 // type change all at once. What it buys immediately:
@@ -123,7 +123,7 @@ export default {
       .add({ type: t.text().notNull() });
     table("apps", { schema: "zeroship" })
       .check("apps_organization_id_shape")
-      .add({ expr: (col) => col("organization_id").regex("^org_[0-9A-Za-z]{22}$") });
+      .add({ expr: (col) => col("organization_id").regex("^org_[0-9a-z]{25}$") });
     // Two scans, two leading columns. `(project_id, organization_id)` answers
     // "the apps of this project" and backs the parent key the next file adds;
     // `(organization_id)` answers "the apps of this organization", which is the

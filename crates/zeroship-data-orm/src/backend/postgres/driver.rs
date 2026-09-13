@@ -1,10 +1,9 @@
 //! PostgreSQL implementation of the ORM execution contracts.
+use crate::value::Value;
 use crate::{driver::*, error::*};
 use async_trait::async_trait;
 use compio_postgres::{CancelToken, Pool, PoolConnection};
 use std::rc::Rc;
-use crate::value::Value;
-use crate::sql::{compile::SqlDialect};
 
 #[derive(Debug)]
 struct PgCancellation {
@@ -71,9 +70,6 @@ impl PostgresDriver {
 }
 #[async_trait(?Send)]
 impl Driver for PostgresDriver {
-    fn dialect(&self) -> SqlDialect {
-        SqlDialect::Postgres
-    }
     fn pool_counts(&self) -> Option<(usize, usize, usize)> {
         Some((
             self.pool.idle_count(),
@@ -98,18 +94,14 @@ mod tests {
     #[compio::test]
     async fn native_exec_reports_command_counts() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
-        let pool = Pool::connect(&postgres.url(), 2)
-            .await
-            .unwrap();
-        crate::driver::tests::native_commands(PostgresDriver::new(Rc::new(pool))).await;
+        let pool = Pool::connect(&postgres.url(), 2).await.unwrap();
+        crate::driver::tests::native_commands(PostgresDriver::new(Rc::new(pool)), "BYTEA").await;
     }
 
     #[compio::test]
     async fn invalid_native_results_are_errors_and_the_session_remains_usable() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
-        let pool = Pool::connect(&postgres.url(), 1)
-            .await
-            .unwrap();
+        let pool = Pool::connect(&postgres.url(), 1).await.unwrap();
         let driver = PostgresDriver::new(Rc::new(pool));
         let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
         for expression in [
@@ -142,9 +134,7 @@ mod tests {
     #[compio::test]
     async fn timestamp_rounding_is_consistent_across_epochs() {
         let postgres = crate::tests::fixtures::postgres::Postgres::start();
-        let pool = Pool::connect(&postgres.url(), 1)
-            .await
-            .unwrap();
+        let pool = Pool::connect(&postgres.url(), 1).await.unwrap();
         let driver = PostgresDriver::new(Rc::new(pool));
         let session = driver.acquire(LeaseKind::Autocommit).await.unwrap();
         for timestamp in [

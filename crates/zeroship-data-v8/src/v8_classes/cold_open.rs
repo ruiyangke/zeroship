@@ -142,8 +142,13 @@ fn cold_collection<'s>(
     app_id: &str,
     name: &str,
 ) -> v8::Local<'s, v8::Object> {
-    super::collection::mint_collection(scope, name.to_string(), crate::tests::fixtures::binding(app_id))
-        .expect("mint_collection")
+    super::collection::mint_collection(
+        scope,
+        name.to_string(),
+        crate::tests::fixtures::binding(app_id),
+        None,
+    )
+    .expect("mint_collection")
 }
 
 /// `dispatch_unmask_field`, entered at `collection.unmaskField(pk, column)`.
@@ -306,7 +311,7 @@ fn a_query_hint_carrying_find_opens_the_cold_isolates_backend() {
 
     let collection = cold_collection(scope, app_id, "users");
     let filter = js_json(scope, "{}");
-    let opts = js_json(scope, r#"{ "unmask": { "columns": ["ssn"] } }"#);
+    let opts = js_json(scope, r#"{ "unmask": ["ssn"] }"#);
     call_js_method(scope, collection, "find", &[filter, opts]);
 
     assert_the_dispatch_opened_the_backend("dispatch_find", &state);
@@ -327,8 +332,8 @@ fn collection_dispatch_uses_the_injected_orm_factory() {
     };
     struct HostFactory(Arc<AtomicUsize>);
     impl BackendFactory for HostFactory {
-        fn dialect(&self) -> zeroship_data_orm::sql::compile::SqlDialect {
-            zeroship_data_orm::sql::compile::SqlDialect::Sqlite
+        fn sql_registration(&self) -> zeroship_data_orm::sql::registration::SqlRegistration {
+            zeroship_data_orm::sql::registration::SqlRegistration::sqlite()
         }
         fn connect(
             &self,

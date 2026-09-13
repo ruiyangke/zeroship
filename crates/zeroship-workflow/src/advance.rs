@@ -4,11 +4,11 @@ use chrono::{DateTime, Utc};
 use compio_postgres::{Client, GenericClient, NoTls, Row};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use crate::engine::StepResult;
 use crate::errors::WorkflowError;
-use crate::store::pg::WorkflowTables;
+use crate::store::pg::{app_id_from_row, WorkflowTables};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -24,14 +24,14 @@ pub enum WorkflowAdvanceNackKind {
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowRunDispatchRequest {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkflowAdvanceRegistration {
     pub run_id: String,
-    pub app_id: Uuid,
+    pub app_id: AppId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_wake_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -40,7 +40,7 @@ pub struct WorkflowAdvanceRegistration {
 
 impl WorkflowAdvanceRegistration {
     #[must_use]
-    pub fn next(run_id: impl Into<String>, app_id: Uuid, next_wake_at: DateTime<Utc>) -> Self {
+    pub fn next(run_id: impl Into<String>, app_id: AppId, next_wake_at: DateTime<Utc>) -> Self {
         Self {
             run_id: run_id.into(),
             app_id,
@@ -50,7 +50,7 @@ impl WorkflowAdvanceRegistration {
     }
 
     #[must_use]
-    pub fn terminal(run_id: impl Into<String>, app_id: Uuid) -> Self {
+    pub fn terminal(run_id: impl Into<String>, app_id: AppId) -> Self {
         Self {
             run_id: run_id.into(),
             app_id,
@@ -60,7 +60,7 @@ impl WorkflowAdvanceRegistration {
     }
 
     #[must_use]
-    pub fn preserve(run_id: impl Into<String>, app_id: Uuid) -> Self {
+    pub fn preserve(run_id: impl Into<String>, app_id: AppId) -> Self {
         Self {
             run_id: run_id.into(),
             app_id,
@@ -764,7 +764,7 @@ fn parse_duration_number(raw: &str) -> Option<f64> {
 #[allow(clippy::future_not_send)]
 pub async fn collect_post_apply_registrations(
     db_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     family: bool,
 ) -> Result<Vec<WorkflowAdvanceRegistration>, WorkflowError> {
@@ -774,14 +774,14 @@ pub async fn collect_post_apply_registrations(
 
 pub async fn collect_post_apply_registrations_on_conn<C>(
     conn: &C,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     family: bool,
 ) -> Result<Vec<WorkflowAdvanceRegistration>, WorkflowError>
 where
     C: GenericClient + Sync,
 {
-    let tables = WorkflowTables::for_app_id(&app_id);
+    let tables = WorkflowTables::for_app_id(app_id);
     if family {
         collect_family_registrations(conn, &tables, run_id).await
     } else {
@@ -821,7 +821,7 @@ where
         )
         .await?;
     let Some(row) = rows.first() else {
-        return Ok(vec![WorkflowAdvanceRegistration::terminal(run_id, tables.app_id)]);
+        return Ok(vec![WorkflowAdvanceRegistration::terminal(run_id, tables.app_id.clone())]);
     };
     Ok(vec![registration_for_row(conn, tables, row).await?])
 }
@@ -864,7 +864,7 @@ where
     );
     let rows = conn.query(&sql, &[&run_id]).await?;
     if rows.is_empty() {
-        return Ok(vec![WorkflowAdvanceRegistration::terminal(run_id, tables.app_id)]);
+        return Ok(vec![WorkflowAdvanceRegistration::terminal(run_id, tables.app_id.clone())]);
     }
 
     let mut seen = HashSet::new();
@@ -987,7 +987,7 @@ where
     C: GenericClient + Sync,
 {
     let run_id: String = row.get("id");
-    let app_id: Uuid = row.get("app_id");
+    let app_id = app_id_from_row(row, "app_id")?;
     let state: String = row.get("state");
     let mut wake_at: Option<DateTime<Utc>> = row.get("wake_at");
     let cancel_requested: bool = row.get("cancel_requested");

@@ -27,6 +27,7 @@ export type {
   TxQuery,
   TransactionOptions,
   Collections,
+  TransactionDb,
   DbExtensions,
   Db,
   InstallSchemaOptions,

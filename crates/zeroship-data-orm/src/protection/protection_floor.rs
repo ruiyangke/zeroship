@@ -55,7 +55,7 @@ fn floor_from_live(live: &crate::sql::catalog::LiveSchema) -> ProtectionFloor {
             .filter_map(|(column, info)| {
                 let stored = StoredProtection {
                     masked: info.mask.is_some(),
-                    encrypted: info.encryption.is_some(),
+                    encrypted: info.encrypted,
                 };
                 stored.any().then(|| (column.clone(), stored))
             })
@@ -93,11 +93,8 @@ async fn resolve_floor(
     if let Some(hit) = crate::orm_context::current().floors(|f| f.get(&key).cloned()) {
         return Ok(hit);
     }
-    // Boxed: an inline `LiveSchema` future makes the whole write path's future
-    // ~16 KB, and it is constructed on EVERY write while the await it guards
-    // runs at most once per binding. The allocation is on the cold arm; the
-    // stack saving is on the hot one.
-    let live = Box::pin(route.backend().introspect_schema(binding.app_id())).await?;
+    // Keep catalog work out of the hot write future's stack allocation.
+    let live = Box::pin(crate::exec::read_catalog(route)).await?;
     let floor = Rc::new(floor_from_live(&live));
     crate::orm_context::current().floors_mut(|f| f.insert(key, Rc::clone(&floor)));
     Ok(floor)
@@ -188,10 +185,7 @@ pub fn reset_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sql::catalog::WrappedType;
-    use crate::sql::catalog::{
-        Classification, ColumnInfo, EncryptionMeta, LiveSchema, MaskKind, MaskMeta,
-    };
+    use crate::sql::catalog::{Classification, ColumnInfo, LiveSchema, MaskKind, MaskMeta};
 
     use crate::value;
 
@@ -200,7 +194,7 @@ mod tests {
             mask: Some(MaskMeta {
                 kind: MaskKind::Last4,
                 classification: Classification::Pci,
-                sibling_column: crate::sql::compile::raw_column_name("ssn"),
+                raw_column: crate::sql::mapping::raw_column_name("ssn"),
             }),
             ..Default::default()
         }
@@ -208,9 +202,7 @@ mod tests {
 
     fn encrypted_column() -> ColumnInfo {
         ColumnInfo {
-            encryption: Some(EncryptionMeta {
-                wraps: WrappedType::String,
-            }),
+            encrypted: true,
             ..Default::default()
         }
     }

@@ -11,21 +11,7 @@ import { ValidationError } from "./errors";
 // Document mapping (native → user)
 // ---------------------------------------------------------------------------
 
-/** @internal Convert column names to JS field names. Returns a new object;
- *  the native side hands back real JS objects we don't own (see commit
- *  9393287), so mutating in place would leak rename side-effects to any
- *  other reference the runtime keeps.
- *
- *  **P9 PR 2** — the `__zsmask__`-sentinel rehydration that used to live
- *  here is gone. Masked columns are now rehydrated Rust-side at
- *  `JSON.parse` time (`ResolveValue::JsonWithRehydration` →
- *  `masked_value::rehydrate_masked_values`): the native row already
- *  carries real `MaskedValue` v8_class instances by the time it reaches
- *  the SDK, so `mapResultDoc` only needs to rename keys. Encrypted
- *  columns are likewise decrypted Rust-side (`apply_encryption_on_read`)
- *  before the row crosses the boundary, so there is no SDK-side
- *  ciphertext arm either.
- */
+/** @internal Rename native row keys without mutating the supplied object. */
 export function mapResultDoc(doc: PlainObject, toField: (s: string) => string): PlainObject {
   const out: PlainObject = {};
   for (const key of Object.keys(doc)) {
@@ -61,19 +47,7 @@ export function mapFilterOutbound(filter: ZeroshipDbFilter, toColumn: (s: string
       { code: "FILTER_NESTING_TOO_DEEP" as const },
     );
   }
-  // R4 IMPORTANT-1 — null/non-object filter rejection at the boundary.
-  // `for (const key in null)` is a zero-iteration no-op (does NOT throw),
-  // so a `null` filter used to slip through `needsMap === false`, return
-  // verbatim, and reach `_nativeCollection().deleteMany(null)` — where
-  // the native side's behaviour on `null` defaults to "matches every
-  // row." This is a destructive-by-accident path that the TS types reject
-  // but a JSON-RPC caller or an `as any` escape can trip. Reject hard
-  // here so every mutating method that funnels through this helper
-  // (`deleteMany`, `updateMany`, `delete`, `update`, `find`, ...) gets
-  // the guard for free. Inside `_run` the throw becomes `Result.error`
-  // with `code = "INVALID_FILTER"`; outside (`find`, which returns a
-  // Query synchronously) it propagates to the caller — consistent with
-  // every other synchronous schema-violation throw in `Collection`.
+  // Mutating operations require an explicit object, including `{}` for all rows.
   if (filter === null || typeof filter !== "object" || Array.isArray(filter)) {
     throw Object.assign(
       new TypeError(
@@ -151,7 +125,7 @@ type AggregateExpr = PlainObject | string | number | boolean | null;
 /** Accumulator op names recognised by `translateAccumulator`. Used to
  *  detect unknown `$op` names that would silently pass through. */
 const KNOWN_ACCUMULATOR_OPS = new Set([
-  "$sum", "$avg", "$min", "$max", "$first", "$count",
+  "$sum", "$avg", "$min", "$max", "$count",
 ]);
 
 /**
@@ -200,8 +174,6 @@ function translateAccumulator(acc: AggregateExpr): AggregateExpr {
   if ("$avg" in obj && typeof obj.$avg === "string") return { $avg: stripDollar(obj.$avg as string) };
   if ("$min" in obj && typeof obj.$min === "string") return { $min: stripDollar(obj.$min as string) };
   if ("$max" in obj && typeof obj.$max === "string") return { $max: stripDollar(obj.$max as string) };
-  if ("$first" in obj && typeof obj.$first === "string") return { $first: stripDollar(obj.$first as string) };
-
   // Surface unknown `$op`s once per shape — silent pass-through means the
   // operator never reaches Postgres and the user gets a confusingly empty
   // result rather than a hint that the op was unrecognised.

@@ -86,11 +86,11 @@ macro_rules! test_app_id {
     }};
 }
 
-/// Stand in for a readwrite binding's explicit column grants.
+/// Grant a table created after the fixture role was provisioned.
 ///
-/// The integration provisioner intentionally grants no table DML. Fixtures
-/// whose subject is CRUD still need authority, but it must be expressed as
-/// column grants so an omitted column remains enforceable by PostgreSQL.
+/// Production provisioning covers later migrator-owned tables with default
+/// privileges. Some tests create tables through a separate admin owner, so they
+/// grant those fixtures explicitly.
 pub async fn grant_all_runtime_table_columns(pool: &compio_postgres::Pool, app: &str, table: &str) {
     let rows = pool
         .query_text_params(
@@ -125,7 +125,7 @@ pub async fn grant_all_runtime_table_columns(pool: &compio_postgres::Pool, app: 
     .expect("grant fixture columns to the runtime role");
 }
 
-/// Grant only the columns an audited read fixture needs.
+/// Build a fixture with deliberately narrower read authority.
 #[allow(dead_code)]
 pub async fn grant_runtime_select_columns(
     pool: &compio_postgres::Pool,

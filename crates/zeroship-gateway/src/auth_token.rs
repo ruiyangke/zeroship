@@ -54,7 +54,9 @@ use futures::FutureExt as _;
 use ntex::util::Bytes;
 use ntex::web::{types::State, HttpRequest, HttpResponse};
 use serde_json::json;
-use uuid::Uuid;
+
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use crate::anchors::{self, RotationError, RotationOk, RotationResult};
 use crate::oidc_rp::TokenSet;
@@ -66,13 +68,13 @@ const X_ZS_AUTH: &str = "x-zs-auth";
 /// Resolved per-request route facts the auth endpoints need.
 pub(crate) struct RouteCtx {
     pub(crate) app_name: String,
-    /// The app's stable UUID (the `RouteMap` key from `lookup_by_name`). This —
-    /// NOT the subdomain slug `app_name` — is the CANONICAL key for the
-    /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows, whose
-    /// `app_id` columns are UUID and bound natively. Keying on the immutable
-    /// UUID (the slug can be renamed) is what lets a `/token`-minted cookie
-    /// validate on the real SPA→app dispatch path.
-    pub(crate) app_id: Uuid,
+    /// The app's stable typed id, from `lookup_by_name`. This — NOT the
+    /// subdomain slug `app_name` — is the CANONICAL key for the
+    /// `zeroship.gateway_sessions` + `zeroship.app_session_anchors` rows,
+    /// whose `app_id` columns are `text` and hold `app_id.as_str()`. Keying
+    /// on the immutable app id (the slug can be renamed) is what lets a
+    /// `/token`-minted cookie validate on the real SPA→app dispatch path.
+    pub(crate) app_id: AppId,
     pub(crate) host: String,
     pub(crate) client_id: String,
     /// The app's stable apex origin used to scope the per-app pairwise
@@ -122,17 +124,23 @@ pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<Rout
     let sector_identifier = route.entry.sector_identifier.clone();
 
     // `RouteCtx::app_id` is the DATABASE key for the gateway-session and
-    // anchor rows, whose `app_id` columns are UUID and bound natively, so the
-    // typed id the route table now carries is unwrapped once, here.
-    Ok(RouteCtx { app_name, app_id: app_id.uuid(), host, client_id, sector_identifier })
+    // anchor rows, whose `app_id` columns are `text` and hold the route
+    // table's typed id directly - no decode needed.
+    Ok(RouteCtx {
+        app_name,
+        app_id,
+        host,
+        client_id,
+        sector_identifier,
+    })
 }
 
 /// Derive the per-app pairwise subject (`pws_…`) the identity projection
-/// carries, so the SPA reads a per-app pseudonym, never the global user UUID
+/// carries, so the SPA reads a per-app pseudonym, never the global [`UserId`]
 /// (§6.2/G4). Hard-fails (`None`) when the route has no `sector_identifier`
 /// yet — the caller answers `503 client_not_provisioned` rather than ever
-/// project the global UUID to the browser.
-fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Option<String> {
+/// project the global user id to the browser.
+fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &UserId) -> Option<String> {
     let sector = route.sector_identifier.as_deref()?;
     Some(zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
@@ -158,7 +166,7 @@ fn pairwise_sub(state: &GateState, route: &RouteCtx, global_user_id: &str) -> Op
 pub(crate) async fn relay_alias_for(
     db_cfg: &crate::db::DbConfig,
     client_id: &str,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
 ) -> Option<String> {
     let pool = match crate::db::checkout(db_cfg).await {
         Ok(p) => p,
@@ -503,11 +511,11 @@ pub(crate) async fn mint_session_from_code(
         return login_required(&route.host);
     }
 
-    // 3. The global user UUID is the OP sub. It is stored INTERNALLY (the
+    // 3. The global user id is the OP sub. It is stored INTERNALLY (the
     //    anchor + the gateway session `user_id`) and projected to the per-app
-    //    `pws_` for the browser — the global UUID never reaches the browser.
-    let Ok(global_user_id) = Uuid::parse_str(&claims.sub) else {
-        tracing::warn!(sub = %claims.sub, "/token: id_token sub is not a UUID");
+    //    `pws_` for the browser — the global id never reaches the browser.
+    let Ok(global_user_id) = UserId::parse(&claims.sub) else {
+        tracing::warn!(sub = %claims.sub, "/token: id_token sub is not a global user id");
         return error_response(
             HttpResponse::BadRequest(),
             "invalid_token",
@@ -538,10 +546,10 @@ pub(crate) async fn mint_session_from_code(
         };
 
     // 5. Project the per-app pairwise `pws_` subject (§6.2/G4) for the browser
-    //    identity. Derive on the CANONICAL UUID string. Fail closed (503) when
+    //    identity. Derive on the CANONICAL id string. Fail closed (503) when
     //    the route has no `sector_identifier` yet rather than ever project the
-    //    global UUID to the browser.
-    let Some(pws_sub) = pairwise_sub(state, route, &global_user_id.to_string()) else {
+    //    global id to the browser.
+    let Some(pws_sub) = pairwise_sub(state, route, &global_user_id) else {
         return error_response(
             HttpResponse::ServiceUnavailable(),
             "client_not_provisioned",
@@ -552,7 +560,7 @@ pub(crate) async fn mint_session_from_code(
     // never the real `claims.email`. No active alias (not yet minted at
     // consent, or revoked) ⇒ empty email (fail closed) — the real address
     // NEVER reaches the browser.
-    let relay_email = relay_alias_for(db_cfg, &route.client_id, global_user_id).await;
+    let relay_email = relay_alias_for(db_cfg, &route.client_id, &global_user_id).await;
     let scope = tokens.scope.clone().unwrap_or_default();
     let scopes: Vec<String> = scope.split_whitespace().map(str::to_string).collect();
     let amr = claims.amr.clone().unwrap_or_default();
@@ -560,14 +568,14 @@ pub(crate) async fn mint_session_from_code(
     // 6. Write the gateway_sessions ROW (the revocation/audit record + the
     //    auth_time/amr source — BFF R1b: NO LONGER read on the per-request path;
     //    the signed cookie is the live credential) AND the reload-recovery
-    //    anchor, on one pooled connection. The row carries the GLOBAL UUID
+    //    anchor, on one pooled connection. The row carries the GLOBAL user id
     //    (internal), the consent scopes, and the id-token auth_time/amr; the
     //    anchor carries the encrypted refresh family. NO connection is held
     //    across any outbound call (the OP exchange already completed).
     let family_id = zeroship_core::typed_id::generate("rfam");
-    // CANONICAL session/anchor key: the app UUID, NOT the subdomain slug.
-    // Bound natively into the UUID `app_id` columns.
-    let app_key = route.app_id;
+    // CANONICAL session/anchor key: the app's typed id, NOT the subdomain
+    // slug. Bound into the `text` `app_id` columns as `app_id.as_str()`.
+    let app_key = &route.app_id;
     let anchor_id = {
         let pool = match crate::db::checkout(db_cfg).await {
             Ok(p) => p,
@@ -584,7 +592,7 @@ pub(crate) async fn mint_session_from_code(
         let session = match crate::sessions::create(
             &mut conn,
             &crate::sessions::NewSession {
-                user_id: &global_user_id.to_string(),
+                user_id: &global_user_id,
                 app_id: app_key,
                 // The REAL email is stored on the row (CITEXT); it is
                 // relay-swapped only on the READ path (the `{ user }` body
@@ -613,15 +621,15 @@ pub(crate) async fn mint_session_from_code(
         };
 
         // 6b. The reload-recovery anchor (server-held refresh family). Keyed by
-        //     the SAME canonical app UUID as the gateway session so the
+        //     the SAME canonical app id as the gateway session so the
         //     `anchor.app_id == route.app_id` self-consistency check on
-        //     reload-recovery is meaningful and never slug-vs-UUID skewed.
+        //     reload-recovery is meaningful and never slug-vs-id skewed.
         let anchor = match anchors::create(
             &mut conn,
             &anchors::NewAnchor {
                 app_id: app_key,
                 client_id: &route.client_id,
-                global_user_id,
+                global_user_id: &global_user_id,
                 refresh_token_enc: &refresh_enc,
                 refresh_family_id: &family_id,
                 granted_scopes: &scopes,
@@ -659,7 +667,7 @@ pub(crate) async fn mint_session_from_code(
         //     the mint because account deletion and password reset enumerate
         //     these rows to recall access-only and cookie credentials.
         if let Err(e) =
-            crate::identities::upsert(&mut conn, &route.client_id, global_user_id, &pws_sub).await
+            crate::identities::upsert(&mut conn, &route.client_id, &global_user_id, &pws_sub).await
         {
             tracing::error!(
                 error = %e,
@@ -840,7 +848,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
         // replayed against the wrong app resolves to `None`, so this READ both
         // loads the anchor AND enforces the former post-hoc
         // `anchor.app_id == route.app_id` bind check.
-        match anchors::read_live(&mut conn, route.app_id, anchor_id).await {
+        match anchors::read_live(&mut conn, &route.app_id, anchor_id).await {
             Ok(Some(a)) => a,
             Ok(None) => return login_required(&route.host),
             Err(e) => {
@@ -853,7 +861,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             }
         }
     };
-    if !principal_lifecycle_allows(&state, &anchor.global_user_id.to_string()) {
+    if !principal_lifecycle_allows(&state, anchor.global_user_id.as_str()) {
         return login_required(&route.host);
     }
 
@@ -862,13 +870,13 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
     // from the rotated id-token facts.
     match rotate_family(&state, &route, &anchor).await {
         Ok(rotated) => {
-            if !principal_lifecycle_allows(&state, &rotated.global_user_id.to_string()) {
+            if !principal_lifecycle_allows(&state, rotated.global_user_id.as_str()) {
                 return login_required(&route.host);
             }
             // Project the per-app `pws_` (§6.3) + relay-swap the email. Fail
             // closed if the sector is missing (same posture as /token).
             let Some(pws_sub) =
-                pairwise_sub(&state, &route, &rotated.global_user_id.to_string())
+                pairwise_sub(&state, &route, &rotated.global_user_id)
             else {
                 return error_response(
                     HttpResponse::ServiceUnavailable(),
@@ -877,7 +885,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 );
             };
             let relay_email =
-                relay_alias_for(db_cfg, &route.client_id, rotated.global_user_id).await;
+                relay_alias_for(db_cfg, &route.client_id, &rotated.global_user_id).await;
 
             // Re-write the gateway_sessions ROW from the rotated facts — KEPT as
             // the revocation/audit record (+ auth_time/amr source), NOT read on
@@ -896,8 +904,8 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 let preserved_sid = if rotated.sid.is_none() {
                     match crate::sessions::latest_sid_for_user(
                         &mut conn,
-                        route.app_id,
-                        &rotated.global_user_id.to_string(),
+                        &route.app_id,
+                        &rotated.global_user_id,
                     )
                     .await
                     {
@@ -921,8 +929,8 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
                 if let Err(e) = crate::sessions::create(
                     &mut conn,
                     &crate::sessions::NewSession {
-                        user_id: &rotated.global_user_id.to_string(),
-                        app_id: route.app_id,
+                        user_id: &rotated.global_user_id,
+                        app_id: &route.app_id,
                         // Real email stored on the audit row; never read back to
                         // the browser. The rotated raw access JWT does not always
                         // carry the email — leave it `None` when absent.
@@ -980,7 +988,7 @@ pub async fn session(req: HttpRequest, state: State<Arc<GateState>>) -> HttpResp
             // Anchor-dead: delete the row + clear the breadcrumb.
             if let Ok(pool) = crate::db::checkout(db_cfg).await {
                 if let Ok(mut conn) = pool.acquire().await {
-                    let _ = anchors::delete(&mut conn, route.app_id, anchor_id).await;
+                    let _ = anchors::delete(&mut conn, &route.app_id, anchor_id).await;
                 }
             }
             login_required(&route.host)
@@ -1055,7 +1063,7 @@ async fn rotate_family(
     // then skips the marker re-check (it cannot project a `pws_` cookie at all,
     // and the handler already 503s `client_not_provisioned` afterwards) but the
     // anchor-revoked rows-affected gate still fails it closed.
-    let pws_sub = pairwise_sub(state, route, &anchor.global_user_id.to_string());
+    let pws_sub = pairwise_sub(state, route, &anchor.global_user_id);
     let anchor = anchor.clone();
     let fut: anchors::SharedRotationFuture = (Box::pin(async move {
         let _guard = anchors::EntryGuard::new(anchor_id);
@@ -1095,8 +1103,8 @@ async fn do_refresh(
     let rotation_started_at = now_secs();
 
     // Decrypt the server-held refresh family. AAD binds (client_id, sub).
-    let sub = anchor.global_user_id.to_string();
-    let aad = anchor_aad(client_id, &sub);
+    let sub = anchor.global_user_id.as_str();
+    let aad = anchor_aad(client_id, sub);
     let refresh = match zeroship_core::crypto::decrypt(
         &state.anchor_enc_key,
         &aad,
@@ -1274,7 +1282,7 @@ async fn do_refresh(
         // (LoginRequired), NEVER persist + sign a fresh cookie (F4).
         match anchors::update_rotated_family(
             &mut conn,
-            anchor.app_id,
+            &anchor.app_id,
             anchor.id,
             &new_enc,
             &family_id,
@@ -1288,7 +1296,7 @@ async fn do_refresh(
     }
 
     Ok(RotationOk {
-        global_user_id: anchor.global_user_id,
+        global_user_id: anchor.global_user_id.clone(),
         credential_iat: raw.iat,
         granted_scopes,
         email_verified,
@@ -1439,10 +1447,10 @@ pub(crate) fn sign_session_cookie(
 /// (local-verify) path (no opaque-UUID + `sessions::validate` arm to fork on).
 ///
 /// Derives the per-app `pws_` from the validated id-token `sub` (the global
-/// UUID) under the route's `sector`, reads the live relay alias (fail closed to
-/// empty), and signs the `zeroship-sess+jwt`. Returns the `Set-Cookie` value, or
-/// `Err(msg)` when the route has no `sector` yet / no signing key (the caller
-/// renders the callback error page).
+/// user id) under the route's `sector`, reads the live relay alias (fail closed
+/// to empty), and signs the `zeroship-sess+jwt`. Returns the `Set-Cookie`
+/// value, or `Err(msg)` when the route has no `sector` yet / no signing key
+/// (the caller renders the callback error page).
 ///
 /// `pub` so the dispatch callback reuses the SAME mint path as the SDK
 /// `POST /session` — one cookie shape, one verifier — and the F1 regression
@@ -1453,7 +1461,7 @@ pub async fn issue_interactive_session_cookie(
     db_cfg: &crate::db::DbConfig,
     client_id: &str,
     sector: Option<&str>,
-    global_user_id: Uuid,
+    global_user_id: &UserId,
     credential_iat: i64,
     name: Option<&str>,
     avatar: Option<&str>,
@@ -1462,7 +1470,7 @@ pub async fn issue_interactive_session_cookie(
     amr: &[String],
     scopes: &[String],
 ) -> Result<String, String> {
-    if !principal_lifecycle_allows(state, &global_user_id.to_string()) {
+    if !principal_lifecycle_allows(state, global_user_id.as_str()) {
         return Err("principal lifecycle rejected authentication".to_string());
     }
     let Some(sector) = sector else {
@@ -1470,7 +1478,7 @@ pub async fn issue_interactive_session_cookie(
     };
     let pws_sub = zeroship_core::auth::derive_pairwise(
         &state.pairwise_salt,
-        &global_user_id.to_string(),
+        global_user_id,
         sector,
     );
 

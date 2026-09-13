@@ -3,6 +3,7 @@
 use std::cell::Cell;
 
 use compio_postgres::{Client, GenericClient};
+use zeroship_core::UserId;
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::error::{AuthError, Result};
@@ -40,7 +41,7 @@ fn bump_login_failure_roundtrips() {
 
 #[derive(Debug, Clone)]
 pub struct UserRow {
-    pub id: uuid::Uuid,
+    pub id: UserId,
     pub email: String,
     pub email_verified_at: Option<chrono::DateTime<chrono::Utc>>,
     pub name: String,
@@ -66,39 +67,30 @@ pub async fn find_by_email(conn: &Client, email: &str) -> Result<Option<UserRow>
         )
         .await
         .map_err(|e| AuthError::Db(format!("users find_by_email: {e}")))?;
-    Ok(rows.first().map(row_to_user))
+    rows.first().map(row_to_user).transpose()
 }
 
 /// Look up a user by their primary key (`zeroship.users.id`).
 ///
-/// The argument is the UUID rendered as a hyphenated string — the native
-/// subject shape surfaced through consent context.
-///
-/// Returns `Ok(None)` if the string doesn't parse as a UUID OR if no row
-/// matches. Callers handling consent flows treat both as "subject unknown
-/// to us" → fall back to a minimal `id_token` (sub-only, claims omitted).
+/// Returns `Ok(None)` if no row matches.
 ///
 /// # Errors
 ///
-/// Returns `AuthError::Db` on PG failure (parse failure is NOT an error —
-/// it's a `None`, since the subject string is attacker-influenced).
+/// Returns `AuthError::Db` on PG failure.
 pub async fn find_by_id(
     conn: &(impl GenericClient + ?Sized),
-    id: &str,
+    id: &UserId,
 ) -> Result<Option<UserRow>> {
-    let Ok(uuid) = uuid::Uuid::parse_str(id) else {
-        return Ok(None);
-    };
     let rows = conn
         .query(
             "SELECT id, email::text, email_verified_at, name, avatar_url, password_hash, \
                     credential_version, locked_until, disabled_at \
              FROM zeroship.users WHERE id = $1",
-            &[&uuid],
+            &[&id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("users find_by_id: {e}")))?;
-    Ok(rows.first().map(row_to_user))
+    rows.first().map(row_to_user).transpose()
 }
 
 /// Insert a new user. Returns the created row.
@@ -122,13 +114,14 @@ pub async fn create(
     name: &str,
     password_hash: Option<&str>,
 ) -> Result<UserRow> {
+    let id = UserId::mint();
     let rows = conn
         .query(
-            "INSERT INTO zeroship.users (email, name, password_hash) \
-             VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.users (id, email, name, password_hash) \
+             VALUES ($1, $2, $3, $4) \
              RETURNING id, email::text, email_verified_at, name, avatar_url, password_hash, \
                        credential_version, locked_until, disabled_at",
-            &[&email, &name, &password_hash],
+            &[&id.as_str(), &email, &name, &password_hash],
         )
         .await
         .map_err(|e| {
@@ -143,7 +136,7 @@ pub async fn create(
     let row = rows
         .first()
         .ok_or_else(|| AuthError::Db("users create: no row returned".into()))?;
-    Ok(row_to_user(row))
+    row_to_user(row)
 }
 
 /// Replace `zeroship.users.password_hash` with a fresh PHC string (Argon2id).
@@ -155,7 +148,7 @@ pub async fn create(
 /// Returns `AuthError::Db` on PG failure.
 pub async fn update_password_hash(
     conn: &(impl GenericClient + Sync),
-    id: uuid::Uuid,
+    id: &UserId,
     phc: &str,
 ) -> Result<()> {
     conn.execute(
@@ -164,7 +157,7 @@ pub async fn update_password_hash(
              credential_version = credential_version + 1, \
              updated_at = NOW() \
          WHERE id = $2",
-        &[&phc, &id],
+        &[&phc, &id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("users update_password_hash: {e}")))?;
@@ -213,7 +206,7 @@ pub mod lockout {
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
-pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> {
+pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
     // Increment atomically and read back the new count so the lock decision is
     // made against the row's authoritative value (no read-modify-write race).
     bump_login_failure_roundtrips();
@@ -224,7 +217,7 @@ pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> 
                  updated_at = NOW() \
              WHERE id = $1 \
              RETURNING failed_login_count",
-            &[&id],
+            &[&id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("users record_login_failure: {e}")))?;
@@ -241,7 +234,7 @@ pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> 
              SET locked_until = NOW() + ($2 || ' seconds')::interval, \
                  updated_at = NOW() \
              WHERE id = $1",
-            &[&id, &secs.to_string()],
+            &[&id.as_str(), &secs.to_string()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("users record_login_failure lock: {e}")))?;
@@ -250,8 +243,8 @@ pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> 
 }
 
 /// Enumeration-defense companion to [`record_login_failure`]: issue ONE
-/// throwaway `UPDATE zeroship.users … WHERE id = $1` against a random,
-/// guaranteed-absent UUID so the absent / OAuth-only / no-credential failure
+/// throwaway `UPDATE zeroship.users … WHERE id = $1` against a freshly minted,
+/// guaranteed-absent user id so the absent / OAuth-only / no-credential failure
 /// arm performs the SAME serialized PG round-trip the real-password arm does
 /// (finding F7).
 ///
@@ -260,8 +253,8 @@ pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> 
 /// absent arm runs only the audit INSERT — a measurable post-Argon2 latency
 /// delta that leaks whether an email belongs to a real, password-bearing
 /// account. This is the DB-round-trip analog of the dummy-hash that already
-/// equalizes the Argon2 wall time. The UPDATE matches zero rows (random UUID),
-/// so it never mutates any account.
+/// equalizes the Argon2 wall time. The UPDATE matches zero rows (an id minted
+/// here and never stored), so it never mutates any account.
 ///
 /// Best-effort by contract: like the real arm, a fault here must NOT change the
 /// credential decision. The caller logs and proceeds.
@@ -271,18 +264,17 @@ pub async fn record_login_failure(conn: &Client, id: uuid::Uuid) -> Result<i32> 
 /// Returns `AuthError::Db` on PG failure.
 pub async fn record_login_failure_dummy(conn: &Client) -> Result<()> {
     bump_login_failure_roundtrips();
-    // A fresh v4 UUID never collides with a real `users.id` (UUIDv7 + this is
-    // not persisted), so the UPDATE always matches 0 rows. We mirror the real
+    // A fresh user id is not persisted, so the UPDATE matches no row. We mirror the real
     // statement's shape (same table, same SET targets, RETURNING) so PG plans
     // and executes equivalent work.
-    let absent = uuid::Uuid::new_v4();
+    let absent = UserId::mint();
     conn.query(
         "UPDATE zeroship.users \
          SET failed_login_count = failed_login_count + 1, \
              updated_at = NOW() \
          WHERE id = $1 \
          RETURNING failed_login_count",
-        &[&absent],
+        &[&absent.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("users record_login_failure_dummy: {e}")))?;
@@ -295,7 +287,7 @@ pub async fn record_login_failure_dummy(conn: &Client) -> Result<()> {
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
-pub async fn reset_login_failures(conn: &Client, id: uuid::Uuid) -> Result<()> {
+pub async fn reset_login_failures(conn: &Client, id: &UserId) -> Result<()> {
     conn.execute(
         "UPDATE zeroship.users \
          SET failed_login_count = 0, \
@@ -303,7 +295,7 @@ pub async fn reset_login_failures(conn: &Client, id: uuid::Uuid) -> Result<()> {
              updated_at = NOW() \
          WHERE id = $1 \
            AND (failed_login_count <> 0 OR locked_until IS NOT NULL)",
-        &[&id],
+        &[&id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("users reset_login_failures: {e}")))?;
@@ -315,7 +307,7 @@ pub async fn reset_login_failures(conn: &Client, id: uuid::Uuid) -> Result<()> {
 /// but a dedicated struct documents exactly what the delete flow needs.)
 #[derive(Debug, Clone)]
 pub struct DeletionRequest {
-    pub user_id: uuid::Uuid,
+    pub user_id: UserId,
     pub email: String,
     pub name: String,
     pub scheduled_for: chrono::DateTime<chrono::Utc>,
@@ -365,7 +357,7 @@ pub struct DeletionRequest {
 /// Returns `AuthError::Db` on PG failure (the transaction is rolled back).
 pub async fn request_deletion(
     conn: &mut Client,
-    id: uuid::Uuid,
+    id: &UserId,
     grace_days: i64,
 ) -> Result<Option<DeletionRequest>> {
     let tx = conn
@@ -391,7 +383,7 @@ pub async fn request_deletion(
 
 async fn request_deletion_tx(
     conn: &(impl GenericClient + ?Sized),
-    id: uuid::Uuid,
+    id: &UserId,
     grace_days: i64,
 ) -> Result<Option<DeletionRequest>> {
     lock_refresh_user_xact(conn, id)
@@ -408,7 +400,7 @@ async fn request_deletion_tx(
              WHERE id = $1 \
                AND anonymized_at IS NULL \
              RETURNING email::text AS email, name, deletion_scheduled_for",
-            &[&id, &i32::try_from(grace_days).unwrap_or(30)],
+            &[&id.as_str(), &i32::try_from(grace_days).unwrap_or(30)],
         )
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion update users: {e}")))?;
@@ -427,7 +419,7 @@ async fn request_deletion_tx(
         .execute(
             "UPDATE zeroship.idp_sessions SET revoked_at = NOW() \
              WHERE user_id = $1 AND revoked_at IS NULL",
-            &[&id],
+            &[&id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion revoke idp_sessions: {e}")))?;
@@ -441,7 +433,7 @@ async fn request_deletion_tx(
     let gateway_sessions_revoked = conn
         .execute(
             "DELETE FROM zeroship.gateway_sessions WHERE user_id = $1",
-            &[&id],
+            &[&id.as_str()],
         )
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion delete gateway_sessions: {e}")))?;
@@ -454,7 +446,7 @@ async fn request_deletion_tx(
             .raw;
 
     Ok(Some(DeletionRequest {
-        user_id: id,
+        user_id: id.clone(),
         email,
         name,
         scheduled_for,
@@ -466,7 +458,7 @@ async fn request_deletion_tx(
 
 async fn revoke_user_app_credentials_in_transaction(
     conn: &(impl GenericClient + ?Sized),
-    user_id: uuid::Uuid,
+    user_id: &UserId,
 ) -> Result<()> {
     conn.execute(
         "WITH stamp AS ( \
@@ -490,7 +482,7 @@ async fn revoke_user_app_credentials_in_transaction(
          ON CONFLICT (client_id, sub) \
            DO UPDATE SET revoked_after = \
              GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
-        &[&user_id],
+        &[&user_id.as_str()],
     )
     .await
     .map(|_| ())
@@ -510,19 +502,19 @@ async fn revoke_user_app_credentials_in_transaction(
 /// # Errors
 ///
 /// Returns `AuthError::Db` on PG failure.
-pub async fn touch_last_login(conn: &Client, id: uuid::Uuid) -> Result<()> {
+pub async fn touch_last_login(conn: &Client, id: &UserId) -> Result<()> {
     conn.execute(
         "UPDATE zeroship.users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1",
-        &[&id],
+        &[&id.as_str()],
     )
     .await
     .map_err(|e| AuthError::Db(format!("users touch_last_login: {e}")))?;
     Ok(())
 }
 
-fn row_to_user(row: &compio_postgres::Row) -> UserRow {
-    UserRow {
-        id: row.get("id"),
+fn row_to_user(row: &compio_postgres::Row) -> Result<UserRow> {
+    Ok(UserRow {
+        id: crate::entity_ids::user_id_with_context(row, "id", "users row")?,
         email: row.get::<_, String>("email"),
         email_verified_at: row.try_get("email_verified_at").ok(),
         name: row.get("name"),
@@ -531,6 +523,17 @@ fn row_to_user(row: &compio_postgres::Row) -> UserRow {
         credential_version: row.get("credential_version"),
         locked_until: row.try_get("locked_until").ok(),
         disabled_at: row.try_get("disabled_at").ok(),
+    })
+}
+
+#[cfg(test)]
+mod user_id_type_tests {
+    use super::UserRow;
+
+    #[test]
+    fn user_rows_expose_the_canonical_user_id_type() {
+        let project: fn(&UserRow) -> &zeroship_core::UserId = |row| &row.id;
+        let _ = project;
     }
 }
 
@@ -575,6 +578,9 @@ mod tests {
             lockout::backoff_secs(lockout::THRESHOLD + 100),
             Some(lockout::MAX_BACKOFF_SECS)
         );
-        assert_eq!(lockout::backoff_secs(i32::MAX), Some(lockout::MAX_BACKOFF_SECS));
+        assert_eq!(
+            lockout::backoff_secs(i32::MAX),
+            Some(lockout::MAX_BACKOFF_SECS)
+        );
     }
 }

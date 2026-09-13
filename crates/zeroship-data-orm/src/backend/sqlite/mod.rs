@@ -19,13 +19,7 @@ use zeroship_data_orm::storage::LockManager;
 
 use crate::cdc::ChangeSink;
 
-/// A `ChangeSink` that drops every event, for this crate's own tests.
-///
-/// The adapter injects `BrokerChangeSink`; a vendor crate cannot reach it
-/// without depending on the crate that composes it. Tests here exercise the
-/// backend, not delivery, so a no-op port is the honest double - and it keeps
-/// the composer's shape visible: `open`/`new` take the sink and the key source
-/// as parameters precisely so the policy lives above.
+/// No-op change sink for backend tests.
 #[cfg(test)]
 struct NullChangeSink;
 
@@ -36,73 +30,28 @@ impl ChangeSink for NullChangeSink {
     }
     fn publish(&self, _event: &zeroship_data_orm::cdc::ChangeEvent) {}
 }
-// `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
-// `preupdate_hook` install + worker->compio publisher integration).
-// Crate-private - the public consumer surface is
-// `BackendHandle::as_change_stream_sqlite()` (mirroring the
-// `as_postgres` / `as_sqlite` accessor shape).
 pub mod cdc;
+mod decimal;
 pub mod error;
 mod json;
 pub mod lock;
-/// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
-/// reads. Peer of `backend::pg_row_json`; see that module for why the two are
-/// deliberately not shared.
-pub mod row_json;
-// SC-2's reservation / cancellation / terminal-classification protocol.
-// Public because the cancellation surface (`SqliteCancelHandle`,
-// `TerminalOutcome`) is the contract a deadline or a dropped caller-side
-// future acts through; the actor in `session` is its only driver.
 pub mod reservation;
+pub mod row_json;
 pub mod session;
-// Pure-Rust haversine + `(lat, lng)` BLOB round-trip. The
-// `impl SpatialIndex for SqliteBackend` block at the bottom of
-// this file routes the flat-scan path through this module; the math
-// (`haversine_m`) and the `point_to_blob` / `blob_to_point` helpers
-// stay unit-testable in `spatial.rs`.
 pub mod spatial;
-// SQLite vector metric validation.
-pub mod vector;
 
 use cdc::CommitPacket;
 use lock::InProcessLockRegistry;
 use session::{SqliteSession, SqliteSessionHandle};
 
-/// SQLite backend handle. One instance per worker thread (mirrors
-/// `zeroship_data_orm::backend::postgres::PostgresBackend`'s lifecycle).
-///
-/// **Field set** (`docs/archive/p1-sqlite-implementation-plan.md` §2.1):
-///
-/// - `session`: the writer-actor handle. Owns the single
-///   `rusqlite::Connection` for this backend and serialises all DDL
-///   / DML / DQL through a `flume` mpsc queue.
-/// - `lock_registry`: in-process advisory-lock map.
-/// - `db_dir`: filesystem directory holding per-app SQLite files
-///   (`zs-<app_id>.sqlite`).
-/// - `app_id_cache`: dedup set for `attach_app_file`
-///   path — SQLite errors on a second ATTACH of the same alias, so
-///   we filter the second call site in Rust.
-/// - `_publisher`: the worker->compio publisher task that
-///   drains the dispatcher's `flume::Receiver<CommitPacket>` and
-///   re-emits each event onto the thread-local broker. The
-///   `JoinHandle` is held so dropping `SqliteBackend` cancels the task
-///   (the task body is `while let Ok(packet) = rx.recv_async().await
-///   { … }`; cancellation simply stops polling — no resources to
-///   release). The matching sender lives on the writer thread, captured
-///   by the three CDC hook closures; dropping the session drops the
-///   connection drops the hooks drops the sender drops the channel.
+/// File-backed SQLite backend with one actor-owned connection.
 #[allow(dead_code)]
 pub struct SqliteBackend {
     session: Rc<SqliteSession>,
     lock_registry: Rc<InProcessLockRegistry>,
-    cdc_name_cache_invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     db_dir: PathBuf,
     app_id_cache: RefCell<HashSet<String>>,
-    /// Keeps the publisher task alive for the lifetime of the
-    /// backend; dropped via `Drop` when the backend goes away. The
-    /// `JoinHandle` is a `compio::runtime::Task<Result<(), …>>` whose
-    /// `Drop` cancels the task per the `async-task` contract (see
-    /// `async_task::Task` rustdoc).
+    /// Keeps change publication alive with the backend.
     _publisher: compio::runtime::JoinHandle<()>,
     /// Project encryption keys supplied by the trusted host.
     key_store: zeroship_data_orm::encryption::KeyStore,
@@ -121,37 +70,11 @@ fn validate_database_path(path: &Path) -> Result<(), DbError> {
 
 impl std::fmt::Debug for SqliteBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Mirrors `PostgresBackend`'s opaque Debug impl — no field
-        // exposure (the `db_dir` path may carry deployment-internal
-        // information operators don't want spilled to log lines).
         f.debug_struct("SqliteBackend").finish()
     }
 }
 
 impl SqliteBackend {
-    /// Mark one table's cached CDC column-name list stale. The
-    /// publisher loop clears the entry before decoding the next event
-    /// for the same `(app_id, collection)` pair.
-    ///
-    /// UNWIRED PRODUCER, LIVE CONSUMER - do not delete it as dead. Nothing
-    /// calls this today, so `cdc_name_cache_invalidations` is a set that is
-    /// drained and never filled. The CONSUMER is real:
-    /// `cdc::publisher_loop` does `invalidations.borrow_mut().remove(&key)`
-    /// and evicts `name_cache` on a hit, so removing this leaves the
-    /// publisher serving stale column names after DDL with no way to be told.
-    /// The missing caller is the SQLite apply path
-    /// (`docs/archive/proposals/2026-06-20-sqlite-engine-production-wiring-design.md`
-    /// §7b.4: invalidate per changed collection after CreateTable/AddColumn).
-    /// Deleting half a live mechanism is a design change, not a dead-code
-    /// sweep; a 2026-09-04 audit flagged this as dead on caller count alone
-    /// and it was kept for exactly that reason.
-    #[allow(dead_code)] // producer unwired; the consumer above is not - read the doc
-    pub(crate) fn invalidate_cdc_name_cache(&self, app_id: &str, collection: &str) {
-        self.cdc_name_cache_invalidations
-            .borrow_mut()
-            .insert((app_id.to_string(), collection.to_string()));
-    }
-
     pub async fn query_values(
         &self,
         sql: &str,
@@ -161,23 +84,7 @@ impl SqliteBackend {
         crate::backend::sqlite::row_json::typed_rows_to_values(&typed)
     }
 
-    /// Production constructor used by the runtime URL-scheme
-    /// dispatcher.
-    ///
-    /// `path` names the control database file for the backend. Per-app
-    /// files still live beside it as `zs-<app_id>.sqlite` and are bound into
-    /// the session by `attach_app_file`. It is idempotent, and data-plane
-    /// entry points call it lazily before addressing an app table.
-    ///
-    /// If `path` points at an existing directory we place the control
-    /// session at `<dir>/zs-control.sqlite`. SQLite requires a filesystem path;
-    /// no ephemeral database mode or implicit temporary directory is supported.
-    ///
-    /// `sink` is an `Arc<dyn ChangeSink>` rather than a generic because it is
-    /// held on BOTH sides of the CDC channel: the commit hook on the writer
-    /// thread samples `disposition`, the publisher task on the compio thread
-    /// calls `publish`. One shared owner is the honest shape for that, and it
-    /// keeps the generic off six signatures in this file.
+    /// Open a control file and place per-app database files beside it.
     pub async fn open(
         path: impl AsRef<Path>,
         sink: Arc<dyn ChangeSink>,
@@ -194,12 +101,6 @@ impl SqliteBackend {
         Ok(Self::finish_open(opened, sink, key_source))
     }
 
-    // `pause_broker_for_tests` and `engage_schema_pending_for_tests` were here
-    // until 2026-09-02. They forwarded to guard constructors without reading
-    // any backend state, which is what made the guards look like a vendor
-    // concern. Tests now call `broker::BrokerPauseGuard::new(app_id)` and
-    // `broker::SchemaPendingGuard::new(app_id)` directly - there was never a
-    // backend to dispatch on.
     #[allow(dead_code)]
     pub fn new(
         db_dir: PathBuf,
@@ -249,24 +150,11 @@ impl SqliteBackend {
         session_path: PathBuf,
         sink: Arc<dyn ChangeSink>,
     ) -> Result<OpenedBackend, DbError> {
-        // CDC packet channel — worker thread (producer, via commit
-        // hook) → compio publisher task (consumer, calls its ChangeSink on
-        // this thread).
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
 
-        // Open the session WITH the `CommitSender` so the worker thread arms
-        // the hook triplet during PRAGMA bootstrap. The sender carries the sink
-        // as well as the channel because the commit hook samples
-        // `ChangeSink::disposition` before it enqueues — the commit boundary is
-        // where a suppression window is decided (see `cdc`'s module rustdoc).
-        // The `app_id` argument is currently unused inside the dispatcher
-        // (per-event app_id derives from the hook's `db_name`
-        // parameter — see `cdc::install` rustdoc), so we pass `None`.
-        let session = SqliteSession::open(
-            &session_path,
-            None,
-            Some(cdc::CommitSender::new(packet_tx, sink)),
-        )?;
+        // Sample delivery state when the transaction commits.
+        let session =
+            SqliteSession::open(&session_path, Some(cdc::CommitSender::new(packet_tx, sink)))?;
 
         Ok(OpenedBackend {
             session,
@@ -287,30 +175,14 @@ impl SqliteBackend {
             packet_rx,
         } = opened;
         let session = Rc::new(session);
-        let cdc_name_cache_invalidations = Rc::new(RefCell::new(HashSet::new()));
 
-        // Spawn the publisher task on the current compio runtime. The
-        // task captures `Rc<SqliteSession>` (for lazy column-name
-        // resolution via `PRAGMA table_info`) + the receiver end of
-        // the CDC channel. Dropping the returned `JoinHandle` cancels
-        // the task; the channel sender on the worker thread will then
-        // fail-fast on the next commit attempt (logged + dropped, no
-        // commit veto).
-        let _publisher = cdc::spawn_publisher(
-            session.clone(),
-            Rc::clone(&cdc_name_cache_invalidations),
-            packet_rx,
-            sink,
-        );
+        let _publisher = cdc::spawn_publisher(session.clone(), packet_rx, sink);
 
-        // Wire the column-key store. SQLite has no admin-schema sidecar
-        // Project keys are supplied by the host, independently of the database.
         let key_store = zeroship_data_orm::encryption::KeyStore::new(key_source);
 
         Self {
             session,
             lock_registry: Rc::new(InProcessLockRegistry::new()),
-            cdc_name_cache_invalidations,
             db_dir,
             app_id_cache: RefCell::new(HashSet::new()),
             _publisher,
@@ -325,12 +197,7 @@ struct OpenedBackend {
     packet_rx: flume::Receiver<CommitPacket>,
 }
 
-// ---------------------------------------------------------------------------
-// Capability impls - five carved capability blocks, per
-// `p1-sqlite-implementation-plan.md` §9. The order below mirrors
-// `backend/postgres.rs` so a reviewer can diff the two files
-// side-by-side as the SQLite side grows.
-// ---------------------------------------------------------------------------
+// Backend capabilities are grouped in the same order across implementations.
 
 impl SqliteBackend {
     /// Return an unreserved session handle for autocommit commands.
@@ -460,11 +327,8 @@ impl LockManager for SqliteBackend {
         key1: &str,
         key2: &str,
     ) -> Result<(), DbError> {
-        // `release` is infallible at the registry layer — unheld /
-        // unknown slots emit a `tracing::warn` and no-op. Returning
-        // `Ok(())` unconditionally matches the legacy PG-arm contract:
-        // a release on a session whose lock has already auto-released
-        // (because the connection died) is also benign there.
+        // Releasing an unknown slot is benign, matching PostgreSQL after a
+        // session has already released its advisory locks.
         self.lock_registry
             .release((key1.to_string(), key2.to_string()));
         Ok(())
@@ -552,13 +416,11 @@ impl SqliteBackend {
     }
 }
 
-/// Recover encrypted-column metadata from stored DDL comments.
+/// Recover encrypted columns from stored DDL comments.
 /// The scanner attaches each sentinel to the preceding quoted column identifier.
-/// Malformed or unattachable sentinels are logged and skipped.
-fn parse_encryption_sentinels(
-    create_table_text: &str,
-) -> std::collections::HashMap<String, crate::sql::catalog::EncryptionMeta> {
-    let mut out = std::collections::HashMap::new();
+/// Unattachable sentinels are logged and skipped.
+fn parse_encryption_sentinels(create_table_text: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
     // Walk the body, finding each `/* zero-migrate:enc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
     // column name. The emitter always emits the column name as the
@@ -608,36 +470,16 @@ fn parse_encryption_sentinels(
             break;
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
-        // Reuse the canonical parser so the wire shape is centralised, and so a
-        // sentinel this crate cannot interpret produces the codec's typed error
-        // rather than a silent absence. Structured exactly like the mask
-        // sibling below, for the same reason: both failure arms are LOUD.
-        match crate::sql::mask_codec::parse_encryption_sentinel(body) {
-            Ok(meta) => {
-                // Rewind from `abs_marker` to find the column name. The
-                // column name is the most recent `"…"` token before the
-                // marker — scan backwards for the closing `"` then the
-                // opening `"`.
-                let before = &create_table_text[..abs_marker];
-                match recover_preceding_quoted_ident(before) {
-                    Some(col_name) => {
-                        out.insert(col_name, meta);
-                    }
-                    None => {
-                        tracing::warn!(
-                            sentinel = %body,
-                            "diff: encryption sentinel with no recoverable column name \
-                             in the CREATE TABLE text; ignoring",
-                        );
-                    }
-                }
+        let before = &create_table_text[..abs_marker];
+        match recover_preceding_quoted_ident(before) {
+            Some(col_name) => {
+                out.insert(col_name);
             }
-            Err(e) => {
+            None => {
                 tracing::warn!(
                     sentinel = %body,
-                    error = %e,
-                    "diff: malformed encryption sentinel on SQLite column; \
-                     treating the column as unencrypted",
+                    "diff: encryption sentinel with no recoverable column name \
+                     in the CREATE TABLE text; ignoring",
                 );
             }
         }
@@ -693,9 +535,7 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: crate::sql::compile::raw_column_name(
-                                    &column,
-                                ),
+                                raw_column: crate::sql::mapping::raw_column_name(&column),
                             },
                         );
                     }
@@ -816,42 +656,6 @@ mod tests {
                 "{error:?}",
             );
         }
-    }
-
-    #[test]
-    fn spatial_near_base_query_reads_masked_sibling_when_schema_cached() {
-        let schema = crate::value!({
-            "ssn": {
-                "type": "string",
-                "mask": { "kind": "last4", "classification": "spi" }
-            },
-            "location": { "type": "geoPoint" }
-        });
-        let bq = search::build_spatial_near_base_query(
-            &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
-            "places",
-            &crate::value!({}),
-            &schema,
-        )
-        .expect("spatial base query");
-        assert!(
-            !bq.sql.starts_with("SELECT *"),
-            "spatial base query must not use SELECT * when masked columns exist: {}",
-            bq.sql,
-        );
-        // A masked column reads its OWN column (the mask); the raw column must
-        // not appear — see the twin assertion in `backend::sqlite::vector`.
-        assert!(
-            bq.sql.contains("\"ssn\""),
-            "spatial base query must project the masked column: {}",
-            bq.sql,
-        );
-        assert!(
-            !bq.sql
-                .contains(&crate::sql::compile::raw_column_name("ssn")),
-            "spatial base query must never name the raw column: {}",
-            bq.sql,
-        );
     }
 
     /// `Backend` composition marker now lands on
@@ -1006,37 +810,10 @@ mod tests {
         (result, warnings[0].1.clone())
     }
 
-    /// Assert `ddl` yields no encryption metadata AND that the walker said so
-    /// out loud, carrying the codec's typed error verbatim.
-    fn assert_enc_sentinel_refused_loudly(ddl: &str, expected_error_fragment: &str) {
-        let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
-        assert!(
-            got.is_empty(),
-            "a refused sentinel must stamp no column: {got:?}"
-        );
-        let error = fields
-            .get("error")
-            .expect("the warning must carry the codec's typed error");
-        assert!(
-            error.contains("enc_sentinel_malformed"),
-            "the codec's discriminator must survive into the log line: {error:?}"
-        );
-        assert!(
-            error.contains(expected_error_fragment),
-            "expected {expected_error_fragment:?} in {error:?}"
-        );
-        assert!(
-            fields.contains_key("sentinel"),
-            "the warning must name the offending sentinel: {fields:?}"
-        );
-    }
-
     // -----------------------------------------------------------------
     // Encryption sentinel parser unit tests
     // -----------------------------------------------------------------
 
-    /// Round-trip a single encrypted column: emitter shape → parser
-    /// extracts the wrapped type correctly.
     #[test]
     fn parse_encryption_sentinel_single_column() {
         let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
@@ -1044,41 +821,9 @@ mod tests {
             \"ssn\" BYTEA /* zero-migrate:enc:string */  NOT NULL,\n  \
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
-        let m = got.get("ssn").expect("ssn must be parsed");
-        assert!(matches!(
-            m.wraps,
-            crate::sql::catalog::WrappedType::String
-        ));
-        assert!(
-            !got.contains_key("name"),
-            "non-encrypted col must be absent"
-        );
-        assert!(!got.contains_key("id"));
-    }
-
-    /// A numeric wrapped type survives introspection.
-    #[test]
-    fn parse_encryption_sentinel_number() {
-        let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
-            \"salary\" BYTEA /* zero-migrate:enc:number */ NOT NULL\n)";
-        let got = parse_encryption_sentinels(ddl);
-        let m = got.get("salary").expect("salary must be parsed");
-        assert!(matches!(
-            m.wraps,
-            crate::sql::catalog::WrappedType::Number
-        ));
-    }
-
-    /// Byte-valued plaintext retains its wrapped type.
-    #[test]
-    fn parse_encryption_sentinel_bytes() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:bytes */)";
-        let got = parse_encryption_sentinels(ddl);
-        let m = got.get("a").expect("a must be parsed");
-        assert!(matches!(
-            m.wraps,
-            crate::sql::catalog::WrappedType::Bytes
-        ));
+        assert!(got.contains("ssn"));
+        assert!(!got.contains("name"), "non-encrypted col must be absent");
+        assert!(!got.contains("id"));
     }
 
     /// Multiple encrypted columns in one CREATE TABLE — each attaches
@@ -1092,26 +837,12 @@ mod tests {
         assert_eq!(got.len(), 2);
     }
 
-    /// Malformed sentinel — wrong number of parts → refused, and the refusal
-    /// is AUDIBLE. A column whose sentinel does not parse reads back
-    /// unencrypted, so the log line is the only difference between "the
-    /// metadata was rejected" and "there was never any metadata".
     #[test]
-    fn parse_encryption_sentinel_rejects_malformed() {
-        assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:only_one_part */)",
-            "expected zero-migrate:enc:",
-        );
-    }
-
-    /// Unknown wraps → refused loudly. This arm had no test at all before the
-    /// walker was collapsed onto the codec.
-    #[test]
-    fn parse_encryption_sentinel_rejects_unknown_wraps() {
-        assert_enc_sentinel_refused_loudly(
-            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:default:blob */)",
-            "expected zero-migrate:enc:",
-        );
+    fn parse_encryption_sentinel_ignores_migration_owned_detail() {
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:opaque-detail */)";
+        let (got, events) = capture_events(|| parse_encryption_sentinels(ddl));
+        assert!(got.contains("a"));
+        assert!(events.is_empty());
     }
 
     /// A well-formed sentinel with no recoverable column name in front of it
@@ -1131,40 +862,6 @@ mod tests {
         );
     }
 
-    /// Every wrapped type the emitter can produce round-trips through the
-    /// walker unchanged, and silently.
-    ///
-    /// The input is BUILT by `crate::sql::mask_codec::build_encryption_sentinel`
-    /// rather than hand-written, so this pins walker-against-emitter rather
-    /// than walker-against-one-literal: a change to the wire shape moves both
-    /// sides and this test keeps passing, which is the point of collapsing the
-    /// parse onto the codec.
-    #[test]
-    fn parse_encryption_sentinel_round_trips_every_built_sentinel() {
-        use crate::sql::catalog::{EncryptionMeta, WrappedType};
-
-        {
-            for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
-                let meta = EncryptionMeta {
-                    wraps,
-                };
-                let sentinel = crate::sql::mask_codec::build_encryption_sentinel(&meta);
-                let ddl = format!("CREATE TABLE t (\"ssn\" BYTEA /* {sentinel} */ NOT NULL)");
-                let (got, events) = capture_events(|| parse_encryption_sentinels(&ddl));
-                let parsed = got.get("ssn").unwrap_or_else(|| {
-                    panic!("built sentinel {sentinel:?} must round-trip: {got:?}")
-                });
-                assert_eq!(parsed.wraps, meta.wraps, "wraps drifted for {sentinel:?}");
-                assert!(
-                    events.is_empty(),
-                    "the success path must be silent for {sentinel:?}: {events:?}"
-                );
-            }
-        }
-    }
-
-    /// DDL with no sentinels → empty map (no allocations beyond the
-    /// HashMap itself).
     #[test]
     fn parse_encryption_sentinel_empty_when_no_marker() {
         let ddl = "CREATE TABLE t (\"a\" TEXT, \"b\" INTEGER)";
@@ -1215,7 +912,7 @@ mod tests {
              \"c\" BYTEA /* zero-migrate:enc:number\n)";
         let (got, fields) = sole_warning(|| parse_encryption_sentinels(unterminated));
         assert_eq!(
-            got.keys().collect::<Vec<_>>(),
+            got.iter().collect::<Vec<_>>(),
             vec!["a"],
             "only the column ahead of the unterminated comment survives: {got:?}"
         );
@@ -1229,7 +926,7 @@ mod tests {
              \"b\" BYTEA /* zero-migrate:enc:string */,\n  \
              \"c\" BYTEA /* zero-migrate:enc:number */\n)";
         let (got, events) = capture_events(|| parse_encryption_sentinels(control));
-        let mut names: Vec<_> = got.keys().cloned().collect();
+        let mut names: Vec<_> = got.iter().cloned().collect();
         names.sort();
         assert_eq!(
             names,
@@ -1272,7 +969,7 @@ mod tests {
     #[test]
     fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
         use crate::sql::catalog::{Classification, MaskKind};
-        let raw = crate::sql::compile::raw_column_name("ssn");
+        let raw = crate::sql::mapping::raw_column_name("ssn");
         let ddl = format!(
             "CREATE TABLE \"app\".\"users\" (\n  \
              \"id\" INTEGER PRIMARY KEY,\n  \
@@ -1283,7 +980,7 @@ mod tests {
         let meta = got.get("ssn").expect("mask meta on the declared field");
         assert_eq!(meta.kind, MaskKind::Last4);
         assert_eq!(meta.classification, Classification::Spi);
-        assert_eq!(meta.sibling_column, raw);
+        assert_eq!(meta.raw_column, raw);
         assert_eq!(
             got.len(),
             1,
@@ -1301,8 +998,8 @@ mod tests {
              \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
              \"{}\" TEXT,\n  \
              \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */\n)",
-            crate::sql::compile::raw_column_name("ssn"),
-            crate::sql::compile::raw_column_name("email"),
+            crate::sql::mapping::raw_column_name("ssn"),
+            crate::sql::mapping::raw_column_name("email"),
         );
         let got = parse_mask_sentinels(&ddl);
         assert_eq!(got.len(), 2);
@@ -1315,13 +1012,7 @@ mod tests {
         );
     }
 
-    /// A sentinel with no recoverable column name before it is ignored, and
-    /// WARNS rather than being discarded in silence.
-    ///
-    /// This test used to assert that a sentinel on a column NOT ending
-    /// `_masked` was ignored - which, after the flip, is where every sentinel
-    /// legitimately sits. Keeping it would have asserted that the introspector
-    /// must drop all mask metadata.
+    /// A sentinel with no recoverable column name before it is ignored.
     #[test]
     fn sqlite_introspection_ignores_a_sentinel_with_no_column() {
         let ddl = "CREATE TABLE t (\n  /* zero-migrate:mask:kind=last4,classification=spi */\n)";
@@ -1344,8 +1035,8 @@ mod tests {
     /// stays unmasked.
     #[test]
     fn sqlite_introspection_malformed_sentinel_skipped() {
-        let ddl = "CREATE TABLE t (\n  \"ssn\" TEXT,\n  \
-             \"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic,classification=pii */\n)";
+        let ddl = "CREATE TABLE t (\n  \
+             \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic,classification=pii */\n)";
         let got = parse_mask_sentinels(ddl);
         assert!(
             got.is_empty(),
@@ -1359,7 +1050,7 @@ mod tests {
     /// the silence was the defect rather than the abort.
     #[test]
     fn sqlite_introspection_warns_on_an_unterminated_comment() {
-        let ddl = "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi";
+        let ddl = "CREATE TABLE t (\"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi";
         let (got, fields) = sole_warning(|| parse_mask_sentinels(ddl));
         assert!(
             got.is_empty(),
@@ -1437,6 +1128,10 @@ mod protection;
 mod search;
 
 impl crate::backend::Backend for SqliteBackend {
+    fn sql_registration(&self) -> crate::sql::registration::SqlRegistration {
+        crate::sql::registration::SqlRegistration::sqlite()
+    }
+
     fn publishes_committed_changes(&self) -> bool {
         true
     }

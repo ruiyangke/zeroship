@@ -19,6 +19,8 @@ use ed25519_dalek::{pkcs8::EncodePrivateKey, SigningKey};
 use ntex::web::{self, test};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 
 use zeroship_auth::config::AuthConfig;
 use zeroship_auth::headers::SecurityHeaders;
@@ -43,7 +45,7 @@ use zeroship_gateway::{session_token, GateConfig, GateState};
 async fn live_session(
     client: &compio_postgres::Client,
     id: Uuid,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Option<compio_postgres::Row> {
     client
         .query(
@@ -54,7 +56,7 @@ async fn live_session(
                AND revoked_at IS NULL \
                AND idle_expires_at > NOW() \
                AND abs_expires_at > NOW()",
-            &[&id, &app_id],
+            &[&id, &app_id.as_str()],
         )
         .await
         .expect("read gateway_sessions row")
@@ -200,7 +202,7 @@ impl zeroship_bundle::BlobStore for MemoryBlobStore {
 
     async fn put_manifest(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
         _d: &str,
         _j: &[u8],
     ) -> Result<(), zeroship_bundle::BlobError> {
@@ -209,7 +211,7 @@ impl zeroship_bundle::BlobStore for MemoryBlobStore {
 
     async fn get_manifest(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
         _d: &str,
     ) -> Result<bytes::Bytes, zeroship_bundle::BlobError> {
         Err(zeroship_bundle::BlobError::NotFound("unused".into()))
@@ -217,13 +219,13 @@ impl zeroship_bundle::BlobStore for MemoryBlobStore {
 
     async fn delete_manifest(
         &self,
-        _a: &Uuid,
+        _a: &AppId,
         _d: &str,
     ) -> Result<bool, zeroship_bundle::BlobError> {
         Ok(false)
     }
 
-    async fn delete_app_manifests(&self, _a: &Uuid) -> Result<(), zeroship_bundle::BlobError> {
+    async fn delete_app_manifests(&self, _a: &AppId) -> Result<(), zeroship_bundle::BlobError> {
         Ok(())
     }
 }
@@ -384,7 +386,7 @@ async fn echo_verified_user(req: web::HttpRequest) -> web::HttpResponse {
 
 fn build_gateway_state(
     auth_base: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     client_id: &str,
     worker_url: Option<&str>,
     db: Option<zeroship_gateway::db::DbConfig>,
@@ -458,7 +460,7 @@ fn build_gateway_state(
 
     let mut routes = HashMap::new();
     routes.insert(
-        app_id,
+        app_id.clone(),
         zeroship_core::types::RouteEntry {
             name: APP_NAME.to_string(),
             plan_id: "free".to_string(),
@@ -705,8 +707,8 @@ fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
 /// has nowhere to send a revocation and the gateway never hears about one.
 async fn seed_user_client(
     db: &Client,
-    user_id: Uuid,
-    app_id: Uuid,
+    user_id: &UserId,
+    app_id: &AppId,
     client_id: &str,
     email: &str,
     redirect_uri: &str,
@@ -716,7 +718,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.users (id, email, email_verified_at, name, password_hash) \
          VALUES ($1, $2::citext, NOW(), 'Gateway E2E User', $3)",
-        &[&user_id, &email, &phc],
+        &[&user_id.as_str(), &email, &phc],
     )
     .await
     .expect("seed user");
@@ -734,8 +736,8 @@ async fn seed_user_client(
         "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
          SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
         &[
-            &app_id,
-            &format!("gateway-e2e-app-{}", app_id.simple()),
+            &app_id.as_str(),
+            &format!("gateway-e2e-app-{}", app_id.as_str()),
             &project_id,
         ],
     )
@@ -765,7 +767,7 @@ async fn seed_user_client(
     db.execute(
         "INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier) \
          VALUES ($1, $2, $3)",
-        &[&app_id, &client_id, &SECTOR],
+        &[&app_id.as_str(), &client_id, &SECTOR],
     )
     .await
     .expect("seed app oauth client");
@@ -773,13 +775,13 @@ async fn seed_user_client(
         "INSERT INTO zeroship.oauth_grants \
              (user_id, client_id, granted_scopes, granted_at, updated_at) \
          VALUES ($1, $2, $3, NOW(), NOW())",
-        &[&user_id, &client_id, &scopes],
+        &[&user_id.as_str(), &client_id, &scopes],
     )
     .await
     .expect("seed oauth grant");
 }
 
-async fn cleanup(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
+async fn cleanup(db: &Client, user_id: &UserId, app_id: &AppId, client_id: &str) {
     let _ = db
         .execute(
             "DELETE FROM zeroship.oauth_grants WHERE client_id = $1",
@@ -795,14 +797,14 @@ async fn cleanup(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &str) {
     let _ = db
         .execute(
             "DELETE FROM zeroship.idp_sessions WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id])
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user_id.as_str()])
         .await;
     let _ = db
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id.as_str()])
         .await;
 }
 
@@ -821,14 +823,14 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     );
     publish_op_key_once(&issuer, &pg_client).await;
 
-    let user_id = Uuid::new_v4();
-    let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let user_id = UserId::mint();
+    let app_id = AppId::mint();
+    let client_id = zeroship_core::typed_id::app_oauth_client_id(&app_id);
     let email = format!("gw-op-h2-{}@zeroship.test", Uuid::new_v4().simple());
     seed_user_client(
         &pg_client,
-        user_id,
-        app_id,
+        &user_id,
+        &app_id,
         &client_id,
         &email,
         REDIRECT_URI,
@@ -856,7 +858,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     })
     .await;
     let worker_base = worker.url("").trim_end_matches('/').to_string();
-    let state = build_gateway_state(&auth_base, app_id, &client_id, Some(&worker_base), None);
+    let state = build_gateway_state(&auth_base, &app_id, &client_id, Some(&worker_base), None);
     let app = test::init_service(
         web::App::new().state(state).service(
             web::resource("/{tail}*")
@@ -883,7 +885,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
     let projected_user: serde_json::Value =
         serde_json::from_slice(&access_body).expect("worker returned projected user JSON");
     let expected_pws =
-        zeroship_core::auth::derive_pairwise(&[9u8; 32], &user_id.to_string(), SECTOR);
+        zeroship_core::auth::derive_pairwise(&[9u8; 32], &user_id, SECTOR);
     assert_eq!(
         projected_user["id"],
         serde_json::json!(expected_pws),
@@ -902,7 +904,7 @@ async fn gateway_bearer_rejects_real_op_id_token_but_accepts_access_token() {
         "OP id_token must not authenticate as a Bearer access token"
     );
 
-    cleanup(&pg_client, user_id, app_id, &client_id).await;
+    cleanup(&pg_client, &user_id, &app_id, &client_id).await;
     compio::time::sleep(Duration::from_millis(50)).await;
     drop(worker);
     drop(srv);
@@ -920,11 +922,11 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     );
     publish_op_key_once(&issuer, &pg_client).await;
 
-    let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let app_id = AppId::mint();
+    let client_id = zeroship_core::typed_id::app_oauth_client_id(&app_id);
     let srv = start_platform_op(&db_url, pg_client, issuer.clone()).await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
-    let state = build_gateway_state(&auth_base, app_id, &client_id, None, None);
+    let state = build_gateway_state(&auth_base, &app_id, &client_id, None, None);
     let app = test::init_service(
         web::App::new().state(state).service(
             web::resource("/{tail}*")
@@ -939,8 +941,8 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
         .as_secs();
     let mut claims = serde_json::json!({
         "iss": issuer.issuer(),
-        "sub": issuer.pairwise_subject(&Uuid::new_v4().to_string(), SECTOR),
-        "aud": format!("app:{app_id}"),
+        "sub": issuer.pairwise_subject(&UserId::mint(), SECTOR),
+        "aud": format!("app:{}", app_id.as_str()),
         "client_id": client_id,
         "scope": "openid email",
         "iat": now,
@@ -966,7 +968,7 @@ async fn gateway_bearer_rejects_access_token_for_different_resource_audience() {
     );
     assert_eq!(test::read_body(response).await.as_ref(), b"ok");
 
-    claims["aud"] = serde_json::json!(format!("app:{}", Uuid::new_v4()));
+    claims["aud"] = serde_json::json!(format!("app:{}", AppId::mint().as_str()));
     let wrong_aud_token = jsonwebtoken::encode(&header, &claims, &key)
         .expect("sign otherwise-identical claims for another audience");
 
@@ -1014,14 +1016,14 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     );
     publish_op_key_once(&issuer, &pg_client).await;
 
-    let user_id = Uuid::new_v4();
-    let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let user_id = UserId::mint();
+    let app_id = AppId::mint();
+    let client_id = zeroship_core::typed_id::app_oauth_client_id(&app_id);
     let email = format!("gw-op-{}@zeroship.test", Uuid::new_v4().simple());
     seed_user_client(
         &pg_client,
-        user_id,
-        app_id,
+        &user_id,
+        &app_id,
         &client_id,
         &email,
         REDIRECT_URI,
@@ -1163,7 +1165,7 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
         .await
         .expect("finish_callback");
     assert_eq!(original_path, "/some/path");
-    assert_eq!(claims.sub, user_id.to_string());
+    assert_eq!(claims.sub, user_id.as_str());
     assert!(granted_scopes.contains(&"openid".to_string()));
     assert!(granted_scopes.contains(&"offline_access".to_string()));
 
@@ -1179,9 +1181,9 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     let session = create(
         &mut sess_client,
         &NewSession {
-            user_id: &claims.sub,
+            user_id: &user_id,
             sid: claims.sid.as_deref(),
-            app_id,
+            app_id: &app_id,
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
@@ -1193,26 +1195,27 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     )
     .await
     .expect("session create");
+    assert_eq!(session.user_id, user_id);
 
-    let live = live_session(&sess_client, session.id, app_id)
+    let live = live_session(&sess_client, session.id, &app_id)
         .await
         .expect("session row must be live after create");
-    let live_user: Uuid = live.get("user_id");
-    assert_eq!(live_user.to_string(), claims.sub);
+    let live_user: &str = live.get("user_id");
+    assert_eq!(live_user, claims.sub);
     let live_scopes: Vec<String> = live.try_get("granted_scopes").unwrap_or_default();
     assert_eq!(live_scopes, granted_scopes);
 
-    revoke_app_sessions_for_user(&mut sess_client, app_id, &claims.sub)
+    revoke_app_sessions_for_user(&mut sess_client, &app_id, &user_id)
         .await
         .expect("revoke");
     assert!(
-        live_session(&sess_client, session.id, app_id)
+        live_session(&sess_client, session.id, &app_id)
             .await
             .is_none(),
         "a revoked session must not resolve as live"
     );
 
-    cleanup(&pg_client, user_id, app_id, &client_id).await;
+    cleanup(&pg_client, &user_id, &app_id, &client_id).await;
     compio::time::sleep(Duration::from_millis(50)).await;
     drop(srv);
 }
@@ -1251,16 +1254,16 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
     );
     publish_op_key_once(&issuer, &pg_client).await;
 
-    let user_id = Uuid::new_v4();
-    let app_id = Uuid::new_v4();
-    let client_id = format!("oac_{}", zeroship_core::typed_id::uuid_to_base62(&app_id));
+    let user_id = UserId::mint();
+    let app_id = AppId::mint();
+    let client_id = zeroship_core::typed_id::app_oauth_client_id(&app_id);
     let email = format!("gw-revoke-{}@zeroship.test", Uuid::new_v4().simple());
     // The gateway's BFF default: the SDK lands the code on the app origin.
     let popup_callback = format!("{SECTOR}/__zeroship/auth/popup-callback");
     seed_user_client(
         &pg_client,
-        user_id,
-        app_id,
+        &user_id,
+        &app_id,
         &client_id,
         &email,
         &popup_callback,
@@ -1272,7 +1275,7 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
     let auth_base = op_srv.url("").trim_end_matches('/').to_string();
 
     let db_cfg = zeroship_gateway::db::DbConfig::new(db_url.clone(), 8);
-    let state = build_gateway_state(&auth_base, app_id, &client_id, None, Some(db_cfg.clone()));
+    let state = build_gateway_state(&auth_base, &app_id, &client_id, None, Some(db_cfg.clone()));
 
     // The gateway's back-channel-logout receiver on a REAL socket, sharing the
     // SAME `GateState` as the in-process app below, so the teardown it runs
@@ -1384,7 +1387,7 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
             "SELECT id FROM zeroship.gateway_sessions \
              WHERE user_id = $1 AND app_id = $2 AND revoked_at IS NULL \
              ORDER BY issued_at DESC LIMIT 1",
-            &[&user_id, &app_id],
+            &[&user_id.as_str(), &app_id.as_str()],
         )
         .await
         .expect("the OP lists the app session it is about to revoke")
@@ -1454,7 +1457,7 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
     );
 
     let pws =
-        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id.to_string(), SECTOR);
+        zeroship_core::auth::derive_pairwise(&state.pairwise_salt, &user_id, SECTOR);
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.token_revocations WHERE client_id = $1 AND sub = $2",
@@ -1470,25 +1473,25 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.app_session_anchors WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await;
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.gateway_sessions WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await;
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.app_user_identities WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await;
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.oidc_session_clients WHERE user_id = $1",
-            &[&user_id],
+            &[&user_id.as_str()],
         )
         .await;
     let _ = pg_client
@@ -1500,10 +1503,10 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
     let _ = pg_client
         .execute(
             "DELETE FROM zeroship.app_oauth_clients WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await;
-    cleanup(&pg_client, user_id, app_id, &client_id).await;
+    cleanup(&pg_client, &user_id, &app_id, &client_id).await;
     compio::time::sleep(Duration::from_millis(50)).await;
     drop(bcl_srv);
     drop(op_srv);

@@ -83,7 +83,7 @@ async fn emit_transition(state: &AppState, t: &SpendTransition) {
     audit::log_with_detail(
         &state.registry,
         AuditEntry {
-            app_id: Some(t.app_id),
+            app_id: Some(&t.app_id),
             organization_id: None,
             actor_user_id: None,
             action: Action::SpendStateChange,
@@ -98,7 +98,7 @@ async fn emit_transition(state: &AppState, t: &SpendTransition) {
     // delivery path. Construct it so the wire variant has a real producer and
     // the transition is observable in logs.
     let event = ControlEvent::SpendState {
-        app_id: t.app_id,
+        app_id: t.app_id.clone(),
         state: t.new,
     };
     match serde_json::to_string(&event) {

@@ -219,7 +219,7 @@ pub(super) async fn assert_login_session(
         .pg
         .query_one(
             "SELECT email::text, email_verified_at IS NOT NULL FROM zeroship.users WHERE id = $1",
-            &[&session.user_id],
+            &[&session.user_id.as_str()],
         )
         .await
         .unwrap();

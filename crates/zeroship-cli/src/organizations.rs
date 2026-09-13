@@ -10,10 +10,10 @@
 //!   zeroship organization invite   <email> --role=ROLE [--organization=org_...]
 //!   zeroship organization revoke   <ivt_...> [--organization=org_...]
 //!   zeroship organization join     <token>
-//!   zeroship organization role     <user-uuid> --role=ROLE [--organization=org_...]
-//!   zeroship organization remove   <user-uuid> [--organization=org_...]
+//!   zeroship organization role     <usr_...> --role=ROLE [--organization=org_...]
+//!   zeroship organization remove   <usr_...> [--organization=org_...]
 //!   zeroship organization leave    [--organization=org_...]
-//!   zeroship organization transfer <user-uuid> [--organization=org_...]
+//!   zeroship organization transfer <usr_...> [--organization=org_...]
 //!   zeroship organization dissolve [--organization=org_...]
 //!   zeroship organization projects [<verb> ...] [--organization=org_...]
 //!
@@ -56,6 +56,7 @@ use std::path::PathBuf;
 use zeroship_core::invite_id::InviteId;
 use zeroship_core::organization_id::OrganizationId;
 use zeroship_core::project_id::ProjectId;
+use zeroship_core::UserId;
 
 /// Encode every ASCII delimiter plus `.` so a value stays exactly one path
 /// segment. Every id this module puts in a path is parsed first, so nothing
@@ -250,21 +251,16 @@ fn required_flag(args: &[String], flag: &'static str, what: &str) -> Result<Stri
         .ok_or_else(|| format!("missing {flag}=<{what}>"))
 }
 
-fn require_user_id(raw: Option<&str>, example: &str) -> Result<String, String> {
+fn require_user_id(raw: Option<&str>, example: &str) -> Result<UserId, String> {
     let Some(raw) = raw else {
         return Err(format!("missing <user-id>; e.g. `{example}`"));
     };
-    // A USER id, not an app id, so this parses uuid directly rather than
-    // borrowing `app_id_or_refuse`: that helper also accepts `app_<base62>`,
-    // which is a different entity and would be accepted here for no reason.
-    // `zeroship.users.id` is a uuid column, so uuid is the whole vocabulary.
-    if raw.parse::<uuid::Uuid>().is_err() {
-        return Err(format!(
-            "{raw:?} is not a user id. A user id is a UUID; \
+    UserId::parse(raw).map_err(|_| {
+        format!(
+            "{raw:?} is not a user id. A user id starts with `usr_`; \
              `zeroship organization members` lists the ones seated here."
-        ));
-    }
-    Ok(raw.to_string())
+        )
+    })
 }
 
 /// Build the control-plane call for one subcommand.
@@ -352,7 +348,7 @@ pub(crate) fn plan(sub: &str, args: &[String], organization: Option<&str>) -> Re
                 format!(
                     "/api/organizations/{}/members/{}",
                     organization_path(),
-                    segment(&user)
+                    segment(user.as_str())
                 ),
                 serde_json::json!({ "role": role }),
             ))
@@ -362,7 +358,7 @@ pub(crate) fn plan(sub: &str, args: &[String], organization: Option<&str>) -> Re
             Ok(Call::delete(format!(
                 "/api/organizations/{}/members/{}",
                 organization_path(),
-                segment(&user)
+                segment(user.as_str())
             )))
         }
         // No positional at all, and that is the shape of the route: nothing in
@@ -486,7 +482,7 @@ fn plan_projects(args: &[String], organization: &str, first: Option<&str>) -> Re
             )?;
             let role = required_flag(args, "--role", "role")?;
             Ok(Call::patch(
-                format!("/api/projects/{project}/members/{}", segment(&user)),
+                format!("/api/projects/{project}/members/{}", segment(user.as_str())),
                 serde_json::json!({ "role": role }),
             ))
         }
@@ -498,7 +494,7 @@ fn plan_projects(args: &[String], organization: &str, first: Option<&str>) -> Re
             )?;
             Ok(Call::delete(format!(
                 "/api/projects/{project}/members/{}",
-                segment(&user)
+                segment(user.as_str())
             )))
         }
         Some(other) => Err(format!(
@@ -932,10 +928,10 @@ mod tests {
             .collect()
     }
 
-    const ORG: &str = "org_0123456789abcdefghijkl";
-    const PRJ: &str = "prj_0123456789abcdefghijkl";
-    const INVITE: &str = "ivt_0123456789abcdefghijkl";
-    const USER: &str = "11111111-2222-3333-4444-555555555555";
+    const ORG: &str = "org_0000000002e4nenowz3qmamtd";
+    const PRJ: &str = "prj_0000000002e4nenowz3qmamtd";
+    const INVITE: &str = "ivt_0000000002e4nenowz3qmamtd";
+    const USER: &str = "usr_0000000002e4nenowz3qmamtd";
 
     /// The routing table, stated as data. Every remote subcommand appears, and
     /// the assertion is on the METHOD, PATH and BODY - the three things a
@@ -1082,7 +1078,7 @@ mod tests {
                 &["projects", "add", PRJ, USER, "--role=developer"],
                 "POST",
                 format!("/api/projects/{PRJ}/members"),
-                Some(r#"{"user_id":"11111111-2222-3333-4444-555555555555","role":"developer"}"#),
+                Some(r#"{"user_id":"usr_0000000002e4nenowz3qmamtd","role":"developer"}"#),
             ),
             (
                 &["projects", "role", PRJ, USER, "--role=viewer"],
@@ -1111,9 +1107,16 @@ mod tests {
         // omits would be tested by nothing while every case above still passes.
         let covered: Vec<&str> = cases.iter().map(|(rest, ..)| rest[1]).collect();
         for verb in PROJECT_VERBS {
-            assert!(covered.contains(verb), "`projects {verb}` has no routing case");
+            assert!(
+                covered.contains(verb),
+                "`projects {verb}` has no routing case"
+            );
         }
-        assert_eq!(covered.len(), PROJECT_VERBS.len(), "a verb is covered twice");
+        assert_eq!(
+            covered.len(),
+            PROJECT_VERBS.len(),
+            "a verb is covered twice"
+        );
     }
 
     /// A project verb that needs an id refuses a slug, an organization id and a
@@ -1156,7 +1159,13 @@ mod tests {
         // The control: either flag alone is enough, and both compose.
         let both = plan(
             "projects",
-            &argv(&["projects", "rename", PRJ, "--name=Checkout", "--slug=checkout"]),
+            &argv(&[
+                "projects",
+                "rename",
+                PRJ,
+                "--name=Checkout",
+                "--slug=checkout",
+            ]),
             Some(ORG),
         )
         .unwrap();
@@ -1217,15 +1226,14 @@ mod tests {
         ] {
             note_invite_delivery(body);
         }
-        let parsed: Option<String> = serde_json::from_str::<serde_json::Value>(
-            r#"{"delivery":"suppressed"}"#,
-        )
-        .ok()
-        .and_then(|v| {
-            v.get("delivery")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        });
+        let parsed: Option<String> =
+            serde_json::from_str::<serde_json::Value>(r#"{"delivery":"suppressed"}"#)
+                .ok()
+                .and_then(|v| {
+                    v.get("delivery")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
         assert_eq!(parsed.as_deref(), Some("suppressed"));
     }
 
@@ -1339,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn a_user_id_that_is_not_a_uuid_is_refused_here() {
+    fn a_non_user_id_is_refused_here() {
         for sub in ["role", "remove", "transfer"] {
             let args = argv(&[sub, "someone@example.test", "--role=viewer"]);
             let err = plan(sub, &args, Some(ORG)).unwrap_err();
@@ -1402,16 +1410,8 @@ mod tests {
         assert_eq!(
             targeted,
             [
-                "show",
-                "members",
-                "invite",
-                "revoke",
-                "role",
-                "remove",
-                "leave",
-                "transfer",
-                "dissolve",
-                "projects"
+                "show", "members", "invite", "revoke", "role", "remove", "leave", "transfer",
+                "dissolve", "projects"
             ]
         );
     }
@@ -1605,7 +1605,7 @@ mod tests {
         let mut recorder = Recorder {
             calls: Vec::new(),
             status: 201,
-            body: r#"{"id":"prj_0123456789abcdefghijkl"}"#.to_string(),
+            body: r#"{"id":"prj_0000000002e4nenowz3qmamtd"}"#.to_string(),
         };
         let call = plan(
             "projects",

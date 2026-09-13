@@ -23,6 +23,7 @@ use zeroship_bundle::{
     AssetEntry, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, WorkerCode,
 };
 use zeroship_control::deploy::{self, IngestError};
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -125,12 +126,8 @@ fn build_zship(
                 header.set_size(bytes.len() as u64);
                 header.set_mode(0o644);
                 header.set_cksum();
-                b.append_data(
-                    &mut header,
-                    format!("blobs/{hash}"),
-                    bytes.as_slice(),
-                )
-                .expect("append blob");
+                b.append_data(&mut header, format!("blobs/{hash}"), bytes.as_slice())
+                    .expect("append blob");
             }
         };
         if manifest_first {
@@ -178,8 +175,10 @@ async fn deploy_round_trip() {
     ];
     let body = build_zship(&manifest_bytes, &blobs, true);
 
-    let app_id = Uuid::new_v4();
-    let success = deploy::ingest(&bs, &app_id, &body).await.expect("ingest ok");
+    let app_id = AppId::mint();
+    let success = deploy::ingest(&bs, &app_id, &body)
+        .await
+        .expect("ingest ok");
 
     assert_eq!(success.blobs_uploaded, 2);
     assert_eq!(success.blobs_deduped, 0);
@@ -193,7 +192,10 @@ async fn deploy_round_trip() {
         .await
         .expect("manifest stored");
     let parsed: Manifest = serde_json::from_slice(&stored_manifest).unwrap();
-    assert_eq!(parsed.deploy_hash.as_deref(), Some(success.deploy_hash.as_str()));
+    assert_eq!(
+        parsed.deploy_hash.as_deref(),
+        Some(success.deploy_hash.as_str())
+    );
     assert_eq!(
         parsed.worker,
         Some(WorkerCode {
@@ -210,7 +212,7 @@ async fn deploy_round_trip() {
         .await
         .expect("seed built-in plans");
     // create_app binds an owner membership (FK → zeroship.users); seed one.
-    let owner_id = Uuid::new_v4();
+    let owner_id = UserId::mint();
     let (pg, pg_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
         .expect("owner-seed connect");
@@ -221,8 +223,8 @@ async fn deploy_round_trip() {
     pg.execute(
         "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
         &[
-            &owner_id,
-            &format!("deploy-owner-{owner_id}@zeroship.test"),
+            &owner_id.as_str(),
+            &format!("deploy-owner-{}@zeroship.test", owner_id.as_str()),
             &"deploy-owner",
         ],
     )
@@ -241,13 +243,16 @@ async fn deploy_round_trip() {
     let app_id2 = record.id;
 
     // Re-run ingest under the real app id, then update the DB.
-    let success2 = deploy::ingest(&bs, &app_id2, &body)
-        .await
-        .expect("ingest2");
+    let success2 = deploy::ingest(&bs, &app_id2, &body).await.expect("ingest2");
     let updated = registry
         // No descriptor: this bundle declares no schema and the app has no
         // applied migrations, which is the arm the precondition permits.
-        .set_deploy_with_manifest(&app_id2, &success2.deploy_hash, &success2.manifest_json, None)
+        .set_deploy_with_manifest(
+            &app_id2,
+            &success2.deploy_hash,
+            &success2.manifest_json,
+            None,
+        )
         .await
         .expect("set deploy");
     assert!(updated);
@@ -290,7 +295,7 @@ async fn deploy_rejects_hash_mismatch() {
     let blobs = vec![(wrong_hash.clone(), bytes.to_vec())];
     let body = build_zship(&manifest_bytes, &blobs, true);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(error.contains("hash mismatch"), "got error={error}");
@@ -312,7 +317,7 @@ async fn deploy_rejects_missing_blob() {
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let body = build_zship(&manifest_bytes, &[], true);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(error.contains("missing blob"), "got error={error}");
@@ -336,7 +341,7 @@ async fn deploy_rejects_manifest_not_first() {
     // manifest_first = false → blob entry comes before manifest.json.
     let body = build_zship(&manifest_bytes, &blobs, false);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(
@@ -369,7 +374,7 @@ async fn deploy_rejects_unsupported_version() {
     let manifest_bytes = serde_json::to_vec(&raw).unwrap();
     let body = build_zship(&manifest_bytes, &[], true);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(
@@ -397,12 +402,12 @@ async fn deploy_dedup_internal() {
     let blobs = vec![(hash.clone(), payload.to_vec())];
     let body = build_zship(&manifest_bytes, &blobs, true);
 
-    let app_a = Uuid::new_v4();
+    let app_a = AppId::mint();
     let success_a = deploy::ingest(&bs, &app_a, &body).await.expect("A");
     assert_eq!(success_a.blobs_uploaded, 1);
     assert_eq!(success_a.blobs_deduped, 0);
 
-    let app_b = Uuid::new_v4();
+    let app_b = AppId::mint();
     let success_b = deploy::ingest(&bs, &app_b, &body).await.expect("B");
     assert_eq!(success_b.blobs_uploaded, 0);
     assert_eq!(success_b.blobs_deduped, 1);
