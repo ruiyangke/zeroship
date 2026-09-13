@@ -7,6 +7,8 @@
 //! readiness endpoint from a second liveness endpoint - a `/readyz` hardcoded
 //! to 200 passes every up-case test ever written.
 
+mod fixture;
+
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,20 +30,6 @@ const TEST_POLICY_SEAL_KEY: &[u8] = b"migrated health probe policy seal key";
 /// than hanging, which is the case the probe's timeout is NOT covering here.
 const DEAD_DSN: &str =
     "host=127.0.0.1 port=9199 user=postgres password=zeroship dbname=zeroship connect_timeout=2";
-
-/// The up-case asserts CONNECTIVITY, not schema: `SchemaApplyStore::probe` is a
-/// connect plus a protocol sync and reads no table, so any reachable database
-/// will do.
-///
-/// It used to say so by carrying its own DSN -- `dbname=postgres` on the shared
-/// :5440 server -- and using it whenever the overlay was absent. "Any reachable
-/// database will do" is a statement about what the test NEEDS; it is not a
-/// licence to pick one. A run with no configuration measured a server this file
-/// named and nothing else in the workspace agreed on. The accessor below panics
-/// instead, naming the provisioning command.
-fn live_dsn() -> String {
-    zeroship_core::config::test_database_url()
-}
 
 /// Readiness never consults the authenticator, so the stub only has to exist.
 #[derive(Debug)]
@@ -134,12 +122,10 @@ async fn readyz_is_503_when_postgres_is_unreachable() {
     }
 }
 
-/// Needs the shared test Postgres (the same one every other migrated
-/// integration test needs). Fails, not skips, when it is absent - a skip here
-/// would make an unreachable database look like a passing suite.
 #[ntex::test]
 async fn readyz_is_200_when_postgres_answers() {
-    let (status, body) = status_of(state_on(&live_dsn()), "/readyz").await;
+    let postgres = fixture::Postgres::start();
+    let (status, body) = status_of(state_on(postgres.url()), "/readyz").await;
     assert_eq!(status, StatusCode::OK, "body: {body}");
     assert!(body.contains("true"), "body: {body}");
 }
