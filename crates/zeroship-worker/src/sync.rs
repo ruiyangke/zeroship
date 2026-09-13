@@ -513,17 +513,17 @@ pub async fn fetch_app_env(
     // Resolve host material before publishing the environment or creating an
     // isolate. Every thread uses the database service's shared source.
     if let Some(keys) = crate::cache::project_keys() {
-        let app = app_id.to_string();
-        if !keys.is_bound(&app).map_err(|error| error.to_string())? {
-            let url = format!("{url_base}/internal/apps/{app_id}/data-key");
+        let app = app_id.as_str();
+        if !keys.is_bound(app).map_err(|error| error.to_string())? {
+            let url = format!("{url_base}/internal/apps/{}/data-key", app_id.as_str());
             let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
             let key = zeroship_core::project_data_key::ProjectDataKey::from_json(body)
                 .map_err(|_| "invalid control project key response".to_string())?;
-            keys.supply(&app, key.project_id.as_str(), *key.key())
+            keys.supply(app, key.project_id.as_str(), *key.key())
                 .map_err(|error| error.to_string())?;
         }
     }
-    let url = format!("{url_base}/internal/apps/{app_id}/env");
+    let url = format!("{url_base}/internal/apps/{}/env", app_id.as_str());
     http_get(&url, control_authorization(service_auth)?.as_deref()).await
 }
 

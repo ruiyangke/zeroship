@@ -1,12 +1,12 @@
 use crate::workflow_postgres::Database;
 use compio_postgres::{connect, NoTls};
-use uuid::Uuid;
+use zeroship_core::AppId;
 use zeroship_workflow::store::pg::PgStore;
 
 #[compio::test]
 async fn concurrent_control_and_worker_provisioning_preserves_the_journal() {
     let database = Database::new();
-    let app = Uuid::new_v4();
+    let app = AppId::mint();
     let (admin, connection) = connect(&database.url(), NoTls).await.unwrap();
     let driver = compio::runtime::spawn(connection.run());
     zeroship_migrate_server::provisioning::provision_workflow_journal_schema(&admin, &app)
@@ -22,6 +22,7 @@ async fn concurrent_control_and_worker_provisioning_preserves_the_journal() {
         .unwrap();
 
     let attempts = futures::future::join_all((0..8).map(|index| {
+        let app = app.clone();
         let mut dsn = url::Url::parse(&database.url()).unwrap();
         let role = if index % 2 == 0 {
             "zeroship_control"
@@ -65,7 +66,7 @@ async fn concurrent_control_and_worker_provisioning_preserves_the_journal() {
 #[compio::test]
 async fn provisioning_waits_without_blocking_an_active_journal_transaction() {
     let database = Database::new();
-    let app = Uuid::new_v4();
+    let app = AppId::mint();
     let (admin, connection) = connect(&database.url(), NoTls).await.unwrap();
     let admin_driver = compio::runtime::spawn(connection.run());
     zeroship_migrate_server::provisioning::provision_workflow_journal_schema(&admin, &app)

@@ -440,7 +440,7 @@ async fn fixture(label: &str) -> (Fixture, String, String) {
         .control_pg
         .query_one(
             "SELECT organization_id, project_id FROM zeroship.apps WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .unwrap();

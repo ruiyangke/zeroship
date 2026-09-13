@@ -1268,7 +1268,7 @@ const APP_ID_PREFIX: &str = "app_";
 /// charset rule above admits `_`, so `app_0123456789ABCDEFGHIJKL` is a legal
 /// name AND a legal [`AppId`] - a single string that is both, which is what
 /// makes any name-or-id discriminator unwritable. Reserving only the parsable
-/// bodies would leave the boundary standing on base62 length and range checks:
+/// bodies would leave the boundary standing on base36 length and range checks:
 /// a body one character short would be claimable, and the rule would be one no
 /// creator could state and no reviewer could check.
 ///
@@ -1311,7 +1311,7 @@ mod name_validation_tests {
     /// The string that is a legal app NAME and a legal app ID at once.
     ///
     /// `create_app`'s charset rule admits `_`, and `AppId::parse` wants the
-    /// `app_` prefix plus a base62 body, so this passes both. A creator who
+    /// `app_` prefix plus a base36 body, so this passes both. A creator who
     /// claims it holds a name that every `--app=` reads as an identity.
     const ID_SHAPED_NAME: &str = "app_0123456789abcdefghijkl000";
 

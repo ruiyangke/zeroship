@@ -3,16 +3,16 @@
 pub mod authz_fixture;
 pub mod stripe_mock;
 
-use std::sync::OnceLock;
 use std::sync::mpsc;
+use std::sync::OnceLock;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use ed25519_dalek::SigningKey;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use ed25519_dalek::pkcs8::EncodePrivateKey;
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use ed25519_dalek::SigningKey;
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::web::{self, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
@@ -549,7 +549,8 @@ pub async fn seat_app_organization_member(
         .await
         .expect("seat organization member for fixture app");
     assert_eq!(
-        seated, 1,
+        seated,
+        1,
         "seating {} as '{role}' on app {} affected {seated} row(s). The \
          INSERT ... SELECT matched no app reaching an organization through \
          apps.project_id -> projects.organization_id, which is a SUCCESSFUL \
@@ -573,7 +574,12 @@ pub async fn seed_usage_total(
          VALUES ($1, $2::date, $3, $4, NOW()) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET \
            total = EXCLUDED.total, updated_at = NOW()",
-        &[&app.as_str(), &period_date(period_start_unix), &metric, &total],
+        &[
+            &app.as_str(),
+            &period_date(period_start_unix),
+            &metric,
+            &total,
+        ],
     )
     .await
     .expect("seed usage total");
@@ -593,7 +599,12 @@ pub async fn seed_usage_delta(
          VALUES ($1, $2::date, $3, $4, NOW()) \
          ON CONFLICT (app_id, period, metric) DO UPDATE SET \
            total = u.total + EXCLUDED.total, updated_at = NOW()",
-        &[&app.as_str(), &period_date(period_start_unix), &metric, &delta],
+        &[
+            &app.as_str(),
+            &period_date(period_start_unix),
+            &metric,
+            &delta,
+        ],
     )
     .await
     .expect("seed usage delta");

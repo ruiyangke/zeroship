@@ -2371,7 +2371,7 @@ mod tests {
         // This test used to hand the arm the placeholder strings "oac_app_a" /
         // "oac_app_b" and a resource audience of "http://api.zeroship.localhost".
         // Neither is what the arm accepts: a per-app client_id is
-        // `oac_<base62(app uuid)>`, which the arm PARSES back to an app id
+        // `oac_<base36(app uuid)>`, which the arm PARSES back to an app id
         // before it consults revocation at all, and `aud` must carry that app's
         // `app:{app_id}` resource audience. So both tokens were refused on the
         // shape check ("route client_id is not a per-app OAuth client"), which

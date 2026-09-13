@@ -1,5 +1,19 @@
 import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  app_audit: ["creator_id", "actor_user_id"],
+  app_members: ["user_id", "added_by"],
+  app_net_grants: ["granted_by"],
+  app_schema_applies: ["submitted_by"],
+  creator_account_history: ["creator_id"],
+  creator_accounts: ["creator_id"],
+  net_policy_catalog: ["updated_by"],
+  payouts: ["creator_id"],
+  permission_tokens: ["owner_id"],
+  platform_admin_roles: ["user_id", "granted_by"],
+  platform_policies: ["updated_by"],
+};
+
 export default {
   name: "control_tables",
   schema() {
@@ -150,7 +164,7 @@ export default {
     table("apps", { schema: "zeroship" }).create({
       columns: {
         // A typed id, and deliberately WITHOUT a database default: a SQL-side
-        // generator for `app_<base62>` would be a second minter beside
+        // generator for `app_<base36>` would be a second minter beside
         // `AppId::mint`, and one producer per identifier is what makes a
         // derived name answerable. Every insert supplies the id.
         id: t.text().notNull(),
@@ -175,9 +189,9 @@ export default {
     // fails the whole file with `table \`apps\` does not exist`.
     //
     // The character class is case-inclusive because `zeroship_core::typed_id`'s
-    // BASE62 alphabet is `0..9A..Za..z` and case is significant in it; a
+    // BASE36 alphabet is `0..9A..Za..z` and case is significant in it; a
     // lower-only class would refuse most minted ids. Twenty-two characters is
-    // base62 of 128 bits.
+    // base36 of 128 bits.
     table("apps", { schema: "zeroship" })
       .check("apps_id_shape")
       .add({ expr: (col) => col("id").regex("^app_[0-9a-z]{25}$") });
@@ -271,5 +285,12 @@ export default {
       },
       primaryKey: ["id"],
     });
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
+    }
   },
 };

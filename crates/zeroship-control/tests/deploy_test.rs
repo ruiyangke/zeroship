@@ -23,7 +23,7 @@ use zeroship_bundle::{
     AssetEntry, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, WorkerCode,
 };
 use zeroship_control::deploy::{self, IngestError};
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -175,7 +175,7 @@ async fn deploy_round_trip() {
     ];
     let body = build_zship(&manifest_bytes, &blobs, true);
 
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let success = deploy::ingest(&bs, &app_id, &body)
         .await
         .expect("ingest ok");
@@ -295,7 +295,7 @@ async fn deploy_rejects_hash_mismatch() {
     let blobs = vec![(wrong_hash.clone(), bytes.to_vec())];
     let body = build_zship(&manifest_bytes, &blobs, true);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(error.contains("hash mismatch"), "got error={error}");
@@ -317,7 +317,7 @@ async fn deploy_rejects_missing_blob() {
     let manifest_bytes = serde_json::to_vec(&manifest).unwrap();
     let body = build_zship(&manifest_bytes, &[], true);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(error.contains("missing blob"), "got error={error}");
@@ -341,7 +341,7 @@ async fn deploy_rejects_manifest_not_first() {
     // manifest_first = false → blob entry comes before manifest.json.
     let body = build_zship(&manifest_bytes, &blobs, false);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(
@@ -374,7 +374,7 @@ async fn deploy_rejects_unsupported_version() {
     let manifest_bytes = serde_json::to_vec(&raw).unwrap();
     let body = build_zship(&manifest_bytes, &[], true);
 
-    let result = deploy::ingest(&bs, &Uuid::new_v4(), &body).await;
+    let result = deploy::ingest(&bs, &AppId::mint(), &body).await;
     match result {
         Err(IngestError::BadRequest { error, .. }) => {
             assert!(
@@ -402,12 +402,12 @@ async fn deploy_dedup_internal() {
     let blobs = vec![(hash.clone(), payload.to_vec())];
     let body = build_zship(&manifest_bytes, &blobs, true);
 
-    let app_a = Uuid::new_v4();
+    let app_a = AppId::mint();
     let success_a = deploy::ingest(&bs, &app_a, &body).await.expect("A");
     assert_eq!(success_a.blobs_uploaded, 1);
     assert_eq!(success_a.blobs_deduped, 0);
 
-    let app_b = Uuid::new_v4();
+    let app_b = AppId::mint();
     let success_b = deploy::ingest(&bs, &app_b, &body).await.expect("B");
     assert_eq!(success_b.blobs_uploaded, 0);
     assert_eq!(success_b.blobs_deduped, 1);

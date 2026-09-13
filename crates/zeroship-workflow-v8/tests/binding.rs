@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid;
+use zeroship_id::AppId;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::{
@@ -19,10 +19,10 @@ fn modules(source: &str) -> Vec<ModuleEntry> {
     }]
 }
 
-async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u16, String) {
+async fn run_workflow_app(control_url: String, app_id: AppId, source: &str) -> (u16, String) {
     init_v8();
     let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
     let plugin: Arc<dyn NativePlugin> =
         Arc::new(WorkflowBinding::new(control_url, TEST_CONTROL_KEY));
     let runtime = Runtime::builder()
@@ -67,12 +67,12 @@ async fn run_workflow_app(control_url: String, app_id: Uuid, source: &str) -> (u
 
 async fn run_dev_workflow_app(
     db_path: &std::path::Path,
-    app_id: Uuid,
+    app_id: AppId,
     source: &str,
 ) -> (u16, String) {
     init_v8();
     let mut env_vars = HashMap::new();
-    env_vars.insert("APP_ID".to_string(), app_id.to_string());
+    env_vars.insert("APP_ID".to_string(), app_id.as_str().to_owned());
     let plugin: Arc<dyn NativePlugin> = Arc::new(
         WorkflowBinding::dev_sqlite(db_path, modules(source), env_vars.clone(), Vec::new())
             .expect("dev workflow plugin"),
@@ -150,7 +150,7 @@ fn getter_exclusion_list_matches_the_binding_contract() {
 async fn dev_sqlite_engine_runs_sleep_signal_core_loop_once() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("workflows.sqlite");
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let source = r#"
         const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -237,7 +237,7 @@ async fn v8_binding_getter_exclusions_are_undefined() {
         };
     "#;
     let (status, body) =
-        run_workflow_app("http://127.0.0.1:9".to_string(), Uuid::new_v4(), source).await;
+        run_workflow_app("http://127.0.0.1:9".to_string(), AppId::mint(), source).await;
     assert_eq!(status, 200, "body: {body}");
     let value: Value = serde_json::from_str(&body).expect("body json");
     assert_eq!(value["thenIsUndefined"], true, "body: {body}");
@@ -269,7 +269,7 @@ async fn a_pending_workflow_restores_the_hosts_active_isolate() {
             }
         };
     "#;
-    let env_vars = HashMap::from([("APP_ID".into(), Uuid::new_v4().to_string())]);
+    let env_vars = HashMap::from([("APP_ID".into(), AppId::mint().as_str().to_owned())]);
     let binding = WorkflowBinding::dev_sqlite(
         directory.path().join("journal.sqlite"),
         modules(source),

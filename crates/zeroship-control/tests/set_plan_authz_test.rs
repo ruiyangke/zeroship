@@ -30,7 +30,7 @@ use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -211,10 +211,10 @@ async fn make_user(pg: &Client, label: &str) -> UserId {
     id
 }
 
-async fn app_plan_id(pg: &Client, app_id: Uuid) -> String {
+async fn app_plan_id(pg: &Client, app_id: &AppId) -> String {
     pg.query_one(
         "SELECT plan_id FROM zeroship.apps WHERE id = $1",
-        &[&app_id],
+        &[&app_id.as_str()],
     )
     .await
     .expect("read app plan")
@@ -262,9 +262,9 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     )
     .await;
 
-    let put = |bearer: String, app_id: Uuid, plan_id: String| {
+    let put = |bearer: String, app_id: &AppId, plan_id: String| {
         test::TestRequest::put()
-            .uri(&format!("/api/apps/{app_id}/plan"))
+            .uri(&format!("/api/apps/{}/plan", app_id.as_str()))
             .header("authorization", bearer)
             .set_json(&serde_json::json!({ "plan_id": plan_id }))
             .to_request()
@@ -275,7 +275,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // Postgres client - alive past the teardown at the end of this test.
     let status = test::call_service(
         &app_svc,
-        put(creator_caller.bearer(), app.id, operator_only.id.clone()),
+        put(creator_caller.bearer(), &app.id, operator_only.id.clone()),
     )
     .await
     .status();
@@ -285,7 +285,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         "creator must NOT self-assign a non-assignable (operator) plan",
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         start.id,
         "a rejected creator assignment must not change the plan",
     );
@@ -293,7 +293,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     // 2. Creator assigning an ASSIGNABLE plan ⇒ 200, plan updated.
     let status = test::call_service(
         &app_svc,
-        put(creator_caller.bearer(), app.id, assignable.id.clone()),
+        put(creator_caller.bearer(), &app.id, assignable.id.clone()),
     )
     .await
     .status();
@@ -303,7 +303,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         "creator may assign an assignable plan"
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         assignable.id,
         "creator assignment applied"
     );
@@ -315,7 +315,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     //    through this endpoint.
     let status = test::call_service(
         &app_svc,
-        put(operator_caller.bearer(), app.id, operator_only.id.clone()),
+        put(operator_caller.bearer(), &app.id, operator_only.id.clone()),
     )
     .await
     .status();
@@ -325,7 +325,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
         "a caller with no membership of the app may not assign its plan",
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         assignable.id,
         "the refused assignment leaves the creator's plan in place",
     );
@@ -334,7 +334,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     let _ = pg
         .execute(
             "DELETE FROM zeroship.app_spend_state WHERE app_id = $1",
-            &[&app.id],
+            &[&app.id.as_str()],
         )
         .await;
     let _ = pg
@@ -342,11 +342,14 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
             "DELETE FROM zeroship.organization_members om \
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
                  WHERE om.organization_id = p.organization_id AND a.id = $1",
-            &[&app.id],
+            &[&app.id.as_str()],
         )
         .await;
     let _ = pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app.id.as_str()],
+        )
         .await;
     for caller in [&creator_caller, &operator_caller] {
         let _ = pg
@@ -432,7 +435,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
     let status = test::call_service(
         &app_svc,
         test::TestRequest::put()
-            .uri(&format!("/api/apps/{}/plan", app.id))
+            .uri(&format!("/api/apps/{}/plan", app.id.as_str()))
             .header("authorization", owner_caller.bearer())
             .set_json(&serde_json::json!({ "plan_id": retired.id }))
             .to_request(),
@@ -452,13 +455,16 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
         "assigning an archived plan is a bad request, like an unknown plan id",
     );
     assert_eq!(
-        app_plan_id(&pg, app.id).await,
+        app_plan_id(&pg, &app.id).await,
         start.id,
         "a refused assignment must leave the plan untouched",
     );
 
     let _ = pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id])
+        .execute(
+            "DELETE FROM zeroship.apps WHERE id = $1",
+            &[&app.id.as_str()],
+        )
         .await;
     let _ = pg
         .execute(

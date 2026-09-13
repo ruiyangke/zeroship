@@ -93,7 +93,8 @@ transferring ownership clears the pointer, which *is* the conversion from
 personal to shared.
 
 Ids are typed and are what these methods take. Organizations use `org_...`,
-projects use `prj_...`, invitations use `ivt_...`, and users use `usr_...`.
+projects use `prj_...`, invitations use `ivt_...`, and users use the exported
+`UserId` type: `usr_` followed by the fixed-width lowercase base36 UUIDv7 body.
 A **slug is not an id**: the server
 parses the typed id before it authorizes anything, so a slug in a path is a
 `400`, and a well-formed id for an organization you have no seat in is a `403`

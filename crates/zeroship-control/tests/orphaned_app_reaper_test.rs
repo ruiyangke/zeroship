@@ -25,7 +25,7 @@ use zeroship_control::cron::orphaned_app_reaper;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use crate::common;
 
@@ -161,7 +161,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
 /// Insert an apps row directly (bypassing `create_app`, which would also seed an
 /// owner member). `created_at` is back-dated so the row is past the reaper grace
 /// unless the caller overrides. `system` defaults false.
-async fn insert_app(state: &AppState, id: &Uuid, name: &str, system: bool, created_age: &str) {
+async fn insert_app(state: &AppState, id: &AppId, name: &str, system: bool, created_age: &str) {
     // plan_id is an FK into zeroship.plans — use the built-in free-plan
     // catalog id (seeded by `seed_plans` in the test setup).
     let free = zeroship_control::plan_catalog::free_plan_id();
@@ -178,27 +178,27 @@ async fn insert_app(state: &AppState, id: &Uuid, name: &str, system: bool, creat
                         p.organization_id \
                    FROM zeroship.projects p WHERE p.id = $5"
             ),
-            &[id, &name, &system, &free, &project],
+            &[&id.as_str(), &name, &system, &free, &project],
         )
         .await
         .expect("insert app");
 }
 
-async fn app_exists(state: &AppState, id: &Uuid) -> bool {
+async fn app_exists(state: &AppState, id: &AppId) -> bool {
     let rows = state
         .control_pg
-        .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[id])
+        .query("SELECT 1 FROM zeroship.apps WHERE id = $1", &[&id.as_str()])
         .await
         .expect("query app");
     !rows.is_empty()
 }
 
-async fn app_is_archived(state: &AppState, id: &Uuid) -> bool {
+async fn app_is_archived(state: &AppState, id: &AppId) -> bool {
     state
         .control_pg
         .query(
             "SELECT archived_at IS NOT NULL AS archived FROM zeroship.apps WHERE id = $1",
-            &[id],
+            &[&id.as_str()],
         )
         .await
         .expect("query app archive state")
@@ -211,20 +211,23 @@ async fn app_is_archived(state: &AppState, id: &Uuid) -> bool {
 /// Read so idempotence can be asserted about THIS APP rather than about the
 /// reaper's fleet-wide count. See
 /// `reaper_archives_ownerless_app_and_retains_its_bundle`.
-async fn app_archived_at(state: &AppState, id: &Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+async fn app_archived_at(state: &AppState, id: &AppId) -> Option<chrono::DateTime<chrono::Utc>> {
     state
         .control_pg
-        .query("SELECT archived_at FROM zeroship.apps WHERE id = $1", &[id])
+        .query(
+            "SELECT archived_at FROM zeroship.apps WHERE id = $1",
+            &[&id.as_str()],
+        )
         .await
         .expect("query app archived_at")
         .first()
         .and_then(|row| row.get("archived_at"))
 }
 
-async fn cleanup_app_row(state: &AppState, id: &Uuid) {
+async fn cleanup_app_row(state: &AppState, id: &AppId) {
     state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&id.as_str()])
         .await
         .expect("test cleanup app");
 }
@@ -262,8 +265,8 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     let fx = build_state(&url, "ownerless").await;
     let state = &fx.state;
 
-    let app_id = Uuid::new_v4();
-    let name = format!("orphan-{}", &app_id.simple().to_string()[..12]);
+    let app_id = AppId::mint();
+    let name = format!("orphan-{}", Uuid::new_v4().simple());
     insert_app(state, &app_id, &name, false, "10 minutes").await;
 
     // Write a manifest for this app so archive retention is observable.
@@ -337,8 +340,9 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
         .expect("re-run the detection query");
     assert!(
         !still_selected.contains(&app_id),
-        "an archived orphan is selected again: {app_id} is still in the reap \
+        "an archived orphan is selected again: {} is still in the reap \
          candidate set ({} candidate(s) total)",
+        app_id.as_str(),
         still_selected.len()
     );
     let retry = orphaned_app_reaper::tick(state)
@@ -425,8 +429,8 @@ async fn reaper_never_touches_system_app() {
 
     // A system-owned app can be owner-less BY CONSTRUCTION (no
     // app_members row). Mirror that exactly: owner-less + system = true + old.
-    let app_id = Uuid::new_v4();
-    let name = format!("sys-console-{}", &app_id.simple().to_string()[..12]);
+    let app_id = AppId::mint();
+    let name = format!("sys-console-{}", Uuid::new_v4().simple());
     insert_app(state, &app_id, &name, true, "1 year").await;
 
     orphaned_app_reaper::tick(state).await.expect("reaper tick");
@@ -456,8 +460,8 @@ async fn reaper_respects_grace_window() {
     let fx = build_state(&url, "grace").await;
     let state = &fx.state;
 
-    let app_id = Uuid::new_v4();
-    let name = format!("fresh-{}", &app_id.simple().to_string()[..12]);
+    let app_id = AppId::mint();
+    let name = format!("fresh-{}", Uuid::new_v4().simple());
     // Just created (owner-less but younger than the 5-minute grace).
     insert_app(state, &app_id, &name, false, "30 seconds").await;
 
@@ -487,8 +491,8 @@ async fn direct_archive_retains_db_row_and_vfs_blob() {
     let fx = build_state(&url, "purge").await;
     let state = &fx.state;
 
-    let app_id = Uuid::new_v4();
-    let name = format!("purge-{}", &app_id.simple().to_string()[..12]);
+    let app_id = AppId::mint();
+    let name = format!("purge-{}", Uuid::new_v4().simple());
     insert_app(state, &app_id, &name, false, "1 minute").await;
 
     state

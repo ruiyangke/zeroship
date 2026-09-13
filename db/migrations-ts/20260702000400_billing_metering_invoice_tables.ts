@@ -1,5 +1,19 @@
 import { table, t, now } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  billing_customer_refs: ["creator_id"],
+  billing_notifications: ["creator_id"],
+  connect_checkout_failures: ["creator_id"],
+  creator_billing: ["creator_id"],
+  creator_billing_status: ["creator_id"],
+  creator_billing_status_history: ["creator_id"],
+  creator_fee_policy: ["creator_id"],
+  credit_ledger: ["creator_id"],
+  invoices: ["creator_id"],
+  metering_exports: ["creator_id"],
+  payout_failures: ["creator_id"],
+};
+
 export default {
   name: "billing_metering_invoice_tables",
   schema() {
@@ -447,5 +461,12 @@ export default {
       primaryKey: ["app_id", "period", "metric"],
     });
     table("usage_aggregates", { schema: "zeroship" }).check("usage_aggregates_total_check").add({ expr: (col) => col("total").ge(0) });
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
+    }
   },
 };

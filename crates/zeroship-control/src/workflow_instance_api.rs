@@ -3527,7 +3527,7 @@ mod tests {
     #[test]
     fn signal_token_time_enforces_expiry_with_tolerance() {
         let claims = workflow_signal_token::WorkflowSignalTokenClaims {
-            app_id: Uuid::nil().to_string(),
+            app_id: AppId::mint().as_str().to_owned(),
             run_id: Some("run_abc".to_string()),
             topic: None,
             types: vec!["go".to_string()],
@@ -3541,7 +3541,7 @@ mod tests {
     #[test]
     fn ingress_signal_type_must_be_authorized() {
         let claims = workflow_signal_token::WorkflowSignalTokenClaims {
-            app_id: Uuid::nil().to_string(),
+            app_id: AppId::mint().as_str().to_owned(),
             run_id: Some("run_abc".to_string()),
             topic: None,
             types: vec!["go".to_string()],

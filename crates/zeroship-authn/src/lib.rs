@@ -9,11 +9,11 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use zeroship_core::user_id::UserId;
 use zeroship_authz as authz;
+use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
-use zeroship_authz::wrapper_revocation::{family_revoked_at, revoked_after_for};
+use zeroship_core::UserId;
 
 pub use rejection::AuthnRejection;
 
@@ -103,7 +103,8 @@ impl BearerVerifier {
             .oauth_guard_from_bearer(token, request_ip, request_id)
             .await?;
 
-        self.require_active_principal(&principal.principal_id).await?;
+        self.require_active_principal(&principal.principal_id)
+            .await?;
 
         Ok(principal)
     }
@@ -154,8 +155,8 @@ impl BearerVerifier {
         let (Some(client_id), Some(iat)) = (client_id, iat) else {
             return Err(AuthnRejection::unauthorized("token_revocation_claims_missing").into());
         };
-        let iat = i64::try_from(iat)
-            .map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
+        let iat =
+            i64::try_from(iat).map_err(|_| AuthnRejection::unauthorized("invalid_token_iat"))?;
         let revoked_after = self.platform_revoked_after_for(client_id, sub).await?;
         if family_revoked_at(revoked_after, iat) {
             return Err(AuthnRejection::unauthorized("token_revoked").into());
@@ -229,19 +230,14 @@ impl BearerVerifier {
                 }) {
                     return Err(AuthnRejection::unauthorized("wrong_audience").into());
                 }
+                let principal_id = parse_platform_subject(&verified.provider_subject)?;
                 self.reject_revoked_platform_token(
                     verified.client_id.as_deref(),
-                    &verified.provider_subject,
+                    principal_id.as_str(),
                     verified.iat,
                 )
                 .await?;
 
-                // The `sub` claim is the platform user id in its printed form. Parsing
-                // it here is the fence: `zeroship.principal_grants.principal_id` and
-                // `identity_links.principal_id` are text holding that rendering, so a
-                // subject in any other shape matches no grant row.
-                let principal_id = UserId::parse(&verified.provider_subject)
-                    .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_sub"))?;
                 let mut scopes = authz::parse_scope_string(raw_scope)
                     .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_scope"))?;
                 let mut seed = false;
@@ -257,8 +253,9 @@ impl BearerVerifier {
                     return Err(AuthnRejection::unauthorized("unauthenticated_gotrue_role").into());
                 }
 
-                let principal_id =
-                    self.resolve_supabase_principal(&verified.provider_subject).await?;
+                let principal_id = self
+                    .resolve_supabase_principal(&verified.provider_subject)
+                    .await?;
                 let grants = self.load_principal_grants(&principal_id).await?;
                 let raw_scope = grants.join(" ");
                 let token_policy = policy_from_scope_string(&raw_scope, "invalid_principal_grant")?;
@@ -298,8 +295,15 @@ impl BearerVerifier {
         let row = rows
             .first()
             .ok_or_else(|| AuthnRejection::unauthorized("unlinked_supabase_principal"))?;
-        Ok(UserId::parse(row.get::<_, &str>("principal_id"))
-            .map_err(|_| AuthnRejection::internal("identity_link_principal_malformed"))?)
+        let raw = row.get::<_, String>("principal_id");
+        UserId::parse(&raw).map_err(|err| {
+            tracing::error!(
+                error = %err,
+                principal_id = raw,
+                "control: identity link contains an invalid principal id"
+            );
+            AuthnRejection::internal("invalid_stored_principal_id").into()
+        })
     }
 
     /// Resolve the live entitlement a platform CLI token is capped to.
@@ -383,7 +387,10 @@ impl BearerVerifier {
         })
     }
 
-    async fn load_principal_grants(&self, principal_id: &UserId) -> Result<Vec<String>, HttpRejection> {
+    async fn load_principal_grants(
+        &self,
+        principal_id: &UserId,
+    ) -> Result<Vec<String>, HttpRejection> {
         let rows = self
             .control_pg
             .query(
@@ -408,6 +415,10 @@ impl BearerVerifier {
     }
 }
 
+fn parse_platform_subject(raw: &str) -> Result<UserId, HttpRejection> {
+    UserId::parse(raw).map_err(|_| AuthnRejection::unauthorized("invalid_oauth_sub").into())
+}
+
 fn policy_from_scope_string(
     raw_scope: &str,
     code: &'static str,
@@ -417,8 +428,7 @@ fn policy_from_scope_string(
     Ok(authz::scopes_to_policy(&scopes))
 }
 
-const ACTIVE_PRINCIPAL_SQL: &str =
-    "SELECT 1 FROM zeroship.users \
+const ACTIVE_PRINCIPAL_SQL: &str = "SELECT 1 FROM zeroship.users \
      WHERE id = $1 \
        AND disabled_at IS NULL \
        AND deletion_requested_at IS NULL \
@@ -428,6 +438,14 @@ const ACTIVE_PRINCIPAL_SQL: &str =
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_subject_requires_a_canonical_user_id() {
+        let canonical = UserId::mint();
+        assert!(parse_platform_subject(canonical.as_str()).is_ok());
+        assert!(parse_platform_subject("0191e7a2-b3c4-4d5e-8f90-123456789abc").is_err());
+        assert!(parse_platform_subject("app_0000000000000000000000").is_err());
+    }
 
     #[test]
     fn active_principal_query_blocks_every_hard_lifecycle_state() {

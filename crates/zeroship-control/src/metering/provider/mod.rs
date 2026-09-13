@@ -118,13 +118,9 @@ pub trait Invoicer {
 
 /// The local invoice rail a `lite`-family provider drives.
 ///
-/// Every verb is scoped to ONE billing subject, and that subject is an
-/// **organization id** (`org_…`, TEXT) rather than a `users.id` uuid. The change
-/// is not a rename: `SubjectRef` is already a `String`, so a provider handing a
-/// uuid-shaped subject to a store that now keys on `organizations(id)` would
-/// find nothing and bill nobody rather than fail. The signature is therefore the
-/// enforcement — there is no overload taking the old type, and no `From<Uuid>`
-/// that would let one be passed by accident.
+/// Every verb is scoped to one organization billing subject. App ownership is
+/// returned as typed [`AppId`] values and becomes text only at a storage or wire
+/// boundary.
 #[async_trait::async_trait(?Send)]
 pub trait LiteStore: Send + Sync {
     async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;

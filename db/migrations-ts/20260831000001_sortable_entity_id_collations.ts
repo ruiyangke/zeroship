@@ -2,7 +2,7 @@ import { raw } from "@zeroship/migrate";
 
 // These are the platform columns whose entire semantic domain is a canonical
 // case-sensitive typed id or a storage copy of one. PostgreSQL's locale
-// collation does not keep the base62 alphabet in numeric order, so sortable
+// collation does not keep the base36 alphabet in numeric order, so sortable
 // entity ids need bytewise ordering. Their foreign-key and denormalized copies
 // need the same collation even when they are never ordered: otherwise a join
 // against the collated entity id cannot use the copy's ordinary index.
@@ -35,7 +35,7 @@ const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
   apps: ["id", "plan_id"],
   app_audit: ["app_id", "actor_user_id", "creator_id"],
   app_deploys: ["app_id"],
-  app_egress_rules: ["app_id"],
+  app_egress_rules: ["app_id", "created_by"],
   app_env_expose: ["app_id"],
   app_members: ["app_id", "user_id", "added_by"],
   app_oauth_clients: ["app_id"],

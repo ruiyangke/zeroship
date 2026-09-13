@@ -22,7 +22,6 @@ use futures::lock::Mutex as AsyncMutex;
 use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
-use zeroship_core::app_id::AppId;
 use zeroship_control::cron::workflow_blob_gc;
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, WorkflowEngineConfig,
@@ -33,6 +32,7 @@ use zeroship_control::registry::RegistryError;
 use zeroship_control::{
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::app_id::AppId;
 use zeroship_workflow::advance::{
     WorkflowAdvanceNackKind, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
@@ -178,7 +178,7 @@ async fn provision_scheduler_store_once(db_url: &str, store: &WorkflowSchedulerS
 async fn build_fixture(
     db_url: &str,
     gateway_url: &str,
-    app_id: Uuid,
+    app_id: AppId,
     deploy_id: String,
     blob_root: &Path,
 ) -> Fixture {
@@ -465,7 +465,7 @@ async fn prepare_side_effect_table(pg: &TestPg) {
 }
 
 /// Double-quote a Postgres identifier. The values this is used on are the
-/// canonical `app_<base62>` rendering of an app id and names derived from it,
+/// canonical rendering of an app id and names derived from it,
 /// so none can carry a quote; the escape is here so a future caller does not
 /// have to notice that.
 fn quote_ident(ident: &str) -> String {
@@ -704,7 +704,7 @@ fn dw23_workflow_engine_load_bench() {
 
         let db_url = fleet.database.url();
         let gateway_url = fleet.gateway_url.clone();
-        let app_id: Uuid = fleet.app_id;
+        let app_id = fleet.app_id.clone();
         let deploy_id = fleet.deploy_id.clone();
         let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
         set_dispatch_paused(&fx, false).await;
@@ -2395,14 +2395,11 @@ async fn post_signal(
             "authorization",
             format!(
                 "Bearer {}",
-                zeroship_workflow::app_scoped_token(
-                    workflow_fleet::CONTROL_KEY,
-                    &app_id.to_string()
-                )
+                zeroship_workflow::app_scoped_token(workflow_fleet::CONTROL_KEY, app_id.as_str())
             ),
         )
         .expect("app-scoped workflow authorization")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header");
     let response = builder.body(body).send().await.expect("post signal");
     let status = response.status().as_u16();
@@ -2460,14 +2457,11 @@ async fn create_signal_token_at(url: &str, app_id: &AppId, ttl: &str) -> String 
             "authorization",
             format!(
                 "Bearer {}",
-                zeroship_workflow::app_scoped_token(
-                    workflow_fleet::CONTROL_KEY,
-                    &app_id.to_string()
-                )
+                zeroship_workflow::app_scoped_token(workflow_fleet::CONTROL_KEY, app_id.as_str())
             ),
         )
         .expect("app-scoped workflow authorization")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header")
         .body(body)
         .send()
@@ -2539,14 +2533,11 @@ async fn post_control(
             "authorization",
             format!(
                 "Bearer {}",
-                zeroship_workflow::app_scoped_token(
-                    workflow_fleet::CONTROL_KEY,
-                    &app_id.to_string()
-                )
+                zeroship_workflow::app_scoped_token(workflow_fleet::CONTROL_KEY, app_id.as_str())
             ),
         )
         .expect("app-scoped workflow authorization")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header");
     let response = builder.body(bytes).send().await.expect("post control");
     let status = response.status().as_u16();
@@ -2584,14 +2575,11 @@ async fn post_control_raw(
             "authorization",
             format!(
                 "Bearer {}",
-                zeroship_workflow::app_scoped_token(
-                    workflow_fleet::CONTROL_KEY,
-                    &app_id.to_string()
-                )
+                zeroship_workflow::app_scoped_token(workflow_fleet::CONTROL_KEY, app_id.as_str())
             ),
         )
         .expect("app-scoped workflow authorization")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header")
         .body(bytes)
         .send()
@@ -2633,14 +2621,11 @@ async fn get_output_bytes(
             "authorization",
             format!(
                 "Bearer {}",
-                zeroship_workflow::app_scoped_token(
-                    workflow_fleet::CONTROL_KEY,
-                    &app_id.to_string()
-                )
+                zeroship_workflow::app_scoped_token(workflow_fleet::CONTROL_KEY, app_id.as_str())
             ),
         )
         .expect("app-scoped workflow authorization")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header");
     if let Some(range) = range {
         builder = builder.header("range", range).expect("range header");
@@ -2797,7 +2782,7 @@ async fn keystone_real_spine(fleet: &workflow_fleet::Fleet) {
     let db_url = fleet.database.url();
     let control_url = fleet.control_url.clone();
     let gateway_url = fleet.gateway_url.clone();
-    let app_id: Uuid = fleet.app_id;
+    let app_id = fleet.app_id.clone();
     let deploy_id = fleet.deploy_id.clone();
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
@@ -4517,7 +4502,8 @@ async fn keystone_real_spine(fleet: &workflow_fleet::Fleet) {
         &forged_run,
     )
     .await;
-    let forged_token = create_run_signal_token(&control_url, &fx.app_id, &forged_run, "PT30S").await;
+    let forged_token =
+        create_run_signal_token(&control_url, &fx.app_id, &forged_run, "PT30S").await;
     let mut forged_bytes = forged_token.into_bytes();
     let last = forged_bytes.last_mut().expect("token bytes");
     *last = if *last == b'a' { b'b' } else { b'a' };
@@ -4544,7 +4530,7 @@ async fn keystone_real_spine(fleet: &workflow_fleet::Fleet) {
     )
     .await;
     let expired_token =
-        create_run_signal_token(&control_url, fx.app_id, &expired_run, "PT1S").await;
+        create_run_signal_token(&control_url, &fx.app_id, &expired_run, "PT1S").await;
     // Wait past TTL(1s) + timestamp-tolerance(1s) with margin for integer-second
     // rounding: exp = mint_second+1, so the token is only strictly expired once
     // now_second >= mint_second+3. 2.25s lands on the mint_second+2 boundary and
@@ -5083,7 +5069,7 @@ async fn bare_await_body_io_is_rejected() {
 
     let db_url = fleet.database.url();
     let gateway_url = fleet.gateway_url.clone();
-    let app_id: Uuid = fleet.app_id;
+    let app_id = fleet.app_id.clone();
     let deploy_id = fleet.deploy_id.clone();
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
     prepare_side_effect_table(&fx.pg).await;
@@ -5129,7 +5115,7 @@ async fn scheduler_misfire_lost_register_recovers() {
 
     let db_url = fleet.database.url();
     let gateway_url = fleet.gateway_url.clone();
-    let app_id: Uuid = fleet.app_id;
+    let app_id = fleet.app_id.clone();
     let deploy_id = fleet.deploy_id.clone();
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
@@ -5239,7 +5225,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
 
     let db_url = fleet.database.url();
     let gateway_url = fleet.gateway_url.clone();
-    let app_id: Uuid = fleet.app_id;
+    let app_id = fleet.app_id.clone();
     let deploy_id = fleet.deploy_id.clone();
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;
@@ -5357,7 +5343,7 @@ async fn compensation_saga_rollback_real_spine() {
     let db_url = fleet.database.url();
     let control_url = fleet.control_url.clone();
     let gateway_url = fleet.gateway_url.clone();
-    let app_id: Uuid = fleet.app_id;
+    let app_id = fleet.app_id.clone();
     let deploy_id = fleet.deploy_id.clone();
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id, &fleet.blob_root).await;

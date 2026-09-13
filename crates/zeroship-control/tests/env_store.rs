@@ -311,7 +311,12 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
              WHERE app_id = $3 AND key_name = $4
              ON CONFLICT (app_id, key_name) DO UPDATE
              SET ciphertext = EXCLUDED.ciphertext",
-            &[&app_b.as_str(), &"STRIPE_KEY", &app_a.as_str(), &"STRIPE_KEY"],
+            &[
+                &app_b.as_str(),
+                &"STRIPE_KEY",
+                &app_a.as_str(),
+                &"STRIPE_KEY",
+            ],
         )
         .await
         .expect("transplant across app");
@@ -333,7 +338,12 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
              WHERE app_id = $3 AND key_name = $4
              ON CONFLICT (app_id, key_name) DO UPDATE
              SET ciphertext = EXCLUDED.ciphertext",
-            &[&app_a.as_str(), &"COPIED_SECRET", &app_a.as_str(), &"STRIPE_KEY"],
+            &[
+                &app_a.as_str(),
+                &"COPIED_SECRET",
+                &app_a.as_str(),
+                &"STRIPE_KEY",
+            ],
         )
         .await
         .expect("transplant across key");
@@ -444,12 +454,12 @@ async fn delete_secret_and_set_expose_bump_exactly_once() {
     let app = create_test_app(&registry).await;
 
     store.set_secret(&app, "TOKEN", "sk_1").await.unwrap();
-    let after_set = registry.get_versions().await.unwrap()[&app.as_str()].env_version;
+    let after_set = registry.get_versions().await.unwrap()[&app].env_version;
 
     // A real removal reports true and advances the version by exactly one.
     let removed = store.delete_secret(&app, "TOKEN").await.unwrap();
     assert!(removed, "deleting a secret that exists must report true");
-    let after_delete = registry.get_versions().await.unwrap()[&app.as_str()].env_version;
+    let after_delete = registry.get_versions().await.unwrap()[&app].env_version;
     assert_eq!(after_delete, after_set + 1);
 
     // A removal that matches nothing reports false and leaves the version
@@ -459,17 +469,17 @@ async fn delete_secret_and_set_expose_bump_exactly_once() {
         !removed_again,
         "second delete of the same key must report false"
     );
-    let after_noop = registry.get_versions().await.unwrap()[&app.as_str()].env_version;
+    let after_noop = registry.get_versions().await.unwrap()[&app].env_version;
     assert_eq!(after_noop, after_delete);
 
     store.set_var(&app, "PUBLIC_ONE", "1").await.unwrap();
-    let before_expose = registry.get_versions().await.unwrap()[&app.as_str()].env_version;
+    let before_expose = registry.get_versions().await.unwrap()[&app].env_version;
     let exposed = store
         .set_expose(&app, &["PUBLIC_ONE".to_string()])
         .await
         .unwrap();
     assert_eq!(exposed, vec!["PUBLIC_ONE".to_string()]);
-    let after_expose = registry.get_versions().await.unwrap()[&app.as_str()].env_version;
+    let after_expose = registry.get_versions().await.unwrap()[&app].env_version;
     assert_eq!(
         after_expose,
         before_expose + 1,
@@ -579,7 +589,7 @@ async fn audit_log_roundtrip() {
     )
     .await;
 
-    let rows = audit::recent_for_app(&registry, app, 10).await.unwrap();
+    let rows = audit::recent_for_app(&registry, &app, 10).await.unwrap();
     assert_eq!(rows.len(), 2);
     // Newest first.
     assert_eq!(rows[0].action, "delete_secret");
@@ -868,7 +878,7 @@ async fn undecryptable_secret_names_the_key_in_the_error() {
     conn.execute(
         "UPDATE zeroship.app_secrets SET ciphertext = $1 \
          WHERE app_id = $2 AND key_name = 'POISONED_KEY'",
-        &[&b"\x01not-a-valid-ciphertext".to_vec(), &app],
+        &[&b"\x01not-a-valid-ciphertext".to_vec(), &app.as_str()],
     )
     .await
     .expect("corrupt the row");

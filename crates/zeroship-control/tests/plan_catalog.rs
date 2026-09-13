@@ -23,7 +23,7 @@ use zeroship_control::pricing::{charge_cents, MetricWeight, MetricWeights, PlanP
 use zeroship_control::Registry;
 use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{AppNetPolicyLimits, AppRuntimeLimits};
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 fn db_url() -> String {
     common::require_control_db()
@@ -342,7 +342,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
 
     let written = egress_rules::upsert_rule(
         &client,
-        app.id,
+        &app.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Accept,
             destination: "DB.Example.COM.".to_string(),
@@ -375,7 +375,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     // second is what would break if rejects were charged.
     egress_rules::upsert_rule(
         &client,
-        app.id,
+        &app.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Reject,
             destination: "203.0.113.0/24".to_string(),
@@ -393,7 +393,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     for port in [5433_u16, 5434] {
         egress_rules::upsert_rule(
             &client,
-            app.id,
+            &app.id,
             &egress_rules::EgressRuleBody {
                 verdict: Verdict::Accept,
                 destination: "db.example.com".to_string(),
@@ -407,7 +407,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     }
     let over = egress_rules::upsert_rule(
         &client,
-        app.id,
+        &app.id,
         &egress_rules::EgressRuleBody {
             verdict: Verdict::Accept,
             destination: "db.example.com".to_string(),
@@ -450,7 +450,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
     assert_eq!(net.egress_ceiling_bytes, 42 * 1024 * 1024);
 
     for port in [5432_u16, 5433, 5434] {
-        egress_rules::delete_rule(&client, app.id, "db.example.com", port)
+        egress_rules::delete_rule(&client, &app.id, "db.example.com", port)
             .await
             .expect("creator delete");
     }
@@ -469,7 +469,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
         "only the reject rule survives"
     );
 
-    egress_rules::delete_rule(&client, app.id, "203.0.113.0/24", 5432)
+    egress_rules::delete_rule(&client, &app.id, "203.0.113.0/24", 5432)
         .await
         .expect("creator delete reject");
     let versions = registry
@@ -587,7 +587,7 @@ async fn set_plan_guards_archive_in_one_statement() {
     );
 
     // set_plan to a non-existent app returns Ok(false), NOT an error.
-    let ghost = Uuid::now_v7();
+    let ghost = AppId::mint();
     assert!(
         !registry
             .set_plan(&ghost, &live.id)
@@ -715,7 +715,7 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     // real Metering aggregate reader.
     let metering = zeroship_control::metering::Metering::new(registry.clone());
     let period = zeroship_control::metering::current_period_start_unix();
-    common::seed_usage_total(&client, app.id, period, "requests", 1_500_000).await;
+    common::seed_usage_total(&client, &app.id, period, "requests", 1_500_000).await;
 
     // Read back the real aggregates, the real global weight table, and price.
     let totals = metering

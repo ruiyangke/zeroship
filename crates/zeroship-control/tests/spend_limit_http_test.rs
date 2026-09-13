@@ -31,7 +31,7 @@ use zeroship_control::spend::SpendEngine;
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
@@ -127,7 +127,7 @@ async fn make_app_with_plan_default(
     state: &AppState,
     plan_default: i64,
     owner_id: &UserId,
-) -> Uuid {
+) -> AppId {
     let plan_id = format!("pln_sl_{}", Uuid::new_v4().simple());
     state
         .control_pg
@@ -141,7 +141,7 @@ async fn make_app_with_plan_default(
         )
         .await
         .expect("seed plan");
-    let app_id: Uuid = common::seed_app(
+    let app_id = common::seed_app(
         &state.control_pg,
         &format!("sl-{}", Uuid::new_v4()),
         &plan_id,
@@ -174,7 +174,7 @@ async fn get_spend_limit_returns_the_app_spend_limit_override() {
     .await;
 
     let req = test::TestRequest::get()
-        .uri(&format!("/api/apps/{app}/spend-limit"))
+        .uri(&format!("/api/apps/{}/spend-limit", app.as_str()))
         .header("authorization", pat.bearer())
         .to_request();
     let body: serde_json::Value = test::read_response_json(&svc, req).await;
@@ -198,7 +198,7 @@ async fn get_spend_limit_returns_the_app_spend_limit_override() {
 
     // The endpoint must now reflect the override read from app_spend_limit.
     let req2 = test::TestRequest::get()
-        .uri(&format!("/api/apps/{app}/spend-limit"))
+        .uri(&format!("/api/apps/{}/spend-limit", app.as_str()))
         .header("authorization", pat.bearer())
         .to_request();
     let body2: serde_json::Value = test::read_response_json(&svc, req2).await;

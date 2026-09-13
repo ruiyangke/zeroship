@@ -69,8 +69,7 @@ pub async fn seeded_principal(state: &AppState) -> SeededPrincipal {
         .await
         .expect("insert bearer user");
 
-    let token =
-        super::platform_token_for_client(&user_id, &all_scopes(), super::CONSOLE_CLIENT_ID);
+    let token = super::platform_token_for_client(&user_id, &all_scopes(), super::CONSOLE_CLIENT_ID);
     SeededPrincipal { user_id, token }
 }
 

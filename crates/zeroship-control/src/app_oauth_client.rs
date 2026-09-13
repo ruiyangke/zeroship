@@ -1,6 +1,6 @@
 //! Per-app brokered OAuth client lifecycle.
 //!
-//! Each hosted creator app gets its own stable `oac_<base62-app-id>` OAuth
+//! Each hosted creator app gets its own stable `oac_<base36-app-id>` OAuth
 //! client. The platform OP treats these clients as gateway-brokered: app code
 //! and browsers never hold a client secret, while the gateway derives and
 //! presents the per-app broker secret from the shared platform broker master.
@@ -129,9 +129,9 @@ fn error_with_source_chain(err: &dyn std::error::Error) -> String {
 // Pure derivations (no I/O — directly unit-testable)
 // ---------------------------------------------------------------------------
 
-/// Deterministic, stable-for-app-life OAuth `client_id`: `oac_<base62-app-id>`.
+/// Deterministic, stable-for-app-life OAuth `client_id`: `oac_<base36-app-id>`.
 ///
-/// The base62 body is carried over VERBATIM from the app id's own printed
+/// The base36 body is carried over VERBATIM from the app id's own printed
 /// form rather than re-derived from its bits: `AppId` keeps no route to them
 /// (see `zeroship_core::entity_id`), and the body is already exactly the
 /// bytes `zeroship_core::typed_id::app_oauth_client_id` would have encoded,
