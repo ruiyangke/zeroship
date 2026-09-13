@@ -1,5 +1,5 @@
 import { table, t, now, grant } from "@zeroship/migrate";
-import { deploymentSchema } from "../../crates/zeroship-workflow/schema/deployments/schema.ts";
+import { deploymentSchema } from "../../crates/zeroship-workflow-manager/schema/deployments/schema.ts";
 
 const schema = "zeroship";
 const journalTables = [

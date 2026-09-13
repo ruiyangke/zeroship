@@ -13,7 +13,12 @@ use std::{collections::BTreeMap, rc::Rc, sync::Arc};
 use zeroship_bundle::{
     BlobStore, LocalDiskBlobStore, Manifest, RuntimeDescriptorEntry, WorkerCode,
 };
-use zeroship_core::{app_id::AppId, schema_name::SchemaName, typed_id};
+use zeroship_core::{
+    app_id::AppId,
+    schema_name::SchemaName,
+    typed_id,
+    workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope},
+};
 use zeroship_data_orm::{
     binding::DbBinding,
     encryption::ProjectKeySource,
@@ -21,13 +26,11 @@ use zeroship_data_orm::{
     value, ConnectOptions, Value,
 };
 use zeroship_workflow::{
-    deployment_holds::{
-        self, DeploymentHoldClient, DeploymentHolds, HoldGeneration, HoldReceipt, HoldScope,
-        ScopedDeploymentHolds,
-    },
+    deployment_holds::DeploymentHoldClient,
     service::{AppDeployments, DeployRegistration, WorkflowService},
     WorkflowServiceError,
 };
+use zeroship_workflow_manager::deployments::{self as deployment_holds, DeploymentHolds};
 
 #[derive(Clone, Debug)]
 pub struct Sources {
@@ -100,13 +103,8 @@ impl Deployments {
     }
     pub fn client(&self, app: &AppId) -> OwnedClient {
         OwnedClient {
-            inner: self.ledger.for_scope(
-                HoldScope::new(
-                    app.clone(),
-                    format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid())),
-                )
-                .unwrap(),
-            ),
+            ledger: self.ledger.clone(),
+            scope: HoldScope::for_app(app.clone()),
             _directory: self.directory.clone(),
         }
     }
@@ -223,7 +221,7 @@ impl Deployments {
             .transaction(async |tx| {
                 assert!(matches!(
                     deployment_holds::fence_reclamation(&tx, app, deployment).await,
-                    Err(WorkflowServiceError::Conflict(_))
+                    Err(deployment_holds::Error::Conflict(_))
                 ));
                 Err::<(), _>(zeroship_data_orm::error::DbError::validation(
                     "fixture_rollback",
@@ -243,26 +241,47 @@ impl Deployments {
 
 #[derive(Clone)]
 pub struct OwnedClient {
-    inner: ScopedDeploymentHolds,
+    ledger: DeploymentHolds,
+    scope: HoldScope,
     _directory: Arc<tempfile::TempDir>,
 }
 #[async_trait::async_trait(?Send)]
 impl DeploymentHoldClient for OwnedClient {
     fn scope(&self) -> &HoldScope {
-        self.inner.scope()
+        &self.scope
     }
     async fn acquire(
         &self,
         deployment: &str,
         generation: HoldGeneration,
     ) -> Result<HoldReceipt, WorkflowServiceError> {
-        self.inner.acquire(deployment, generation).await
+        self.ledger
+            .acquire(&self.scope, deployment, generation)
+            .await
+            .map_err(deployment_error)
     }
     async fn release(
         &self,
         deployment: &str,
         generation: HoldGeneration,
     ) -> Result<HoldReceipt, WorkflowServiceError> {
-        self.inner.release(deployment, generation).await
+        self.ledger
+            .release(&self.scope, deployment, generation)
+            .await
+            .map_err(deployment_error)
+    }
+}
+
+fn deployment_error(error: zeroship_workflow_manager::deployments::Error) -> WorkflowServiceError {
+    use zeroship_workflow_manager::deployments::Error;
+    match error {
+        Error::InvalidRequest(message) => WorkflowServiceError::InvalidRequest(message),
+        Error::Unauthenticated => WorkflowServiceError::Unauthenticated,
+        Error::PermissionDenied => WorkflowServiceError::PermissionDenied,
+        Error::Conflict(message) => WorkflowServiceError::Conflict(message),
+        Error::ResourceExhausted(message) => WorkflowServiceError::ResourceExhausted(message),
+        Error::Unavailable(message) => WorkflowServiceError::Unavailable(message),
+        Error::Timeout => WorkflowServiceError::Timeout,
+        Error::Internal(message) => WorkflowServiceError::Internal(message),
     }
 }

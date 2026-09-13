@@ -13,8 +13,11 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_ROUTES,
     endpoints::CONTROL_WORKFLOW_SIGNAL_INGRESS,
     endpoints::CONTROL_VERSIONS,
+    endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+    endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
     endpoints::WORKFLOW_WORKERS,
     endpoints::WORKFLOW_ASSIGN,
+    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
     endpoints::WORKFLOW_RECOVERY,
     endpoints::WORKFLOW_MANAGE,
     endpoints::WORKFLOW_MANAGEMENT_STATUS,
@@ -86,6 +89,24 @@ fn assert_endpoint(
 #[test]
 fn endpoint_catalog_records_exact_measured_operations() {
     for (endpoint, destination, method, path_template) in [
+        (
+            endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
+            "workflow",
+            "POST",
+            "/v1/assignments/verify",
+        ),
+        (
+            endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+            "control",
+            "POST",
+            "/v1/deployment-holds/acquire",
+        ),
+        (
+            endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
+            "control",
+            "POST",
+            "/v1/deployment-holds/release",
+        ),
         (
             endpoints::WORKFLOW_WORKERS,
             "workflow",
@@ -264,6 +285,7 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
             endpoints::GATEWAY_WORKFLOW_ADVANCE,
             endpoints::WORKFLOW_WORKERS,
             endpoints::WORKFLOW_ASSIGN,
+            endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
             endpoints::WORKFLOW_RECOVERY,
             endpoints::WORKFLOW_MANAGE,
             endpoints::WORKFLOW_MANAGEMENT_STATUS,
@@ -294,6 +316,8 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         "svc/worker",
         &[
             endpoints::CONTROL_VERSIONS,
+            endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+            endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
             endpoints::WORKFLOW_REGISTER,
             endpoints::WORKFLOW_ASSIGNMENTS,
             endpoints::WORKFLOW_RENEW,
@@ -393,12 +417,6 @@ fn gateway_cannot_reach_env_or_reconcile_endpoints() {
     let gateway = identity("zeroship.ai", "svc/gateway");
 
     assert!(!authorize(&gateway, endpoints::CONTROL_APP_ENV));
-    assert!(!authorize(
-        &gateway,
-        endpoints::CONTROL_BILLING_RECONCILE
-    ));
-    assert!(!authorize(
-        &gateway,
-        endpoints::CONTROL_SPEND_RECONCILE
-    ));
+    assert!(!authorize(&gateway, endpoints::CONTROL_BILLING_RECONCILE));
+    assert!(!authorize(&gateway, endpoints::CONTROL_SPEND_RECONCILE));
 }

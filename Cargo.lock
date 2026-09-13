@@ -7871,6 +7871,7 @@ dependencies = [
 name = "zeroship-cli"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "compio",
  "ed25519-dalek",
@@ -7897,6 +7898,7 @@ dependencies = [
  "zeroship-storage",
  "zeroship-storage-v8",
  "zeroship-workflow",
+ "zeroship-workflow-manager",
  "zeroship-workflow-v8",
 ]
 
@@ -7982,13 +7984,17 @@ dependencies = [
  "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-data-orm",
  "zeroship-mailer",
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-runtime",
  "zeroship-stream",
  "zeroship-workflow",
+ "zeroship-workflow-client",
+ "zeroship-workflow-manager",
  "zeroship-workflow-scheduler",
+ "zeroship-workflow-server",
  "zeroship-workflow-v8",
  "zstd",
 ]
@@ -8641,15 +8647,12 @@ dependencies = [
  "compio",
  "compio-postgres",
  "compio-s3",
- "compio-tls",
  "cyper",
  "ed25519-dalek",
  "flume 0.11.1",
  "futures",
  "percent-encoding",
- "rcgen",
  "rusqlite",
- "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8657,12 +8660,49 @@ dependencies = [
  "testcontainers",
  "thiserror 2.0.18",
  "tracing",
- "url",
  "uuid",
  "zeroship-bundle",
  "zeroship-core",
  "zeroship-data-orm",
  "zeroship-storage",
+ "zeroship-workflow-client",
+ "zeroship-workflow-manager",
+]
+
+[[package]]
+name = "zeroship-workflow-client"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "compio-tls",
+ "cyper",
+ "futures",
+ "rcgen",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+ "zeroship-core",
+]
+
+[[package]]
+name = "zeroship-workflow-manager"
+version = "0.1.0"
+dependencies = [
+ "compio",
+ "compio-postgres",
+ "futures",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "testcontainers",
+ "thiserror 2.0.18",
+ "zeroship-bundle",
+ "zeroship-core",
+ "zeroship-data-orm",
 ]
 
 [[package]]
@@ -8703,6 +8743,7 @@ dependencies = [
  "zeroship-authn",
  "zeroship-core",
  "zeroship-workflow",
+ "zeroship-workflow-client",
 ]
 
 [[package]]
@@ -8725,6 +8766,7 @@ dependencies = [
  "zeroship-runtime-macros",
  "zeroship-storage",
  "zeroship-workflow",
+ "zeroship-workflow-manager",
 ]
 
 [[package]]

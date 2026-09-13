@@ -7,7 +7,7 @@ use zeroship_core::{
         AcknowledgeManagement, AssignScope, AssignedScope, Assignment, Failure, ManageRun,
         ManagementOperation, ManagementOutcome, ManagementReceipt, ManagementStatus,
         PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope, RequestId, Revision,
-        RunId, ScopePage, UnixMillis, WakeHintReceipt, WorkerId, WorkerPage,
+        RunId, ScopePage, UnixMillis, VerifyAssignment, WakeHintReceipt, WorkerId, WorkerPage,
     },
 };
 
@@ -57,6 +57,24 @@ fn registry_and_placement_contracts_reject_customer_data() {
     rejects_customer_fields::<Assignment>(&json!({
         "appId":app,"workerId":worker,"revision":1,"expiresAt":1000
     }));
+    rejects_customer_fields::<VerifyAssignment>(&json!({
+        "appId":app,"workerId":worker,"assignmentRevision":1
+    }));
+    let valid = json!({"appId":app,"workerId":worker,"assignmentRevision":1});
+    for field in ["appId", "workerId", "assignmentRevision"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<VerifyAssignment>(missing).is_err());
+    }
+    for (field, invalid) in [
+        ("appId", json!(worker)),
+        ("workerId", json!(app)),
+        ("assignmentRevision", json!(0)),
+    ] {
+        let mut malformed = valid.clone();
+        malformed[field] = invalid;
+        assert!(serde_json::from_value::<VerifyAssignment>(malformed).is_err());
+    }
     rejects_customer_fields::<AssignedScope>(&json!({
         "appId":app,"assignmentRevision":1
     }));

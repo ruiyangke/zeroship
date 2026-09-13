@@ -4,6 +4,8 @@ use std::process::Command;
 pub fn run() -> Result<()> {
     for schema in [
         "crates/zeroship-workflow/schema",
+        "crates/zeroship-workflow-manager/schema",
+        "crates/zeroship-workflow-manager/schema/deployments",
         "crates/zeroship-workflow-server/schema",
     ] {
         checked(
@@ -30,11 +32,15 @@ pub fn run() -> Result<()> {
             "-p",
             "zeroship-workflow",
             "-p",
+            "zeroship-workflow-client",
+            "-p",
+            "zeroship-workflow-manager",
+            "-p",
             "zeroship-workflow-v8",
             "-p",
             "zeroship-workflow-scheduler",
         ]),
-        "workflow engine, binding and scheduler tests",
+        "workflow engine, metadata client, manager, binding and scheduler tests",
     )?;
     checked(
         cargo().args(["test", "-p", "zeroship-workflow-server"]),

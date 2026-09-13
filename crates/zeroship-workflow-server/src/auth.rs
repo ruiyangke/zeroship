@@ -79,6 +79,18 @@ impl std::fmt::Debug for WorkflowAuth {
     }
 }
 impl WorkflowAuth {
+    /// Control may verify placement only for an instance still enrolled as active.
+    ///
+    /// # Errors
+    /// Refuses revoked or missing workers and unavailable registry storage.
+    pub async fn active_worker(&self, worker: &WorkerId) -> Result<(), Error> {
+        self.workers
+            .active_key(worker.as_str())
+            .await?
+            .map(|_| ())
+            .ok_or(Error::Denied)
+    }
+
     /// # Errors
     /// Returns `Unavailable` when the worker registry cannot be queried.
     pub async fn ready(&self) -> Result<(), Error> {

@@ -272,7 +272,7 @@ async fn recovery_contract(store: Rc<OrmStore>, dir: &Path) {
     let result = deployments
         .database
         .transaction(|tx| async move {
-            crate::deployment_holds::fence_reclamation(&tx, app, deployment)
+            zeroship_workflow_manager::deployments::fence_reclamation(&tx, app, deployment)
                 .await
                 .unwrap();
             Err::<(), _>(zeroship_data_orm::error::DbError::internal(

@@ -5,11 +5,37 @@ use zeroship_core::{
     typed_id,
     workflow_coordination::{
         AssignScope, AssignedScope, Assignment, PublishWakeHint, ReleaseScope, RequestId, Revision,
-        UnixMillis, WakeHintReceipt, WorkerId,
+        UnixMillis, VerifyAssignment, WakeHintReceipt, WorkerId,
     },
 };
 
 impl Coordinator {
+    /// Verify existing app authority without extending registration or placement.
+    /// Draining workers may still settle their durable journal intents.
+    ///
+    /// # Errors
+    /// Rejects missing, released, stale or expired authority and database failures.
+    pub async fn verify_assignment(&self, request: &VerifyAssignment) -> Result<Assignment, Error> {
+        self.transact(async |tx| {
+            scope(tx, &request.app_id, false).await?;
+            let (row, _) = bound(
+                tx,
+                &request.worker_id,
+                &request.app_id,
+                request.assignment_revision,
+            )
+            .await?;
+            let expires = get::<i64>(&row, "expires_at")?.min(get::<i64>(&row, "worker_expires")?);
+            Ok(Assignment {
+                app_id: request.app_id.clone(),
+                worker_id: request.worker_id.clone(),
+                revision: request.assignment_revision,
+                expires_at: timestamp(expires)?,
+            })
+        })
+        .await
+    }
+
     /// Trusted Control placement. Retained revisions prevent ABA after release.
     ///
     /// # Errors

@@ -20,7 +20,7 @@ use zeroship_core::{
     service_peers::{ServiceAuth, ServiceKeyring},
     workflow_coordination::{RegisterWorker, RegisteredWorker, WorkerId, WorkerState},
 };
-use zeroship_workflow::coordination::{Error, Options, WorkerCoordinator};
+use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
 fn worker_auth() -> Arc<ServiceAuth> {
     let issuer = ServiceIssuer::parse(&format!(

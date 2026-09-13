@@ -64,6 +64,9 @@ zeroship-auth = { workspace = true }
 # un-wired; this is the wiring.
 zeroship-mailer = { workspace = true }
 zeroship-workflow = { workspace = true }
+zeroship-workflow-client = { workspace = true }
+zeroship-workflow-manager = { workspace = true }
+zeroship-data-orm = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-metering = { workspace = true }
@@ -118,6 +121,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "serde"
 chrono-tz = "0.10"
 
 [dev-dependencies]
+zeroship-workflow-server = { path = "../zeroship-workflow-server" }
 rcgen = "0.14"
 testcontainers = { version = "0.28", features = ["blocking"] }
 zeroship-workflow-v8 = { workspace = true }
@@ -184,3 +188,7 @@ path = "tests/no_liquibase_residue_test.rs"
 
 [lints]
 workspace = true
+
+[[test]]
+name = "deployment_holds"
+path = "tests/deployment_holds.rs"

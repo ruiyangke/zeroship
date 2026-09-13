@@ -18,7 +18,8 @@ use zeroship_core::{
     service_identity::endpoints,
     workflow_coordination::{
         AcknowledgeManagement, AssignScope, AssignedScope, Failure, FailureCode, ManageRun,
-        ManagementStatus, PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage, WorkerPage,
+        ManagementStatus, PublishWakeHint, RegisterWorker, ReleaseScope, ScopePage,
+        VerifyAssignment, WorkerPage,
     },
 };
 
@@ -37,6 +38,10 @@ pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
         )
         .service(
             web::resource(endpoints::WORKFLOW_ASSIGN.path_template()).route(web::post().to(assign)),
+        )
+        .service(
+            web::resource(endpoints::WORKFLOW_VERIFY_ASSIGNMENT.path_template())
+                .route(web::post().to(verify_assignment)),
         )
         .service(
             web::resource(endpoints::WORKFLOW_RECOVERY.path_template())
@@ -184,6 +189,36 @@ async fn assign(
             .map_err(|_| Error::Unavailable)??;
             let command: AssignScope = read_json(&request, body).await?;
             state.service.assign(&command).await
+        }
+        .await,
+    )
+}
+
+async fn verify_assignment(
+    request: web::HttpRequest,
+    state: State<SharedState>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        async {
+            let _actor = compio::time::timeout(
+                Duration::from_secs(5),
+                state.auth.peer(
+                    authorization(&request),
+                    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
+                ),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            let command: VerifyAssignment = read_json(&request, body).await?;
+            let assignment = state.service.verify_assignment(&command).await?;
+            compio::time::timeout(
+                Duration::from_secs(5),
+                state.auth.active_worker(&command.worker_id),
+            )
+            .await
+            .map_err(|_| Error::Unavailable)??;
+            Ok(assignment)
         }
         .await,
     )

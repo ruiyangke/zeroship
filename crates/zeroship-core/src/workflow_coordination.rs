@@ -175,6 +175,15 @@ pub struct AssignedScope {
     pub assignment_revision: Revision,
 }
 
+/// Control checks a worker's current app authority without renewing its lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifyAssignment {
+    pub app_id: AppId,
+    pub worker_id: WorkerId,
+    pub assignment_revision: Revision,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReleaseScope {

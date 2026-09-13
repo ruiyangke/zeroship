@@ -1,6 +1,6 @@
 # zeroship-workflow
 
-The Rust workflow engine and client. This crate owns the journal protocol,
+The Rust customer workflow engine. This crate owns the journal protocol,
 claim and apply logic, PostgreSQL journal storage, app-scoped HTTP backend,
 and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
 
@@ -14,9 +14,9 @@ and customer-bound PostgreSQL and SQLite execution. It does not depend on V8.
   worker task protocol through the shared Rust ORM.
 - `schema/`: customer journal recorded through the canonical migration DSL
   and generated through its PostgreSQL and SQLite compilers.
-- `deployment_holds/`: platform deployment retention metadata through ORM models;
-  it never reads customer journals. Its canonical schema lives in
-  `schema/deployments/` and is composed into the platform migration.
+- `deployment_holds/`: scoped customer clients for deployment retention.
+  `zeroship-workflow-manager::deployments` owns the platform ORM ledger and its
+  canonical schema; `zeroship-workflow-client` owns authenticated transport.
 
 Rust hosts can construct `HttpWorkflowBackend` with `WorkflowClientConfig` and
 call `WorkflowBackend::{start,status,signal,transition,restart,read_step_output}`. The host binds
@@ -38,9 +38,9 @@ The shared engine is composed into the CLI; production worker and Control
 integration remain unfinished. The [revised design](../../docs/proposals/2026-09-11-workflow-worker.md)
 assigns scheduling and queue delivery to the manager, with workers consuming
 bounded jobs against creator storage. The [planned crate layout](../../docs/proposals/2026-09-11-workflow-worker.md#crate-layout)
-extracts the manager and service client while keeping customer execution here.
-These changes are not implemented; the module descriptions above reflect the
-current tree. Workers may access only creator databases; Control and other
+keeps the manager and service client separate from customer execution here.
+Their native crates exist; production scheduling and delivery still await
+cutover. Workers may access only creator databases; Control and other
 platform services may access only the Control database. Authenticated service
 contracts carry cross-boundary requests without sharing database credentials.
 `AppWorkflows::apply_management` commits coordinator lifecycle commands with
@@ -49,7 +49,8 @@ outcome even after ordinary request cleanup or policy expiry. Changed command
 bodies conflict; infrastructure failures remain retryable. Lifecycle rejection
 and database failure are separate paths, so a failed write cannot become a
 permanent denial. Receipt compaction awaits a coordinator redelivery contract.
-`DeploymentHolds` accepts an authorized platform ORM database. Holds survive
+`zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
+platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers
 run inside a host-owned transaction that also fences routing and other deployment
 consumers. `service::WorkflowService` records customer-side acquisition and release
@@ -73,10 +74,9 @@ The engine keeps the ORM transaction callback alive until settlement; abandoning
 an operation rolls it back. Database-clock reads use a separate connection to the
 same customer database, so checking a lease cannot wait for the journal's own
 pool lease. These clock queries read no journal state.
-The integrated main ORM currently rejects the journal's reserved collection
-names during descriptor installation. Customer journal execution and its
-database tests remain blocked until native descriptor and collection APIs
-accept these declared tables. The workflow branch does not bypass that check.
+Descriptor installation and collection operations use the ORM's transparent
+schema access, including the declared workflow tables. The native journal tests
+exercise this path without a workflow-specific identifier bypass.
 `schema::postgres_sql` binds the generated
 DDL for a provisioning host with authorized migration credentials. Runtime
 operations only verify the journal fingerprint and use ordinary DML.

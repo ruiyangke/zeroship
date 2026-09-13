@@ -1,4 +1,4 @@
-//! Verify the actual platform migration and the coordinator's database authority.
+//! Verify platform provisioning and workflow metadata database authority.
 #[path = "support/platform.rs"]
 mod platform;
 
@@ -52,6 +52,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
             "coordinator accepted {sql}"
         );
     }
+    manager_queue_authority(&fixture, &runtime).await;
     let schema = fixture
         .admin
         .query(
@@ -93,4 +94,193 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         service.verify().await.unwrap();
     }
     assert!(fixture.work.path().join("migrate.toml").is_file());
+}
+
+async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_postgres::Client) {
+    use zeroship_core::{
+        app_id::AppId,
+        workflow_jobs::{DeploymentId, JobId, JobOperation},
+    };
+    let namespace = fixture
+        .admin
+        .query_one(
+            "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='workflow_manager'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(namespace.get::<_, String>(0), "zeroship_workflow_migrator");
+    let tables = fixture.admin.query(
+        "SELECT c.relname, pg_get_userbyid(c.relowner) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='workflow_manager' AND c.relkind='r' ORDER BY c.relname",
+        &[],
+    ).await.unwrap();
+    assert_eq!(
+        tables
+            .iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>(),
+        ["jobs", "queue_scopes"]
+    );
+    for table in &tables {
+        assert_eq!(table.get::<_, String>(1), "zeroship_workflow_migrator");
+    }
+
+    let app = AppId::mint();
+    let job = JobId::mint();
+    let deployment = DeploymentId::mint();
+    let operation = serde_json::to_string(&JobOperation::Reconcile {}).unwrap();
+    let digest = "a".repeat(64);
+    assert_eq!(
+        runtime
+            .execute(
+                "INSERT INTO workflow_manager.queue_scopes(id,app_id) VALUES($1,$1)",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(runtime.execute(
+        "INSERT INTO workflow_manager.jobs(id,app_id,deployment_id,operation,spec_digest,available_at,state,created_at) VALUES($1,$2,$3,$4,$5,0,'ready',0)",
+        &[&job.as_str(), &app.as_str(), &deployment.as_str(), &operation, &digest],
+    ).await.unwrap(), 1);
+    let stored = runtime
+        .query_one(
+            "SELECT operation FROM workflow_manager.jobs WHERE app_id=$1 AND id=$2",
+            &[&app.as_str(), &job.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored.get::<_, String>(0), operation);
+    assert_eq!(
+        runtime
+            .execute(
+                "UPDATE workflow_manager.jobs SET state='leased' WHERE app_id=$1 AND id=$2",
+                &[&app.as_str(), &job.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(runtime.execute(
+        "UPDATE workflow_manager.queue_scopes SET lock_version=lock_version+1 WHERE app_id=$1",
+        &[&app.as_str()],
+    ).await.unwrap(), 1);
+
+    for sql in [
+        "SELECT * FROM customer.__zeroship_workflow_runs",
+        "CREATE TABLE workflow_manager.extra(id text PRIMARY KEY)",
+        "ALTER TABLE workflow_manager.jobs ADD COLUMN injected text",
+        "DROP TABLE workflow_manager.jobs",
+        "TRUNCATE workflow_manager.jobs",
+    ] {
+        let error = runtime.batch_execute(sql).await.unwrap_err();
+        assert_eq!(
+            error.as_db_error().unwrap().code().code(),
+            "42501",
+            "workflow runtime accepted {sql}: {error}"
+        );
+    }
+    for privilege in [
+        "TRUNCATE",
+        "REFERENCES",
+        "TRIGGER",
+        "SELECT WITH GRANT OPTION",
+        "INSERT WITH GRANT OPTION",
+        "UPDATE WITH GRANT OPTION",
+        "DELETE WITH GRANT OPTION",
+    ] {
+        for table in ["workflow_manager.jobs", "workflow_manager.queue_scopes"] {
+            let granted = fixture
+                .admin
+                .query_one(
+                    "SELECT has_table_privilege('zeroship_workflow', $1, $2)",
+                    &[&table, &privilege],
+                )
+                .await
+                .unwrap();
+            assert!(
+                !granted.get::<_, bool>(0),
+                "runtime has {privilege} on {table}"
+            );
+        }
+    }
+    for role in [
+        "zeroship_control",
+        "zeroship_worker",
+        "zeroship_gateway",
+        "zeroship_app",
+    ] {
+        let schema = fixture
+            .admin
+            .query_one(
+                "SELECT has_schema_privilege($1, 'workflow_manager', 'USAGE')",
+                &[&role],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !schema.get::<_, bool>(0),
+            "{role} can enter the queue namespace"
+        );
+        for table in ["workflow_manager.jobs", "workflow_manager.queue_scopes"] {
+            for privilege in [
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "REFERENCES",
+                "TRIGGER",
+            ] {
+                let granted = fixture
+                    .admin
+                    .query_one(
+                        "SELECT has_table_privilege($1, $2, $3)",
+                        &[&role, &table, &privilege],
+                    )
+                    .await
+                    .unwrap();
+                assert!(
+                    !granted.get::<_, bool>(0),
+                    "{role} has {privilege} on {table}"
+                );
+            }
+        }
+        fixture
+            .admin
+            .batch_execute(&format!("SET ROLE {role}"))
+            .await
+            .unwrap();
+        let denied = fixture
+            .admin
+            .batch_execute("SELECT id FROM workflow_manager.jobs")
+            .await;
+        fixture.admin.batch_execute("RESET ROLE").await.unwrap();
+        assert_eq!(
+            denied.unwrap_err().as_db_error().unwrap().code().code(),
+            "42501",
+            "{role} can read the queue"
+        );
+    }
+    assert_eq!(
+        runtime
+            .execute(
+                "DELETE FROM workflow_manager.jobs WHERE app_id=$1 AND id=$2",
+                &[&app.as_str(), &job.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .execute(
+                "DELETE FROM workflow_manager.queue_scopes WHERE app_id=$1",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
 }

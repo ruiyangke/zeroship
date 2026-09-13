@@ -16,10 +16,9 @@ use std::{
     thread::JoinHandle,
 };
 use zeroship_bundle::LoadedWorker;
-use zeroship_core::{app_id::AppId, typed_id};
+use zeroship_core::{app_id::AppId, typed_id, workflow_deployments::HoldScope};
 use zeroship_runtime::{NativePlugin, RuntimeLimits};
 use zeroship_workflow::{
-    deployment_holds::{DeploymentHolds, HoldScope},
     service::{
         runner::{TaskPayloadLimits, WorkerOptions, WorkflowWorker},
         schema,
@@ -28,6 +27,7 @@ use zeroship_workflow::{
     },
     WorkflowServiceError,
 };
+use zeroship_workflow_manager::deployments::DeploymentHolds;
 use zeroship_workflow_v8::{AppRuntimeLoader, V8TaskExecutor, WorkflowBinding};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -237,10 +237,10 @@ async fn initialize(
     schema::initialize_local(&store).await?;
     let storage = storage.objects;
     let catalog = deployment.catalog().await?;
-    let client = catalog.for_scope(HoldScope::new(
-        app.clone(),
-        format!("dhl_{}", typed_id::uuid_to_base62(&app.uuid())),
-    )?);
+    let client = crate::deployment::LocalDeploymentHolds::new(
+        catalog.clone(),
+        HoldScope::for_app(app.clone()),
+    );
     let service = WorkflowService::open(Rc::new(store), Arc::new(HostPolicies::default()))
         .await?
         .with_payload_storage(storage)?
