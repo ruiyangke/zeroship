@@ -70,7 +70,7 @@ async fn queries(db: &Database) -> Result<(), DbError> {
         .left_join(
             &child,
             p.column(posts::nickname)
-                .eq_column(child.column(posts::title))?,
+                .eq(child.column(posts::title))?,
         )?
         .select((
             p.column(posts::title).select(),

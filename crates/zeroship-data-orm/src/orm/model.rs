@@ -161,30 +161,111 @@ impl<C: Column> Field<C> {
         Self(PhantomData)
     }
 }
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ValueOperand;
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct ExpressionOperand;
+
+/// Scalar types that can be compared across column nullability.
+pub trait ComparableSqlType {
+    type Base;
+}
+macro_rules! comparable_types {
+    ($($t:ident),* $(,)?) => { $(impl ComparableSqlType for super::sql_types::$t { type Base = super::sql_types::$t; })* };
+}
+comparable_types!(
+    Text,
+    Integer,
+    BigInt,
+    Number,
+    Boolean,
+    Bytes,
+    Timestamp,
+    CalendarDate,
+    Time
+);
+impl<S: ComparableSqlType> ComparableSqlType for super::sql_types::Nullable<S> {
+    type Base = S::Base;
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct FieldOperand(FieldOperandValue);
+#[derive(Debug)]
+enum FieldOperandValue {
+    Value(Value),
+    Column(&'static str),
+}
+
+/// A native value or compatible field from the same entity.
+pub trait IntoFieldOperand<C: Column, Kind> {
+    #[doc(hidden)]
+    fn into_field_operand(self) -> Result<FieldOperand, DbError>;
+}
+impl<C: Column, T: EncodeValue<C::SqlType>> IntoFieldOperand<C, ValueOperand> for T {
+    fn into_field_operand(self) -> Result<FieldOperand, DbError> {
+        self.encode_value()
+            .map(|value| FieldOperand(FieldOperandValue::Value(value)))
+    }
+}
+impl<C, D> IntoFieldOperand<C, ExpressionOperand> for Field<D>
+where
+    C: Column,
+    D: FilterableColumn<Entity = C::Entity>,
+    C::SqlType: ComparableSqlType,
+    D::SqlType: ComparableSqlType<Base = <C::SqlType as ComparableSqlType>::Base>,
+{
+    fn into_field_operand(self) -> Result<FieldOperand, DbError> {
+        Ok(FieldOperand(FieldOperandValue::Column(D::NAME)))
+    }
+}
+impl<C, D> IntoFieldOperand<C, ExpressionOperand> for &Field<D>
+where
+    C: Column,
+    D: FilterableColumn<Entity = C::Entity>,
+    C::SqlType: ComparableSqlType,
+    D::SqlType: ComparableSqlType<Base = <C::SqlType as ComparableSqlType>::Base>,
+{
+    fn into_field_operand(self) -> Result<FieldOperand, DbError> {
+        Ok(FieldOperand(FieldOperandValue::Column(D::NAME)))
+    }
+}
+
 impl<C: FilterableColumn> Field<C> {
-    pub fn eq<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+    pub fn eq<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         self.compare(crate::sql::CompareOp::Eq, value)
     }
-    pub fn ne<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+    pub fn ne<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         self.compare(crate::sql::CompareOp::Ne, value)
     }
-    fn compare<T: EncodeValue<C::SqlType>>(
+    fn compare<T: IntoFieldOperand<C, K>, K>(
         self,
         op: crate::sql::CompareOp,
         value: T,
     ) -> Result<Filter<C::Entity>, DbError> {
-        let value = value
-            .encode_value()
+        let operand = value
+            .into_field_operand()
             .map_err(|error| field_error::<C>("filter", error))?;
-        Ok(Filter {
-            predicate: ModelPredicate::Compare {
+        let predicate = match operand.0 {
+            FieldOperandValue::Value(value) => ModelPredicate::Compare {
                 field: C::NAME,
                 op,
                 value,
             },
+            FieldOperandValue::Column(other) => ModelPredicate::CompareColumn {
+                field: C::NAME,
+                op,
+                other,
+            },
+        };
+        Ok(Filter {
+            predicate,
             entity: PhantomData,
         })
     }
+
     pub fn in_values<T: EncodeValue<C::SqlType>>(
         self,
         values: impl IntoIterator<Item = T>,
@@ -240,16 +321,16 @@ impl<C: FilterableColumn> Field<C>
 where
     C::SqlType: OrderedSqlType,
 {
-    pub fn lt<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+    pub fn lt<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         self.compare(crate::sql::CompareOp::Lt, value)
     }
-    pub fn lte<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+    pub fn lte<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         self.compare(crate::sql::CompareOp::Lte, value)
     }
-    pub fn gt<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+    pub fn gt<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         self.compare(crate::sql::CompareOp::Gt, value)
     }
-    pub fn gte<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+    pub fn gte<T: IntoFieldOperand<C, K>, K>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
         self.compare(crate::sql::CompareOp::Gte, value)
     }
 }
@@ -299,6 +380,11 @@ pub(crate) enum ModelPredicate {
         field: &'static str,
         op: crate::sql::CompareOp,
         value: Value,
+    },
+    CompareColumn {
+        field: &'static str,
+        op: crate::sql::CompareOp,
+        other: &'static str,
     },
     Membership {
         field: &'static str,
