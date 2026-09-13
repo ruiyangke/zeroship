@@ -308,8 +308,55 @@ The SQL module renders qualified expressions and native parameters for PostgreSQ
 and SQLite. The ORM restores each projected row's source identity before the
 protection and codec passes. An unmatched optional row becomes `None` in Rust
 and `null` in TypeScript, including when the selected fields are nullable.
-Explicit joins preserve row multiplication and paginate joined rows. The SDK's
-existing `with` relation loader remains a separate operation.
+Explicit joins preserve row multiplication and paginate joined rows. Named
+relation loading preserves the parent query's rows and pagination.
+
+## Named relations
+
+A foreign-key descriptor can carry a logical `relation` name. Authoring declares
+it with `.references("users", "id", { relation: "author" })`; the generated
+runtime descriptor retains the source field, target collection, target column,
+and relation name together. The name is independent of the database constraint
+name and cannot collide with another edge or a column in its source collection.
+
+```text
+posts.author_id -- relation: author --> users.id
+
+Rust with_related(posts::relations::author) --+
+                                             +--> shared ORM loader
+JS   with({ author: true }) -----------------+
+                                                   |
+                                         parent page + reference keys
+                                                   |
+                                         bounded target queries
+                                                   |
+                                         target protection pipeline
+                                                   |
+                                         parent + related record
+```
+
+The loader resolves named edges from installed descriptors, captures the route
+and read dependencies before yielding, and batches distinct reference values.
+Related reads use the parent query's captured transaction route. Outside a
+transaction they use the ordinary pool path. A transaction's isolation level
+determines visibility across the statements; relation loading does not add a
+snapshot guarantee to PostgreSQL's default isolation.
+
+Target rows pass through their own codecs, encryption and masking stages.
+Unreadable or protected reference keys cannot be used for loading. A null key
+or an absent or deleted target produces `None` in Rust and `null` in JavaScript.
+The scalar foreign key remains unchanged. Parent projections can omit that key;
+the loader obtains it internally and removes it from the returned projection.
+
+Rust uses generated relation handles and `FromRow` projections, returning parent
+and optional target tuples. V8 recursively converts the same protected native
+values. The TypeScript SDK maps declared field names and tracks live-query
+dependencies; it executes no secondary queries.
+
+This loader handles forward references to unique columns. Reverse collections,
+many-to-many loading, nested relations and target projection options remain
+future work. Batched reads are the initial execution strategy; a later joined
+strategy must preserve the same result and protection contracts.
 
 ## Driver contract
 

@@ -18,7 +18,7 @@ type ExampleSchema = {
 type ExpectNever<T extends never> = T;
 type PublicCollectionKeys = Exclude<
   keyof Collection<ExampleSchema>,
-  "_setResolveCollection" | "_loadRelations" | "Id" | "RowInput"
+  "Id" | "RowInput"
 >;
 type PublicQueryKeys = Exclude<keyof Query<ExampleSchema>, "_exec">;
 

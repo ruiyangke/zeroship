@@ -484,13 +484,13 @@ export const tasksWithRelations = action(async ({
     await db.tasks
       .find({ workspaceId })
       .sort({ title: 1 })
-      .with({ ownerId: true, workspaceId: true }),
+      .with({ owner: true, workspace: true }),
     "tasksWithRelations",
   ) as Array<Record<string, unknown>>;
 
   return rows.map((row) => {
-    const owner = row.ownerId as Record<string, unknown> | null;
-    const workspace = row.workspaceId as Record<string, unknown> | null;
+    const owner = row.owner as Record<string, unknown> | null;
+    const workspace = row.workspace as Record<string, unknown> | null;
     return {
       id: row.id,
       title: row.title,

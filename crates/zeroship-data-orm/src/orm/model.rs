@@ -14,6 +14,14 @@ pub trait Column: 'static {
     const NAME: &'static str;
 }
 pub trait ReadableColumn: Column {}
+/// A named forward edge declared by the generated schema.
+pub trait Relation: 'static {
+    type Source: Entity;
+    type Target: Entity;
+    const NAME: &'static str;
+    const FIELD: &'static str;
+    const TARGET_COLUMN: &'static str;
+}
 pub trait FilterableColumn: Column {}
 pub trait WritableColumn: Column {}
 pub trait UpdatableColumn: WritableColumn {}

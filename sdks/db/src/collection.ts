@@ -70,10 +70,7 @@ import {
   bulkUnmaskCollection,
   type MaskingCollectionInternals,
 } from "./collection/masking";
-import {
-  loadRelations,
-  type RelationsCollectionInternals,
-} from "./collection/relations";
+import { createReadResultMapper, type ReadResultMapper } from "./collection/read-mapping";
 import {
   nearCollection,
   searchCollection,
@@ -131,9 +128,9 @@ function toResultError(e: unknown): Error {
  * `Id` accessor below produces `Id<N>` rather than `Id<string>`.
  *
  * `AllSchemas` is the parent db's full schema map — threaded in by
- * `installSchema` so a `find({...}, { with: { userId: true } })` can
- * resolve the joined field's type to the target collection's `Row<...>`
- * rather than the v1 fallback of `PlainObject`. Standalone `model()`
+ * `installSchema` so a `find({...}, { with: { user: true } })` can
+ * resolve the relation's type to the target collection's `Row<...>`
+ * instead of `PlainObject`. Standalone `model()`
  * callers inherit the safe default and degrade to `PlainObject` per
  * relation.
  *
@@ -161,16 +158,7 @@ export class Collection<
   private _indexes: readonly NamedIndexSpec[];
   /** Per-collection DataLoader, lazily constructed on first batchable `get(id)`. */
   private _idLoader: IdLoader<Row<S>, IdValue> | null;
-  /**
-   * Sibling-collection lookup, planted by `installSchema` so `with: { fk: true }`
-   * can resolve `fieldDef.refTarget` → the target `Collection` to fire one
-   * batched `find({id: {$in: ids}})` against. `model()` callers without a
-   * parent db leave this null; `with` then errors at call time with a
-   * clear message instead of silently degrading to N+1.
-   */
-  private _resolveCollection:
-    | ((name: string) => Collection<unknown> | undefined)
-    | null;
+  private _mapReadResult: ReadResultMapper;
   declare readonly Id: Id<N, RowId<S>>;
   declare readonly RowInput: RowInput<S>;
 
@@ -185,6 +173,7 @@ export class Collection<
     options?: {
       naming?: NamingStrategy;
       indexes?: readonly NamedIndexSpec[];
+      schemas?: Readonly<Record<string, NormalizedSchema>>;
     },
   ) {
     validateCollectionIdentity(schema);
@@ -193,7 +182,6 @@ export class Collection<
     this._native = native;
     this._nativeCol = null;
     this._idLoader = null;
-    this._resolveCollection = null;
 
     const strategy = options?.naming ?? naming.asIs;
     const fieldToCol: Record<string, string> = {};
@@ -206,6 +194,7 @@ export class Collection<
     this._knownFields = new Set(Object.keys(fieldToCol));
     this._toColumn = (field) => fieldToCol[field] ?? field;
     this._toField = (column) => colToField[column] ?? column;
+    this._mapReadResult = createReadResultMapper(schema, options?.schemas ?? {}, strategy, this._toField);
 
     this._indexes = (options?.indexes ?? []).map((idx) => ({
       name: idx.name,
@@ -216,10 +205,6 @@ export class Collection<
 
   private _crud(): CrudCollectionInternals<S, N, AllSchemas> {
     return this as unknown as CrudCollectionInternals<S, N, AllSchemas>;
-  }
-
-  private _relations(): RelationsCollectionInternals {
-    return this as unknown as RelationsCollectionInternals;
   }
 
   private _masking(): MaskingCollectionInternals<S> {
@@ -242,21 +227,6 @@ export class Collection<
       message: "@zeroship/db: env.db.collection(name) is unavailable",
     });
     return this._nativeCol;
-  }
-
-  /** @internal — planted by `installSchema` so `with` can resolve siblings. */
-  _setResolveCollection(
-    fn: (name: string) => Collection<unknown> | undefined,
-  ): void {
-    this._resolveCollection = fn;
-  }
-
-  async _loadRelations(
-    rows: PlainObject[],
-    withSpec: WithSpec,
-    transactionScoped = false,
-  ): Promise<void> {
-    return loadRelations(this._relations(), rows, withSpec, transactionScoped);
   }
 
   /** Wraps an operation in try/catch and maps it to Result. */
@@ -288,10 +258,10 @@ export class Collection<
     idOrFilter: RowId<S> | Filter<S>,
     opts: { select: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
   ): Promise<Result<Pick<Row<S>, K> | null>>;
-  async get<const W extends WithSpec<S>>(
+  async get<const W extends WithSpec<S>, K extends string & keyof Row<S> = string & keyof Row<S>>(
     idOrFilter: RowId<S> | Filter<S>,
-    opts: { with: ExactWithSpec<S, W>; orderBy?: SortSpec<S> } & ReadHints<S>,
-  ): Promise<Result<(Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>) | null>>;
+    opts: { with: ExactWithSpec<S, W>; select?: K[]; orderBy?: SortSpec<S> } & ReadHints<S>,
+  ): Promise<Result<(Pick<Row<S>, K> & WithRelations<S, W, AllSchemas>) | null>>;
   async get(
     idOrFilter: RowId<S> | Filter<S>,
     opts?: { orderBy?: SortSpec<S> } & ReadHints<S>,
@@ -306,12 +276,6 @@ export class Collection<
       unmaskReason?: string;
       with?: WithSpec;
     } = {},
-    // The implementation signature's return type must be compatible with
-    // EVERY overload above, including the `with` overload whose joined key
-    // OMITS the raw FK field from `Row<S>` before intersecting the joined
-    // shape back in (see WithRelations doc comment in types.ts). `any` is
-    // the standard TS idiom here — callers never see this signature, only
-    // the precise overloads above, which stay fully checked.
   ): Promise<Result<any>> {
     return getCollection(this._crud(), idOrFilter, opts);
   }
@@ -323,7 +287,7 @@ export class Collection<
   find<const W extends WithSpec<S>>(
     filter: Filter<S>,
     opts: { with: ExactWithSpec<S, W> } & ReadHints<S>,
-  ): Query<S, Omit<Row<S>, keyof W> & WithRelations<S, W, AllSchemas>, AllSchemas>;
+  ): Query<S, Row<S> & WithRelations<S, W, AllSchemas>, AllSchemas>;
   find(filter?: Filter<S>): Query<S, Row<S>, AllSchemas>;
   find(
     filter: Filter<S> = {} as Filter<S>,

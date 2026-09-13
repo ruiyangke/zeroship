@@ -42,6 +42,7 @@ import {
   err,
   ok,
 } from "../types";
+import { trackRelations, type ReadResultMapper } from "./read-mapping";
 import { validateEncryptedFieldsInFilter } from "./encryption-fence";
 import { _maybeWarnUnindexedFilter } from "./index-warnings";
 
@@ -63,11 +64,7 @@ export interface CrudCollectionInternals<
   _nativeCollection(): NativeCollection;
   _toColumn(field: string): string;
   _toField(column: string): string;
-  _loadRelations(
-    rows: PlainObject[],
-    withSpec: WithSpec,
-    transactionScoped?: boolean,
-  ): Promise<void>;
+  _mapReadResult: ReadResultMapper;
 }
 
 /**
@@ -201,6 +198,7 @@ export function getCollection<
   } = {},
 ): Promise<Result<Row<S> | null>> {
   trackCollectionAccess(self._name);
+  if (opts.with !== undefined) trackRelations(self._schema, opts.with);
   const isBareId = isIdValue(idOrFilter);
   if (
     isBareId &&
@@ -246,12 +244,10 @@ export function getCollection<
     if (opts.unmaskReason !== undefined) {
       nativeOpts.unmaskReason = opts.unmaskReason;
     }
+    if (opts.with !== undefined) nativeOpts.with = opts.with as Record<string, true>;
     const rows = (await self._nativeCollection().find(mapped, nativeOpts)) ?? [];
     if (rows.length === 0) return null;
-    const row = mapResultDoc(rows[0] as PlainObject, self._toField);
-    if (opts.with !== undefined) {
-      await self._loadRelations([row], opts.with, opts[TRANSACTION_READ] === true);
-    }
+    const row = self._mapReadResult(rows[0] as PlainObject, opts.with);
     return row as Row<S>;
   });
 }
@@ -320,7 +316,6 @@ export function findCollection<
     unmask?: (string & keyof Row<S>)[];
     unmaskReason?: string;
     with?: WithSpec;
-    [TRANSACTION_READ]?: boolean;
   },
 ): Query<S, Row<S>, AllSchemas> {
   trackCollectionAccess(self._name);
@@ -338,11 +333,7 @@ export function findCollection<
     async (_col, f, fopts) => self._nativeCollection().find(f, fopts),
     self._toField,
     self._toColumn,
-    (rows, spec) => self._loadRelations(
-      rows,
-      spec,
-      opts?.[TRANSACTION_READ] === true,
-    ),
+    self._mapReadResult,
     opts?.unmask !== undefined || opts?.actor !== undefined || opts?.unmaskReason !== undefined
       ? {
           unmask: opts.unmask?.map((f) => self._toColumn(f)),

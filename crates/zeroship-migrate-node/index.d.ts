@@ -385,23 +385,12 @@ export interface FieldDescriptorDto {
   unique?: boolean
   /** For a `ref` field, the referenced collection (FK target table). */
   references?: string
-  /**
-   * The referenced target COLUMN. A legacy declarative `ref` omits it and keeps its
-   * historical `id` target; a typed migration reference always records it.
-   *
-   * Added when this type stopped being inbound-only. It was absent while the DTO
-   * only ever fed the producer - which defaults it to `id` - and that absence
-   * became an export loss the moment the fold, which recovers the REAL target
-   * column from the FK it holds, had to hand its answer outward.
-   */
+  /** Target column, required when a reference is declared. */
   referenceColumn?: string
-  /**
-   * An explicit foreign-key constraint name. Absent references use the shared
-   * `<table>_<field>_fkey` derivation. Present for the same reason as
-   * `reference_column`: the fold knows the real name, and dropping it here made an
-   * exported FK indistinguishable from a derived-name one.
-   */
+  /** Optional foreign-key constraint name; otherwise derived from table and field. */
   referenceName?: string
+  /** Logical ORM navigation name, independent of the constraint name. */
+  relation?: string
   /** `ref` ON DELETE policy (`cascade`|`restrict`|`setNull`|`setDefault`|`noAction`). */
   onDelete?: string
   /** `ref` ON UPDATE policy. */

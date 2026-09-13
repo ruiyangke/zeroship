@@ -235,15 +235,16 @@ type StringOps = {
  *
  * `$like` / `$ilike` are real backend operators: the ORM query builder
  * validates them and lowers them to SQL predicates.
+ * Keep kind checks non-distributive to bound generic operator intersections.
  */
 type PlainFilterValue<T, K extends FilterKind = InferredFilterKind<T>> =
-  K extends "search"
+  [K] extends ["search"]
     ? never
-    : (K extends "json" ? null : T | null) | (
+    : ([K] extends ["json"] ? null : T | null) | (
       EqualityOps<NonNullable<T>> &
-      (K extends "text"
+      ([K] extends ["text"]
         ? OrderingOps<NonNullable<T>> & StringOps
-        : K extends "ordered"
+        : [K] extends ["ordered"]
           ? OrderingOps<NonNullable<T>>
           : object)
     );
@@ -471,12 +472,7 @@ export type InferId<C> =
   C extends import("./collection").Collection<infer S, infer N extends string, any> ? Id<N, RowId<S>> :
   never;
 
-/**
- * Spec accepted by `find()` / `get()`'s `with: { ... }` option. Each key
- * must be a `t.ref(...)` field on the parent schema; the value is `true`
- * (eager-load the full target row). Future shapes — column narrowing,
- * relation-level filters — slot in as `{ columns: K[] } | { where: Filter }`.
- */
+/** Declared foreign-key fields available for relation loading. */
 export type RelationField<S> = string & (IsSchemaDict<S> extends true
   ? {
       [K in keyof S]-?: [ExtractRefTarget<NonNullable<S[K]>>] extends [never] ? never : K;
@@ -489,33 +485,28 @@ export type RelationField<S> = string & (IsSchemaDict<S> extends true
           : K;
       }[keyof Row<S>]);
 
-export type WithSpec<S = PlainObject> = [RelationField<S>] extends [never]
-  ? never
-  : AtLeastOne<Record<RelationField<S>, true>>;
+type DeclaredRelation<X> = X extends { readonly _relation: infer N extends string }
+  ? N : X extends { relation: infer N extends string } ? N : never;
 
-export type ExactWithSpec<S, W extends WithSpec<S>> = W &
-  Record<Exclude<keyof W, RelationField<S>>, never>;
+/** Named schema edges, distinct from their scalar foreign-key fields. */
+export type RelationName<S> = string & (string extends keyof Row<S> ? string : {
+  [K in keyof S]: DeclaredRelation<NonNullable<S[K]>>;
+}[keyof S]);
 
-/**
- * Extract the target table name (e.g. `"users"`) from whatever shape the
- * user wrote at `S[K]` for a `t.ref(...)` field. The user-facing schema
- * dict carries a `TypeBuilder<Id<TargetName>>` at that key; the brand
- * tag inside `Id<T>` is the lookup key for `AllSchemas[T]`.
- *
- * Also handles the Mongoose-style raw `{ type: "ref"; refTarget: T }`
- * literal shape so users who skip `t.*` still get strong relation typing.
- *
- * Resolves to `never` when the field at `K` is not a ref — that lets
- * callers surface a "not a t.ref field" error at the type layer.
- */
+export type WithSpec<S = PlainObject> = Partial<Record<RelationName<S>, true>>;
+
+export type ExactWithSpec<S, W extends WithSpec<S>> = keyof W extends never ? never : W & Record<keyof W, true> &
+  Record<Exclude<keyof W, RelationName<S>> | Extract<keyof W, `_${string}` | "constructor" | "prototype">, never>;
+
+/** Resolve reference targets from builder identity metadata or field descriptors. */
 export type ExtractRefTarget<X> =
   X extends TypeBuilder<infer U, any, any, any, any>
-    ? U extends Id<infer T>
+    ? U extends { readonly __zeroshipTable: infer T extends string }
       ? T
       : never
-    : X extends Id<infer T, any>
+    : X extends { readonly __zeroshipTable: infer T extends string }
       ? T
-      : X extends { type: "ref"; refTarget: infer T extends string }
+      : X extends { refTarget: infer T extends string }
         ? T
         : never;
 
@@ -549,18 +540,12 @@ export type ResolveTargetRow<X, AllSchemas> =
         : never
     : never;
 
-/**
- * Type-level shape for joined rows. Each key in `W` becomes a field on
- * the row carrying the target's full `Row<TargetSchema>` (or `null`).
- *
- * `AllSchemas` is the schema map that `installSchema` was given —
- * threading it through `Collection<S, N, AllSchemas>` lets us look up each key's
- * `t.ref(target)` and resolve `target` to the target collection's `Row`.
- * The default `Record<string, unknown>` keeps direct `Collection`/`Query`
- * users (e.g. `model("users", ...)`) compiling with `PlainObject` relations.
- */
+/** Attach target row types to requested named edges. */
 export type WithRelations<S, W extends WithSpec<S>, AllSchemas = Record<string, unknown>> = {
-  [K in keyof W & keyof S]: ResolveTargetRow<S[K], AllSchemas> | null;
+  [N in keyof W]: string extends keyof Row<S> ? PlainObject | null : {
+    [K in keyof S]: N extends DeclaredRelation<NonNullable<S[K]>>
+      ? ResolveTargetRow<S[K], AllSchemas> | null : never;
+  }[keyof S];
 };
 
 /** Wraps a successful value in Result. */
@@ -840,6 +825,8 @@ export type FkAction = "restrict" | "cascade" | "set null" | "no action";
  * Options accepted by `t.ref()` to control FK behaviour at the DB layer.
  */
 export interface RefOptions {
+  /** Logical edge name used by with(). */
+  relation?: string;
   /** Target column. Required when authoring a foreign key through a manual schema. */
   column?: string;
   /** ON DELETE policy. Omitted means SQL/Postgres `NO ACTION`. */
@@ -924,22 +911,11 @@ export interface FieldDef {
   scale?: number;
   enum?: (string | number)[];
   pattern?: RegExp;
-  /**
-   * Target table name for a foreign key.
-   *
-   * Set by `t.ref()` (which also sets `type: "ref"`), and by the
-   * migration-first pipeline for a column declared
-   * `t.text().references(target, column)` — there the engine descriptor
-   * reports `type: "string"` with `refTarget` alongside it, because the
-   * column's storage really is text. This field is the authoritative marker
-   * that a field IS a reference; `type` describes storage, not relationship.
-   *
-   * The doc here previously read "Present iff `type === \"ref\"`", and
-   * `loadRelations` gated on exactly that, which made `with:` unusable for
-   * every migration-declared foreign key — see `collection/relations.ts`.
-   */
+  /** Referenced table; independent of the field's storage type. */
   refTarget?: string;
   refColumn?: string;
+  /** Logical edge name used by relation loading. */
+  relation?: string;
   /** ON DELETE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
   onDelete?: FkAction;
   /** ON UPDATE policy for `t.ref()`. Omitted means SQL/Postgres `NO ACTION`. */
@@ -1080,7 +1056,10 @@ const SCHEMA_BUILDER_BRAND = Symbol.for("@zeroship/db/SchemaBuilder");
  * `t.string().mask({ kind: "email" })` → `TypeBuilder<string, false, "email", undefined, false>`
  * `t.string().required().default("x")` → `TypeBuilder<string, true, undefined, undefined, true>`
  */
-type AssignmentBrand<T> = Pick<T, Extract<keyof T, "_assigned">>;
+type BuilderMetadata<T> = Pick<T, Extract<keyof T, "_assigned" | "_relation">>;
+type RelationMetadata<N extends string> = [N] extends [never] ? {} : { readonly _relation: N };
+type ReferenceValue<V, Target extends string> = V extends null ? null :
+  Id<Target, V extends string ? string : V extends number ? number : V extends bigint ? bigint : never>;
 
 export class TypeBuilder<
   T = unknown,
@@ -1137,10 +1116,32 @@ export class TypeBuilder<
     return Object.freeze({ ...this._def });
   }
 
+  /** Attach a reference without changing its scalar storage. */
+  references<Target extends string, const N extends string = never>(
+    this: [T] extends [IdValue | null] ? TypeBuilder<T, R, M, E, D, F> : never,
+    table: Target,
+    opts?: RefOptions & { relation?: N },
+  ): TypeBuilder<ReferenceValue<T, Target>, R, M, E, D, F> & Pick<this, Extract<keyof this, "_assigned">> & RelationMetadata<N> {
+    if (typeof table !== "string" || table.length === 0) {
+      throw Object.assign(new Error("reference target must be a non-empty table name"), { code: "REF_EMPTY_TABLE" });
+    }
+    if (!["string", "text", "ref", "id", "int", "integer", "bigInt", "bigint"].includes(this._def.type)) {
+      throw new TypeError("reference storage must be text or integer");
+    }
+    for (const key of ["refColumn", "relation", "onDelete", "onUpdate", "deferrable"] as const) delete this._def[key];
+    this._def.refTarget = table;
+    if (opts?.column !== undefined) this._def.refColumn = opts.column;
+    if (opts?.relation !== undefined) this._def.relation = opts.relation;
+    if (opts?.onDelete !== undefined) this._def.onDelete = opts.onDelete;
+    if (opts?.onUpdate !== undefined) this._def.onUpdate = opts.onUpdate;
+    if (opts?.deferrable !== undefined) this._def.deferrable = opts.deferrable;
+    return this as unknown as TypeBuilder<ReferenceValue<T, Target>, R, M, E, D, F> & Pick<this, Extract<keyof this, "_assigned">> & RelationMetadata<N>;
+  }
+
   /** Marks the field as required; validation will fail if the field is absent. */
-  required(): TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this> {
+  required(): TypeBuilder<T, true, M, E, D, F> & BuilderMetadata<this> {
     this._def.required = true;
-    return this as unknown as TypeBuilder<T, true, M, E, D, F> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, true, M, E, D, F> & BuilderMetadata<this>;
   }
 
   /** Adds a unique index constraint to the field. */
@@ -1164,9 +1165,9 @@ export class TypeBuilder<
   }
 
   /** Sets the default value (or factory function) used when the field is absent on insert. */
-  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this> {
+  default(val: FieldDefaultValue | (() => FieldDefaultValue)): TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this> {
     this._def.default = val;
-    return this as unknown as TypeBuilder<T, R, M, E, true, F> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, M, E, true, F> & BuilderMetadata<this>;
   }
 
   /** For strings: minimum length. For numbers: minimum value. */
@@ -1184,9 +1185,9 @@ export class TypeBuilder<
   /** Restricts the field to a fixed set of allowed values. */
   enum<const Values extends readonly (T & (string | number))[]>(
     ...values: Values
-  ): TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this> {
+  ): TypeBuilder<Values[number], R, M, E, D, F> & BuilderMetadata<this> {
     this._def.enum = [...values];
-    return this as unknown as TypeBuilder<Values[number], R, M, E, D, F> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<Values[number], R, M, E, D, F> & BuilderMetadata<this>;
   }
 
   /** For strings: a RegExp the value must match. */
@@ -1232,7 +1233,7 @@ export class TypeBuilder<
    *   schema-normaliser auto-populates `{ kind: "full",
    *   classification: "pii" }` — fail-safe per §3 of the proposal.
    */
-  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this> {
+  mask<K extends MaskKind>(opts: { kind: K; classification?: Classification }): TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & BuilderMetadata<this> {
     if (opts === null || typeof opts !== "object") {
       throw Object.assign(
         new Error(".mask(opts): opts must be an object with at least `{ kind }`"),
@@ -1299,12 +1300,12 @@ export class TypeBuilder<
       );
     }
     this._def.mask = { kind, classification };
-    return this as unknown as TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & AssignmentBrand<this>;
+    return this as unknown as TypeBuilder<T, R, K, E, D, F extends "text" ? "text" : "equality"> & BuilderMetadata<this>;
   }
 
   /** Allow null in the field's value type. */
-  nullable(): TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this> {
-    return this as TypeBuilder<T | null, R, M, E, D, F> & AssignmentBrand<this>;
+  nullable(): TypeBuilder<T | null, R, M, E, D, F> & BuilderMetadata<this> {
+    return this as TypeBuilder<T | null, R, M, E, D, F> & BuilderMetadata<this>;
   }
 
   /** Assign the database timestamp on insert. */
@@ -1349,6 +1350,10 @@ export const t = {
   /** Creates a string field definition. */
   string(): TypeBuilder<string, false, undefined, undefined, false, "text"> {
     return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "string" });
+  },
+  /** Creates an integer field definition. */
+  integer(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
+    return new TypeBuilder<number, false, undefined, undefined, false, "ordered">({ type: "integer" });
   },
   /** Creates a number field definition. */
   number(): TypeBuilder<number, false, undefined, undefined, false, "ordered"> {
@@ -1430,21 +1435,8 @@ export const t = {
     return new TypeBuilder<U[], false, undefined, undefined, false, "json">({ type: "array", items: itemType });
   },
   /** Declare a branded reference, optionally naming its target column and FK actions. */
-  ref<T extends string>(table: T, opts?: RefOptions): TypeBuilder<Id<T>, false, undefined, undefined, false, "text"> {
-    if (typeof table !== "string" || table.length === 0) {
-      throw Object.assign(
-        new Error("t.ref(table) requires a non-empty table name"),
-        { code: "REF_EMPTY_TABLE" as const },
-      );
-    }
-    return new TypeBuilder<Id<T>, false, undefined, undefined, false, "text">({
-      type: "ref",
-      refTarget: table,
-      ...(opts?.column !== undefined ? { refColumn: opts.column } : {}),
-      ...(opts?.onDelete !== undefined ? { onDelete: opts.onDelete } : {}),
-      ...(opts?.onUpdate !== undefined ? { onUpdate: opts.onUpdate } : {}),
-      ...(opts?.deferrable !== undefined ? { deferrable: opts.deferrable } : {}),
-    });
+  ref<T extends string, const N extends string = never>(table: T, opts?: RefOptions & { relation?: N }): TypeBuilder<Id<T>, false, undefined, undefined, false, "text"> & RelationMetadata<N> {
+    return new TypeBuilder<string, false, undefined, undefined, false, "text">({ type: "ref" }).references(table, opts);
   },
   /**
    * D2 — nested-object validator. The argument is a record of nested

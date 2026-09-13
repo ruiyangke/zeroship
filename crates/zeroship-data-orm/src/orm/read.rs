@@ -482,7 +482,7 @@ impl PreparedRead {
     }
 }
 
-fn consume_budget(value: &Value, budget: &mut usize) -> Result<(), DbError> {
+pub(super) fn consume_budget(value: &Value, budget: &mut usize) -> Result<(), DbError> {
     let mut stack = vec![value];
     while let Some(value) = stack.pop() {
         let size = match value {
@@ -560,7 +560,9 @@ fn resolve_operand(
                 check_field(path, sources, true)?;
                 let definition = &source_for(path, sources)?.schema[path.root().as_str()];
                 if !crate::sql::descriptors::supports_aggregate(definition, aggregate.func()) {
-                    return Err(invalid("aggregate requires a compatible portable scalar column"));
+                    return Err(invalid(
+                        "aggregate requires a compatible portable scalar column",
+                    ));
                 }
             }
             ResolvedOperand::Aggregate {
@@ -693,7 +695,7 @@ fn encode_literal(
                     .map(|(field, _)| (field.as_str(), &source.schema))
             })
         }),
-        ResolvedOperand::Aggregate { column: None, .. } => None,
+        ResolvedOperand::Aggregate { column: None, .. } | ResolvedOperand::Comparison(_) => None,
     }
     .flatten();
     if let Some((field, schema)) = path {

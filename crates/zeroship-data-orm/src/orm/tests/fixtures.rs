@@ -244,6 +244,16 @@ impl CollectionFixture {
         }
     }
 
+    pub async fn install_case_insensitive_text(&self) {
+        if let Some((backend, _, _)) = &self.postgres {
+            backend
+                .pool()
+                .batch_execute("CREATE EXTENSION IF NOT EXISTS citext WITH SCHEMA public")
+                .await
+                .unwrap();
+        }
+    }
+
     pub async fn replace_from_migration(&mut self, collection: &str, migration: &str) {
         let migration: zeroship_migrate::model::ir::MigrationIr =
             serde_json::from_str(migration).unwrap();
@@ -280,12 +290,26 @@ impl CollectionFixture {
             },
         )
         .unwrap();
-        let table = format!(
-            "{}.{}",
-            crate::sql::mapping::quote_ident(namespace),
-            crate::sql::mapping::quote_ident(collection)
-        );
-        let ddl = format!("DROP TABLE {table};{}", statements.join(";"));
+        let runtime: Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
+        let collections = runtime["collections"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(name, def)| (name.clone(), def["fields"].clone()))
+            .collect::<Vec<_>>();
+        assert!(collections.iter().any(|(name, _)| name == collection));
+        let drops = collections
+            .iter()
+            .rev()
+            .map(|(name, _)| {
+                format!(
+                    "DROP TABLE IF EXISTS {}.{};",
+                    crate::sql::mapping::quote_ident(namespace),
+                    crate::sql::mapping::quote_ident(name),
+                )
+            })
+            .collect::<String>();
+        let ddl = format!("{drops}{}", statements.join(";"));
         if let Some(file) = &self.sqlite_file {
             rusqlite::Connection::open(file)
                 .unwrap()
@@ -294,19 +318,30 @@ impl CollectionFixture {
         } else {
             let (backend, _, role) = self.postgres.as_ref().unwrap();
             backend.pool().batch_execute(&ddl).await.unwrap();
-            backend.pool().batch_execute(&format!(
-                "GRANT SELECT, INSERT, UPDATE, DELETE ON {table} TO {role}; GRANT USAGE ON ALL SEQUENCES IN SCHEMA {} TO {role}",
-                crate::sql::mapping::quote_ident(namespace),
-            )).await.unwrap();
+            for (name, _) in &collections {
+                backend
+                    .pool()
+                    .batch_execute(&format!(
+                        "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{} TO {role}",
+                        crate::sql::mapping::quote_ident(namespace),
+                        crate::sql::mapping::quote_ident(name),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            backend
+                .pool()
+                .batch_execute(&format!(
+                    "GRANT USAGE ON ALL SEQUENCES IN SCHEMA {} TO {role}",
+                    crate::sql::mapping::quote_ident(namespace),
+                ))
+                .await
+                .unwrap();
         }
-        let runtime: Value = serde_json::from_str(&artifacts.runtime_json).unwrap();
         self.database = Database::from_schema(
             self.database.binding.clone(),
             self.database.backend.clone(),
-            vec![(
-                collection.into(),
-                runtime["collections"][collection]["fields"].clone(),
-            )],
+            collections,
         )
         .unwrap();
     }

@@ -247,8 +247,9 @@ export interface ColumnDef {
   /**
    * Declare a typed single-column foreign-key reference. The local physical
    * type and value-format facets remain exactly those selected by this builder;
-   * the reference adds only the target, optional explicit constraint name, and
-   * referential actions. When `name` is omitted, the constraint name remains
+   * the reference adds the target, optional relation and constraint names, and
+   * referential actions. `relation` names the ORM navigation; `name` names its
+   * SQL constraint. When `name` is omitted, the constraint name remains
    * derived as `<table>_<column>_fkey`. Returns a fresh def. References are currently
    * create-table-only; add/rename/set-type and nested type positions reject this
    * facet instead of dropping it.
@@ -260,6 +261,7 @@ export interface ColumnDef {
       onDelete?: RefAction;
       onUpdate?: RefAction;
       name?: string;
+      relation?: string;
     },
   ): ColumnDef;
   /**

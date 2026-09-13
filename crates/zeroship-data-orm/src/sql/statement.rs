@@ -1,9 +1,9 @@
 //! Resolved physical statements. Application policy is applied before this boundary.
 
 use super::{
+    Ident, IdentRole, SchemaName,
     compiler::CompileError,
     predicate::{CompareOp, MembershipOp, PatternOp},
-    Ident, IdentRole, SchemaName,
 };
 use crate::value::Value;
 use std::{
@@ -280,6 +280,7 @@ pub struct Assignment {
     pub value: Expression,
 }
 
+#[derive(Clone)]
 pub struct Comparison {
     pub column: Column,
     pub op: CompareOp,
@@ -289,6 +290,7 @@ pub struct Comparison {
 #[derive(Clone, Debug)]
 pub enum ResolvedOperand {
     Column(Column),
+    Comparison(Comparison),
     Aggregate {
         function: super::AggregateFunc,
         column: Option<Column>,
@@ -300,6 +302,7 @@ impl ResolvedOperand {
     pub fn storage(&self) -> Result<StorageType, CompileError> {
         Ok(match self {
             Self::Column(column) => column.storage(),
+            Self::Comparison(_) => StorageType::Boolean,
             Self::Aggregate {
                 function: super::AggregateFunc::Count,
                 column: None,
@@ -965,8 +968,10 @@ fn validate_grouped_operand(
     operand: &ResolvedOperand,
     group_by: &[ResolvedOperand],
 ) -> Result<(), CompileError> {
-    let ResolvedOperand::Column(column) = operand else {
-        return Ok(());
+    let column = match operand {
+        ResolvedOperand::Column(column)
+        | ResolvedOperand::Comparison(Comparison { column, .. }) => column,
+        ResolvedOperand::Aggregate { .. } => return Ok(()),
     };
     let grouped = group_by.iter().any(|group| {
         matches!(group, ResolvedOperand::Column(candidate) if Arc::ptr_eq(&column.source.0, &candidate.source.0) && column.index == candidate.index)
@@ -1295,6 +1300,20 @@ fn validate_operand(
         }
     }
     match operand {
+        ResolvedOperand::Comparison(comparison) => {
+            validate_operand(
+                tables,
+                &ResolvedOperand::Column(comparison.column.clone()),
+                false,
+            )?;
+            let storage = comparison.column.storage();
+            validate_comparison_operator(storage, comparison.op)?;
+            if comparison.value.is_null() || !storage.accepts(&comparison.value) {
+                return Err(invalid(
+                    "comparison projection requires a non-null value with matching storage type",
+                ));
+            }
+        }
         ResolvedOperand::Column(column) => {
             if !tables
                 .iter()

@@ -1,6 +1,6 @@
 {
   "kind": "ir",
-  "descriptor_sha256": "36f433ac2640f13313c154a71c4b50361968577dde69c2f2beb9e91973820a60",
+  "descriptor_sha256": "2ced32e27d46726c1839fb6700ef4d926a83386520c037e0e41f6b2ea39cc287",
   "documents": [
     {
       "filename": "20260101000000_create_db_e2e.ir.json",
@@ -61,7 +61,8 @@
                 "nullable": false,
                 "references": {
                   "table": "workspaces",
-                  "column": "id"
+                  "column": "id",
+                  "relation": "workspace"
                 }
               },
               {
@@ -133,7 +134,8 @@
                 "nullable": false,
                 "references": {
                   "table": "workspaces",
-                  "column": "id"
+                  "column": "id",
+                  "relation": "workspace"
                 }
               },
               {
@@ -142,7 +144,8 @@
                 "nullable": false,
                 "references": {
                   "table": "users",
-                  "column": "id"
+                  "column": "id",
+                  "relation": "owner"
                 }
               },
               {
@@ -224,7 +227,8 @@
                 "nullable": false,
                 "references": {
                   "table": "workspaces",
-                  "column": "id"
+                  "column": "id",
+                  "relation": "workspace"
                 }
               },
               {

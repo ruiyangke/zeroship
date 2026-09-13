@@ -263,13 +263,11 @@ holds it.
 
 ### Joined reads
 
-A joined result **is nested before the read pipeline runs**. Today that is true
-by construction: `with: { <ref field>: true }` fires one batched
-`find({ id: { $in: [...] } })` per relation against the **target** collection and
-stitches the rows in the SDK (`sdks/db/src/collection/relations.ts`), so every
-row passes its own collection's decrypt, mask and normalisation passes with its
-own collection context. Mask policy and unmask authorization are therefore
-per source collection already.
+Named relation reads apply each target collection's decrypt, mask and
+normalisation passes before attaching the protected record to its parent.
+`with: { author: true }` resolves a declared schema edge and loads its targets
+through the shared ORM loader (`crates/zeroship-data-orm/src/orm/relations.rs`).
+Mask policy and unmask authorization retain the target collection's context.
 
 **Any future lowering that produces a flat joined row must nest first.** A flat
 row is not a presentation problem, it breaks three mechanisms keyed on a single

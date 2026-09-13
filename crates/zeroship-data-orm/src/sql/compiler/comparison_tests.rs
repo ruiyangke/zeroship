@@ -1,12 +1,12 @@
 use super::*;
 use crate::sql::{
+    CompareOp, Ident, IdentRole, SchemaName,
     statement::{
         Assignment, Comparison, Expression, Insert, InsertParts, ReturnedColumn, Statement,
         StorageType, Table, Upsert, UpsertParts,
     },
-    CompareOp, Ident, IdentRole, SchemaName,
 };
-use crate::{value, Value};
+use crate::{Value, value};
 
 fn table(namespace: &str, storage: StorageType) -> Table {
     Table::new(
@@ -215,4 +215,94 @@ async fn postgres_conflict_conditions_compare_json_structurally() {
     exercise_json_condition(&PostgresCompiler, &connection, "public", "JSONB").await;
     drop(connection);
     pool.close().await;
+}
+
+fn comparison_projection(
+    storage: StorageType,
+    value: Value,
+    foreign_column: bool,
+    grouped: bool,
+) -> Result<crate::sql::statement::SelectStatement, CompileError> {
+    use crate::sql::statement::{
+        ResolvedOperand, ResolvedPredicate, RowLock, SelectParts, SelectStatement,
+        SelectedExpression,
+    };
+    let make_table = || {
+        Table::aliased(
+            SchemaName::new("public").unwrap(),
+            Ident::parse_as("comparison_entries", IdentRole::Collection).unwrap(),
+            Ident::parse_as("source", IdentRole::Alias).unwrap(),
+            [(
+                Ident::parse_as("payload", IdentRole::Column).unwrap(),
+                storage,
+            )],
+        )
+        .unwrap()
+    };
+    let table = make_table();
+    let column = if foreign_column {
+        make_table().column("payload").unwrap()
+    } else {
+        table.column("payload").unwrap()
+    };
+    let mut projection = vec![SelectedExpression {
+        expression: ResolvedOperand::Comparison(Comparison {
+            column,
+            op: CompareOp::Eq,
+            value,
+        }),
+        alias: Ident::parse_as("matches", IdentRole::Alias).unwrap(),
+    }];
+    if grouped {
+        projection.push(SelectedExpression {
+            expression: ResolvedOperand::Aggregate {
+                function: crate::sql::AggregateFunc::Count,
+                column: None,
+                distinct: false,
+            },
+            alias: Ident::parse_as("count", IdentRole::Alias).unwrap(),
+        });
+    }
+    SelectStatement::new(SelectParts {
+        table,
+        joins: Vec::new(),
+        projection,
+        predicate: ResolvedPredicate::Const(true),
+        group_by: Vec::new(),
+        having: ResolvedPredicate::Const(true),
+        order_by: Vec::new(),
+        limit: None,
+        offset: None,
+        distinct: false,
+        lock: RowLock::None,
+    })
+}
+
+#[test]
+fn comparison_projections_validate_sources_storage_grouping_and_bind_budgets() {
+    for compiler in [&PostgresCompiler as &dyn SqlCompiler, &SqliteCompiler] {
+        for (storage, value) in [
+            (StorageType::Text, value!("Ada")),
+            (StorageType::Integer, value!(9_007_199_254_740_993_i64)),
+        ] {
+            let statement = Statement::Select(
+                comparison_projection(storage, value.clone(), false, false).unwrap(),
+            );
+            assert_eq!(Requirements::for_statement(&statement).bind_parameters, 1);
+            let query = compiler.compile(statement, &compiler.support()).unwrap();
+            assert_eq!(query.params(), std::slice::from_ref(&value));
+            let mut unsupported = compiler.support();
+            unsupported.max_bind_parameters = 0;
+            let statement =
+                Statement::Select(comparison_projection(storage, value, false, false).unwrap());
+            assert!(matches!(
+                compiler.compile(statement, &unsupported),
+                Err(CompileError::BindLimitExceeded { .. })
+            ));
+        }
+    }
+    assert!(comparison_projection(StorageType::Text, value!(1), false, false).is_err());
+    assert!(comparison_projection(StorageType::Text, Value::Null, false, false).is_err());
+    assert!(comparison_projection(StorageType::Text, value!("Ada"), true, false).is_err());
+    assert!(comparison_projection(StorageType::Text, value!("Ada"), false, true).is_err());
 }
