@@ -36,13 +36,13 @@
 #   * SCHEMA-INIT bug — FIXED, and this header described it as live long after
 #     it stopped being so. It said any app exporting a declared schema fails
 #     module init on the production worker, because runtime-entry's
-#     `await import("@zeroship/bootstrap/install-schema")` could not be
+#     `await import("@zeroship/db/internal")` could not be
 #     resolved by the worker's module loader (not in the bundle's static
 #     graph, not a native module) => `Cannot find module`.
 #
 #     That resolution now exists. `crates/zeroship-runtime/src/core/dynamic_import.rs`
 #     carries "Path 2.5: runtime-provided module", which resolves exactly
-#     `@zeroship/bootstrap/install-schema`, `@zeroship/db/internal` and
+#     `@zeroship/db/internal`, `@zeroship/db/internal` and
 #     `zeroship` on the grounds that the runtime injects the code importing
 #     them, so it owns their resolution even when a tree-shaken bundle does
 #     not carry them (ISS-63).

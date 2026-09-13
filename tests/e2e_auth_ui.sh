@@ -178,7 +178,6 @@ pnpm --filter @zeroship/bootstrap build >>"$BUILD_LOG" 2>&1 \
   || fail_from_log "$BUILD_LOG" "bootstrap SDK prerequisite build"
 for path in \
   "$ROOT/sdks/bootstrap/dist/runtime-entry.js" \
-  "$ROOT/sdks/bootstrap/dist/install-schema.js" \
   "$ROOT/sdks/db/dist/internal.js"; do
   [ -f "$path" ] || die "SDK build did not produce $path"
 done

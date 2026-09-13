@@ -46,7 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The SDK dist files BEFORE any cargo command, and this is not stylistic.
       # zeroship-runtime `include_str!`s sdks/bootstrap/dist/runtime-entry.js,
-      # sdks/bootstrap/dist/install-schema.js and sdks/db/dist/internal.js
+      # sdks/db/dist/internal.js
       # (crates/runtime/src/core/init.rs:391 and
       # crates/runtime/src/core/bootstrap_modules.rs:59,65). Those three are
       # build outputs, gitignored, and have never been tracked in any ref, so a
@@ -880,7 +880,7 @@ jobs:
       # The block below is therefore still load-bearing, for a different reason.
       # The original failure, reproduced
       # 2026-08-20 in a worktree that had never run pnpm:
-      #   error: couldn't read .../sdks/bootstrap/dist/install-schema.js
+      #   error: couldn't read .../sdks/db/dist/internal.js
       #   error: couldn't read .../sdks/db/dist/internal.js
       #   error: couldn't read .../sdks/bootstrap/dist/runtime-entry.js
       #   error: could not compile `zeroship-runtime` (lib) due to 3 previous errors

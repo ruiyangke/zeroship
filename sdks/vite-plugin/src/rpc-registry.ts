@@ -114,10 +114,6 @@ export function buildServerEntrySource(opts: {
 //            bootstrap dispatcher. The plugin only normalises —
 //            capability/Zod/stream framing live in shared runtime helpers.
 
-// Side-effect import: forces the bundler to include the framework-
-// internal bootstrap package so the runtime can dynamically resolve
-// \`@zeroship/bootstrap/install-schema\` at module-eval time.
-import "@zeroship/bootstrap";
 import { createFetchHandler } from "@zeroship/bootstrap/fetch-handler";
 import { collectWorkflowClasses, isWorkflowClass } from "@zeroship/bootstrap/normalize";
 
@@ -246,13 +242,6 @@ function buildPhase2Entry(
 // behind a \\0-prefix. Dispatch lives in bootstrap's shared dispatcher
 // and fetch handler — this file is glue, not a dispatcher fork.
 
-// Side-effect imports: force the bundler to include the exact modules
-// the runtime-entry resolves dynamically during isolate boot. Bundle
-// inclusion matters even though the synthetic entry never calls them
-// directly: the V8 module loader can only resolve dynamic imports
-// against bundle-resident modules.
-import "@zeroship/bootstrap/install-schema";
-import "@zeroship/db/internal";
 import { createFetchHandler } from "@zeroship/bootstrap/fetch-handler";
 import { collectWorkflowClasses } from "@zeroship/bootstrap/normalize";
 

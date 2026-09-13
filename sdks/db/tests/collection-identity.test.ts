@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { Collection } from "@zeroship/db";
-import { installSchema, type RuntimeSchemaDescriptor } from "@zeroship/bootstrap/install-schema";
+import { installSchema, type RuntimeSchemaDescriptor } from "@zeroship/db/internal";
 
 const id = { type: "string" as const, required: true, primaryKey: true };
 

@@ -19,7 +19,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { installSchema } from "@zeroship/bootstrap/install-schema";
+import { installSchema } from "@zeroship/db/internal";
 import { t } from "@zeroship/db";
 import { descriptorFor } from "./_install-helper.js";
 import type { NativeDb } from "../src/native.js";

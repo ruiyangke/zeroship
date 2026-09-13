@@ -34,7 +34,7 @@
  */
 
 import "./dispatcher.js";
-import { installSchema as bundledInstallSchema } from "./install-schema.js";
+import { installSchema as bundledInstallSchema } from "@zeroship/db/internal";
 import { createFetchHandler } from "./fetch-handler.js";
 import { createDevAuthProvider } from "./dev-auth.js";
 import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";

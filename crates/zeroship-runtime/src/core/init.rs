@@ -364,7 +364,7 @@ fn zs_db_platform_callback(
 
 /// Schema auto-discovery init script. Spliced into [`BOOTSTRAP_JS`]
 /// immediately after the `import * as user from "./__user__.js"` line so
-/// the top-level `await import("@zeroship/bootstrap/install-schema")`
+/// the top-level `await import("@zeroship/db/internal")`
 /// runs inside the bootstrap module's evaluation — before the runtime
 /// resolves `default.fetch` / `default.rpc` off the namespace.
 ///

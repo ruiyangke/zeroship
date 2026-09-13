@@ -359,7 +359,7 @@ export default {
 "#;
 
     // Stage 7: the bootstrap dynamically imports
-    // `@zeroship/bootstrap/install-schema` (the framework-internal
+    // `@zeroship/db/internal` (the framework-internal
     // package that owns installSchema post-refactor). Stub it as a
     // bundle module so the dynamic import resolves. The stub captures the
     // schema keys it was handed; verifying installSchema was CALLED from the
@@ -384,7 +384,6 @@ export function _flushPendingMaskPolicy() { return null; }
     // The pre-init module imports the stub packages so the bundle eagerly
     // compiles them (the later dynamic imports then hit the registry path).
     let pre_init = r#"
-import "@zeroship/bootstrap/install-schema";
 import "@zeroship/db/internal";
 "#;
 
@@ -395,12 +394,8 @@ import "@zeroship/db/internal";
             source: user_with_preinit,
         },
         ModuleEntry {
-            specifier: "@zeroship/bootstrap/install-schema".into(),
-            source: stub_bootstrap.into(),
-        },
-        ModuleEntry {
             specifier: "@zeroship/db/internal".into(),
-            source: stub_db_internal.into(),
+            source: format!("{stub_bootstrap}\n{stub_db_internal}"),
         },
     ];
 
@@ -500,7 +495,6 @@ export function installSchema(schema, _env, _options) {
 export function _flushPendingMaskPolicy() { return null; }
 "#;
     let pre_init = r#"
-import "@zeroship/bootstrap/install-schema";
 import "@zeroship/db/internal";
 "#;
 
@@ -511,12 +505,8 @@ import "@zeroship/db/internal";
             source: user_with_preinit,
         },
         ModuleEntry {
-            specifier: "@zeroship/bootstrap/install-schema".into(),
-            source: stub_bootstrap.into(),
-        },
-        ModuleEntry {
             specifier: "@zeroship/db/internal".into(),
-            source: stub_db_internal.into(),
+            source: format!("{stub_bootstrap}\n{stub_db_internal}"),
         },
     ];
 
@@ -571,7 +561,7 @@ fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
     // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
     // treated as schema-less by the runtime entry. Even if a stale
     // `default.schema` exists, the bootstrap must not read it or import
-    // `@zeroship/bootstrap/install-schema`.
+    // `@zeroship/db/internal`.
     init_v8();
 
     let user_src = r#"

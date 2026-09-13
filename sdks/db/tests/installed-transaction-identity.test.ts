@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { t, type Db } from "@zeroship/db";
-import { installSchema } from "@zeroship/bootstrap/install-schema";
+import { installSchema } from "@zeroship/db/internal";
 import type { NativeDb } from "../src/native.js";
 
 const schema = {records:{id:t.bigInt().required().primaryKey(),label:t.string()}};

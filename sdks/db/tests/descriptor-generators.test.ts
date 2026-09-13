@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { t, type Collection, type RowInput, type UpdateExpression } from "@zeroship/db";
-import { installSchema, normalizeSchema } from "@zeroship/bootstrap/install-schema";
+import { installSchema, normalizeSchema } from "@zeroship/db/internal";
 
 const fields = {
   id: t.string().primaryKey().assigned({ by: "typedId", on: "insert" }).required(),
