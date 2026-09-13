@@ -55,6 +55,8 @@ pub struct ServerOptions {
     /// Dev callers typically raise this to 256-512 MB for app bundles that
     /// pull in heavy dependencies (LangChain, SDKs, etc).
     pub heap_limit_bytes: Option<usize>,
+    /// Trusted host export used to load replaceable development entries.
+    pub dev_entry_loader: Option<String>,
     /// Env vars exposed to JS as `process.env.*`. Cloned into each worker.
     ///
     /// In serve mode this map also seeds the app-facing `env` object (the
@@ -76,6 +78,7 @@ impl std::fmt::Debug for ServerOptions {
             .field("workers", &self.workers)
             .field("cpu_limit", &self.cpu_limit)
             .field("wall_timeout", &self.wall_timeout)
+            .field("dev_entry_loader", &self.dev_entry_loader)
             .field("plugins", &self.plugins.len())
             .finish()
     }
@@ -89,6 +92,7 @@ impl Default for ServerOptions {
             cpu_limit: None,
             wall_timeout: None,
             heap_limit_bytes: None,
+            dev_entry_loader: None,
             env_vars: HashMap::new(),
             plugins: Vec::new(),
         }
@@ -214,6 +218,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             options.cpu_limit,
             options.wall_timeout,
             options.heap_limit_bytes,
+            options.dev_entry_loader,
             modules,
             options.env_vars,
             options.plugins,
@@ -234,6 +239,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
             let cpu_limit = options.cpu_limit;
             let wall_timeout = options.wall_timeout;
             let heap_limit_bytes = options.heap_limit_bytes;
+            let dev_entry_loader = options.dev_entry_loader.clone();
             let port = options.port;
             let worker_env = options.env_vars.clone();
             let worker_plugins = options.plugins.clone();
@@ -247,6 +253,7 @@ pub fn start_server(modules: Vec<ModuleEntry>, options: ServerOptions) -> ! {
                         cpu_limit,
                         wall_timeout,
                         heap_limit_bytes,
+                        dev_entry_loader,
                         worker_modules,
                         worker_env,
                         worker_plugins,
@@ -1833,6 +1840,7 @@ fn run_single_worker(
     cpu_limit: Option<Duration>,
     wall_timeout: Option<Duration>,
     heap_limit_bytes: Option<usize>,
+    dev_entry_loader: Option<String>,
     modules: Vec<ModuleEntry>,
     env_vars: HashMap<String, String>,
     plugins: Vec<Arc<dyn NativePlugin>>,
@@ -1873,7 +1881,7 @@ fn run_single_worker(
                 tracing::info!(port, addr = %format!("http://0.0.0.0:{port}"), "runtime listening");
             }
 
-            let runtime = Runtime::builder()
+            let builder = Runtime::builder()
                 .modules(modules)
                 .env_vars(env_vars)
                 .runtime_descriptor(runtime_descriptor)
@@ -1882,8 +1890,12 @@ fn run_single_worker(
                     wall_timeout,
                     heap_limit_bytes,
                 })
-                .plugins(plugins)
-                .build();
+                .plugins(plugins);
+            let runtime = match dev_entry_loader {
+                Some(export) => builder.dev_entry_loader(export),
+                None => builder,
+            }
+            .build();
 
             // Start the async event loop pump (timers, fetch, streams).
             // (Warmup removed — `call_fetch_handler` initializes lazily via
