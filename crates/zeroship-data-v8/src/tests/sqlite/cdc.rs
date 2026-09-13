@@ -8,7 +8,7 @@ fn prefixed_creator_table_delivers_change_through_the_v8_adapter() {
     apply_schema_ahead_of_runtime(
         &dir,
         &format!(
-            "CREATE TABLE \"default\".\"{collection}\" ({SYSTEM_COLUMNS_SQLITE}, \
+            "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".\"{collection}\" ({SYSTEM_COLUMNS_SQLITE}, \
              \"name\" TEXT NOT NULL)"
         ),
     );

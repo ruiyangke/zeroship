@@ -8,7 +8,7 @@ fn native_transaction_collections_expire_with_their_own_frame() {
         apply_schema_ahead_of_runtime(
             &dir,
             &format!(
-                "CREATE TABLE \"default\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
+                "CREATE TABLE \"{LOCAL_DEV_APP_ID}\".notes ({SYSTEM_COLUMNS_SQLITE}, title TEXT NOT NULL);"
             ),
         );
         let source = sqlite_runtime_source(
