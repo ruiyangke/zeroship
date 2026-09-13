@@ -18,10 +18,10 @@ test("installed transaction wrappers preserve numeric identity types and values"
       bulkUnmask: async () => ({results:{[String(id)]:{label:"private"}}}),
     }),
   } as unknown as NativeDb;
-  installSchema(schema, native, {descriptor:{version:2,collections:{records:{
+  installSchema(native, {version:2,collections:{records:{
     fields:{id:{type:"bigInt",required:true,primaryKey:true},label:{type:"string"}},
     options:{softDelete:false,versioning:false},indexes:[],
-  }}}});
+  }}});
   const db = native as unknown as Db<typeof schema>;
   const result = await db.transaction(async tx => {
     assert.equal((await tx.records.get(id))?.id, id);

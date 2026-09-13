@@ -124,9 +124,8 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
     "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
   );
 }
-// The object passed as installSchema's first arg is only the descriptor's field
-// map. If the descriptor is present but not v2-shaped, throw: corrupt
-// descriptors must never degrade to schema-less boots.
+// Validate the descriptor before resolving its native handle. A corrupt
+// descriptor must never degrade to a schema-less boot.
 const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
 if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
@@ -144,18 +143,13 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   if (envDb != null) {
     const sdk = await import("@zeroship/db/internal") as {
       installSchema?: (
-        schema: unknown,
         env: unknown,
-        options?: { descriptor?: unknown },
+        descriptor: unknown,
       ) => { collections: unknown };
     };
     if (typeof sdk.installSchema === "function") {
       // `installSchema` plants the Collection wrappers synchronously.
-      sdk.installSchema(schema, envDb, {
-        // **P5 S3** — the descriptor is the source of truth; _installSchemaInner
-        // reads it and ignores the first arg for options.
-        descriptor: hasDescriptor ? descriptor : undefined,
-      });
+      sdk.installSchema(envDb, descriptor);
 
       // Keep only the asynchronous mask-policy flush off the module-eval
       // critical path. The shared dispatcher awaits it before the first

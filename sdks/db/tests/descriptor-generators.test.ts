@@ -28,10 +28,10 @@ test("id and renamed assignments drive SDK dispatch", async () => {
   const normalized = normalizeSchema(fields);
   normalized.revision.concurrency = true;
   normalized.removed.softDelete = true;
-  installSchema({}, native as never, { descriptor: {
+  installSchema(native as never, {
     version: 2, collections: { entries: { fields: normalized,
       options: { softDelete: true, versioning: true, strictness: "strict" }, indexes: [] } },
-  } } as never);
+  } as never);
   const db = native as unknown as { entries: Collection<typeof fields> };
   const input: RowInput<typeof fields> = { title: "hello" };
   // @ts-expect-error Assignment fields cannot be overridden through typed updates.

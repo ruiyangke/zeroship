@@ -29,7 +29,7 @@ await build({
   // empty `env` into the bootstrap; at runtime the V8 kernel synthesizes the
   // real `"zeroship"` virtual module (`crates/zeroship-runtime/src/core/init.rs::ZEROSHIP_MODULE_JS`)
   // that exposes the live `env.db` plugin handle. `@zeroship/db`
-  // re-exports `installSchema(schema, env.db)`, which plants typed
+  // re-exports `installSchema(env.db, descriptor)`, which plants typed
   // Collection wrappers on the supplied env handle — must read the
   // live env, not the stub.
   external: ["zeroship"],

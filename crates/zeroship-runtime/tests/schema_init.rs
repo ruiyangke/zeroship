@@ -8,7 +8,7 @@
 //!     `DATABASE_URL` still boot.
 //!   - When the runtime ships an `installSchema`-shaped module, an `env.db`
 //!     namespace, and a descriptor, the init script calls
-//!     `installSchema(descriptorFields, env, { descriptor })` with the live
+//!     `installSchema(env, descriptor)` with the live
 //!     `env.db` handle.
 //!   - The bootstrap doesn't publish the legacy `__zsSchemaInit` global.
 
@@ -365,9 +365,9 @@ export default {
     // schema keys it was handed; verifying installSchema was CALLED from the
     // descriptor is the assertion that matters here.
     let stub_bootstrap = r#"
-export function installSchema(schema, _env) {
+export function installSchema(_env, descriptor) {
     globalThis.__zsCapturedSchema = JSON.stringify({
-        keys: Object.keys(schema),
+        keys: Object.keys(descriptor.collections),
     });
     return { collections: {} };
 }
@@ -482,9 +482,9 @@ export default defaultExport;
 "#;
 
     let stub_bootstrap = r#"
-export function installSchema(schema, _env, _options) {
+export function installSchema(_env, descriptor, _options) {
     globalThis.__zsCapturedSchema = JSON.stringify({
-        keys: Object.keys(schema),
+        keys: Object.keys(descriptor.collections),
         optionKeys: _options ? Object.keys(_options) : [],
         hasDeclaredSchemas: !!(_options && Object.prototype.hasOwnProperty.call(_options, "declaredSchemas")),
     });
@@ -540,15 +540,14 @@ import "@zeroship/db/internal";
         }
         _ => panic!("expected sync Response"),
     };
-    // The FIELD SOURCE (installSchema's first arg) is the descriptor's
-    // collections (`posts`), NOT the declared `todos`.
+    // The installer receives the host descriptor directly.
     assert!(
         body.contains(r#"\"keys\":[\"posts\"]"#),
         "expected installSchema sourced from the descriptor (posts), got: {body}"
     );
     assert!(
-        body.contains(r#"\"optionKeys\":[\"descriptor\"]"#),
-        "expected runtime-entry to pass only descriptor options, got: {body}"
+        body.contains(r#"\"optionKeys\":[]"#),
+        "expected runtime-entry to pass no extra options, got: {body}"
     );
     assert!(
         body.contains(r#"\"hasDeclaredSchemas\":false"#),

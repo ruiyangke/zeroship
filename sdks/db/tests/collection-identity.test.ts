@@ -38,7 +38,7 @@ test("invalid identities fail before collections are published", () => {
     const descriptor = { version: 2, collections: {
       entries: collection({ id }), invalid: collection(fields),
     } } as RuntimeSchemaDescriptor;
-    assert.throws(() => installSchema({}, native, { descriptor }), {
+    assert.throws(() => installSchema(native, descriptor), {
       code: "INVALID_COLLECTION_IDENTITY",
     });
     assert.equal("entries" in native, false);
