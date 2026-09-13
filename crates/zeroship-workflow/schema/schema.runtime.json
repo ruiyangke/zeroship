@@ -1177,7 +1177,7 @@
             "valueColumn": "result"
           }
         },
-        "expires_at": {
+        "created_at": {
           "type": "bigInt",
           "required": true,
           "readable": true,
@@ -1185,7 +1185,7 @@
           "sortable": true,
           "projectable": true,
           "storage": {
-            "valueColumn": "expires_at"
+            "valueColumn": "created_at"
           }
         }
       },
@@ -1202,12 +1202,6 @@
             "request_id"
           ],
           "unique": true
-        },
-        {
-          "name": "__zeroship_workflow_requests_expiry_idx",
-          "fields": [
-            "expires_at"
-          ]
         }
       ]
     },

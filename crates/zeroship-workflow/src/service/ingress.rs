@@ -1,5 +1,5 @@
 use super::{
-    app::{deadline, encode, lock_app, lock_run, parse_state, request_result, store_request},
+    app::{encode, lock_app, lock_run, parse_state, request_result, store_request},
     capability::{
         mint_signal_capability, verify_signal_capability, CapabilityToken, SignalGrant,
         SignalTarget, WORKFLOW_AUDIENCE,
@@ -85,15 +85,8 @@ impl AppWorkflows {
         let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
-        if let Some(receipt) = request_result(
-            &mut tx,
-            &self.app,
-            request,
-            "issue_signal_token",
-            &digest,
-            now,
-        )
-        .await?
+        if let Some(receipt) =
+            request_result(&tx, &self.app, request, "issue_signal_token", &digest).await?
         {
             return Ok(receipt);
         }
@@ -127,7 +120,7 @@ impl AppWorkflows {
             "issue_signal_token",
             &digest,
             &token,
-            deadline(now, policy.request_retention_ms)?,
+            now,
         )
         .await?;
         tx.commit().await?;
@@ -141,17 +134,10 @@ impl AppWorkflows {
     ) -> Result<RevokedSignals, WorkflowServiceError> {
         let digest = digest(&target)?;
         let mut tx = self.service.begin().await?;
-        let policy = lock_app(&mut tx, &self.app).await?;
+        lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
-        if let Some(receipt) = request_result(
-            &mut tx,
-            &self.app,
-            request,
-            "revoke_signal_tokens",
-            &digest,
-            now,
-        )
-        .await?
+        if let Some(receipt) =
+            request_result(&tx, &self.app, request, "revoke_signal_tokens", &digest).await?
         {
             return Ok(receipt);
         }
@@ -200,7 +186,7 @@ impl AppWorkflows {
             "revoke_signal_tokens",
             &digest,
             &result,
-            deadline(now, policy.request_retention_ms)?,
+            now,
         )
         .await?;
         tx.commit().await?;
@@ -237,9 +223,7 @@ impl WorkflowService {
             return Err(WorkflowServiceError::Unauthenticated);
         }
         let digest = digest(&(target, &options))?;
-        if let Some(receipt) =
-            request_result(&mut tx, app, request, "signal_ingress", &digest, now).await?
-        {
+        if let Some(receipt) = request_result(&tx, app, request, "signal_ingress", &digest).await? {
             return Ok(receipt);
         }
         policy.admit()?;
@@ -268,7 +252,7 @@ impl WorkflowService {
             "signal_ingress",
             &digest,
             &result,
-            deadline(now, policy.request_retention_ms)?,
+            now,
         )
         .await?;
         tx.commit().await?;

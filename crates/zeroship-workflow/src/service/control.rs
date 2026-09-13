@@ -4,7 +4,7 @@
 )]
 
 use super::{
-    app::{deadline, lock_app, lock_run, parse_state, request_result, store_request, validate_run},
+    app::{lock_app, lock_run, parse_state, request_result, store_request, validate_run},
     models,
     store::Transaction,
     types::digest,
@@ -78,7 +78,7 @@ impl AppWorkflows {
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
         if let Some(receipt) =
-            request_result(&mut tx, &self.app, request, "transition", &digest, now).await?
+            request_result(&tx, &self.app, request, "transition", &digest).await?
         {
             return Ok(receipt);
         }
@@ -93,7 +93,7 @@ impl AppWorkflows {
             "transition",
             &digest,
             &result,
-            deadline(now, policy.request_retention_ms)?,
+            now,
         )
         .await?;
         tx.commit().await?;
@@ -117,9 +117,7 @@ impl AppWorkflows {
         let mut tx = self.service.begin().await?;
         let policy = lock_app(&mut tx, &self.app).await?;
         let now = tx.now().await?;
-        if let Some(receipt) =
-            request_result(&mut tx, &self.app, request, "restart", &digest, now).await?
-        {
+        if let Some(receipt) = request_result(&tx, &self.app, request, "restart", &digest).await? {
             return Ok(receipt);
         }
         let plan = restart::prepare(&mut tx, &self.app, run_id, &options, &policy, now)
@@ -127,13 +125,7 @@ impl AppWorkflows {
             .accept()?;
         let result = plan.apply(&mut tx, &self.app, run_id, now).await?;
         store_request(
-            &mut tx,
-            &self.app,
-            request,
-            "restart",
-            &digest,
-            &result,
-            deadline(now, policy.request_retention_ms)?,
+            &mut tx, &self.app, request, "restart", &digest, &result, now,
         )
         .await?;
         tx.commit().await?;

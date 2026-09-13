@@ -13,14 +13,14 @@ use zeroship_core::workflow_coordination::{
 use zeroship_data_orm::{orm::Operation, value};
 
 #[compio::test]
-async fn sqlite_management_receipts_survive_request_cleanup_and_worker_reopen() {
+async fn sqlite_management_receipts_survive_app_receipt_loss_and_worker_reopen() {
     let directory = tempfile::tempdir().unwrap();
     let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
     replay_contract(Rc::new(store)).await;
 }
 
 #[compio::test]
-async fn postgres_management_receipts_survive_request_cleanup_and_worker_reopen() {
+async fn postgres_management_receipts_survive_app_receipt_loss_and_worker_reopen() {
     let fixture = PostgresFixture::start().await;
     replay_contract(Rc::new(fixture.store.clone())).await;
 }
@@ -259,6 +259,8 @@ async fn replay_contract(store: Rc<OrmStore>) {
 
     let tx = service.begin().await.unwrap();
     assert!(journal_count(&tx, "requests", json!({"app_id":local.as_str()})).await > 0);
+    // Simulate app-receipt loss to check separate management identity. Normal
+    // journal operations cannot retire accepted requests by age.
     tx.database()
         .collection("__zeroship_workflow_requests")
         .unwrap()

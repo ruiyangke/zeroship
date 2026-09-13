@@ -258,8 +258,8 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `tasks` | Existing customer execution claims, fences and completion receipts. Adapt to delivered jobs rather than use it as a second scheduler. |
 | `waits` | Recorded sleep, signal and child waits and their execution scope. |
 | `topics`, `broadcasts`, `signals`, `subscriptions` | Customer event bodies, ordering, targets, subscription state and fanout cursors. |
-| `requests` | App-operation request deduplication and its declared retention policy. |
-| `management_receipts` | Durable creator outcomes keyed by management request, separate from expiring app requests. |
+| `requests` | Durable app-operation request identity, body digest and original result. Age alone cannot retire an accepted request. |
+| `management_receipts` | Durable creator outcomes keyed by coordinator management request, independently scoped from app requests. |
 | `schedules`, `occurrences` | Existing customer schedule definitions and accepted occurrences. Calendar discovery moves to the manager; customer acceptance, overlap state and input references remain customer-side. |
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Existing customer event outbox. Extend or replace its contracts for durable queue publication; its present existence does not mean that cutover is complete. |
@@ -530,13 +530,15 @@ intents remain pending. Marking publication confirmed happens only after a
 manager receipt is validated against app, job and content. A lost confirmation
 write merely causes another idempotent publication attempt.
 
-App request receipts and delivery receipts have different lifetimes. Existing
-`requests` retention does not authorize deleting durable management outcomes,
-job receipts or unpublished intents. Until an explicit retirement protocol proves
-that submissions and redeliveries are no longer admissible, retain deduplication
-records. Expiry of a response cache must not admit a still-retryable accepted
-start as a different run. History collection cannot erase the only proof that a
-job already ran.
+App request receipts and delivery receipts have separate identities. Both retain
+their deduplication state until an explicit retirement protocol proves that the
+relevant submissions and redeliveries are no longer admissible. The creator
+`requests` table records creation time without an expiry, and `AppPolicy` offers
+no request-receipt TTL. A repeated request returns its original result or rejects
+changed content, including after later lifecycle changes. Capability receipt
+replay cannot issue fresh authority: the original token keeps its own expiration
+and revocation checks. History collection cannot erase the only proof that a job
+already ran, and unpublished intents remain pending until confirmed.
 Receipt retirement/watermarks are unresolved; arbitrary TTL-based deletion is not
 the default design.
 
@@ -1395,10 +1397,11 @@ checks do not establish a completed distributed workflow system.
 
 The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
 with their database barriers still held. The shared ORM typed-read allocation
-fix also passes the complete creator management module on the normal test
-thread stack, including its former overflow case. This establishes that module's
-behavior; the complete journal and distributed acceptance suites remain separate
-verification obligations.
+fix also passes the complete workflow library test target on the normal test
+thread stack, including the creator journal, management, payload and runner
+contracts on PostgreSQL and SQLite. Request receipt tests cover aged records,
+reopen, later lifecycle changes and revoked signal capabilities. Host integration
+and distributed acceptance remain separate verification obligations.
 
 Workflow provisioning preserves an existing creator schema's migrator ownership.
 Native PostgreSQL container tests exercise both provisioning orders, repeated
