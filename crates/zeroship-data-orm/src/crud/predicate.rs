@@ -170,6 +170,12 @@ fn resolve_model_inner(
             comparison(column, field, definition, op, value, registration)?
         }
         ModelPredicate::CompareColumn { field, op, other } => {
+            if mapping::column_is_masked(field, schema) || mapping::column_is_masked(other, schema)
+            {
+                return Err(invalid(
+                    "protected field is not valid in a column comparison",
+                ));
+            }
             let (lhs, left) = resolve_column(field, schema, table)?;
             let (rhs, right) = resolve_column(other, schema, table)?;
             validate_comparison(left, op)?;
@@ -625,6 +631,17 @@ mod tests {
             value: "value".into(),
         };
         assert!(run(plain.clone(), equality()).is_ok());
+        for op in [CompareOp::Eq, CompareOp::Ne] {
+            assert!(run(
+                crate::value!({"type":"string", "mask":{"kind":"full"}}),
+                ModelPredicate::CompareColumn {
+                    field: "field",
+                    op,
+                    other: "field"
+                }
+            )
+            .is_err());
+        }
         for definition in [
             crate::value!({"type":"string", "filterable":false}),
             crate::value!({"type":"string", "encrypted":true}),

@@ -16,6 +16,38 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
         }
     }
 
+    #[must_use]
+    pub fn filter(mut self, filter: Filter<E>) -> Self {
+        self.query = self.query.filter(filter);
+        self
+    }
+    #[must_use]
+    pub fn order_by(mut self, key: FieldOrder<E>) -> Self {
+        self.query = self.query.order_by(key);
+        self
+    }
+    pub fn limit(mut self, limit: i64) -> Result<Self, DbError> {
+        self.query = self.query.limit(limit)?;
+        Ok(self)
+    }
+    pub fn offset(mut self, offset: i64) -> Result<Self, DbError> {
+        self.query = self.query.offset(offset)?;
+        Ok(self)
+    }
+    #[must_use]
+    pub fn include_deleted(mut self) -> Self {
+        self.query = self.query.include_deleted();
+        self
+    }
+    /// Count matching parents without loading the relation projection.
+    pub fn count(self) -> impl Future<Output = Result<i64, DbError>> + use<E, R> {
+        self.query.count()
+    }
+    /// Test for matching parents without loading the relation projection.
+    pub fn exists(self) -> impl Future<Output = Result<bool, DbError>> + use<E, R> {
+        self.query.exists()
+    }
+
     pub fn all<P: FromRow<E>, T: FromRow<R::Target>>(
         self,
     ) -> impl Future<Output = Result<Vec<(P, Option<T>)>, DbError>> + use<E, R, P, T> {

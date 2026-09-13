@@ -333,6 +333,18 @@ and `null` in TypeScript, including when the selected fields are nullable.
 Explicit joins preserve row multiplication and paginate joined rows. Named
 relation loading preserves the parent query's rows and pagination.
 
+Entity, joined, and related queries expose `first`, `count`, and `exists`.
+`first` keeps ordering and offset. `count` and `exists` ignore ordering and
+page bounds, execute a scalar query in the database, and retain scope/schema
+validation. Joined counts include row multiplication; grouped counts count
+surviving groups after `HAVING`. A selected global aggregate is a result row,
+including for empty input. Related-query summaries count parents without
+loading relation projections.
+
+Repeated `filter` and `having` calls combine with AND. Ordering accepts
+`nulls_first` and `nulls_last`. An alias's `include_deleted()` applies only
+to that source, including a joined source's visibility condition.
+
 ## Named relations
 
 A foreign-key descriptor can carry a logical `relation` name. Authoring declares
