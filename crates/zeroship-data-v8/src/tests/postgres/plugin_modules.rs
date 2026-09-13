@@ -17,11 +17,13 @@ async fn db_plugin_supplies_the_installer_and_shares_its_module_instance() {
     let source = r#"
         import { env } from "zeroship";
         import * as sdk from "zeroship:db/internal";
+        const collectionAtEvaluation = env.db.posts instanceof sdk.Collection;
         const initial = await import("zeroship:db/internal");
         export default { rpc: { inspect: async () => {
             const later = await import("zeroship:db/internal");
             return {
                 same: initial === sdk && later === sdk,
+                collectionAtEvaluation,
                 installer: typeof sdk.installSchema === 'function',
                 collection: env.db.posts instanceof sdk.Collection,
                 naming: typeof sdk.naming === 'object',
@@ -36,6 +38,7 @@ async fn db_plugin_supplies_the_installer_and_shares_its_module_instance() {
         value["json"],
         zeroship_data_orm::value!({
             "same": true, "installer": true, "collection": true,
+            "collectionAtEvaluation": true,
             "naming": true, "policy": true,
         })
     );

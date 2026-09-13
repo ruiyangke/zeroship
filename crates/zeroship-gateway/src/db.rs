@@ -144,20 +144,4 @@ pub async fn checkout(cfg: &DbConfig) -> Result<Rc<Pool>, Error> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn db_config_clamps_pool_size_to_one() {
-        let cfg = DbConfig::new("postgres://x", 0);
-        assert_eq!(cfg.pool_size(), 1);
-        let cfg = DbConfig::new("postgres://x", 32);
-        assert_eq!(cfg.pool_size(), 32);
-    }
-
-    #[test]
-    fn db_config_is_send_sync() {
-        fn assert_send_sync<T: Send + Sync>() {}
-        assert_send_sync::<DbConfig>();
-    }
-}
+pub(crate) mod tests;

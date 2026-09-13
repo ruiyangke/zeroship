@@ -87,6 +87,21 @@ impl NativePlugin for DbPlugin {
         }]
     }
 
+    fn prepare_runtime<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        namespace: v8::Local<'s, v8::Object>,
+        descriptor: Option<&serde_json::Value>,
+    ) -> Result<Option<v8::Global<v8::Promise>>, String> {
+        let Some(descriptor) = descriptor else { return Ok(None); };
+        let json = serde_json::to_string(descriptor).map_err(|error| error.to_string())?;
+        let json = v8::String::new(scope, &json).ok_or("could not allocate DB descriptor")?;
+        let descriptor = v8::json::parse(scope, json).ok_or("could not parse DB descriptor")?;
+        zeroship_runtime::modules::invoke_module_export(
+            scope, "zeroship:db/internal", "installSchema", &[namespace.into(), descriptor],
+        ).map(Some)
+    }
+
     /// Mint a `Db` v8_class instance as the namespace value for
     /// `env.db`. The runtime then attaches the Db-scoped entry points
     /// registered via [`Self::register`] on top. The `.collection(name)`
@@ -183,6 +198,7 @@ fn descriptor_schemas(
 
 #[cfg(test)]
 mod runtime_descriptor_binding_tests {
+    use futures::FutureExt;
     use std::cell::RefCell;
     use std::collections::HashMap;
 
@@ -249,19 +265,21 @@ mod runtime_descriptor_binding_tests {
     }
 
     #[test]
-    fn declared_collections_exist_natively_during_creator_module_evaluation() {
+    fn declared_collections_have_sdk_facades_during_creator_module_evaluation() {
         crate::tests::fixtures::reset_context();
         init_v8();
         let modules = vec![ModuleEntry {
             specifier: "index.js".into(),
             source: r#"
 import { env } from "zeroship";
+import { Collection } from "zeroship:db/internal";
 const direct = env.db.__zeroship_workflow_app_state;
 const property = Object.getOwnPropertyDescriptor(env.db, "__zeroship_workflow_app_state");
 globalThis.__nativeCollectionAtEvaluation = JSON.stringify({
     visible: direct != null,
     hasFind: typeof direct?.find === "function",
-    sameIdentity: direct === env.db.collection("__zeroship_workflow_app_state"),
+    isSdkCollection: direct instanceof Collection,
+    nativeLookupAvailable: typeof env.db.collection("__zeroship_workflow_app_state").find === "function",
     enumerable: property?.enumerable === true,
     readOnly: property?.writable === false,
 });
@@ -278,6 +296,7 @@ export default { fetch() { return new Response("ok"); } };
 
         runtime
             .initialize(&EnvSnapshot::empty())
+            .now_or_never().expect("fixture startup must settle without I/O")
             .expect("native collection descriptor must initialize");
         let observed = runtime.with_scope(|scope| {
             let global = scope.get_current_context().global(scope);
@@ -292,7 +311,8 @@ export default { fetch() { return new Response("ok"); } };
             serde_json::json!({
                 "visible": true,
                 "hasFind": true,
-                "sameIdentity": true,
+                "isSdkCollection": true,
+                "nativeLookupAvailable": true,
                 "enumerable": true,
                 "readOnly": true,
             })
@@ -332,6 +352,7 @@ export default { fetch() { return new Response("ok"); } };
 
         runtime
             .initialize(&EnvSnapshot::empty())
+            .now_or_never().expect("fixture startup must settle without I/O")
             .expect("name collisions must not block descriptor installation");
         let observed = runtime.with_scope(|scope| {
             let global = scope.get_current_context().global(scope);

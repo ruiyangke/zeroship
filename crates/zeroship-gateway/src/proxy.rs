@@ -91,7 +91,7 @@ impl HashRing {
     /// through a function that returns `[u8; 16]` makes that substitution
     /// impossible to make by accident.
     pub fn select(&self, app_id: &AppId) -> (usize, &str) {
-        let hash = hash_bytes(&app_derivation::ring_key(app_id));
+        let hash = hash_bytes(app_derivation::ring_key(app_id));
         for (_, &idx) in self.ring.range(hash..).chain(self.ring.iter()) {
             if self.active[idx].load(Ordering::Relaxed) < self.max_per_worker {
                 return (idx, &self.workers[idx]);
@@ -116,7 +116,7 @@ impl HashRing {
         let mut combined = Vec::with_capacity(16 + affinity.len() + 1);
         // The app half is the EMBEDDED bits, for the reason spelled out on
         // [`Self::select`].
-        combined.extend_from_slice(&app_derivation::ring_key(app_id));
+        combined.extend_from_slice(app_derivation::ring_key(app_id));
         combined.push(b':');
         combined.extend_from_slice(affinity.as_bytes());
         let hash = hash_bytes(&combined);

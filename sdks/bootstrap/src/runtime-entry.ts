@@ -1,44 +1,12 @@
-// Runtime-owned DB schema descriptor install (production path).
+// Production mask-policy handoff after creator evaluation.
 //
-// Compiled to `dist/runtime-entry.js` and `include_str!`d by the
-// runtime crate's `crates/zeroship-runtime/src/core/init.rs`, spliced into the
-// bootstrap module so it runs INSIDE the module's top-level evaluation
-// — between `import * as user from "./__user__.js"` and the
-// `default.fetch` / `default.rpc` resolution. The post-build step
-// (`scripts/post-build.mjs`) strips the `export {};` line so the file
-// content is pure top-level JS suitable for splicing.
+// The runtime embeds this entry while the native policy finalization cutover
+// is in progress. DbPlugin prepares SDK collections before creator evaluation;
+// this entry still seals the JavaScript policy declaration and starts the
+// existing asynchronous native policy handoff. Dispatchers await its readiness
+// promise. Vite's deferred development entry owns its separate policy handoff.
 //
-// DbPlugin supplies the compiled DB SDK adapter under zeroship:db/internal.
-// The runtime owns module resolution independently of the creator artifact.
-//
-// Schema install MUST NOT block module evaluation. `installSchema`
-// plants the typed `Collection` wrappers on `env.db` SYNCHRONOUSLY (so
-// `default.{fetch,rpc}` and `env.db.<collection>.find(...)` are live the
-// instant evaluation completes). The async mask-policy flush resolves
-// later. We stash that promise on `globalThis.__zsSchemaReady` and the shared dispatcher
-// (`dispatcher.ts`) AWAITS it before running any procedure — mirroring
-// the dev path (`dev-entry.ts`, which gates on `schemaReady` per request).
-//
-// Why not `await` here: the mask-policy flush does real async database I/O.
-// A top-level `await` on it can leave the bootstrap module's evaluation
-// PENDING after `load_modules`' single microtask checkpoint (which cannot
-// drive the compio event loop). `default.fetch` / `default.rpc` would
-// then be unread (exports unpopulated) and every dispatch 404s with
-// "No default.fetch handler exported". Deferring readiness to the
-// dispatch path keeps init synchronous and exports available. (ISS-66)
-//
-// Guards:
-//   - `__zs_env()?.db` missing → no DbPlugin registered on this runtime.
-//     `installSchema` would throw "env.db not available"; skip silently
-//     to support dev runs without DATABASE_URL.
-//   - `globalThis.__zsRuntimeDescriptor` absent → schema-less app; skip
-//     silently and install no env.db collections.
-//
-// Errors from the synchronous `installSchema` call (validation, naming
-// collisions) re-raise — module evaluation rejects, the runtime surfaces
-// it as an init failure. Mask-policy errors surface on the first dispatch
-// (the dispatcher awaits `__zsSchemaReady` and lets the rejection through
-// to the RPC error envelope) — same as the dev path.
+// The runtime supplies zeroship:db/internal independently of creator artifacts.
 
 // Module marker — stripped by the post-build script. See dispatcher.ts
 // for the same pattern.
@@ -137,31 +105,18 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   const envDb = envObj && envObj.db;
 
   if (envDb != null) {
-    const sdk = await import("zeroship:db/internal") as {
-      installSchema?: (
-        env: unknown,
-        descriptor: unknown,
-      ) => { collections: unknown };
-    };
-    if (typeof sdk.installSchema === "function") {
-      // `installSchema` plants the Collection wrappers synchronously.
-      sdk.installSchema(envDb, descriptor);
-
-      // Keep only the asynchronous mask-policy flush off the module-eval
-      // critical path. The shared dispatcher awaits it before the first
-      // procedure runs.
-      globalThis.__zsSchemaReady = (async () => {
-        // Seal the app declaration before dispatch. Install an empty policy
-        // when none was declared so runtime code cannot add one later.
-        const policyMod = await import("zeroship:db/internal") as {
-          _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
-        };
-        const pending = typeof policyMod._flushPendingMaskPolicy === "function"
-          ? policyMod._flushPendingMaskPolicy()
-          : null;
-        await __zsInstallDbMaskPolicy(pending ?? {});
-      })();
-    }
+    // The native DB plugin installs SDK collections before creator evaluation.
+    // Policy declaration sealing still follows creator evaluation here until
+    // the native policy finalization hook owns this remaining handoff.
+    globalThis.__zsSchemaReady = (async () => {
+      const policyMod = await import("zeroship:db/internal") as {
+        _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
+      };
+      const pending = typeof policyMod._flushPendingMaskPolicy === "function"
+        ? policyMod._flushPendingMaskPolicy()
+        : null;
+      await __zsInstallDbMaskPolicy(pending ?? {});
+    })();
   }
 }
 
