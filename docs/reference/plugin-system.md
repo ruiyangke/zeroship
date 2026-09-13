@@ -79,6 +79,26 @@ download handles and metering live in the binding.
 See [Object storage](storage.md) for Rust usage, runtime configuration,
 namespace isolation, streaming and verification.
 
+## Continuation state
+
+Native callbacks read the invoking procedure's kind with
+`zeroship_runtime::rpc::current_kind(scope)` before queueing work. The frame
+follows V8 continuations across `await`; a thread-local marker cannot distinguish
+overlapping requests or isolates. Native callers use `with_kind(scope, kind,
+call)` to enter a procedure while restoring the caller's context when the
+synchronous V8 call returns.
+
+`rpc::capability::current_procedure_frame(scope)` provides opaque storage for
+plugin-owned state with that frame's lifetime. Attach state through an
+isolate-private V8 key. The DB adapter uses it to retain the query's read
+capture, enters the capture during preparation and each poll of queued native
+work, and snapshots it when opening a subscription. A suspended operation
+keeps its capture without leaving it active on the host thread.
+
+Implementations: [procedure frames](../../crates/zeroship-runtime/src/rpc/capability.rs),
+[DB capture ownership](../../crates/zeroship-data-v8/src/read_capture.rs), and
+[scoped ORM capture](../../crates/zeroship-data-orm/src/cdc/read_set/capture.rs).
+
 ## Boundary
 
 Creator-facing APIs should stay small. If a feature can be expressed in JS on top of `fetch` or the existing native primitives, it belongs in an SDK package rather than a new runtime plugin.

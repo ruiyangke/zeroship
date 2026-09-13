@@ -46,26 +46,34 @@ pub(super) fn dispatch_operation<'s>(
     operation: Operation,
     mode: OutputMode,
 ) -> v8::Local<'s, v8::Promise> {
-    crate::v8_bridge::ensure_read_set_capture();
     let state = runtime_state(scope);
     let route = crate::tx_scope::capture_route(scope, &binding);
-    let prepared = route.and_then(|route| {
-        PreparedOperation::new(
-            binding,
-            collection,
-            route,
-            current_actor_id(&state),
-            operation,
-        )
+    let prepared = crate::read_capture::current(scope).map(|capture| {
+        let prepared = capture.with(|| {
+            route.and_then(|route| {
+                PreparedOperation::new(
+                    binding,
+                    collection,
+                    route,
+                    current_actor_id(&state),
+                    operation,
+                )
+            })
+        });
+        (capture, prepared)
     });
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
         async move {
-            let prepared = prepared?;
-            prepared
-                .execute(crate::tx_scope::ensure_backend().await?)
+            let (capture, prepared) = prepared?;
+            capture
+                .with_future(async {
+                    prepared?
+                        .execute(crate::tx_scope::ensure_backend().await?)
+                        .await
+                })
                 .await
         },
         move |output| match output {

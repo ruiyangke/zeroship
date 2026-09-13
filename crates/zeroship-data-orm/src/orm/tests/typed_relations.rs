@@ -226,16 +226,17 @@ async fn scope_and_schema(postgres: bool) {
     let owner = fixture(postgres).await;
     let db = &owner.database;
     seed(db).await;
-    let (prepared, reads) = db.context.with(|| {
-        let capture = crate::cdc::read_set::Active::begin(true);
-        let prepared = db
-            .entity::<posts::Entity>()
-            .unwrap()
-            .query()
-            .with_related(posts::relations::author)
-            .all::<Post, Author>();
-        (prepared, capture.take())
+    let capture = crate::cdc::read_set::Capture::new(true);
+    let prepared = db.context.with(|| {
+        capture.with(|| {
+            db.entity::<posts::Entity>()
+                .unwrap()
+                .query()
+                .with_related(posts::relations::author)
+                .all::<Post, Author>()
+        })
     });
+    let reads = capture.snapshot();
     assert!(reads.iter().any(|read| read.collection == "posts"));
     assert!(reads.iter().any(|read| read.collection == "authors"));
     assert_eq!(prepared.await.unwrap().len(), 3);
