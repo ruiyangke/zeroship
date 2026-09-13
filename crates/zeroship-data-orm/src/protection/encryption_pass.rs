@@ -3,10 +3,11 @@
 //! and column, so moving ciphertext to another row fails authentication.
 //! Mask derivation receives protected plaintext before encryption replaces it.
 
-use zeroize::Zeroizing;
+use crate::schema::FieldMap;
 use crate::value::Value;
+use zeroize::Zeroizing;
 
-use crate::encryption::{KeyStore, plaintext::PlaintextType};
+use crate::encryption::{plaintext::PlaintextType, KeyStore};
 use zeroship_data_orm::error::DbError;
 
 /// A logical field's encoded plaintext and mask input, staged before key lookup.
@@ -19,7 +20,7 @@ pub async fn encrypt_row_on_write(
     keys: &KeyStore,
     app_id: &str,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     row_pk: &str,
     row: &mut Value,
 ) -> Result<(), DbError> {
@@ -46,14 +47,11 @@ pub async fn encrypt_row_on_write_with_sidechannel(
     keys: &KeyStore,
     app_id: &str,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     row_pk: &str,
     row: &mut Value,
     sidechannel: &mut crate::protection::mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError> {
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(()); // schema not present → no encrypted columns to find
-    };
     let Some(obj) = row.as_object_mut() else {
         return Err(DbError::internal(
             "encrypt_row_on_write: row must be a JSON object",
@@ -63,7 +61,7 @@ pub async fn encrypt_row_on_write_with_sidechannel(
     // Stage native plaintext and mask input before async key lookup. Physical
     // placement belongs to the later write relocation stage.
     let mut to_encrypt: Vec<PendingEncryption> = Vec::new();
-    for (col, def) in schema_obj.iter() {
+    for (col, def) in schema.iter() {
         let Some(plaintext_type) = PlaintextType::from_field(def)? else {
             continue;
         };
@@ -108,12 +106,9 @@ pub async fn decrypt_row_on_read(
     keys: &KeyStore,
     app_id: &str,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     row: &mut Value,
 ) -> Result<(), DbError> {
-    let Some(schema_obj) = schema.as_object() else {
-        return Ok(());
-    };
     let Some(obj) = row.as_object_mut() else {
         // Not an object (e.g. NULL row); nothing to do.
         return Ok(());
@@ -127,7 +122,7 @@ pub async fn decrypt_row_on_read(
 
     // Same async-borrow shuffle as the write path.
     let mut to_decrypt: Vec<(String, PlaintextType, Vec<u8>)> = Vec::new();
-    for (col, def) in schema_obj.iter() {
+    for (col, def) in schema.iter() {
         let Some(plaintext_type) = PlaintextType::from_field(def)? else {
             continue;
         };
@@ -175,6 +170,12 @@ pub async fn decrypt_row_on_read(
 
 #[cfg(test)]
 mod tests {
+    fn test_schema(fields: crate::value::Value) -> crate::schema::FieldMap {
+        crate::schema::CollectionSchema::from_fields(&fields)
+            .unwrap()
+            .into_fields()
+    }
+
     use super::*;
 
     /// Exercise project-key resolution with explicitly bound test apps.
@@ -195,13 +196,12 @@ mod tests {
     fn write_then_read_round_trip_randomised() {
         let keys = test_key_store();
 
-        let schema = crate::value!({
+        let schema = test_schema(crate::value!({
             "id": { "type": "string", "primaryKey": true },
             "ssn": { "type": "string", "encrypted": true },
             "name": { "type": "string" },
-        });
-        let mut row =
-            crate::value!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
+        }));
+        let mut row = crate::value!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
@@ -218,7 +218,8 @@ mod tests {
         assert_ne!(raw, b"123-45-6789");
         assert_eq!(obj["name"], "alice");
         assert!(!obj.contains_key("__zsbin__ssn"));
-        let mut read_row = crate::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
+        let mut read_row =
+            crate::value!({ "id": "usr_01HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
 
         rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
@@ -232,7 +233,8 @@ mod tests {
         // Same ciphertext under a DIFFERENT row_pk must fail tag check
         // (Camp A defence — the row-swap attack surfaces as
         // `encryption_aead_failed`).
-        let mut wrong_pk_row = crate::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
+        let mut wrong_pk_row =
+            crate::value!({ "id": "usr_02HX", "ssn": Value::Bytes(raw.clone()), "name": "alice" });
         let err = rt.block_on(async {
             decrypt_row_on_read(&keys, "app1", "users", &schema, &mut wrong_pk_row).await
         });
@@ -248,13 +250,13 @@ mod tests {
     fn decrypt_row_on_read_skips_masked_display_values() {
         let keys = test_key_store();
 
-        let schema = crate::value!({
+        let schema = test_schema(crate::value!({
             "contactEmail": {
                 "type": "string",
                 "encrypted": true,
                 "mask": { "kind": "email", "classification": "pii" }
             }
-        });
+        }));
         let mut read_row = crate::value!({
             "id": "usr_01HX",
             "contactEmail": "a***@example.com"
@@ -275,9 +277,9 @@ mod tests {
         let keys = KeyStore::new(crate::encryption::ProjectKeySource::supplied(
             std::sync::Arc::new(crate::encryption::SuppliedProjectKeys::new()),
         ));
-        let schema = crate::value!({
+        let schema = test_schema(crate::value!({
             "secret": {"type":"string", "encrypted":true, "mask":{"classification":"pii"}}
-        });
+        }));
         let mut row = crate::value!({"id":"row", "secret":"***"});
         decrypt_row_on_read(&keys, "app", "records", &schema, &mut row)
             .await
@@ -290,9 +292,9 @@ mod tests {
     fn same_plaintext_yields_distinct_ciphertext() {
         let keys = test_key_store();
 
-        let schema = crate::value!({
+        let schema = test_schema(crate::value!({
             "ssn": { "type": "string", "encrypted": true },
-        });
+        }));
 
         let mut row_a = crate::value!({ "id": "usr_a", "ssn": "shared" });
         let mut row_b = crate::value!({ "id": "usr_b", "ssn": "shared" });

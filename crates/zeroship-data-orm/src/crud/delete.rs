@@ -1,16 +1,14 @@
 use super::{predicate, resolved::ResolvedTable, update};
-use crate::{
-    sql::{
-        lifecycle::WriteAssignments,
-        mapping::QueryError,
-        registration::SqlRegistration,
-        statement::{
-            Delete, DeleteParts, MutationScope, ResolvedOperand, ResolvedPredicate, ReturnedColumn,
-            Statement, Update, UpdateParts,
-        },
-        SchemaName,
+use crate::schema::FieldMap;
+use crate::sql::{
+    lifecycle::WriteAssignments,
+    mapping::QueryError,
+    registration::SqlRegistration,
+    statement::{
+        Delete, DeleteParts, MutationScope, ResolvedOperand, ResolvedPredicate, ReturnedColumn,
+        Statement, Update, UpdateParts,
     },
-    value::Value,
+    SchemaName,
 };
 
 #[derive(Clone, Copy)]
@@ -22,7 +20,7 @@ pub(crate) enum Cardinality {
 pub(crate) struct Builder<'a> {
     namespace: &'a SchemaName,
     collection: &'a str,
-    schema: &'a Value,
+    schema: &'a FieldMap,
     registration: &'a SqlRegistration,
 }
 
@@ -30,7 +28,7 @@ impl<'a> Builder<'a> {
     pub(crate) const fn new(
         namespace: &'a SchemaName,
         collection: &'a str,
-        schema: &'a Value,
+        schema: &'a FieldMap,
         registration: &'a SqlRegistration,
     ) -> Self {
         Self {
@@ -109,7 +107,7 @@ impl<'a> Builder<'a> {
 
 fn scope(
     cardinality: Cardinality,
-    schema: &Value,
+    schema: &FieldMap,
     resolved: &ResolvedTable,
 ) -> Result<MutationScope, QueryError> {
     Ok(match cardinality {
@@ -124,7 +122,7 @@ fn scope(
 
 fn returning(
     cardinality: Cardinality,
-    schema: &Value,
+    schema: &FieldMap,
     resolved: &ResolvedTable,
 ) -> Result<Vec<ReturnedColumn>, QueryError> {
     match cardinality {

@@ -14,7 +14,7 @@ CREATE TABLE "{LOCAL_DEV_APP_ID}".users (
 );
 CREATE TABLE "{LOCAL_DEV_APP_ID}".posts (
     id TEXT PRIMARY KEY, title TEXT NOT NULL, author_id TEXT, editor_id TEXT,
-    hidden_owner TEXT, missing_target TEXT,
+    hidden_owner TEXT,
     masked_owner TEXT /* zero-migrate:mask:kind=last4,classification=pii */,
     __zs_raw__masked_owner TEXT
 );
@@ -22,10 +22,10 @@ INSERT INTO "{LOCAL_DEV_APP_ID}".users VALUES
     ('u1', 'Ada', NULL, '***-**-6789', '123-45-6789', 9007199254740993, X'0001FF', '2026-09-12T12:00:00Z'),
     ('u2', 'Deleted', '2026-09-12T12:00:00Z', NULL, NULL, NULL, NULL, NULL);
 INSERT INTO "{LOCAL_DEV_APP_ID}".posts VALUES
-    ('p1', 'present', 'u1', 'u1', 'u1', 'u1', '**', 'u1'),
-    ('p2', 'empty', NULL, NULL, NULL, NULL, NULL, NULL),
-    ('p3', 'deleted', 'u2', NULL, NULL, NULL, NULL, NULL),
-    ('p4', 'missing', 'absent', NULL, NULL, NULL, NULL, NULL);
+    ('p1', 'present', 'u1', 'u1', 'u1', '**', 'u1'),
+    ('p2', 'empty', NULL, NULL, NULL, NULL, NULL),
+    ('p3', 'deleted', 'u2', NULL, NULL, NULL, NULL),
+    ('p4', 'missing', 'absent', NULL, NULL, NULL, NULL);
 "#
         ),
     );
@@ -57,8 +57,7 @@ INSERT INTO "{LOCAL_DEV_APP_ID}".posts VALUES
                         "readable":false, "projectable":false, "filterable":false},
                     "masked_owner":{"type":"string", "refTarget":"users", "refColumn":"id", "relation":"maskedOwner",
                         "mask":{"kind":"last4", "classification":"pii"},
-                        "storage":{"valueColumn":"masked_owner", "rawColumn":"__zs_raw__masked_owner"}},
-                    "missing_target":{"type":"string", "refTarget":"undeclared", "refColumn":"id", "relation":"missingTarget"}
+                        "storage":{"valueColumn":"masked_owner", "rawColumn":"__zs_raw__masked_owner"}}
                 },
                 "options":{"softDelete":false, "versioning":false, "strictness":"strict"},
                 "indexes":[]
@@ -177,7 +176,7 @@ const _procedures = {
     const posts = env.db.collection("posts");
     const codes = [];
     for (const withSpec of [
-      { title: true }, { author: { field: "author_id" } }, { missingTarget: true },
+      { title: true }, { author: { field: "author_id" } },
       { hiddenOwner: true }, { maskedOwner: true }, { author_id: true }, { author: false }
     ]) {
       try {
@@ -193,7 +192,7 @@ const _procedures = {
         assert_eq!(
             dispatch_sqlite_runtime(&dir, &source, "invalidRelations"),
             value!({"json":[
-                "unknown_relation", "WITH_UNSUPPORTED_VALUE", "WITH_TARGET_NOT_FOUND",
+                "unknown_relation", "WITH_UNSUPPORTED_VALUE",
                 "invalid_relation", "invalid_relation", "unknown_relation", "WITH_UNSUPPORTED_VALUE"
             ]})
         );

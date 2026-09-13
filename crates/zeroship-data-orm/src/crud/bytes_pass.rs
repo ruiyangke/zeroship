@@ -1,19 +1,16 @@
 //! Validate native binary fields before they reach the SQL compiler.
-use zeroship_data_orm::error::DbError;
+use crate::schema::{ColumnSchema, FieldMap, LogicalType};
 use crate::value::Value;
+use zeroship_data_orm::error::DbError;
 
-pub fn schema_has_plain_bytes_columns(schema: &Value) -> bool {
-    schema
-        .as_object()
-        .is_some_and(|fields| fields.values().any(is_plain_bytes))
+pub fn schema_has_plain_bytes_columns(schema: &FieldMap) -> bool {
+    schema.values().any(is_plain_bytes)
 }
-fn is_plain_bytes(def: &Value) -> bool {
-    !crate::sql::descriptors::is_encrypted(def) && def.get("type").and_then(Value::as_str) == Some("bytes")
+fn is_plain_bytes(def: &ColumnSchema) -> bool {
+    !crate::sql::descriptors::is_encrypted(def) && def.logical_type == LogicalType::Bytes
 }
-pub fn validate_bytes_on_write(schema: &Value, doc: &mut Value) -> Result<(), DbError> {
-    let Some(fields) = schema.as_object() else {
-        return Ok(());
-    };
+pub fn validate_bytes_on_write(schema: &FieldMap, doc: &mut Value) -> Result<(), DbError> {
+    let fields = schema;
     for (name, definition) in fields {
         if is_plain_bytes(definition) {
             if let Some(value) = doc.get(name) {
@@ -23,13 +20,11 @@ pub fn validate_bytes_on_write(schema: &Value, doc: &mut Value) -> Result<(), Db
     }
     Ok(())
 }
-pub fn validate_bytes_on_update(schema: &Value, patch: &mut Value) -> Result<(), DbError> {
+pub fn validate_bytes_on_update(schema: &FieldMap, patch: &mut Value) -> Result<(), DbError> {
     if let Some(set) = patch.get_mut("$set") {
         validate_bytes_on_write(schema, set)?;
     }
-    let Some(fields) = schema.as_object() else {
-        return Ok(());
-    };
+    let fields = schema;
     for (name, definition) in fields {
         if is_plain_bytes(definition) {
             if let Some(value) = patch.get(name) {
@@ -53,8 +48,10 @@ fn validate_scalar(field: &str, value: &Value) -> Result<(), DbError> {
 mod tests {
     use super::*;
     use crate::value;
-    fn schema() -> Value {
-        value!({ "payload": { "type": "bytes" }, "title": { "type": "string" } })
+    fn schema() -> FieldMap {
+        crate::tests::fixtures::native_fields(
+            value!({ "payload": { "type": "bytes" }, "title": { "type": "string" } }),
+        )
     }
     #[test]
     fn validation_preserves_the_owned_buffer_and_text() {
@@ -100,14 +97,17 @@ mod tests {
         ] {
             validate_bytes_on_update(&schema(), &mut patch).unwrap();
         }
-        assert!(
-            validate_bytes_on_update(&schema(), &mut value!({ "$set": { "payload": "AQI=" } }))
-                .is_err()
-        );
+        assert!(validate_bytes_on_update(
+            &schema(),
+            &mut value!({ "$set": { "payload": "AQI=" } })
+        )
+        .is_err());
     }
     #[test]
     fn encrypted_fields_belong_to_the_encryption_pass() {
-        let schema = value!({ "secret": { "type": "bytes", "encrypted": true } });
+        let schema = crate::tests::fixtures::native_fields(
+            value!({ "secret": { "type": "bytes", "encrypted": true } }),
+        );
         assert!(!schema_has_plain_bytes_columns(&schema));
         validate_bytes_on_write(&schema, &mut value!({ "secret": Value::Bytes(vec![1]) })).unwrap();
     }

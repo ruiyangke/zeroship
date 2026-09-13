@@ -1,5 +1,6 @@
 //! Batched reference reads shared by native Rust and adapter queries.
 use super::*;
+use crate::schema::{ColumnSchema, LogicalType};
 use crate::sql::{descriptors, registration::SqlRegistration};
 use crate::tx_route::TxRoute;
 use std::collections::{HashMap, HashSet};
@@ -16,10 +17,10 @@ enum KeyKind {
 }
 
 impl KeyKind {
-    fn for_field(field: &Value) -> Result<Self, DbError> {
-        match field.get("type").and_then(Value::as_str) {
-            Some("string" | "text" | "id" | "ref") => Ok(Self::Text),
-            Some("integer" | "int" | "bigint" | "bigInt") => Ok(Self::Integer),
+    fn for_field(field: &ColumnSchema) -> Result<Self, DbError> {
+        match field.logical_type {
+            LogicalType::Text => Ok(Self::Text),
+            LogicalType::Integer | LogicalType::BigInt => Ok(Self::Integer),
             _ => Err(invalid("reference keys must use text or integer storage")),
         }
     }
@@ -45,12 +46,12 @@ enum Key {
     Integer(i64),
 }
 
-fn validate_key(schema: &Value, field: &str) -> Result<KeyKind, DbError> {
+fn validate_key(schema: &FieldMap, field: &str) -> Result<KeyKind, DbError> {
     let definition = schema
         .get(field)
         .ok_or_else(|| invalid("reference key is not declared"))?;
     if !descriptors::readable_fields(schema).contains(field)
-        || definition.get("filterable").and_then(Value::as_bool) == Some(false)
+        || !definition.filterable
         || descriptors::is_encrypted(definition)
         || descriptors::effective_mask(definition).is_some()
     {
@@ -66,7 +67,7 @@ struct Reference {
     field: String,
     collection: String,
     column: String,
-    schema: Arc<Value>,
+    schema: Arc<FieldMap>,
     kind: KeyKind,
     batch_size: usize,
 }
@@ -74,7 +75,7 @@ struct Reference {
 #[derive(Debug)]
 pub(super) struct PreparedRelations {
     source: String,
-    schema: Arc<Value>,
+    schema: Arc<FieldMap>,
     references: Vec<Reference>,
 }
 
@@ -98,22 +99,18 @@ impl PreparedRelations {
             if !seen.insert(field.clone()) {
                 continue;
             }
-            let collection = schema
+            let reference = schema
                 .get(field)
-                .and_then(|definition| definition.get("refTarget"))
-                .and_then(Value::as_str)
-                .filter(|name| !name.is_empty())
+                .and_then(|definition| definition.reference.as_ref())
                 .ok_or_else(|| {
                     DbError::validation(
                         "WITH_NOT_A_REF_FIELD",
                         format!("'{source}.{field}' is not a declared reference"),
                     )
                 })?;
+            let collection = reference.collection.as_str();
             let kind = validate_key(&schema, field)?;
-            let column = match schema[field].get("refColumn") {
-                Some(Value::String(name)) if !name.is_empty() => name,
-                _ => return Err(invalid("reference target column must be a nonempty string")),
-            };
+            let column = reference.column.as_str();
             let target =
                 crate::descriptor::collection_schema(binding, collection).map_err(|_| {
                     DbError::validation(
@@ -124,9 +121,7 @@ impl PreparedRelations {
             if kind != validate_key(&target, column)? {
                 return Err(invalid("reference and target key storage types differ"));
             }
-            if target[column].get("primaryKey").and_then(Value::as_bool) != Some(true)
-                && target[column].get("unique").and_then(Value::as_bool) != Some(true)
-            {
+            if !target[column].primary_key && !target[column].unique {
                 return Err(invalid("a forward reference must target a unique column"));
             }
             // Validate target projection and comparison before an empty parent result can hide errors.
@@ -332,7 +327,7 @@ impl FindRelations {
             return Err(invalid("with exceeds the relation budget"));
         }
         let schema = crate::descriptor::collection_schema(binding, collection)?;
-        let declared = descriptors::relation_fields(&schema).map_err(invalid)?;
+        let declared = descriptors::relation_fields(&schema);
         let mut aliases = Vec::new();
         for (alias, spec) in spec {
             if spec.as_bool() != Some(true) {

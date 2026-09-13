@@ -47,6 +47,7 @@ Host Backend = scoped executor + catalog + protection + search
 crates/
   zeroship-data-orm/
     src/orm/                 Rust models and codecs
+    src/schema/              native metadata, artifact decoding and validation
     src/value.rs             native values shared with drivers and V8
     src/sql/                 query grammar, storage codecs, SQL compilation
     src/connection/          backend factories and shared local initialization
@@ -98,13 +99,13 @@ access controls. SQLite retains its local row-image matching.
 ## Setup and application code
 
 The host supplies a validated `DbBinding`, database configuration, a project-key
-source, and the deployment's runtime collection descriptors:
+source, and a native `Schema`:
 
 ```rust,ignore
 use zeroship_data_orm::{ConnectOptions, Database};
 
 let options = ConnectOptions::new(database_url, key_source);
-let db = Database::connect(binding, options, collections).await?;
+let db = Database::connect(binding, options, models::schema()).await?;
 ```
 
 Changing the configured PostgreSQL or SQLite URL does not change application
@@ -112,6 +113,13 @@ functions taking `&Database`. `Database::from_schema` also accepts an explicitly
 registered backend, allowing a host-defined implementation or instrumentation
 wrapper. Rust models continue using `schema!`, `FromRow`, `Insertable`, and
 `Changeset`. TypeScript continues using `env.db`.
+
+Rust `schema!` declarations emit native collection metadata without loading files.
+Creator hosts decode their runtime artifact with `Schema::from_runtime_descriptor`.
+Both enter the same validation and immutable registration path. Column types,
+capabilities, generators, references, and protection remain part of entity
+compatibility; equivalent artifact spellings normalize at the decoding boundary.
+Physical schema changes remain the migration engine's responsibility.
 
 Native platform services use the same `Database` API without a V8 adapter. The
 service database URL authenticates as the service role already provisioned by

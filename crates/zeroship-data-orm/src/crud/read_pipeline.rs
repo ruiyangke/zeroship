@@ -1,3 +1,4 @@
+use crate::schema::FieldMap;
 use std::sync::Arc;
 
 use crate::value::Value;
@@ -75,7 +76,7 @@ pub async fn apply(
     opts: ApplyOptions<'_>,
 ) -> Result<ApplyResult, DbError> {
     let app_id = binding.app_id();
-    // Runtime descriptors are the authority for types and protection metadata.
+    // Installed model metadata determines types and protection.
     let schema = scope_schema(
         crate::descriptor::collection_schema(binding, collection)?,
         &opts.schema_field_scope,
@@ -123,15 +124,12 @@ pub async fn apply(
 /// hands the shared allocation straight through instead of deep-cloning the
 /// schema on every read, which is what the old owned-`Value` signature forced.
 /// The `Only` arm still copies, because it mutates.
-fn scope_schema(schema: Arc<Value>, scope: &SchemaFieldScope<'_>) -> Arc<Value> {
+fn scope_schema(schema: Arc<FieldMap>, scope: &SchemaFieldScope<'_>) -> Arc<FieldMap> {
     match scope {
         SchemaFieldScope::All => schema,
         SchemaFieldScope::Only(fields) => {
             let mut owned = (*schema).clone();
-            let Some(obj) = owned.as_object_mut() else {
-                return schema;
-            };
-            obj.retain(|key, _| key.starts_with('_') || fields.iter().any(|field| field == key));
+            owned.retain(|key, _| fields.iter().any(|field| field == key));
             Arc::new(owned)
         }
     }
@@ -146,7 +144,7 @@ async fn decrypt_rows_on_read(
     keys: &crate::encryption::KeyStore,
     app_id: &str,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
     for row in rows.iter_mut() {
@@ -159,7 +157,7 @@ async fn decrypt_rows_on_read(
 }
 
 /// Restrict the public result after protection consumes internal identity and storage.
-fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut [Value]) {
+fn restrict_rows_to_surface(schema: &FieldMap, surface: &RowSurface<'_>, rows: &mut [Value]) {
     let allowed = match surface {
         RowSurface::Declared => crate::sql::mapping::read_surface_columns(schema),
         RowSurface::Projected(names) => names.iter().cloned().collect(),
@@ -173,7 +171,7 @@ fn restrict_rows_to_surface(schema: &Value, surface: &RowSurface<'_>, rows: &mut
 
 fn wrap_masked_rows_on_read(
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
     for row in rows.iter_mut() {

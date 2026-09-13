@@ -1,5 +1,5 @@
 error[E0425]: cannot find type `typo` in module `schema::posts::columns`
- --> tests/ui/unknown_column.rs:5:15
+ --> tests/ui/unknown_column.rs:6:15
   |
-5 | struct Post { typo: String }
+6 | struct Post { typo: String }
   |               ^^^^ not found in `schema::posts::columns`

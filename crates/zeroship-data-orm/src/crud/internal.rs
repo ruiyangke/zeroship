@@ -1,6 +1,7 @@
 //! ORM-owned statements for protected storage.
 
 use super::resolved::ResolvedTable;
+use crate::schema::FieldMap;
 use crate::{
     sql::{
         compiler::CompiledQuery,
@@ -36,7 +37,7 @@ pub(crate) fn raw_column(
     collection: &str,
     raw_column: &str,
     key: Value,
-    schema: &Value,
+    schema: &FieldMap,
     registration: &SqlRegistration,
 ) -> Result<CompiledQuery, QueryError> {
     let resolved = ResolvedTable::aliased(namespace, collection, "source", schema, registration)?;
@@ -122,19 +123,20 @@ fn invalid(message: &str) -> QueryError {
 #[cfg(test)]
 mod tests {
     use crate::{
+        schema::FieldMap,
         sql::{registration::SqlRegistration, SchemaName},
         value::Value,
     };
 
-    fn schema() -> Value {
-        crate::value!({
+    fn schema() -> FieldMap {
+        crate::tests::fixtures::native_fields(crate::value!({
             "id": { "type": "string", "primaryKey": true },
             "ssn": {
                 "type": "string",
                 "mask": { "kind": "last4", "classification": "spi" },
                 "storage": { "valueColumn": "ssn", "rawColumn": "__zs_raw__ssn" }
             }
-        })
+        }))
     }
 
     #[test]

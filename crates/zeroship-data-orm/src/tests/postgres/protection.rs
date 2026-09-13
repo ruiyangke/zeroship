@@ -195,7 +195,7 @@ async fn insert_through_the_pipeline(
         .as_str()
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
-    let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
+    let schema = &crate::tests::fixtures::generated_schema(schema.clone());
     let bq = compile_insert(
         &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         collection,
@@ -238,7 +238,7 @@ fn row_to_value(row: &compio_postgres::Row) -> Value {
 fn compile_insert(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &crate::schema::FieldMap,
     document: &Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::insert::build_one(
@@ -259,7 +259,7 @@ fn compile_find(
     offset: Option<i64>,
     order_by: Option<&Value>,
     select: Option<&Value>,
-    schema: &Value,
+    schema: &crate::schema::FieldMap,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::read::find(
         namespace,
@@ -281,7 +281,7 @@ fn compile_distinct(
     collection: &str,
     field: &str,
     filter: &Value,
-    schema: &Value,
+    schema: &crate::schema::FieldMap,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::read::distinct(
         namespace,
@@ -298,7 +298,7 @@ fn compile_aggregate(
     namespace: &SchemaName,
     collection: &str,
     pipeline: &Value,
-    schema: &Value,
+    schema: &crate::schema::FieldMap,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::aggregate::build(
         namespace,
@@ -314,13 +314,13 @@ fn compile_aggregate(
 fn compile_filter(
     filter: &Value,
     _parameters: &mut Vec<Value>,
-    _schema: &Value,
+    _schema: &crate::schema::FieldMap,
 ) -> Result<crate::sql::Predicate, crate::sql::mapping::QueryError> {
     crate::sql::filter::decode(filter)
 }
 
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
-    let schema = &crate::tests::fixtures::schema::generated_fields(schema.clone());
+    let schema = &crate::tests::fixtures::generated_schema(schema.clone());
     let bq = compile_find(
         &crate::sql::SchemaName::new(app).expect("fixture schema name"),
         "people",
@@ -346,7 +346,7 @@ async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) ->
 /// Masked fields expose only their visible representation, so ordered predicates are invalid.
 #[test]
 fn a_range_filter_on_a_masked_column_is_refused() {
-    let schema = crate::tests::fixtures::schema::generated_fields(flip_schema());
+    let schema = crate::tests::fixtures::generated_schema(flip_schema());
     let error = compile_find(
         &crate::sql::SchemaName::new("flip_oracle").expect("fixture schema name"),
         "people",
@@ -1965,9 +1965,8 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
             assert_eq!(stored.len(), 1, "the row must exist");
 
             // BOUNDARY 2, the runtime's.
-            let allowed: BTreeSet<String> = read_surface_columns(
-                &crate::tests::fixtures::schema::generated_fields(schema.clone()),
-            );
+            let allowed: BTreeSet<String> =
+                read_surface_columns(&crate::tests::fixtures::generated_schema(schema.clone()));
             let finalized = host
                 .finalize_rows_on_read(app, "people", returned.clone())
                 .await
@@ -2050,7 +2049,7 @@ fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 fn the_raw_column_is_refused_on_every_inbound_surface() {
     Host::test(|_| {
         let raw = raw_column_name("ssn");
-        let schema = flip_schema();
+        let schema = crate::tests::fixtures::native_fields(flip_schema());
 
         let refusals: Vec<(&str, bool)> = vec![
             (
@@ -2143,7 +2142,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         )
         .is_ok());
         assert!(validate_field_name("ssn").is_ok());
-        let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+        let runtime_schema = crate::tests::fixtures::generated_schema(flip_schema());
         assert!(compile_find(
             &crate::sql::SchemaName::new("app1").expect("fixture schema name"),
             "people",
@@ -2177,7 +2176,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
 fn a_masked_predicate_is_lowered_for_the_change_stream() {
     Host::test(|_| {
         use zeroship_data_orm::cdc::read_set::{normalise_filter, Predicate, PredicateOp};
-        let schema = flip_schema();
+        let schema = crate::tests::fixtures::native_fields(flip_schema());
 
         let Some(Predicate::All(conjuncts)) =
             normalise_filter(&value!({ "ssn": "123-45-6789" }), &schema)
@@ -2429,7 +2428,7 @@ fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             host.prepare_insert_many_docs(&mut docs, app, "people", None)
                 .await
                 .expect("write pipeline");
-            let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+            let runtime_schema = crate::tests::fixtures::generated_schema(schema.clone());
             let bq = compile_insert(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 "people",
@@ -2959,10 +2958,9 @@ fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
             let app_id = zeroship_core::AppId::mint();
             let encrypted = encrypted_schema();
             let _keys = host.supply_project_key(&[app_id.as_str()], &"01".repeat(32));
-            let app = fixture_via_the_migration_engine(
-                host, &pool, &url, &app_id, "people", &encrypted,
-            )
-            .await;
+            let app =
+                fixture_via_the_migration_engine(host, &pool, &url, &app_id, "people", &encrypted)
+                    .await;
 
             // The live catalog must retain an encryption marker the runtime recognizes.
             let stored = column_comment(&pool, &app, "people", "secret")

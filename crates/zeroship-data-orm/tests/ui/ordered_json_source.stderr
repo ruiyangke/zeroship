@@ -1,7 +1,7 @@
 error[E0599]: the method `gt` exists for struct `SourceColumn<document>`, but its trait bounds were not satisfied
- --> tests/ui/ordered_json_source.rs:4:61
+ --> tests/ui/ordered_json_source.rs:5:61
   |
-4 |     let _ = source.column(schema::predicate_rows::document).gt(Value::Null);
+5 |     let _ = source.column(schema::predicate_rows::document).gt(Value::Null);
   |                                                             ^^ method cannot be called on `SourceColumn<document>` due to unsatisfied trait bounds
   |
  ::: src/orm/codecs.rs

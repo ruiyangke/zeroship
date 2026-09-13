@@ -1,15 +1,16 @@
 //! Descriptor-resolved collection reads.
 
 use super::{predicate, resolved::ResolvedTable};
+use crate::schema::FieldMap;
 use crate::{
     sql::{
-        Direction, Ident, IdentRole, NullOrder, RowLimit, RowOffset, SchemaName,
         mapping::{self, QueryError},
         registration::SqlRegistration,
         statement::{
             Comparison, ResolvedOperand, ResolvedOrder, ResolvedPredicate, SelectParts,
             SelectStatement, SelectedExpression, Statement,
         },
+        Direction, Ident, IdentRole, NullOrder, RowLimit, RowOffset, SchemaName,
     },
     value::Value,
 };
@@ -21,7 +22,7 @@ const SOURCE_ALIAS: &str = "source";
 pub(crate) fn find(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     filter: Value,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -49,7 +50,7 @@ pub(crate) fn find(
 }
 
 pub(crate) fn relation_match_capacity(
-    schema: &Value,
+    schema: &FieldMap,
     registration: &SqlRegistration,
 ) -> Result<usize, QueryError> {
     let fields = projection_fields(None, schema, &[])?.len();
@@ -69,7 +70,7 @@ pub(crate) fn relation_match_capacity(
 pub(crate) fn find_with_key_matches(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     key: &str,
     values: &[Value],
     registration: &SqlRegistration,
@@ -105,7 +106,7 @@ pub(crate) fn find_with_key_matches(
 fn find_with_projections(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     filter: Value,
     limit: Option<i64>,
     offset: Option<i64>,
@@ -188,7 +189,7 @@ fn find_with_projections(
 pub(crate) fn count(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     filter: Value,
     filter_soft_deleted: bool,
     registration: &SqlRegistration,
@@ -223,7 +224,7 @@ pub(crate) fn count(
 pub(crate) fn distinct(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     field: &str,
     filter: Value,
     filter_soft_deleted: bool,
@@ -297,7 +298,7 @@ fn compile_select(
 
 fn projection_fields(
     select: Option<&Value>,
-    schema: &Value,
+    schema: &FieldMap,
     unmask_columns: &[String],
 ) -> Result<Vec<String>, QueryError> {
     let Some(fields) = select
@@ -356,7 +357,7 @@ pub(super) fn selected(
 
 pub(super) fn visible_predicate(
     predicate: ResolvedPredicate,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     enabled: bool,
 ) -> Result<ResolvedPredicate, QueryError> {
@@ -383,7 +384,7 @@ pub(super) fn visible_predicate(
 
 fn parse_order(
     order: Option<&Value>,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
 ) -> Result<Vec<ResolvedOrder>, QueryError> {
     let Some(order) = order else {
@@ -420,7 +421,7 @@ fn parse_order(
                 )));
             }
             mapping::validate_value_operation(field, schema)?;
-            if schema[field]["sortable"].as_bool() == Some(false) {
+            if !schema[field].sortable {
                 return Err(invalid(format!("field '{field}' is not sortable")));
             }
             if !crate::sql::descriptors::supports_sorting(&schema[field]) {

@@ -48,7 +48,7 @@ use crate::v8_bridge::decode_native;
 use crate::v8_classes::collection::mint_collection;
 use crate::v8_classes::db_platform::mint_db_platform;
 use crate::v8_classes::transaction::transaction_dispatch;
-use zeroship_data_orm::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
+use zeroship_data_orm::binding::{DbBinding, COLD_START_DEPLOY_TOKEN};
 use zeroship_data_orm::error::IsolationLevel;
 
 // ---------------------------------------------------------------------------
@@ -455,7 +455,6 @@ mod tests {
     use std::collections::HashMap;
 
     use zeroship_data_orm::value;
-    use zeroship_data_orm::value::Value;
     use zeroship_runtime::Runtime;
 
     use super::normalize_isolation_level;
@@ -497,7 +496,7 @@ mod tests {
     fn resolve_collection_binding(
         runtime: &Runtime,
         collection: &v8::Global<v8::Object>,
-    ) -> (String, Option<Value>) {
+    ) -> (String, Option<zeroship_data_orm::schema::FieldMap>) {
         runtime.with_scope(|scope| {
             let object = v8::Local::new(scope, collection);
             let external: v8::Local<v8::External> = object
@@ -557,9 +556,15 @@ mod tests {
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
             (
                 PINNED.to_string(),
-                Some(crate::tests::fixtures::schema::generated_fields(
-                    value!({ "marker": { "type": "string" } })
-                ))
+                Some(
+                    zeroship_data_orm::schema::CollectionSchema::from_fields(
+                        &crate::tests::fixtures::schema::generated_fields(
+                            value!({ "marker": { "type": "string" } })
+                        )
+                    )
+                    .unwrap()
+                    .into_fields()
+                )
             ),
             "the pinned deploy must resolve the entry it installed",
         );
@@ -588,9 +593,15 @@ mod tests {
             resolve_collection_binding(&pinned_runtime, &pinned_collection),
             (
                 PINNED.to_string(),
-                Some(crate::tests::fixtures::schema::generated_fields(
-                    value!({ "marker": { "type": "string" } })
-                ))
+                Some(
+                    zeroship_data_orm::schema::CollectionSchema::from_fields(
+                        &crate::tests::fixtures::schema::generated_fields(
+                            value!({ "marker": { "type": "string" } })
+                        )
+                    )
+                    .unwrap()
+                    .into_fields()
+                )
             ),
             "installing the current deploy redirected the pinned binding",
         );
@@ -598,9 +609,15 @@ mod tests {
             resolve_collection_binding(&current_runtime, &current_collection),
             (
                 CURRENT.to_string(),
-                Some(crate::tests::fixtures::schema::generated_fields(
-                    value!({ "other": { "type": "string" } })
-                ))
+                Some(
+                    zeroship_data_orm::schema::CollectionSchema::from_fields(
+                        &crate::tests::fixtures::schema::generated_fields(
+                            value!({ "other": { "type": "string" } })
+                        )
+                    )
+                    .unwrap()
+                    .into_fields()
+                )
             ),
             "the current binding must retain its own deploy token and descriptor entry",
         );

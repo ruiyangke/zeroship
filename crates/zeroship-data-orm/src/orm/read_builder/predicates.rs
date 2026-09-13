@@ -134,10 +134,7 @@ where
 fn literal<C: Column>(mut value: Value) -> Result<Option<crate::sql::Literal>, DbError> {
     if !value.is_null()
         && !matches!(value, Value::Json(_))
-        && matches!(
-            C::Entity::schema()[C::NAME]["type"].as_str(),
-            Some("json" | "object" | "array" | "union")
-        )
+        && C::Entity::schema()[C::NAME].logical_type.is_json()
     {
         value = Value::Json(
             serde_json::to_string(&value).map_err(|error| read::invalid(error.to_string()))?,
@@ -153,10 +150,14 @@ mod tests {
     struct Vectors;
     impl Entity for Vectors {
         const COLLECTION: &'static str = "vectors";
-        fn schema() -> &'static Value {
-            static SCHEMA: std::sync::LazyLock<Value> = std::sync::LazyLock::new(
-                || crate::value!({"embedding":{"type":"vector", "vectorDims":2}}),
-            );
+        fn schema() -> &'static crate::schema::CollectionSchema {
+            static SCHEMA: std::sync::LazyLock<crate::schema::CollectionSchema> =
+                std::sync::LazyLock::new(|| {
+                    let mut embedding =
+                        crate::schema::ColumnSchema::new(crate::schema::LogicalType::Vector);
+                    embedding.vector_dims = Some(2);
+                    crate::schema::CollectionSchema::new([("embedding".into(), embedding)])
+                });
             &SCHEMA
         }
     }
@@ -176,7 +177,7 @@ mod tests {
                 database: Rc::new(()),
                 scope: None,
                 source: ReadSource::new("vectors", "v"),
-                schema: std::sync::Arc::new(Vectors::schema().clone()),
+                schema: std::sync::Arc::new(Vectors::schema().fields().clone()),
             },
             entity: PhantomData,
         };

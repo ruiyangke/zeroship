@@ -97,7 +97,7 @@ fn masked_insert_persists_visible_and_raw_columns_sqlite() {
             let bq = compile_insert(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
             )
             .unwrap();
@@ -182,7 +182,7 @@ fn a_select_serves_the_masked_column_sqlite() {
             let bq = compile_insert(
                 &crate::sql::SchemaName::new("app_demo").expect("fixture schema name"),
                 "users",
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
                 &doc,
             )
             .expect("compile insert");
@@ -208,7 +208,7 @@ fn a_select_serves_the_masked_column_sqlite() {
                 None,
                 None,
                 None,
-                &schema,
+                &crate::tests::fixtures::native_fields(schema.clone()),
             )
             .expect("compile find");
             let select_clause = bq
@@ -281,7 +281,7 @@ fn aliased_select_skips_kind_none_sqlite() {
             None,
             None,
             None,
-            &schema,
+            &crate::tests::fixtures::native_fields(schema.clone()),
         )
         .expect("compile find");
         // Schema-aware reads now always expand to the allowlisted public

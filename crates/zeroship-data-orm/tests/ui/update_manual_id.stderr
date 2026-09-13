@@ -1,18 +1,37 @@
 error[E0277]: the trait bound `id: UpdatableColumn` is not satisfied
- --> tests/ui/update_manual_id.rs:6:10
+ --> tests/ui/update_manual_id.rs:7:10
   |
-6 | #[derive(Changeset)]
+7 | #[derive(Changeset)]
   |          ^^^^^^^^^ unsatisfied trait bound
   |
 help: the trait `UpdatableColumn` is not implemented for `id`
- --> tests/ui/update_manual_id.rs:3:1
+ --> tests/ui/../fixtures/manual_id_schema.rs
   |
-3 | schema!(pub models = "../fixtures/manual-id.runtime.json");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 records {
+  | |                     #[orm(primary_key)]
+  | |                     id: Text,
+  | |______________________^
+  |
+ ::: tests/ui/update_manual_id.rs:4:1
+  |
+4 |   manual_id_schema!(pub models);
+  |   ----------------------------- in this macro invocation
 help: the trait `UpdatableColumn` is implemented for `label`
- --> tests/ui/update_manual_id.rs:3:1
+ --> tests/ui/../fixtures/manual_id_schema.rs
   |
-3 | schema!(pub models = "../fixtures/manual-id.runtime.json");
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  | /         ::zeroship_data_orm::orm::schema! {
+  | |             $visibility $module {
+  | |                 records {
+  | |                     #[orm(primary_key)]
+  | |                     id: Text,
+  | |                     label: Text,
+  | |_________________________^
+  |
+ ::: tests/ui/update_manual_id.rs:4:1
+  |
+4 |   manual_id_schema!(pub models);
+  |   ----------------------------- in this macro invocation
   = help: see issue #48214
-  = note: this error originates in the derive macro `Changeset` which comes from the expansion of the macro `schema` (in Nightly builds, run with -Z macro-backtrace for more info)
+  = note: this error originates in the derive macro `Changeset` which comes from the expansion of the macro `manual_id_schema` (in Nightly builds, run with -Z macro-backtrace for more info)

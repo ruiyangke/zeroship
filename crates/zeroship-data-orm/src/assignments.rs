@@ -1,8 +1,6 @@
-//! Resolve lifecycle generators from a collection's immutable descriptor.
+//! Collect lifecycle generators from a collection's immutable schema.
 
-use crate::error::DbError;
-use crate::value::Value;
-use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
+use crate::schema::{AssignmentEvent, AssignmentGenerator, FieldMap};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssignedColumn {
@@ -17,73 +15,32 @@ pub struct AssignmentPlan {
 }
 
 impl AssignmentPlan {
-    /// Resolve the generators declared by one collection's immutable descriptor.
-    pub fn from_schema(schema: &crate::value::Value) -> Result<Self, DbError> {
-        let mut columns = Vec::new();
-        for (name, definition) in schema
-            .as_object()
-            .ok_or_else(|| DbError::internal("field map must be an object"))?
-        {
-            let Some(assignment) = definition.get("assign") else {
-                continue;
-            };
-            let by = assignment
-                .get("by")
-                .and_then(Value::as_str)
-                .ok_or_else(|| DbError::internal("assignment requires a generator"))?
-                .parse::<AssignmentGenerator>()
-                .map_err(|e| DbError::validation("invalid_assignment", e.to_string()))?;
-            let on = match assignment.get("on").and_then(Value::as_str) {
-                Some("insert") => AssignmentEvent::Insert,
-                Some("write") => AssignmentEvent::Write,
-                Some("delete") => AssignmentEvent::Delete,
-                _ => {
-                    return Err(DbError::validation(
-                        "invalid_assignment",
-                        "unknown assignment event",
-                    ));
-                }
-            };
-            let kind = definition.get("type").and_then(Value::as_str).unwrap_or("");
-            let valid = match by {
-                AssignmentGenerator::Now => matches!(kind, "date" | "timestamp" | "timestamptz"),
-                AssignmentGenerator::Actor => matches!(kind, "string" | "text" | "id"),
-                AssignmentGenerator::TypedId => {
-                    on == AssignmentEvent::Insert && matches!(kind, "string" | "text" | "id")
-                }
-                AssignmentGenerator::Identity => {
-                    on == AssignmentEvent::Insert
-                        && matches!(kind, "integer" | "int" | "bigint" | "bigInt")
-                }
-                AssignmentGenerator::Increment(_) => {
-                    on == AssignmentEvent::Write
-                        && matches!(kind, "integer" | "int" | "bigint" | "bigInt")
-                }
-            };
-            if !valid {
-                return Err(DbError::validation(
-                    "invalid_assignment",
-                    format!("generator does not match the type or event of '{name}'"),
-                ));
-            }
-            columns.push(AssignedColumn {
-                name: name.clone(),
-                by,
-                on,
-            });
-        }
-        Ok(Self { columns })
+    pub fn from_schema(schema: &FieldMap) -> Self {
+        let columns = schema
+            .iter()
+            .filter_map(|(name, definition)| {
+                definition
+                    .assignment
+                    .as_ref()
+                    .map(|assignment| AssignedColumn {
+                        name: name.clone(),
+                        by: assignment.by,
+                        on: assignment.on,
+                    })
+            })
+            .collect();
+        Self { columns }
     }
 
     pub fn write_assignments(
         &self,
-        schema: &crate::value::Value,
+        schema: &FieldMap,
         actor: Option<&str>,
         deleting: bool,
         restoring: bool,
     ) -> crate::sql::lifecycle::WriteAssignments {
+        use crate::sql::lifecycle::{AssignedValue, ColumnAssignment, WriteAssignments};
         use crate::value::Value;
-        use crate::sql::{lifecycle::{AssignedValue, ColumnAssignment, WriteAssignments}};
         let columns = self
             .columns
             .iter()
@@ -106,8 +63,9 @@ impl AssignmentPlan {
                 } else {
                     return None;
                 };
-                let physical = schema[&column.name]["storage"]["valueColumn"]
-                    .as_str()
+                let physical = schema
+                    .get(&column.name)
+                    .and_then(|definition| definition.storage.value_column.as_deref())
                     .unwrap_or(&column.name);
                 Some(ColumnAssignment {
                     column: physical.into(),
@@ -118,7 +76,7 @@ impl AssignmentPlan {
         WriteAssignments { columns }
     }
 
-    /// Assignments in descriptor order.
+    /// Assignments in declared field order.
     pub fn columns(&self) -> &[AssignedColumn] {
         &self.columns
     }
@@ -137,5 +95,76 @@ impl AssignmentPlan {
             .iter()
             .filter(|column| column.on == AssignmentEvent::Write)
             .map(|column| column.name.as_str())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{Assignment, CollectionSchema, ColumnSchema, LogicalType};
+    use crate::sql::lifecycle::AssignedValue;
+
+    #[test]
+    fn a_missing_assignment_field_keeps_the_logical_column_fallback() {
+        let mut revision = ColumnSchema::new(LogicalType::Integer);
+        revision.assignment = Some(Assignment {
+            by: AssignmentGenerator::Increment(2),
+            on: AssignmentEvent::Write,
+        });
+        revision.storage.value_column = Some("stored_revision".into());
+        let original = CollectionSchema::new([("revision".into(), revision)]).into_fields();
+        let plan = AssignmentPlan::from_schema(&original);
+        let mapped = plan.write_assignments(&original, None, false, false);
+        assert_eq!(mapped.columns[0].column, "stored_revision");
+
+        let assignments = plan.write_assignments(&FieldMap::new(), None, false, false);
+        assert_eq!(assignments.columns.len(), 1);
+        assert_eq!(assignments.columns[0].column, "revision");
+        assert!(matches!(
+            assignments.columns[0].value,
+            AssignedValue::Increment(2)
+        ));
+    }
+
+    #[test]
+    fn native_and_decoded_assignments_keep_generators_and_physical_columns() {
+        let mut revision = ColumnSchema::new(LogicalType::Integer);
+        revision.assignment = Some(Assignment {
+            by: AssignmentGenerator::Increment(2),
+            on: AssignmentEvent::Write,
+        });
+        revision.storage.value_column = Some("stored_revision".into());
+        let native = CollectionSchema::new([("revision".into(), revision)]).into_fields();
+        let decoded = CollectionSchema::from_fields(&crate::value!({
+            "revision": {
+                "type": "int", "required": true,
+                "assign": {"by": "increment(2)", "on": "write"},
+                "storage": {"valueColumn": "stored_revision"}
+            }
+        }))
+        .unwrap()
+        .into_fields();
+        assert_eq!(native, decoded);
+        for schema in [native, decoded] {
+            let plan = AssignmentPlan::from_schema(&schema);
+            assert_eq!(
+                plan.columns(),
+                &[AssignedColumn {
+                    name: "revision".into(),
+                    by: AssignmentGenerator::Increment(2),
+                    on: AssignmentEvent::Write,
+                }]
+            );
+            let assignments = plan.write_assignments(&schema, None, false, false);
+            assert_eq!(assignments.columns.len(), 1);
+            assert_eq!(assignments.columns[0].column, "stored_revision");
+            assert!(matches!(
+                assignments.columns[0].value,
+                AssignedValue::Increment(2)
+            ));
+        }
+        assert!(AssignmentPlan::from_schema(&FieldMap::new())
+            .columns()
+            .is_empty());
     }
 }
