@@ -227,29 +227,8 @@ echo "------------------------------------------------------------------"
 # why they are listed here; it is not reproducible today, because the same run
 # without a DSN now fails instead of printing the first line.
 #
-# `oidc_rp_e2e` used to be excluded BY NAME here, on the stated ground that it
-# "also wants CONTROL_TEST_DB, which this script does not provision, so it would
-# skip". That reason was wrong even then - its `db_url()` read
-# `test_env!("AUTH_DB_URL").or_else(|| test_env!("CONTROL_TEST_DB"))`, so EITHER
-# variable satisfied it and this script exported the first. Measured 2026-08-16
-# with CONTROL_TEST_DB explicitly unset and only AUTH_DB_URL set: "3 passed in
-# 6.73s", against the "3 passed in 0.00s" the same target reports with neither.
-# The exclusion cost real coverage for a provisioning gap that did not exist.
-#
-# The two-variable `or_else` is gone: `db_url()` at
-# crates/zeroship-gateway/tests/oidc_rp_e2e.rs:46 is now
-# `zeroship_core::config::test_database_url_opt()`, one source for every target
-# in the workspace. The measurement above is why the collapse is safe here - the
-# target was already satisfied by whichever name happened to be exported, which
-# is another way of saying the two names never meant different things.
-#
-# It is in the list below now, and it needs nothing to make a lost database
-# visible: the target REFUSES when it cannot resolve one, so this gate goes red
-# on the run itself rather than on a marker counted afterwards.
-#
-# Gateway browser-auth, logout, session, anchor and rotation cases run in the
-# library suite below. Their private fixtures own migrated PostgreSQL containers.
-# Remaining integration binaries still use this script's database.
+# Gateway identity contracts run in the library suite below. Their private
+# fixtures own migrated PostgreSQL containers and real provider connections.
 #
 # Mailer runs as a whole package with owned PostgreSQL and SMTP fixtures.
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
@@ -269,7 +248,6 @@ for spec in \
   "zeroship-authn:" \
   "zeroship-authz:" \
   "zeroship-mailer:" \
-  "zeroship-gateway:oidc_rp_e2e" \
 ; do
   pkg="${spec%%:*}"
   bin="${spec#*:}"
@@ -311,11 +289,6 @@ passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+'
 # carries. Raise it as the suite grows; a fixed floor gets looser with every test
 # added, which is the wrong direction for a guard against coverage loss.
 #
-# History, so nobody reads the gap between floor and total as slack: 505 was set
-# against 543 measured on 2026-08-07. The suite then reached 636 and the floor
-# stayed put, leaving 21 percent of the suite free to vanish unnoticed. 595 is
-# against 640 measured on 2026-08-16 - the 636 the fixture repairs reached, plus
-# oidc_rp_e2e's 3 (newly run by this gate) and the identities rebinding test.
 # Checked BEFORE the floor, because a build that died for want of disk space also
 # passes zero tests. Without this the gate blames coverage loss and tells you to
 # lower AUTH_MIN_PASSED - advice that would permanently weaken the guard in

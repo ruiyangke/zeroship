@@ -1231,11 +1231,10 @@ found by review of this document itself rather than of the code.
 11. **My own, while checking claim 2's neighbour.** I first checked for
     `signing_keys` across the whole `crates/zeroship-gateway/` tree and found
     matches, which reads as a refutation of "the gateway never touches it". The
-    matches are doc comments in
-    `crates/zeroship-gateway/tests/oidc_rp_e2e.rs`. "No reference in
-    `crates/zeroship-gateway/src`" is right; "no reference in the crate"
-    would have been wrong. A grep that does not distinguish production from test
-    answers a different question than the one asked.
+    matches were comments in the integration fixtures at that time. The real-provider
+    fixtures now live under `crates/zeroship-gateway/src/oidc_rp/tests/platform/`
+    and publish signing keys only in test builds. Directory membership alone
+    does not distinguish production database access from test code.
 
 12. **Two stale doc comments found in passing, recorded so nobody reasons from
     them.** `RotationSingleFlight` in `crates/zeroship-gateway/src/anchors.rs`
