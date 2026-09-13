@@ -66,7 +66,6 @@ Published packages:
 
 - `@zeroship/types`
 - `@zeroship/db`
-- `@zeroship/bootstrap`
 - `@zeroship/auth`
 - `@zeroship/kv`
 - `@zeroship/storage`

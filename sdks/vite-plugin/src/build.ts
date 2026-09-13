@@ -415,8 +415,8 @@ export function buildPlugin(
   let serverBuilt = false;
   let zshipEmitted = false;
   // Whether the user's SSR entry source contains `export default`.
-  // Probed before Rollup runs so it isn't confused by the bootstrap's
-  // own appended default. Conservative default = true (emit Worker(SSR)
+  // Probed before Rollup runs so it isn't confused by the generated server
+  // entry's default export. Conservative default = true (emit Worker(SSR)
   // catch-all when in doubt; better to 404 than serve stale shell).
   let userHasDefaultFetch = true;
   // Vite's resolved mode — drives the manifest emitter's

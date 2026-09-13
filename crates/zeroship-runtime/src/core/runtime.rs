@@ -1215,8 +1215,8 @@ impl RuntimeInner {
         if let Some(dsn_json) = js_driver_dsn_json {
             state.borrow_mut().js_driver = Some(crate::state::JsDriverState::new(dsn_json));
         }
-        // **Migration-first cutover (P4b)** — stash the bundled descriptor so
-        // `setup_globals` can expose it as `globalThis.__zsRuntimeDescriptor`.
+        // Stash the bundled descriptor for validation and direct plugin binding
+        // during native startup.
         state.borrow_mut().runtime_descriptor = runtime_descriptor;
         isolate.set_slot(state.clone());
 

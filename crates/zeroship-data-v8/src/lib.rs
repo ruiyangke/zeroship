@@ -183,8 +183,8 @@ fn install_native_collection_properties<'s>(
             scope,
             key.into(),
             collection.into(),
-            // The bootstrap still replaces this value with its SDK facade.
-            // Add DONT_DELETE when that installer is removed.
+            // The DB adapter replaces this native placeholder with its SDK
+            // facade during startup, so the property remains configurable.
             v8::PropertyAttribute::READ_ONLY,
         );
         if installed != Some(true) {

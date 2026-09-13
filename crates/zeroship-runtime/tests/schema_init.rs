@@ -364,9 +364,8 @@ export default {
 fn init_script_sources_schema_from_runtime_descriptor_when_present() {
     // **Migration-first cutover (P4b).** When the deploy carries a bundled
     // `RuntimeSchemaDescriptor` (v2 `{ fields, options, indexes }` per collection), the
-    // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`
-    // and `setup_globals` exposes it as `globalThis.__zsRuntimeDescriptor`. The
-    // native plugin preparation must then install the schema FROM the
+    // worker stamps it onto the runtime via `RuntimeBuilder::runtime_descriptor`.
+    // Native plugin preparation must then install the schema FROM the
     // descriptor — IGNORING `user.default.schema`.
     //
     // We give the user a throwing `default.schema` getter and inject a descriptor

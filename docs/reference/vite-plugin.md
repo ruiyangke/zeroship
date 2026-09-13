@@ -50,7 +50,7 @@ is what keeps `zeroship()` working in a scratch directory.
 ### `devAuth`
 
 The `pnpm dev` implementation of the platform auth contract - the peer of
-`env.db` to SQLite and `env.kv` to redb. When enabled, the dev runtime serves
+`env.db` to SQLite and `env.kv` to redb. When enabled, Vite middleware serves
 the same-origin `/__zeroship/auth/*` endpoints the `@zeroship/auth` client
 drives and supplies a logged-in identity to `env.auth.getUser()` server-side,
 with no gateway, no external auth service and no control plane.
@@ -63,16 +63,13 @@ with no gateway, no external auth service and no control plane.
 | `false` | Disabled. `/__zeroship/auth/*` falls through to the user module and `env.auth.getUser()` returns `null`. |
 
 A configured user is `{ id?, email?, name?, avatar?, scopes? }`. **There is no
-`password` field.** The dev login form prefills and validates a password derived
-from the id (`devPasswordFor` in `sdks/bootstrap/src/dev-auth.ts`): `"dev-"`
-plus the first eight characters of the id with any leading `pws_` stripped
-(fewer if the remainder is shorter), so `pws_alice000000000000000` gives
-`dev-alice000`. It is not a secret; it exists
-so the credential check and its failure path are real, and it is deliberately
-short enough that the deployed platform's signup policy refuses it.
+`password` field.** The dev login form prefills and validates the deterministic
+password produced by `devPasswordFor` in `sdks/vite-plugin/src/dev-auth.ts`.
+It is a local test credential rather than a secret, and the deployed platform's
+signup policy refuses it.
 
-The provider lives in the dev runtime (`@zeroship/bootstrap/dev`) and is
-structurally absent from any production `.zship`. Full contract:
+The provider lives in Vite's development middleware and is structurally absent
+from any production `.zship`. Full contract:
 [`auth-dev-tier.md`](auth-dev-tier.md).
 
 ## Migration-first type generation (`gen-types`)
@@ -204,12 +201,10 @@ native runtime dispatch:
 The generated entry supplies callable references and module imports. The
 [native dispatcher](../../crates/zeroship-runtime/src/rpc/dispatch/mod.rs)
 owns HTTP RPC invocation, validation, capability context and response framing.
-The entry still imports the workflow collector from bootstrap while the
-workflow integration remains active. See [the deploy contract](zeroship-standard.md).
+See [the deploy contract](zeroship-standard.md).
 
 ## See also
 
 - [`vite-environment-api.md`](vite-environment-api.md)
 - [`rpc.md`](rpc.md)
 - [`zeroship-standard.md`](zeroship-standard.md)
-- [`sdks/bootstrap/README.md`](../../sdks/bootstrap/README.md)

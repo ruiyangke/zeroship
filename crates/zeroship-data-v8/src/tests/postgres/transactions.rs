@@ -1,7 +1,7 @@
 //! Creator transaction callbacks through the V8 runtime and PostgreSQL.
 //!
 //! Fixtures install tables before boot and supply runtime descriptors, so calls use
-//! the bootstrap transaction wrapper. It returns a `Result` envelope: failures are
+//! the DB facade transaction wrapper. It returns a `Result` envelope: failures are
 //! asserted through `result.error`, or deliberately rethrown for HTTP-boundary tests.
 //! PostgreSQL comes from an owned testcontainer; fixture startup is required.
 
@@ -601,7 +601,7 @@ const _procedures = { autocommitBeforeMigrate };
 /// The unmigrated-app classification must reach the creator, and it must reach
 /// them with the terminal HTTP remedy when nothing catches it.
 ///
-/// `env.db.transaction` is the bootstrap wrapper (module header), so it folds
+/// `env.db.transaction` is the DB facade wrapper (module header), so it folds
 /// the classified denial into `result.error` and the handler answers 200 with
 /// `{data:null,error:{...}}`. THAT IS THE PUBLISHED CONTRACT, not a defect -
 /// but it means the handler has to rethrow to make the response terminal, and
@@ -1687,7 +1687,7 @@ const _procedures = { nestedBothCommit };
 ///
 /// NAMED `..._is_refused`, not `..._throws`: the refusal arrives as
 /// `result.error` on the level that could not open its savepoint, because
-/// `env.db.transaction` here is the bootstrap wrapper (module header). It
+/// `env.db.transaction` here is the DB facade wrapper (module header). It
 /// asserted a throw until 2026-09-04 and had never once observed the cap - it
 /// panicked on `tripped: false` while the very same body reported
 /// `reachedLevel: 10`, which is the cap doing exactly its job.

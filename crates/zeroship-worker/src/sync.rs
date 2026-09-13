@@ -32,8 +32,8 @@ pub(crate) fn worker_entry_hash(manifest: &Manifest, app_id: &AppId) -> Option<S
 
 /// Resolve the bundled `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`)
 /// for an app from its `manifest.runtime_descriptor` slot. The descriptor is a
-/// separate content-addressed blob; we read it via `BlobStore` so the runtime
-/// can expose it as `globalThis.__zsRuntimeDescriptor`.
+/// separate content-addressed blob; the worker reads it through `BlobStore` and
+/// hands it to native runtime startup.
 ///
 /// Returns `Ok(None)` when no descriptor is present (schema-less app). A missing
 /// descriptor blob or non-UTF-8 descriptor bytes is a hard load error.
