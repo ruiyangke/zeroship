@@ -60,7 +60,7 @@ impl Assertion {
     }
 }
 
-/// Gate the claim statements in PostgreSQL while the clients verify the same assertion.
+/// Gate the claim statements in `PostgreSQL` while the clients verify the same assertion.
 pub async fn race(
     database: &Database,
     store: impl Fn(Client) -> Arc<dyn ReplayStore + Send + Sync>,
