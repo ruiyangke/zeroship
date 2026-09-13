@@ -7,7 +7,8 @@ use crate::schema::{ColumnSchema, FieldMap, LogicalType};
 pub(crate) use typed::prepare_value;
 pub use typed::{prepare_document, prepare_update};
 
-pub(crate) const MAX_JSON_DEPTH: usize = 128;
+/// Maximum JSON container nesting accepted by the storage decoders.
+pub const MAX_JSON_DEPTH: usize = 127;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CodecError {
@@ -51,15 +52,10 @@ impl std::error::Error for CodecError {}
 pub(crate) fn validate_json_value(field: &str, value: &Value) -> Result<(), CodecError> {
     let mut pending = vec![(value, 0usize)];
     while let Some((value, depth)) = pending.pop() {
-        if depth > MAX_JSON_DEPTH {
-            return Err(CodecError::validation(
-                "invalid_json_value",
-                format!("column '{field}' requires bounded JSON nesting"),
-            ));
-        }
+        check_json_depth(field, depth)?;
         match value {
             Value::Json(encoded) => {
-                validate_encoded_json_depth(field, encoded)?;
+                validate_encoded_json_depth(field, encoded, depth)?;
                 serde_json::from_str::<&serde_json::value::RawValue>(encoded).map_err(|_| {
                     CodecError::validation(
                         "invalid_json_value",
@@ -68,9 +64,11 @@ pub(crate) fn validate_json_value(field: &str, value: &Value) -> Result<(), Code
                 })?;
             }
             Value::Array(values) => {
+                check_json_depth(field, depth + 1)?;
                 pending.extend(values.iter().map(|value| (value, depth + 1)));
             }
             Value::Object(values) => {
+                check_json_depth(field, depth + 1)?;
                 pending.extend(values.values().map(|value| (value, depth + 1)));
             }
             _ => {}
@@ -79,8 +77,21 @@ pub(crate) fn validate_json_value(field: &str, value: &Value) -> Result<(), Code
     Ok(())
 }
 
-fn validate_encoded_json_depth(field: &str, encoded: &str) -> Result<(), CodecError> {
-    let mut depth = 0usize;
+fn check_json_depth(field: &str, depth: usize) -> Result<(), CodecError> {
+    if depth > MAX_JSON_DEPTH {
+        return Err(CodecError::validation(
+            "invalid_json_value",
+            format!("column '{field}' requires bounded JSON nesting"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_encoded_json_depth(
+    field: &str,
+    encoded: &str,
+    mut depth: usize,
+) -> Result<(), CodecError> {
     let mut in_string = false;
     let mut escaped = false;
     for byte in encoded.bytes() {
@@ -98,12 +109,7 @@ fn validate_encoded_json_depth(field: &str, encoded: &str) -> Result<(), CodecEr
             b'"' => in_string = true,
             b'[' | b'{' => {
                 depth += 1;
-                if depth > MAX_JSON_DEPTH {
-                    return Err(CodecError::validation(
-                        "invalid_json_value",
-                        format!("column '{field}' requires bounded JSON nesting"),
-                    ));
-                }
+                check_json_depth(field, depth)?;
             }
             b']' | b'}' => depth = depth.saturating_sub(1),
             _ => {}
