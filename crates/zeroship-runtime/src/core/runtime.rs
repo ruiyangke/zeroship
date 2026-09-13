@@ -632,14 +632,10 @@ pub struct RuntimeBuilder {
     /// Lives on the builder (not `RuntimeLimits`) because it's a runtime
     /// scheduling knob, not a per-request cap.
     idle_gc_after_ms: Option<u64>,
-    /// **Migration-first cutover (P4b/P5 S2)** — the bundled
-    /// `RuntimeSchemaDescriptor` JSON the worker resolves from
-    /// `manifest.runtime_descriptor`'s blob.
-    /// Exposed to JS as `globalThis.__zsRuntimeDescriptor` so the bootstrap
-    /// entry sources the schema from the migration fold. `None` means the app
-    /// is schema-less.
+    /// Host-supplied schema descriptor, validated and bound before creator evaluation.
     runtime_descriptor: Option<String>,
     validate_rpc_output: bool,
+    dev_entry_loader: Option<String>,
 }
 
 impl RuntimeBuilder {
@@ -762,12 +758,16 @@ impl RuntimeBuilder {
         self
     }
 
-    /// **Migration-first cutover (P4b/P5 S2)** — set the bundled
-    /// `RuntimeSchemaDescriptor` JSON (`schema.runtime.json`). Exposed to JS
-    /// as `globalThis.__zsRuntimeDescriptor`; the bootstrap entry installs
-    /// the schema from it when present.
+    /// Set the host-supplied runtime schema descriptor.
     pub fn runtime_descriptor(mut self, descriptor: Option<String>) -> Self {
         self.runtime_descriptor = descriptor;
+        self
+    }
+
+    /// Select a trusted dev-host export that constructs an entry loader.
+    /// Production hosts leave this unset; creator exports cannot enable it.
+    pub fn dev_entry_loader(mut self, factory_export: impl Into<String>) -> Self {
+        self.dev_entry_loader = Some(factory_export.into());
         self
     }
 
@@ -787,7 +787,7 @@ impl RuntimeBuilder {
             .idle_gc_after_ms
             .map(Duration::from_millis)
             .unwrap_or(DEFAULT_IDLE_GC_AFTER);
-        let inner = RuntimeInner::new_with_plugins(
+        let mut inner = RuntimeInner::new_with_plugins(
             self.env_vars,
             limits.cpu_limit,
             limits.wall_timeout,
@@ -802,6 +802,7 @@ impl RuntimeBuilder {
             self.runtime_descriptor,
         );
         inner.state.borrow_mut().validate_rpc_output = self.validate_rpc_output;
+        inner.dev_entry_factory = self.dev_entry_loader;
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
             limits,
@@ -894,6 +895,12 @@ pub(crate) struct RuntimeInner {
 
     pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
     startup: StartupState,
+    dev_entry_factory: Option<String>,
+    dev_entry_loader: Option<super::dev_entry::DevEntryLoader>,
+    dev_entry_cpu: Duration,
+    dev_entry_cpu_started: Option<Duration>,
+    dev_entry_cpu_generation: Option<u64>,
+    dev_entry_cpu_running: bool,
     startup_cpu: Duration,
     startup_cpu_started: Option<Duration>,
     startup_waiters: Vec<std::task::Waker>,
@@ -1211,6 +1218,12 @@ impl RuntimeInner {
             application: None,
             workflow_fn: None,
             startup: StartupState::Uninitialized,
+            dev_entry_factory: None,
+            dev_entry_loader: None,
+            dev_entry_cpu: Duration::ZERO,
+            dev_entry_cpu_started: None,
+            dev_entry_cpu_generation: None,
+            dev_entry_cpu_running: false,
             startup_cpu: Duration::ZERO,
             startup_cpu_started: None,
             startup_waiters: vec![],
@@ -1411,7 +1424,13 @@ impl RuntimeInner {
                 let Some(runtime) = runtime.upgrade() else { return; };
                 {
                     let mut rt = runtime.borrow_mut();
-                    if rt.startup.is_pending() || matches!(rt.startup, StartupState::Failed(_)) {
+                    if rt.startup.is_pending()
+                        || rt
+                            .dev_entry_loader
+                            .as_ref()
+                            .is_some_and(|loader| loader.is_pending())
+                        || matches!(rt.startup, StartupState::Failed(_))
+                    {
                         rt.enter_isolate();
                         rt.advance_startup();
                         rt.exit_isolate();
@@ -1422,6 +1441,11 @@ impl RuntimeInner {
                     rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
                     crate::streams::response_forwarder::queue_cancellations(&rt.state, Instant::now());
                     request_deadline = rt.startup_deadline().into_iter()
+                        .chain(rt.dev_entry_deadline())
+                        .chain(rt.waiting_startup_requests.iter().filter_map(|request| {
+                            rt.wall_timeout
+                                .and_then(|limit| request.started.checked_add(limit))
+                        }))
                         .chain(rt.pending_requests.values().filter_map(|request| {
                             request.rpc_lifetime.as_ref().and_then(|request| request.deadline)
                         }))
@@ -1756,6 +1780,15 @@ impl RuntimeInner {
 
     fn arm_cpu_timer(&mut self) {
         let startup = self.startup.is_pending();
+        let dev_loading = !startup && self.dev_entry_cpu_running;
+        if dev_loading && self.cpu_limit.is_some() && self.dev_entry_cpu_started.is_none() {
+            let generation = self.dev_entry_loader.as_ref().unwrap().work_generation();
+            if self.dev_entry_cpu_generation != Some(generation) {
+                self.dev_entry_cpu_generation = Some(generation);
+                self.dev_entry_cpu = Duration::ZERO;
+            }
+            self.dev_entry_cpu_started = Some(crate::core::init::thread_cpu_time());
+        }
         if startup && self.cpu_limit.is_some() && self.startup_cpu_started.is_none() {
             self.startup_cpu_started = Some(crate::core::init::thread_cpu_time());
         }
@@ -1763,7 +1796,13 @@ impl RuntimeInner {
         if !self.cpu_timer_active
             && let (Some(timer), Some(limit)) = (&self.cpu_timer, self.cpu_limit)
         {
-            let remaining = if startup { limit.saturating_sub(self.startup_cpu) } else { limit };
+            let remaining = if startup {
+                limit.saturating_sub(self.startup_cpu)
+            } else if dev_loading {
+                limit.saturating_sub(self.dev_entry_cpu)
+            } else {
+                limit
+            };
             // A zero POSIX timer duration disarms it, so an exhausted startup
             // budget must retain an active interrupt deadline.
             timer.arm(remaining.max(Duration::from_nanos(1)));
@@ -1783,6 +1822,17 @@ impl RuntimeInner {
             self.startup_cpu += crate::core::init::thread_cpu_time().saturating_sub(started);
             if self.cpu_limit.is_some_and(|limit| self.startup_cpu >= limit) {
                 self.cpu_note.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        if let Some(started) = self.dev_entry_cpu_started.take() {
+            self.dev_entry_cpu +=
+                crate::core::init::thread_cpu_time().saturating_sub(started);
+            if self
+                .cpu_limit
+                .is_some_and(|limit| self.dev_entry_cpu >= limit)
+            {
+                self.cpu_note
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
     }
@@ -1964,16 +2014,8 @@ impl RuntimeInner {
         }
     }
 
-    /// Kernel's sole HTTP dispatch primitive. Three tiers, in order:
-    ///   1. `default.rpc(name, input, ctx)` when set + URL matches
-    ///      `/__zeroship/v1/<id>` and the request isn't a WS upgrade.
-    ///   2. `default.fetchFast(method, url, bodyBytes, env)` when set.
-    ///   3. `default.fetch(request, env, ctx)` (WinterCG slow path).
-    ///
-    /// Tiers 1 and 2 can fall through to (3) by returning a sentinel
-    /// (AsyncIterator from rpc, `null` from fetchFast). Pending Promises
-    /// from any tier hand off to the pump. The result is classified as
-    /// a `FetchOutcome`.
+    /// Invoke native RPC for matching procedure URLs, then fetchFast and fetch.
+    /// A fetchFast null result falls through to the ordinary HTTP handler.
     // Mirrors the outer Runtime::call_fetch_handler_with_user wrapper's
     // params one-for-one; same rationale as that allow.
     #[allow(clippy::too_many_arguments)]
@@ -1988,6 +2030,32 @@ impl RuntimeInner {
         ctx: crate::RequestCtx,
         user_json: Option<String>,
     ) -> crate::FetchOutcome {
+        self.call_fetch_handler_started(
+            modules,
+            method,
+            url,
+            headers,
+            body,
+            env,
+            ctx,
+            user_json,
+            Instant::now(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn call_fetch_handler_started(
+        &mut self,
+        modules: &[crate::ModuleEntry],
+        method: &str,
+        url: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+        env: &crate::EnvSnapshot,
+        ctx: crate::RequestCtx,
+        user_json: Option<String>,
+        request_started: Instant,
+    ) -> crate::FetchOutcome {
         // Reset the idle-GC clock — every request entry is "activity".
         self.last_request_ts.set(Instant::now());
         crate::node::net::state::reset_dispatch_egress(&self.state);
@@ -1998,6 +2066,7 @@ impl RuntimeInner {
                 let (reply, rx) = channel::result_slot();
                 let cancel = ctx.cancel.clone();
                 self.waiting_startup_requests.push(WaitingRequest {
+                    started: request_started,
                     method: method.into(), url: url.into(), headers: headers.to_vec(),
                     body: body.to_vec(), env: env.clone(), ctx, user_json, reply,
                 });
@@ -2006,7 +2075,14 @@ impl RuntimeInner {
             }
             Ok(true) => {}
         }
+        if self
+            .wall_timeout
+            .is_some_and(|limit| request_started.elapsed() >= limit)
+        {
+            return super::startup::failure_response("Request wall timeout while loading entry");
+        }
         let application = self.application.as_ref().expect("ready application entry").clone();
+        let dispatch_started = Instant::now();
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
         let invocation_context = crate::core::invocation::InvocationContext::request(
@@ -2017,8 +2093,6 @@ impl RuntimeInner {
         if user_json.is_some() {
             crate::auth::set_request_user(&self.state, request_id, user_json);
         }
-
-        let wall_start = Instant::now();
 
         // Mark the request as executing, and wire the cancel flag through so
         // native ops spawned inside the handler can observe cancellation.
@@ -2109,7 +2183,9 @@ impl RuntimeInner {
                             });
                             let request = crate::rpc::lifetime::RequestLifetime {
                                 request_id, cancel: ctx.cancel.clone(),
-                                deadline: self.wall_timeout.and_then(|timeout| wall_start.checked_add(timeout)),
+                                deadline: self
+                                    .wall_timeout
+                                    .and_then(|timeout| request_started.checked_add(timeout)),
                                 signal, _abort_guard: abort_guard,
                             };
                             (ctx_obj, Some(request))
@@ -2230,7 +2306,7 @@ impl RuntimeInner {
             };
         }
 
-        let cpu_elapsed = wall_start.elapsed();
+        let cpu_elapsed = dispatch_started.elapsed();
 
         match dispatch_result {
             Ok(DispatchResult::HttpResponse(info)) => {
@@ -2314,7 +2390,7 @@ impl RuntimeInner {
                 //
                 self.clear_executing_request();
                 self.store_fetch_pending(
-                    request_id, promise, ctx, cpu_elapsed, wall_start, pending_origin,
+                    request_id, promise, ctx, cpu_elapsed, request_started, pending_origin,
                     pending_rpc_call, pending_rpc_lifetime,
                 )
             }
@@ -3173,7 +3249,13 @@ impl RuntimeInner {
     /// Returns true if there are pending async requests.
     #[allow(dead_code)]
     pub fn has_pending_requests(&self) -> bool {
-        self.startup.is_pending() || !self.waiting_startup_requests.is_empty() || !self.pending_requests.is_empty()
+        self.startup.is_pending()
+            || self
+                .dev_entry_loader
+                .as_ref()
+                .is_some_and(|loader| loader.is_pending())
+            || !self.waiting_startup_requests.is_empty()
+            || !self.pending_requests.is_empty()
     }
 
     // -----------------------------------------------------------------------

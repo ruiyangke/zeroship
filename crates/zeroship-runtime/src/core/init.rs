@@ -1891,6 +1891,7 @@ pub(crate) fn prepare_application(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
     plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
+    dev_host_entry: bool,
 ) -> Result<PreparedApplication, String> {
     crate::core::plugin_modules::register(scope, plugins, modules)?;
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
@@ -2059,7 +2060,11 @@ pub(crate) fn prepare_application(
     // namespace is the bootstrap's, so ensure_initialized reads
     // `default.fetch` off the bootstrap (not the user module) — exactly the
     // indirection we want.
-    let wrapped = wrap_with_bootstrap(modules);
+    let wrapped = if dev_host_entry {
+        modules.to_vec()
+    } else {
+        wrap_with_bootstrap(modules)
+    };
 
     // Compile the graph and retain adapter preparation before creator evaluation.
     let entry = crate::modules::compile_modules(scope, &wrapped)?;
