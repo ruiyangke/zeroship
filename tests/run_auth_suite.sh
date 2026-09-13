@@ -247,28 +247,9 @@ echo "------------------------------------------------------------------"
 # visible: the target REFUSES when it cannot resolve one, so this gate goes red
 # on the run itself rather than on a marker counted afterwards.
 #
-# GATEWAY_ANCHORS_DB_URL used to be set nowhere in this repo, so the 13 gated
-# tests in `auth_token_anchors_test` and the 1 in `browser_auth_test` announced
-# a skip into this script's own log and never ran. Pointing it at this
-# script's database ran 23 tests of which 11 FAILED, the first on "initial
-# login must succeed, left: 400", so the deferral was recorded here rather
-# than taken.
-#
-# It is taken now. The 11 failures were one stale fixture, not 11 defects: the
-# mock OP minted its ID token and its access token independently and never
-# carried `at_hash`, while `session_post` requests access-token binding, which
-# makes the claim mandatory. The gateway log named it exactly - "at_hash
-# missing while access token binding was requested". The REAL OP does mint it
-# (crates/zeroship-auth/src/oidc/issuer.rs, unconditional in the single mint path), so
-# the handler was right and the fixture was wrong. Binding the mock's ID tokens
-# to the access token they ship with took it to 23 passed / 0 failed, and
-# surfaced a second, real defect on the way (the gateway declined to verify
-# at_hash on a ROTATED id_token while holding the access token; see
-# crates/zeroship-gateway/src/auth_token.rs).
-#
-# So both binaries are in the list. This is the SAME database the auth tests
-# use: these tests seed their own users and key off per-test UUIDs, and
-# TEST_THREADS serializes the run.
+# Gateway browser-session, anchor and rotation cases now run in the library
+# suite above. Their private fixtures own migrated PostgreSQL containers.
+# Remaining integration binaries still use this script's database.
 #
 # Mailer runs as a whole package with owned PostgreSQL and SMTP fixtures.
 echo "==> Other database-gated binaries (authn, authz, mailer, gateway)"
@@ -289,7 +270,6 @@ for spec in \
   "zeroship-authz:" \
   "zeroship-mailer:" \
   "zeroship-gateway:backchannel_logout_test" \
-  "zeroship-gateway:auth_token_anchors_test" \
   "zeroship-gateway:browser_auth_test" \
   "zeroship-gateway:oidc_rp_e2e" \
 ; do

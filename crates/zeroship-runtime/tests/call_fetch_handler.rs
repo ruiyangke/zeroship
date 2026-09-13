@@ -725,7 +725,7 @@ fn streaming_async_closes_cleanly() {
 //
 // These lock in the three exports of the user-facing `zeroship` module:
 // `env`, `waitUntil`, `getRequest`. The module is injected by the runtime
-// alongside the bootstrap (see crates/zeroship-runtime/src/core/init.rs::ZEROSHIP_MODULE_JS).
+// alongside the bootstrap (see crates/zeroship-runtime/src/core/zeroship_module.rs).
 
 #[test]
 fn zeroship_module_env_import() {

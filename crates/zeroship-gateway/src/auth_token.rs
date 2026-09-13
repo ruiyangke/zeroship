@@ -1852,3 +1852,6 @@ mod session_csrf_tests {
         assert!(res.is_ok(), "non-mint read must not require Origin or X-ZS-Auth: {res:?}");
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -561,17 +561,12 @@ pub struct RuntimeState {
     /// the response body write until every promise settles or the wall
     /// timeout fires. Cleared when the request is discarded (e.g. after
     /// the wall budget elapses or the client cancels).
-    ///
-    /// TODO(PR 2): when the `__zs_wait_until` native op lands, also clear
-    /// entries in `drain_request_logs`, `discard_request_state`, and the
-    /// cancellation sweep in runtime.rs, alongside `per_request_user`.
-    /// Otherwise leaked entries pin `v8::Global<v8::Promise>` for the
-    /// isolate's lifetime.
+    /// Cleanup drops the retained handles with the request state.
     pub wait_until_by_request: HashMap<u64, Vec<v8::Global<v8::Promise>>>,
 
     /// Per-request Request JS object, keyed by request_id. Stored by the
     /// kernel when `call_fetch_handler` builds the Request; read by the
-    /// `__zs_get_request` native op so user code can do
+    /// native `zeroship` module export so user code can do
     /// `import { getRequest } from 'zeroship'; getRequest()` without the
     /// bootstrap having to call `__bindRequest(ctx, request)` on every
     /// request.

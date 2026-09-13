@@ -44,7 +44,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use compio_postgres::Client;
-use futures::future::Shared;
+use futures::future::{Shared, WeakShared};
 use uuid::Uuid;
 
 use zeroship_core::app_id::AppId;
@@ -290,7 +290,9 @@ pub async fn update_rotated_family(
 ) -> Result<u64> {
     let refresh_enc = refresh_token_enc.to_vec();
     let tx = conn.transaction().await.map_err(|e| {
-        GatewayError::Db(format!("app_session_anchors update_rotated_family begin: {e}"))
+        GatewayError::Db(format!(
+            "app_session_anchors update_rotated_family begin: {e}"
+        ))
     })?;
     rls::set_tenant_app(&tx, app_id).await?;
     let affected = tx
@@ -304,7 +306,9 @@ pub async fn update_rotated_family(
         .await
         .map_err(|e| GatewayError::Db(format!("app_session_anchors update_rotated_family: {e}")))?;
     tx.commit().await.map_err(|e| {
-        GatewayError::Db(format!("app_session_anchors update_rotated_family commit: {e}"))
+        GatewayError::Db(format!(
+            "app_session_anchors update_rotated_family commit: {e}"
+        ))
     })?;
     Ok(affected)
 }
@@ -349,7 +353,9 @@ pub async fn delete_all_for_user(
     global_user_id: &UserId,
 ) -> Result<Vec<DeletedFamily>> {
     let tx = conn.transaction().await.map_err(|e| {
-        GatewayError::Db(format!("app_session_anchors delete_all_for_user begin: {e}"))
+        GatewayError::Db(format!(
+            "app_session_anchors delete_all_for_user begin: {e}"
+        ))
     })?;
     rls::set_tenant_app(&tx, app_id).await?;
     let rows = tx
@@ -369,7 +375,9 @@ pub async fn delete_all_for_user(
         })
         .collect();
     tx.commit().await.map_err(|e| {
-        GatewayError::Db(format!("app_session_anchors delete_all_for_user commit: {e}"))
+        GatewayError::Db(format!(
+            "app_session_anchors delete_all_for_user commit: {e}"
+        ))
     })?;
     Ok(out)
 }
@@ -405,13 +413,10 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Result<Anchor> {
 
 // ─── Per-node family-rotation single-flight ────────────
 //
-// Concurrent `?mint=1` reloaders for the SAME anchor on ONE gateway worker
-// thread coalesce into ONE OP refresh (the "family rotation"). The compio
-// model is single-thread per worker (`!Send` futures), so the keyed map is a
-// thread-local `RefCell<HashMap<AnchorId, Shared<…>>>` — NOT a cross-thread
-// `Mutex`. A `Shared` future is `Clone`, so N callers clone-and-await the SAME
-// future; exactly one drives the body (the OP refresh), and all N receive
-// its cloned result.
+// Concurrent reloads for the same anchor share a family rotation. Callers
+// drive the shared future; the thread-local map indexes it weakly so
+// cancellation releases abandoned work. The compio worker's futures are
+// local to their thread.
 //
 // The single-flight holds NO db connection and NO lock across the OP
 // call: the future body itself checks a pooled connection out, reads, then
@@ -427,7 +432,7 @@ fn row_to_anchor(row: &compio_postgres::Row) -> Result<Anchor> {
 /// The result a coalesced family-rotation future resolves to. `Clone` so a
 /// `Shared` future can hand the same value to every awaiter (the underlying
 /// `Output` must be `Clone`).
-pub type RotationResult = std::result::Result<RotationOk, RotationError>;
+pub(crate) type RotationResult = std::result::Result<RotationOk, RotationError>;
 
 /// A successful reload-recovery family rotation (BFF redesign §2.2 / §3.1).
 ///
@@ -440,7 +445,7 @@ pub type RotationResult = std::result::Result<RotationOk, RotationError>;
 /// holds the route and salts), exactly as on the `/token` path, so the rotated
 /// raw OP access JWT never leaves the gateway and no JWT reaches the browser.
 #[derive(Debug, Clone)]
-pub struct RotationOk {
+pub(crate) struct RotationOk {
     pub global_user_id: UserId,
     /// Issuance time of the verified access token returned by the rotation.
     pub credential_iat: i64,
@@ -459,7 +464,7 @@ pub struct RotationOk {
 
 /// Why a coalesced family rotation failed. `Clone` so a `Shared` future can fan it out.
 #[derive(Debug, Clone)]
-pub enum RotationError {
+pub(crate) enum RotationError {
     /// The anchor is gone / its family was revoked or hit the 720h ceiling
     /// (OP `invalid_grant`). The caller deletes the anchor + clears the
     /// breadcrumb and surfaces `401 login_required`.
@@ -472,25 +477,18 @@ pub enum RotationError {
 
 /// A type-erased, shared, cloneable rotation future. Boxed so the map can hold
 /// futures of one concrete type regardless of the concrete `async` block.
-pub type SharedRotationFuture =
-    Shared<std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>>;
+type RotationFuture = std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>;
+pub(crate) type SharedRotationFuture = Shared<RotationFuture>;
 
-/// Per-worker-thread coalescing map: `anchor_id → in-flight rotation future`.
+/// Per-worker-thread index of rotations owned by their awaiting callers.
 ///
-/// `!Send` (it lives behind a thread-local), matching the single-thread
-/// compio worker model. An entry is inserted on the first miss and removed
-/// once the future resolves, so the map only ever holds genuinely in-flight
-/// rotations.
-///
-/// Because it is `!Send`, it CANNOT live in the `Arc<GateState>` shared
-/// across ntex's worker arbiter threads — exactly the same constraint the
-/// `!Send` compio-postgres `Pool` has. So it lives in a thread-local
-/// ([`with_single_flight`]); coalescing is per worker thread, which is the
-/// intended scope (cross-thread/cross-node concurrency is absorbed by the
-/// short cached wrapper + OP's rotation grace, §1.2).
+/// Weak references let cancellation of the last caller drop the rotation body
+/// and its [`EntryGuard`]. Keeping a strong future here would retain abandoned
+/// I/O and defer the guard until thread-local destruction. The map is `!Send`,
+/// matching the compio worker and its thread-local database pool.
 #[derive(Default, Clone)]
-pub struct RotationSingleFlight {
-    inner: Rc<RefCell<HashMap<Uuid, SharedRotationFuture>>>,
+pub(crate) struct RotationSingleFlight {
+    inner: Rc<RefCell<HashMap<Uuid, WeakShared<RotationFuture>>>>,
 }
 
 impl std::fmt::Debug for RotationSingleFlight {
@@ -503,7 +501,7 @@ impl std::fmt::Debug for RotationSingleFlight {
 
 impl RotationSingleFlight {
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -511,28 +509,45 @@ impl RotationSingleFlight {
     /// future if one exists. `None` ⇒ the caller is the leader and must
     /// `insert` a fresh future.
     #[must_use]
-    pub fn get(&self, anchor_id: Uuid) -> Option<SharedRotationFuture> {
-        self.inner.borrow().get(&anchor_id).cloned()
+    pub(crate) fn get(&self, anchor_id: Uuid) -> Option<SharedRotationFuture> {
+        let mut map = self.inner.borrow_mut();
+        let shared = map.get(&anchor_id).and_then(WeakShared::upgrade);
+        if shared.is_none() {
+            map.remove(&anchor_id);
+        }
+        shared
     }
 
     /// Register `fut` as the in-flight rotation for `anchor_id` and return a
     /// clone to await. If a concurrent leader already registered one (it
     /// cannot on a single thread between two synchronous calls, but the API
     /// stays race-safe), the existing one is returned and `fut` is dropped.
-    pub fn insert(&self, anchor_id: Uuid, fut: SharedRotationFuture) -> SharedRotationFuture {
-        let mut map = self.inner.borrow_mut();
-        map.entry(anchor_id).or_insert(fut).clone()
+    pub(crate) fn insert(
+        &self,
+        anchor_id: Uuid,
+        fut: SharedRotationFuture,
+    ) -> SharedRotationFuture {
+        if let Some(existing) = self.get(anchor_id) {
+            return existing;
+        }
+        if let Some(weak) = fut.downgrade() {
+            self.inner.borrow_mut().insert(anchor_id, weak);
+        }
+        fut
     }
 
     /// Remove the in-flight entry once the rotation resolves.
-    pub fn remove(&self, anchor_id: Uuid) {
+    pub(crate) fn remove(&self, anchor_id: Uuid) {
         self.inner.borrow_mut().remove(&anchor_id);
     }
 
     /// Number of in-flight rotations (test/observability only).
     #[must_use]
-    pub fn in_flight(&self) -> usize {
-        self.inner.borrow().len()
+    #[cfg(test)]
+    pub(crate) fn in_flight(&self) -> usize {
+        let mut map = self.inner.borrow_mut();
+        map.retain(|_, future| future.upgrade().is_some());
+        map.len()
     }
 }
 
@@ -548,28 +563,16 @@ thread_local! {
 /// cheap `Clone` of the per-thread map (the `Rc` clone is shared state), so
 /// it can `get`/`insert`/`remove` across `.await` points without holding a
 /// `RefCell` borrow.
-pub fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
+pub(crate) fn with_single_flight<R>(f: impl FnOnce(RotationSingleFlight) -> R) -> R {
     SINGLE_FLIGHT.with(|sf| f(sf.clone()))
 }
 
-/// RAII guard that removes an `anchor_id` from THIS worker thread's rotation
-/// single-flight map when dropped, so the entry is removed when the shared
-/// future resolves or is dropped.
-///
-/// The guard is owned by the SHARED rotation future's body, NOT by the leader
-/// request task. That distinction is the whole point: a `futures::Shared`
-/// future is driven to completion by whichever awaiter is alive, so if the
-/// leader's request is cancelled mid-flight (client disconnect / ntex
-/// timeout) after the entry was inserted, a surviving follower still drives
-/// the future, and the guard fires when the future (and thus its body) is
-/// dropped. If EVERY awaiter is dropped before the future resolves, the
-/// future body is dropped too and the guard still fires — so a half-started,
-/// never-resolved entry is also cleared rather than leaking. Either way the
-/// map only ever holds genuinely in-flight rotations, and a later rotation for the
-/// same anchor re-rotates instead of being handed a stale resolved wrapper
-/// forever.
+/// Removes the worker's rotation entry when the shared body completes or is
+/// cancelled. The body owns the guard, so a surviving follower can finish a
+/// rotation after the leading request disconnects. Dropping every caller
+/// releases the body and guard together.
 #[derive(Debug)]
-pub struct EntryGuard {
+pub(crate) struct EntryGuard {
     anchor_id: Uuid,
 }
 
@@ -577,7 +580,7 @@ impl EntryGuard {
     /// Create a guard that will remove `anchor_id` from the per-thread
     /// single-flight map on drop.
     #[must_use]
-    pub fn new(anchor_id: Uuid) -> Self {
+    pub(crate) fn new(anchor_id: Uuid) -> Self {
         Self { anchor_id }
     }
 }
@@ -591,6 +594,58 @@ impl Drop for EntryGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[compio::test]
+    async fn dropping_every_rotation_awaiter_cancels_the_body_and_removes_the_entry() {
+        use futures::{poll, FutureExt};
+
+        let id = Uuid::new_v4();
+        let rotation: SharedRotationFuture = (Box::pin(async move {
+            let _guard = EntryGuard::new(id);
+            futures::future::pending::<RotationResult>().await
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
+            .shared();
+        let mut leader = with_single_flight(|sf| sf.insert(id, rotation));
+        let mut follower = with_single_flight(|sf| sf.get(id)).unwrap();
+        assert!(poll!(&mut leader).is_pending());
+        assert!(poll!(&mut follower).is_pending());
+        drop(leader);
+        assert!(with_single_flight(|sf| sf.get(id)).is_some());
+        drop(follower);
+        let retained = with_single_flight(|sf| sf.get(id));
+        let in_flight = with_single_flight(|sf| sf.in_flight());
+        let leaked = retained.is_some();
+        // Observe before cleanup so a regression cannot hide the assertion
+        // behind a guard panicking during thread-local destruction.
+        with_single_flight(|sf| sf.remove(id));
+        drop(retained);
+        assert!(
+            !leaked,
+            "the map must not keep abandoned rotation work alive"
+        );
+        assert_eq!(in_flight, 0);
+    }
+
+    #[test]
+    fn an_unpolled_rotation_does_not_keep_its_map_entry_alive() {
+        use futures::FutureExt;
+
+        let sf = RotationSingleFlight::new();
+        let id = Uuid::new_v4();
+        let rotation = futures::future::pending::<RotationResult>()
+            .boxed_local()
+            .shared();
+        drop(sf.insert(id, rotation));
+        assert_eq!(sf.in_flight(), 0);
+        assert!(sf.get(id).is_none());
+        let replacement = futures::future::pending::<RotationResult>()
+            .boxed_local()
+            .shared();
+        let _caller = sf.insert(id, replacement);
+        assert!(sf.get(id).is_some());
+        assert_eq!(sf.in_flight(), 1);
+    }
 
     #[test]
     fn anchor_cookie_is_host_strict_httponly_secure() {
@@ -625,7 +680,10 @@ mod tests {
             parse_anchor_cookie("__Host-zeroship_app_anchor=not-a-uuid"),
             None
         );
-        assert_eq!(parse_anchor_cookie(&format!("zeroship_app_anchor={id}")), None);
+        assert_eq!(
+            parse_anchor_cookie(&format!("zeroship_app_anchor={id}")),
+            None
+        );
         // CRITICAL (MAJOR fix): the interactive OIDC cookie name must NOT be
         // parsed as an anchor — distinct stores, distinct names.
         let interactive = format!("__Host-zeroship_app_session={id}");
@@ -639,9 +697,15 @@ mod tests {
     #[test]
     fn breadcrumb_is_non_httponly_lax_host_keyed() {
         let c = set_breadcrumb_cookie("myapp.zeroship.ai");
-        assert!(c.starts_with("zs.myapp.zeroship.ai.is.authenticated=true"), "{c}");
+        assert!(
+            c.starts_with("zs.myapp.zeroship.ai.is.authenticated=true"),
+            "{c}"
+        );
         // Breadcrumb is readable by JS — NOT HttpOnly.
-        assert!(!c.contains("HttpOnly"), "breadcrumb must be JS-readable: {c}");
+        assert!(
+            !c.contains("HttpOnly"),
+            "breadcrumb must be JS-readable: {c}"
+        );
         assert!(c.contains("SameSite=Lax"), "{c}");
         assert!(c.contains("Secure"));
         assert!(c.contains("Max-Age=2592000"), "matches anchor 30d: {c}");
@@ -675,7 +739,8 @@ mod tests {
                 auth_time: None,
                 amr: vec![],
             })
-        }) as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
+        })
+            as std::pin::Pin<Box<dyn std::future::Future<Output = RotationResult>>>)
             .shared();
         let _leader = sf.insert(id, fut);
         assert_eq!(sf.in_flight(), 1);

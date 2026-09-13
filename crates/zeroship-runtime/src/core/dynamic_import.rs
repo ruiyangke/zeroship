@@ -1,9 +1,9 @@
 //! V8 host callback for dynamic imports.
 //!
 //! Imports resolve relative to the importing module against retained bundle
-//! sources and plugin adapters, then native factories and the core `zeroship`
-//! facade. Dependency graphs compile on demand and share cached module identity
-//! with static imports. This callback does not fetch source code.
+//! sources, plugin adapters and native factories. Dependency graphs compile on
+//! demand and share cached module identity with static imports. This callback
+//! does not fetch source code.
 //!
 //! Evaluation runs in a promise continuation, and the import resolves only
 //! after V8's cached evaluation promise settles. Linking and evaluation errors
@@ -150,24 +150,6 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
     }
 
     if let Some(module) = native_modules::resolve_native(scope, &spec) {
-        cache_into_registry(scope, &spec, module);
-        return import_registered(scope, resolver, specifier);
-    }
-
-    if spec == "zeroship" {
-        // The core facade has no imports. Plugin adapters are already in the
-        // registry and own their source delivery independently of this module.
-        let module = match modules::compile_module(scope, &spec, crate::init::ZEROSHIP_MODULE_JS) {
-            Ok(module) => module,
-            Err(error) => {
-                if let Some(exception) = scope.exception() {
-                    resolver.reject(scope, exception);
-                    return Some(resolver.get_promise(scope));
-                }
-                return Some(reject_typeerror(scope, resolver, &error));
-            }
-        };
-        let module = v8::Local::new(scope, module);
         cache_into_registry(scope, &spec, module);
         return import_registered(scope, resolver, specifier);
     }

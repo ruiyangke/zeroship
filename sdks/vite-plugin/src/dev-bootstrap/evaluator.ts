@@ -3,8 +3,6 @@
  * Same pattern as Cloudflare's __VITE_UNSAFE_EVAL__.
  */
 
-import { ssrModuleExportsKey } from "vite/module-runner";
-
 export const zeroshipEvaluator = {
   async runInlinedModule(
     context: Record<string, any>,
@@ -18,13 +16,12 @@ export const zeroshipEvaluator = {
   },
 
   async runExternalModule(filepath: string): Promise<any> {
-    // V8 runtime does not support dynamic import(). All modules should be
-    // inlined by Vite (resolved via node-compat polyfills or bundled).
-    // If we get here, the module was externalized — which is a config error.
+    // The host resolves this reserved module and shares its native exports
+    // with the bundled entry. Creator dependencies still belong to Vite.
+    if (filepath === "zeroship") return import("zeroship");
     throw new Error(
       `[zeroship] Cannot import external module "${filepath}". ` +
-      `The V8 runtime does not support dynamic import(). ` +
-      `Add this module to the node-compat polyfills or configure Vite to bundle it.`
+      `Configure Vite to bundle this dependency or provide a runtime module adapter.`
     );
   },
 };

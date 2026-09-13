@@ -7,6 +7,7 @@
 
 use compio_postgres::{Client, NoTls};
 use futures::FutureExt;
+use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -22,6 +23,7 @@ pub struct Database {
     pub(crate) url: url::Url,
     pub(crate) admin: Client,
     driver: compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>,
+    service_drivers: RefCell<Vec<compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>>>,
 }
 
 impl Database {
@@ -65,6 +67,7 @@ impl Database {
             url,
             admin,
             driver: compio::runtime::spawn(async move { connection.run().await }),
+            service_drivers: RefCell::new(Vec::new()),
         };
         let outcome = AssertUnwindSafe(async {
             compio::time::timeout(Duration::from_secs(45), Box::pin(test(&database)))
@@ -78,6 +81,10 @@ impl Database {
             let cached = POOL.with(|slot| slot.borrow_mut().take());
             if let Some((_, pool)) = cached {
                 pool.close().await;
+            }
+            let drivers = database.service_drivers.take();
+            for driver in drivers {
+                driver.await.expect("service driver task").expect("service connection");
             }
             loop {
                 let empty: bool = database.admin.query_one(
@@ -116,6 +123,21 @@ impl Database {
         url.set_username(role).unwrap();
         url.set_password(Some(role)).unwrap();
         DbConfig::new(url.as_str(), capacity)
+    }
+
+    pub(crate) async fn connect_as(&self, role: &str) -> Client {
+        let mut url = self.url.clone();
+        url.set_username(role).unwrap();
+        url.set_password(Some(role)).unwrap();
+        let (client, connection) = compio_postgres::connect(url.as_str(), NoTls)
+            .await
+            .expect("connect the service role");
+        self.service_drivers
+            .borrow_mut()
+            .push(compio::runtime::spawn(
+                async move { connection.run().await },
+            ));
+        client
     }
 
     pub(crate) async fn wait_until_blocked(&self, pids: &[i32]) {

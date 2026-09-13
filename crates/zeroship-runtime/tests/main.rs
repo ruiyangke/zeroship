@@ -127,6 +127,7 @@
 //! cannot distinguish "still correct" from "now passing for a new reason".
 
 mod common;
+mod zeroship_module;
 
 mod abort;
 mod abort_runtime;
