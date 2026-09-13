@@ -20,7 +20,7 @@ pub(super) async fn exercise(db: &Database) {
     let c = db.entity::<posts::Entity>().unwrap().alias("c").unwrap();
     let on = || {
         o.column(posts::nickname)
-            .eq_column(c.column(posts::title))
+            .eq(c.column(posts::title))
             .unwrap()
     };
     let read = || {
@@ -48,16 +48,15 @@ pub(super) async fn exercise(db: &Database) {
         .await
         .unwrap();
     assert!(unmatched[0].1.is_none());
-    assert!(
-        db.from(&o)
-            .left_join(&c, on())
-            .unwrap()
-            .select(c.row::<Summary>())
-            .unwrap()
-            .all()
-            .await
-            .is_err()
-    );
+    assert!(db
+        .from(&o)
+        .left_join(&c, on())
+        .unwrap()
+        .select(c.row::<Summary>())
+        .unwrap()
+        .all()
+        .await
+        .is_err());
 
     collection
         .delete(value!({"title":"join_child"}))
@@ -87,9 +86,17 @@ pub(super) async fn exercise(db: &Database) {
     grouped.joins.push(ReadJoin {
         kind: crate::sql::JoinKind::Left,
         source: child.clone(),
-        on: on(),
+        on: Predicate::compare(
+            Operand::Path(source.column("nickname").unwrap()),
+            CompareOp::Eq,
+            Operand::Path(child.column("title").unwrap()),
+        ),
     });
-    grouped.filter = o.column(posts::title).eq("join_parent").unwrap();
+    grouped.filter = Predicate::compare(
+        Operand::Path(source.column("title").unwrap()),
+        CompareOp::Eq,
+        Operand::Lit(crate::sql::Literal::Text("join_parent".into())),
+    );
     let count =
         AggregateRef::over_path(AggregateFunc::Count, child.column("id").unwrap(), false).unwrap();
     grouped.projection = vec![ReadProjection::Scalar {
@@ -135,11 +142,7 @@ pub(super) async fn exercise(db: &Database) {
             let b = tx.entity::<posts::Entity>()?.alias("b")?;
             let rows = tx
                 .from(&a)
-                .inner_join(
-                    &b,
-                    a.column(posts::nickname)
-                        .eq_column(b.column(posts::title))?,
-                )?
+                .inner_join(&b, a.column(posts::nickname).eq(b.column(posts::title))?)?
                 .filter(a.column(posts::title).eq("join_tx")?)
                 .select((a.row::<Summary>(), b.row::<Summary>()))?
                 .all()
