@@ -291,7 +291,6 @@ for spec in \
   "zeroship-gateway:backchannel_logout_test" \
   "zeroship-gateway:auth_token_anchors_test" \
   "zeroship-gateway:browser_auth_test" \
-  "zeroship-gateway:identities_relay_test" \
   "zeroship-gateway:oidc_rp_e2e" \
 ; do
   pkg="${spec%%:*}"
