@@ -36,6 +36,12 @@ pub struct WorkflowSettings {
     /// Issuer-bound peer verification keys.
     #[config(name = "workflow.service_peers_file", default = PathBuf::new())]
     pub service_peers_file: Operational<PathBuf>,
+    /// Private signing key for the workflow service's Control requests.
+    #[config(name = "workflow.service_key_file", default = PathBuf::new())]
+    pub service_key_file: Operational<PathBuf>,
+    /// Control origin used for deployment queue retention.
+    #[config(name = "workflow.control_url", default = String::new())]
+    pub control_url: Operational<String>,
     /// HTTP worker threads.
     #[config(name = "workflow.http_threads", default = 2)]
     pub http_threads: Operational<usize>,

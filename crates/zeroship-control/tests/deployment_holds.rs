@@ -7,6 +7,11 @@
 #[path = "../../zeroship-workflow-server/tests/support/platform.rs"]
 mod platform;
 
+#[path = "deployment_holds/queue.rs"]
+mod queue_holds;
+#[path = "deployment_holds/collector.rs"]
+mod collector;
+
 use ntex::{
     client::Client,
     http::StatusCode,
@@ -15,21 +20,21 @@ use ntex::{
         types::{Json, State},
     },
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     num::NonZeroU32,
     rc::Rc,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore, LocalWorkflowBlobStore, WorkflowBlobStore};
 use zeroship_control::{
-    deployment_hold_api::{self, DeploymentHoldApi},
     AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
+    deployment_hold_api::{self, DeploymentHoldApi},
 };
 use zeroship_core::{
     app_id::AppId,
@@ -40,33 +45,34 @@ use zeroship_core::{
         InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
         ServiceTrustBundle, TransportAssertionVerifier,
     },
-    service_identity::{endpoints, verify_service_call, ServiceEndpoint},
+    service_identity::{ServiceEndpoint, endpoints, verify_service_call},
     service_peers::{
-        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME,
+        CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKER_SERVICE_NAME,
+        WORKFLOW_SERVICE_NAME, service_issuer,
     },
     typed_id,
     workflow_coordination::{
-        AssignScope, Assignment, Failure, FailureCode, RegisterWorker, RequestId, VerifyAssignment,
-        WorkerId, WorkerState, AUDIENCE,
+        AUDIENCE, AssignScope, Assignment, Failure, FailureCode, RegisterWorker, RequestId,
+        VerifyAssignment, WorkerId, WorkerState,
     },
 };
 use zeroship_data_orm::{
-    binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
+    ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
 };
 use zeroship_workflow::{
+    WorkflowServiceError,
     deployment_holds::{
         DeploymentHoldClient, HoldGeneration, HoldReceipt, HoldRequest, HoldScope, HoldState,
         RemoteDeploymentHolds,
     },
-    WorkflowServiceError,
 };
 use zeroship_workflow_client::{
     ControlCoordinator, Error as CoordinationError, Options, WorkerCoordinator,
 };
 use zeroship_workflow_server::{
+    WorkflowHttpState,
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     coordinator::{Coordinator, Options as CoordinatorOptions},
-    WorkflowHttpState,
 };
 
 fn signer(issuer: ServiceIssuer, key: ServiceSigningKey) -> Arc<ServiceAuth> {
@@ -84,6 +90,7 @@ struct Fixture {
     platform: platform::Platform,
     state: Arc<AppState>,
     worker_role: Arc<ServiceAuth>,
+    workflow_role: Arc<ServiceAuth>,
     control_url: String,
 }
 
@@ -100,10 +107,18 @@ impl Fixture {
             service_issuer(WORKER_SERVICE_NAME).unwrap(),
             ServiceSigningKey::generate(),
         );
+        let workflow_role = signer(
+            service_issuer(WORKFLOW_SERVICE_NAME).unwrap(),
+            ServiceSigningKey::generate(),
+        );
         let (worker_issuer, worker_key) = worker_role.signing_identity().unwrap();
         let mut peers = ServiceTrustBundle::new();
         peers
             .trust_signing_key(worker_issuer, worker_key.key_id(), worker_key)
+            .unwrap();
+        let (workflow_issuer, workflow_key) = workflow_role.signing_identity().unwrap();
+        peers
+            .trust_signing_key(workflow_issuer, workflow_key.key_id(), workflow_key)
             .unwrap();
         let service_auth = Arc::new(ServiceAuth::new(
             ServiceKeyring::from_parts(
@@ -177,6 +192,7 @@ impl Fixture {
             platform,
             state,
             worker_role,
+            workflow_role,
             control_url,
         }
     }
@@ -248,9 +264,11 @@ impl Fixture {
 
     async fn coordinator(&self) -> test::TestServer {
         let url = self.platform.runtime_url.clone();
+        let catalog_url = self.control_url.clone();
         let control = self.state.service_auth.clone();
         test::server(move || {
             let url = url.clone();
+            let catalog_url = catalog_url.clone();
             let control = control.clone();
             async move {
                 let registry = Arc::new(platform::connect(&url).await);
@@ -266,6 +284,12 @@ impl Fixture {
                             assignment_ttl: Duration::from_secs(120),
                             ..CoordinatorOptions::default()
                         },
+                        Rc::new(zeroship_workflow_manager::retention::CatalogClient::new(
+                            zeroship_workflow_manager::deployments::DeploymentHolds::new(
+                                database(&catalog_url).await,
+                            )
+                            .unwrap(),
+                        )),
                     )
                     .await
                     .unwrap(),
@@ -933,11 +957,13 @@ async fn failed_final_placement_authorization_rolls_back_hold_generations() {
             before,
             "the deferred commit barrier must retain the uncommitted mutation"
         );
-        assert!(blocker
-            .query_one("SELECT pg_advisory_unlock(73921863)", &[])
-            .await
-            .unwrap()
-            .get::<_, bool>(0));
+        assert!(
+            blocker
+                .query_one("SELECT pg_advisory_unlock(73921863)", &[])
+                .await
+                .unwrap()
+                .get::<_, bool>(0)
+        );
         compio::time::timeout(Duration::from_secs(3), async {
             loop {
                 let active: bool = fixture

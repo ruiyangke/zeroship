@@ -331,6 +331,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `control.tax_provider` | operational | `ZEROSHIP_CONTROL_TAX_PROVIDER` | `control.tax_provider` | zeroship-control `--tax-provider` | `native` |
 | `control.worker_enrolment_networks` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS` | `control.worker_enrolment_networks` | zeroship-control `--worker-enrolment-networks` | empty |
 | `control.worker_enrolment_ports` | operational | `ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS` | `control.worker_enrolment_ports` | zeroship-control `--worker-enrolment-ports` | empty |
+| `control.workflow_coordinator_url` | operational | `ZEROSHIP_CONTROL_WORKFLOW_COORDINATOR_URL` | `control.workflow_coordinator_url` | zeroship-control `--workflow-coordinator-url` | `http://127.0.0.1:9093` |
 
 ### data-cdc-server
 
@@ -425,6 +426,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | --- | --- | --- | --- | --- | --- |
 | `workflow.assignment_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_ASSIGNMENT_TTL_MS` | `workflow.assignment_ttl_ms` | zeroship-workflow-server `--assignment-ttl-ms` | `30000` |
 | `workflow.batch_limit` | operational | `ZEROSHIP_WORKFLOW_BATCH_LIMIT` | `workflow.batch_limit` | zeroship-workflow-server `--batch-limit` | `128` |
+| `workflow.control_url` | operational | `ZEROSHIP_WORKFLOW_CONTROL_URL` | `workflow.control_url` | zeroship-workflow-server `--control-url` | empty |
 | `workflow.database_acquire_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DATABASE_ACQUIRE_TIMEOUT_MS` | `workflow.database_acquire_timeout_ms` | zeroship-workflow-server `--database-acquire-timeout-ms` | `5000` |
 | `workflow.database_command_timeout_ms` | operational | `ZEROSHIP_WORKFLOW_DATABASE_COMMAND_TIMEOUT_MS` | `workflow.database_command_timeout_ms` | zeroship-workflow-server `--database-command-timeout-ms` | `10000` |
 | `workflow.database_connections` | operational | `ZEROSHIP_WORKFLOW_DATABASE_CONNECTIONS` | `workflow.database_connections` | zeroship-workflow-server `--database-connections` | `8` |
@@ -435,6 +437,7 @@ Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is
 | `workflow.max_pending_management` | operational | `ZEROSHIP_WORKFLOW_MAX_PENDING_MANAGEMENT` | `workflow.max_pending_management` | zeroship-workflow-server `--max-pending-management` | `1024` |
 | `workflow.max_request_bytes` | operational | `ZEROSHIP_WORKFLOW_MAX_REQUEST_BYTES` | `workflow.max_request_bytes` | zeroship-workflow-server `--max-request-bytes` | `crate::api::DEFAULT_MAX_REQUEST_BYTES` |
 | `workflow.replay_sweep_ms` | operational | `ZEROSHIP_WORKFLOW_REPLAY_SWEEP_MS` | `workflow.replay_sweep_ms` | zeroship-workflow-server `--replay-sweep-ms` | `30000` |
+| `workflow.service_key_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_KEY_FILE` | `workflow.service_key_file` | zeroship-workflow-server `--service-key-file` | empty |
 | `workflow.service_peers_file` | operational | `ZEROSHIP_WORKFLOW_SERVICE_PEERS_FILE` | `workflow.service_peers_file` | zeroship-workflow-server `--service-peers-file` | empty |
 | `workflow.worker_ttl_ms` | operational | `ZEROSHIP_WORKFLOW_WORKER_TTL_MS` | `workflow.worker_ttl_ms` | zeroship-workflow-server `--worker-ttl-ms` | `30000` |
 

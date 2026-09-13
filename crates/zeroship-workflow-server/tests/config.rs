@@ -15,6 +15,8 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         toml::to_string(&serde_json::json!({"workflow":{
             "database_url":"postgres://unused:private-workflow-password@127.0.0.1:1/unreachable",
             "service_peers_file":dir.path().join("unread-peers"),
+            "service_key_file":dir.path().join("unread-workflow-key"),
+            "control_url":"https://control.example.test",
             "batch_limit":3,
         }}))
         .unwrap(),
@@ -77,17 +79,54 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         .output()
         .unwrap();
     assert!(!invalid.status.success());
-    for flag in [
-        "--payload-url",
-        "--service-key-file",
-        "--max-running",
-        "--lease-ms",
-    ] {
+    for flag in ["--payload-url", "--max-running", "--lease-ms"] {
         assert!(WorkflowSettingsSources::try_parse_from([
             "zeroship-workflow-server",
             flag,
             "unused"
         ])
         .is_err());
+    }
+}
+
+#[test]
+fn retention_configuration_requires_a_signer_and_unambiguous_control_origin() {
+    let valid = serde_json::json!({"workflow":{
+        "database_url":"postgres://unused@127.0.0.1:1/unreachable",
+        "service_peers_file":"unread-peers", "service_key_file":"unread-key",
+        "control_url":"https://control.example.test",
+    }});
+    let resolve = |input: &serde_json::Value| {
+        let overlay = toml::from_str(&toml::to_string(input).unwrap()).unwrap();
+        let settings = WorkflowSettings::resolve_config(
+            WorkflowSettingsSources::try_parse_from(["zeroship-workflow-server", "--no-config"])
+                .unwrap(),
+            Some(&overlay),
+        )
+        .unwrap();
+        ServerOptions::resolve(&settings)
+    };
+    resolve(&valid).unwrap();
+    for field in ["control_url", "service_key_file"] {
+        let mut missing = valid.clone();
+        missing["workflow"].as_object_mut().unwrap().remove(field);
+        assert!(resolve(&missing).is_err(), "missing {field}");
+    }
+    for url in [
+        "http://control.example.test",
+        "https://user:secret@control.example.test",
+        "https://control.example.test/path",
+        "https://control.example.test?query",
+        "https://control.example.test#fragment",
+        "not a URL",
+    ] {
+        let mut invalid = valid.clone();
+        invalid["workflow"]["control_url"] = url.into();
+        assert!(resolve(&invalid).is_err(), "accepted {url}");
+    }
+    for url in ["http://127.0.0.1:9090", "http://[::1]:9090"] {
+        let mut loopback = valid.clone();
+        loopback["workflow"]["control_url"] = url.into();
+        resolve(&loopback).unwrap();
     }
 }

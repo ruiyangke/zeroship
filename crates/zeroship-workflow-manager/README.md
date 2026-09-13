@@ -11,6 +11,8 @@ serialized across apps. Native job operations verify stored assignments and
 invoke the host's current enrollment check inside the queue transaction.
 Recovery pagination filters existing owners before
 ending a result page, so owned scopes cannot hide later recovery work.
+Coordinator reads use generated field predicates and native `FromRow` decoding;
+the queue's app locks and conditional writes remain the serialization boundary.
 
 `Queue` binds a provisioned platform database. App locks serialize queue changes;
 delivery attempts fence retries and stale acknowledgements. Settlement writes
@@ -31,8 +33,8 @@ catch-up boundary and remaining allowance. Occurrences wait for their own
 activation job to complete; replacement stops future generation without changing
 already queued jobs. Claims and receipt replay verify stored job linkage, and
 frontier extension checks the immutable descriptor and calendar interpretation.
-The manager host loop, creator activation/cron handlers and queue-owned deployment
-holds still need composition before production scheduling can be enabled.
+Creator activation is handled by the customer engine. The manager host loop and
+creator cron handler still need composition before production scheduling can be enabled.
 
 `recovery::Recovery` stores persistent scope responsibility and publishes due
 reconciliation into this queue. Repeated activation registration preserves its
@@ -47,6 +49,14 @@ epoch handshake still require integration before enabling customer ingress.
 It records normal app deployments and generation-fenced retention holds. Manager
 queue ownership and customer journal ownership require separate host authority;
 the journal hold API does not grant manager access.
+
+`retention::HoldClient` supplies the queue's Control capability. Queue publication,
+activation and recovery require a confirmed deployment hold. The queue persists
+acquire/release intents and generations; network requests run outside its database
+transactions. Release closes publication and checks pending jobs, schedule
+frontiers and recovery responsibility under the app lock. Completed receipts may
+replay after code reclamation. A host must reconcile unfinished intents, and
+Control reclamation must consult the shared ledger before deleting manifests.
 
 `schema/` and `schema/deployments/` record definitions through the migration DSL
 and generate migration metadata and dialect DDL. Rust ORM models use native

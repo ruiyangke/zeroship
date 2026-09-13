@@ -193,14 +193,15 @@ pub fn spawn_all_with_options(
             .await;
         })
         .detach();
-
-        let deploy_retention_state = Arc::clone(&state);
-        compio::runtime::spawn(async move {
-            deploy_retention::run(deploy_retention_state, deploy_retention::DEFAULT_TICK_SECS)
-                .await;
-        })
-        .detach();
     }
+
+    // Normal deployment retention is platform catalog work, independent of the
+    // legacy workflow journal sweeps and their timer authority.
+    let deploy_retention_state = Arc::clone(&state);
+    compio::runtime::spawn(async move {
+        deploy_retention::run(deploy_retention_state, deploy_retention::DEFAULT_TICK_SECS).await;
+    })
+    .detach();
 
     // Dunning sweep (billing G2) — suspends each `past_due` organization whose
     // dunning window (`max_dunning_days`, default 7) has elapsed; the gateway

@@ -1,4 +1,6 @@
 //! Verify platform provisioning and workflow metadata database authority.
+#[path = "support/holds.rs"]
+mod holds;
 #[path = "support/platform.rs"]
 mod platform;
 
@@ -7,7 +9,7 @@ use zeroship_workflow_server::coordinator::{Coordinator, Options};
 #[ntex::test]
 async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     let fixture = platform::Platform::new().await;
-    let service = Coordinator::connect(&fixture.runtime_url, Options::default())
+    let service = Coordinator::connect(&fixture.runtime_url, Options::default(), holds::client())
         .await
         .unwrap();
     service.verify().await.unwrap();
@@ -89,12 +91,28 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
             "GRANT CREATE ON SCHEMA workflow_manager TO zeroship_workflow",
             "REVOKE CREATE ON SCHEMA workflow_manager FROM zeroship_workflow",
         ),
+        (
+            "GRANT TRIGGER ON workflow_manager.deployment_holds TO zeroship_workflow",
+            "REVOKE TRIGGER ON workflow_manager.deployment_holds FROM zeroship_workflow",
+        ),
     ] {
         fixture.admin.batch_execute(grant).await.unwrap();
         assert!(service.verify().await.is_err(), "startup accepted {grant}");
         fixture.admin.batch_execute(revoke).await.unwrap();
         service.verify().await.unwrap();
     }
+    fixture
+        .admin
+        .batch_execute("REVOKE UPDATE ON workflow_manager.deployment_holds FROM zeroship_workflow")
+        .await
+        .unwrap();
+    assert!(service.verify().await.is_err());
+    fixture
+        .admin
+        .batch_execute("GRANT UPDATE ON workflow_manager.deployment_holds TO zeroship_workflow")
+        .await
+        .unwrap();
+    service.verify().await.unwrap();
     assert!(fixture.work.path().join("migrate.toml").is_file());
 }
 
@@ -122,6 +140,7 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
         ),
         &fixture.runtime_url,
         QueueOptions::default(),
+        holds::client(),
     )
     .await
     .unwrap();
@@ -171,6 +190,7 @@ async fn manager_scheduling_authority(fixture: &platform::Platform) {
         ),
         &fixture.runtime_url,
         QueueOptions::default(),
+        holds::client(),
     )
     .await
     .unwrap();
@@ -255,6 +275,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             .collect::<Vec<_>>(),
         [
             "assignments",
+            "deployment_holds",
             "jobs",
             "management",
             "placement_receipts",

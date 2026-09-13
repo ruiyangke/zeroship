@@ -5,6 +5,12 @@
   "queue_scopes": [
     "id"
   ],
+  "deployment_holds": [
+    "id",
+    "app_id",
+    "deployment_id",
+    "holder_id"
+  ],
   "workers": [
     "id"
   ],

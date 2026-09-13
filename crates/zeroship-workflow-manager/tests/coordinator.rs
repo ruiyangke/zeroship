@@ -77,9 +77,14 @@ case!(
 );
 
 async fn host(fixture: &Fixture, options: Options) -> (Coordinator, Queue) {
-    let queue = Queue::connect(fixture.binding(), fixture.url(), QueueOptions::default())
-        .await
-        .unwrap();
+    let queue = Queue::connect(
+        fixture.binding(),
+        fixture.url(),
+        QueueOptions::default(),
+        support::synthetic_holds(),
+    )
+    .await
+    .unwrap();
     let coordinator = Coordinator::new(queue.clone(), options).unwrap();
     (coordinator, queue)
 }

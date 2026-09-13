@@ -25,6 +25,9 @@ use zeroship_workflow_server::coordinator::{Coordinator, Error as HostError, Opt
 
 type StoredIds = BTreeMap<(String, String, String), String>;
 
+#[path = "support/holds.rs"]
+mod holds;
+
 struct Fixture {
     _postgres: Container<GenericImage>,
     admin: Client,
@@ -71,7 +74,7 @@ impl Fixture {
             "GRANT USAGE ON SCHEMA workflow_manager TO coordinator_test;
              GRANT SELECT ON workflow_manager.schema_version TO coordinator_test;
              GRANT SELECT,INSERT,UPDATE,DELETE ON workflow_manager.workers,
-               workflow_manager.queue_scopes,workflow_manager.assignments,
+               workflow_manager.queue_scopes,workflow_manager.deployment_holds,workflow_manager.assignments,
                workflow_manager.placement_receipts,workflow_manager.management,workflow_manager.jobs TO coordinator_test;"
         ).await.unwrap();
         Self {
@@ -84,7 +87,7 @@ impl Fixture {
         self.options(Options::default()).await
     }
     async fn options(&self, options: Options) -> Coordinator {
-        Coordinator::connect(&self.runtime_url, options)
+        Coordinator::connect(&self.runtime_url, options, holds::client())
             .await
             .unwrap()
     }
@@ -790,7 +793,7 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         .unwrap();
     assert_eq!(service.verify().await, Err(HostError::Unavailable));
     assert!(matches!(
-        Coordinator::connect(&fixture.runtime_url, Options::default()).await,
+        Coordinator::connect(&fixture.runtime_url, Options::default(), holds::client()).await,
         Err(HostError::Unavailable)
     ));
 }

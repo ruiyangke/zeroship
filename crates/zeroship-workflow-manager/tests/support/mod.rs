@@ -3,16 +3,80 @@
     reason = "fixture connections stay on their compio runtime"
 )]
 
-use std::{future::Future, pin::Pin};
+use std::{future::Future, pin::Pin, rc::Rc};
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::SyncRunner,
     Container, GenericImage, ImageExt,
 };
-use zeroship_core::schema_name::SchemaName;
+use zeroship_core::{
+    app_id::AppId,
+    schema_name::SchemaName,
+    workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
+    workflow_jobs::DeploymentId,
+};
 use zeroship_data_orm::{
     binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
 };
+use zeroship_workflow_manager::{retention::HoldClient, Error};
+
+/// Queue state-machine tests use invented deployment identities. Retention
+/// safety tests instead compose the real catalog and published app artifacts.
+#[allow(
+    dead_code,
+    reason = "retention safety tests bind the real deployment catalog"
+)]
+pub fn synthetic_holds() -> Rc<dyn HoldClient> {
+    Rc::new(SyntheticHolds)
+}
+
+#[derive(Debug)]
+struct SyntheticHolds;
+
+impl SyntheticHolds {
+    fn receipt(
+        app: &AppId,
+        deployment: &DeploymentId,
+        generation: HoldGeneration,
+        state: HoldState,
+    ) -> HoldReceipt {
+        HoldReceipt {
+            app_id: app.clone(),
+            deploy_id: deployment.as_str().into(),
+            deploy_hash: zeroship_bundle::sha256_hex(deployment.as_str().as_bytes()),
+            holder_id: HoldScope::for_queue(app.clone()).holder().into(),
+            generation,
+            state,
+        }
+    }
+}
+
+impl HoldClient for SyntheticHolds {
+    fn acquire<'a>(
+        &'a self,
+        app: &'a AppId,
+        deployment: &'a DeploymentId,
+        generation: HoldGeneration,
+    ) -> Pin<Box<dyn Future<Output = Result<HoldReceipt, Error>> + 'a>> {
+        Box::pin(async move { Ok(Self::receipt(app, deployment, generation, HoldState::Held)) })
+    }
+
+    fn release<'a>(
+        &'a self,
+        app: &'a AppId,
+        deployment: &'a DeploymentId,
+        generation: HoldGeneration,
+    ) -> Pin<Box<dyn Future<Output = Result<HoldReceipt, Error>> + 'a>> {
+        Box::pin(async move {
+            Ok(Self::receipt(
+                app,
+                deployment,
+                generation,
+                HoldState::Released,
+            ))
+        })
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub enum Backend {
@@ -133,7 +197,7 @@ impl Fixture {
     }
 
     pub fn binding(&self) -> DbBinding {
-        DbBinding::new("workflow_manager", "manager-test", self.schema.clone())
+        DbBinding::new("workflow_manager", "manager-test", self.schema().clone())
     }
 
     pub fn options(&self) -> ConnectOptions {

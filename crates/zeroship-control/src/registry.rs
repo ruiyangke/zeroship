@@ -696,17 +696,26 @@ impl Registry {
 
         let deploy_id = zeroship_core::typed_id::generate("dep");
         let row = tx
-            .query_one(
+            .query_opt(
                 "INSERT INTO zeroship.app_deploys \
                     (id, app_id, deploy_hash, manifest_json, activated_at) \
                  VALUES ($1, $2, $3, $4, now()) \
                  ON CONFLICT (app_id, deploy_hash) DO UPDATE SET \
                     manifest_json = EXCLUDED.manifest_json, \
                     activated_at = now() \
+                 WHERE app_deploys.retention_state = 'available' \
                  RETURNING id",
                 &[&deploy_id, &id.as_str(), &deploy_hash, &manifest_json],
             )
             .await?;
+        // The collector holds apps before fencing app_deploys, matching this
+        // transaction's lock order. A tombstone refuses the complete activation,
+        // including the live pointer UPDATE above; it must never reopen admission.
+        let Some(row) = row else {
+            return Err(RegistryError::Conflict(
+                "deployment retention has closed activation".into(),
+            ));
+        };
         let deploy_id: String = row.get("id");
         crate::cron::workflow_schedules::reconcile_deploy_schedules(
             &tx,

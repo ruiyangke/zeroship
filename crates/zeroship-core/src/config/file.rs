@@ -366,6 +366,10 @@ pub struct WorkflowSection {
     pub listen: Option<String>,
     /// Issuer-bound peer verification keys.
     pub service_peers_file: Option<PathBuf>,
+    /// Workflow service signing key for authenticated Control requests.
+    pub service_key_file: Option<PathBuf>,
+    /// Control origin for deployment queue retention.
+    pub control_url: Option<String>,
     /// HTTP worker threads.
     pub http_threads: Option<usize>,
     /// Maximum connections per HTTP thread.
