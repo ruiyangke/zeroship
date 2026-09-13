@@ -1,9 +1,8 @@
 /**
  * Node-side shim for the "zeroship" virtual module.
  *
- * Inside the V8 runtime the kernel synthesizes a real module from
- * `ZEROSHIP_MODULE_JS` that wires env/waitUntil/getRequest to native
- * callbacks. That module is never resolved via Node's resolver.
+ * Inside the V8 runtime the kernel supplies native module exports
+ * for env/waitUntil/getRequest. That module is never resolved via Node's resolver.
  *
  * Node-based SDK unit tests, however, do go through the resolver — so
  * we ship this tiny file-linked stub to keep `import { env } from "zeroship"`
@@ -11,7 +10,7 @@
  *
  * ## Mutability contract
  *
- * Production `env` is frozen (via `Object.freeze` in ZEROSHIP_MODULE_JS).
+ * The runtime freezes production `env` before creator evaluation.
  * This test-time stub is intentionally mutable — tests set
  * `env.auth = { getUser: ... }` to simulate a registered AuthPlugin,
  * then clear it. SDK code must only READ env, not mutate it, so this
@@ -23,7 +22,7 @@ export const env = {};
 
 /** Test-time waitUntil — accepts a promise, drops it on the floor. */
 export function waitUntil(_promise) {
-  // No-op in test environment. Real implementation calls __zs_wait_until().
+  // No-op in test environment. The native export registers background work with its request.
 }
 
 /** Test-time getRequest — always throws. Tests never call this. */

@@ -177,98 +177,6 @@ pub struct HttpResult {
 // requires a rollback, restore from `git log --diff-filter=D --
 // crates/runtime/src/embed/websocket.js`.
 
-/// The `zeroship` user-facing ESM module. Exposes the request-scoped helpers
-/// that SDK packages lean on:
-///
-/// - `env`: a frozen snapshot of per-app env vars (same as `fetch`'s 2nd arg).
-/// - `waitUntil(promise)`: extend the isolate's hold on a request past its
-///   response so fire-and-forget work (log flush, webhook retry) can finish.
-/// - `getRequest()`: look up the current `Request` from any nested module
-///   without threading it through every call. Throws if called outside a
-///   request (bootstrap hasn't bound a ctx yet).
-///
-/// `__zs_wait_until` is registered by `setup_globals`; it throws to JS when
-/// called outside a request. `__zs_env` / `__zs_get_request_ctx` are the
-/// other halves.
-pub(crate) const ZEROSHIP_MODULE_JS: &str = r#"
-const env = Object.freeze(__zs_env());
-
-function waitUntil(promise) {
-    if (!(promise instanceof Promise)) {
-        throw new TypeError("waitUntil expects a Promise");
-    }
-    __zs_wait_until(promise);
-}
-
-function getRequest() {
-    // Kernel stashes the Request JS object on `state.request_by_id`
-    // when it builds one in call_fetch_handler's slow path. The RPC
-    // fast-path does NOT build a Request (body-is-args dispatch), so
-    // getRequest() returns null there — use the default.fetch contract
-    // when you need header/url access.
-    const req = __zs_get_request();
-    if (!req) {
-        throw new Error("getRequest called outside a fetch handler (RPC fast-path has no Request)");
-    }
-    return req;
-}
-
-// RPC v2 ALS-backed per-request context. Returns
-// the frozen `ctx` object during a `default.rpc(...)` call and
-// `undefined` outside one. The npm `@zeroship/server` package layers
-// `user()` / `request()` / `idempotencyKey()` etc. on top of this.
-function getRequestContext() {
-    return globalThis.__zeroshipGetRpcCtx();
-}
-
-// runQuery / runMutation — RPC composition primitives. Pass the
-// wrapped handler function (the value returned from query()/mutation()).
-// The handler runs with its declared kind on the capability stack — DB
-// write refusal, fetch refusal, and downstream capability checks see
-// the inner kind, not the caller's kind.
-async function _runWithKind(kind, fn, args) {
-    if (typeof fn !== "function") {
-        throw new TypeError("runQuery/runMutation: first arg must be a procedure function");
-    }
-    const ek = globalThis.__zsEnterKind;
-    const xk = globalThis.__zsExitKind;
-    const tok = (typeof ek === "function") ? ek(kind) : -1;
-    try {
-        const out = fn(args);
-        return (out && typeof out.then === "function") ? await out : out;
-    } finally {
-        if (tok >= 0 && typeof xk === "function") xk(tok);
-    }
-}
-function runQuery(fn, args) { return _runWithKind("query", fn, args); }
-function runMutation(fn, args) { return _runWithKind("mutation", fn, args); }
-
-// Per-request accessors — read fields off the same kernel-built ctx
-// object getRequestContext() returns. Throw outside a request scope
-// (the holder is undefined). Each returns the field value the
-// equivalent ctx.<field> getter would, if ctx were a handler parameter.
-function _requireCtx(name) {
-    const ctx = globalThis.__zeroshipGetRpcCtx();
-    if (!ctx) {
-        throw new Error(name + ": called outside a request handler");
-    }
-    return ctx;
-}
-function currentUser()           { return _requireCtx("currentUser").user; }
-function currentRequestId()      { return _requireCtx("currentRequestId").requestId; }
-function currentTraceId()        { return _requireCtx("currentTraceId").traceId; }
-function currentSignal()         { return _requireCtx("currentSignal").signal; }
-function currentHeaders()        { return _requireCtx("currentHeaders").headers; }
-function currentIdempotencyKey() { return _requireCtx("currentIdempotencyKey").idempotencyKey; }
-
-export {
-    env, waitUntil, getRequest, getRequestContext,
-    runQuery, runMutation,
-    currentUser, currentRequestId, currentTraceId,
-    currentSignal, currentHeaders, currentIdempotencyKey,
-};
-"#;
-
 /// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
 /// wrapping the user's original entry (renamed internally to `__user__.js`).
 ///
@@ -2351,11 +2259,9 @@ pub(crate) fn prepare_application(
 
     // Wrap the user's module graph in the bootstrap entry.
     //
-    // Layout after wrapping:
-    //   entries[0] = "index.js"            — BOOTSTRAP_JS (the new entry)
-    //   entries[1] = "__user__.js"         — user's original entry (source preserved)
-    //   entries[2] = "zeroship"            — env / waitUntil / getRequest facade
-    //   entries[3..] = user's other modules (unchanged specifiers)
+    // The wrapper contains the bootstrap, its private capability bridge,
+    // the renamed creator entry and the remaining creator sources. Native
+    // modules resolve through the runtime factories.
     //
     // The load_modules walker compiles BOOTSTRAP_JS first, discovers its
     // import (`./__user__.js`) and transitively the user's `zeroship`
@@ -2380,8 +2286,8 @@ pub(crate) fn prepare_application(
 /// Rewrite the user's module list so the bootstrap is the new entry.
 ///
 /// The user's declared first module is renamed to `__user__.js`; a synthetic
-/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry, plus the
-/// `zeroship` facade module.
+/// `index.js` (BOOTSTRAP_JS) is prepended as the new entry. Native modules
+/// resolve through the runtime factories.
 ///
 /// **Collision**: the compiler always emits `index.js` as the user's entry,
 /// so a user entry actually named `__user__.js` is a bug if it happens. A
@@ -2434,14 +2340,6 @@ fn wrap_with_bootstrap(
     out.push(ModuleEntry {
         specifier: "__user__.js".into(),
         source: user_entry.source.clone(),
-    });
-
-    // entry 3: the zeroship facade module. Lives in the module graph
-    // alongside the user's modules so `import ... from "zeroship"`
-    // resolves via the normal lookup path.
-    out.push(ModuleEntry {
-        specifier: "zeroship".into(),
-        source: ZEROSHIP_MODULE_JS.into(),
     });
 
     // Remaining user modules — pass through unchanged. Their declared
@@ -2927,37 +2825,6 @@ fn zs_bind_request_ctx_callback(
     state.borrow_mut().request_ctx_by_id.insert(rid, global_obj);
 }
 
-/// `__zs_wait_until(promise)` — push a Promise onto the current request's
-/// waitUntil bag. The kernel keeps the isolate alive past the response body
-/// write until every promise here settles (or the wall timeout fires).
-///
-/// Type-checking and TypeError on non-Promise args is done in the JS-side
-/// `zeroship.waitUntil` wrapper; this op defensively no-ops on bad input so
-/// a JS-side bug can't crash the isolate. Silent no-op when called outside
-/// an active request — the JS side already checks and doesn't call us in
-/// that case, but be conservative for robustness.
-fn zs_wait_until_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let state = scope
-        .get_slot::<crate::state::SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    let arg = args.get(0);
-    if !arg.is_promise() {
-        return;
-    }
-    let promise: v8::Local<v8::Promise> = arg.try_into().unwrap();
-    let global = v8::Global::new(scope, promise);
-    if let Some(request_id) = crate::core::invocation::current_request_id(scope, &state) {
-        state.borrow_mut().register_wait_until(request_id, global);
-    }
-    // With no active invocation, drop the promise silently. The JS-side
-    // wrapper is the user-facing contract for that case.
-}
-
 /// `__zs_get_request_ctx()` — return the stashed `ctx` object for the
 /// currently-executing request, or `null` if none was bound (no active
 /// request, or bootstrap hasn't run). Returns the exact same object
@@ -2981,40 +2848,6 @@ fn zs_get_request_ctx_callback(
         Some(ctx_global) => {
             let ctx_local = v8::Local::new(scope, ctx_global);
             rv.set(ctx_local.into());
-        }
-        None => {
-            rv.set(v8::null(scope).into());
-        }
-    }
-}
-
-/// `__zs_get_request()` — return the Request JS object for the current
-/// in-flight request, or `null` if none (e.g. the RPC fast-path doesn't
-/// construct a Request since there's no URL/header work to do).
-///
-/// The kernel stores the Request at call_fetch_handler's slow-path entry,
-/// immediately after it calls `build_kernel_request`. Stored
-/// keyed by the same `executing_request_id` that drives per_request_user
-/// / waitUntil / logs, so cleanup rides on `drain_request_logs`.
-fn zs_get_request_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let state: SharedState = scope
-        .get_slot::<SharedState>()
-        .expect("RuntimeState not in isolate slot")
-        .clone();
-    let rid_opt = crate::core::invocation::current_request_id(scope, &state);
-    let Some(rid) = rid_opt else {
-        rv.set(v8::null(scope).into());
-        return;
-    };
-    let req_opt = state.borrow().request_by_id.get(&rid).cloned();
-    match req_opt {
-        Some(req_global) => {
-            let local = v8::Local::new(scope, req_global);
-            rv.set(local.into());
         }
         None => {
             rv.set(v8::null(scope).into());
@@ -3371,8 +3204,7 @@ fn setup_globals_with_descriptor(
     }
 
     // __zs_env — returns the frozen env snapshot (same as fetch's 2nd arg).
-    // The zeroship JS module exposes this as `const env = Object.freeze(__zs_env());`
-    // so SDK packages can read env.* without threading it through fetch().
+    // The bootstrap capability bridge still captures this callback.
     {
         let f = v8::Function::new(scope, zs_env_callback).unwrap();
         let key = v8::String::new(scope, "__zs_env").unwrap();
@@ -3460,24 +3292,6 @@ fn setup_globals_with_descriptor(
         let get_key = v8::String::new(scope, "__zs_get_request_ctx").unwrap();
         let get_fn = v8::Function::new(scope, zs_get_request_ctx_callback).unwrap();
         global.set(scope, get_key.into(), get_fn.into());
-
-        // __zs_get_request — direct-read for the current Request JS object.
-        // Stored by the kernel in `state.request_by_id` on the fetch()
-        // slow path; empty for the RPC fast-path (no Request built). Lets
-        // `getRequest()` skip a per-request __bindRequest round-trip.
-        let req_key = v8::String::new(scope, "__zs_get_request").unwrap();
-        let req_fn = v8::Function::new(scope, zs_get_request_callback).unwrap();
-        global.set(scope, req_key.into(), req_fn.into());
-    }
-
-    // __zs_wait_until — registers a Promise against the current request's
-    // wait-until bag. Consumed by `zeroship.waitUntil` in the user-facing
-    // ESM module; the kernel holds the isolate alive past the response
-    // until every promise settles or the wall timeout fires.
-    {
-        let key = v8::String::new(scope, "__zs_wait_until").unwrap();
-        let f = v8::Function::new(scope, zs_wait_until_callback).unwrap();
-        global.set(scope, key.into(), f.into());
     }
 
     // process.env polyfill — many npm packages (e.g. LangChain) read

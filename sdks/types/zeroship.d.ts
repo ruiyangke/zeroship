@@ -1,17 +1,18 @@
 /**
  * Type stubs for the user-facing `zeroship` ESM module.
  *
- * The runtime synthesizes a virtual module named `"zeroship"` that exports
- * three things the SDK packages consume:
+ * The runtime supplies a native module named `"zeroship"`. SDK packages use
+ * its environment, request helpers and procedure composition exports:
  *
  *   - `env`: the composite handler env (plugin namespaces + app secrets),
  *     same reference as the 2nd arg of `fetch(request, env, ctx)`.
  *   - `waitUntil(p)`: extend the request lifetime past its response.
  *   - `getRequest()`: look up the current Request from nested modules.
+ *   - `runQuery` / `runMutation`: invoke a procedure under its native kind.
  *
  * This declaration lets `import { env } from "zeroship"` resolve during
  * TypeScript build. At runtime, the module is provided by the V8 kernel
- * (see `crates/zeroship-runtime/src/core/init.rs::ZEROSHIP_MODULE_JS`).
+ * (see `crates/zeroship-runtime/src/core/zeroship_module.rs`).
  *
  * The `env` type is deliberately loose: plugin namespaces are attached at
  * runtime based on which plugins the worker registered, and scalar secrets

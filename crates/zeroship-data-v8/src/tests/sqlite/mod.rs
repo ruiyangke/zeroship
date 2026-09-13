@@ -1,6 +1,7 @@
 //! SQLite contracts, grouped by behavior.
 mod cdc;
 mod codecs;
+mod composition;
 mod fixtures;
 mod joins;
 mod parity;

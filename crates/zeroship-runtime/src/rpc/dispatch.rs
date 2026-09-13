@@ -85,7 +85,7 @@ pub fn with_rpc_context<'s, R>(
 // globalThis.__zeroshipGetRpcCtx
 // ---------------------------------------------------------------------------
 
-fn current_rpc_ctx_object<'s>(
+pub(crate) fn current_rpc_ctx_object<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let map = read_context_map(scope)?;

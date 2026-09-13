@@ -9,6 +9,12 @@ Reference for the public plugin exported from [`sdks/vite-plugin/src/index.ts`](
 - The synthetic server entry `virtual:zeroship/_server-entry`
 - The zeroship dev runtime and production `.zship` build
 
+The `zeroship` import stays external in the built server artifact. The runtime
+provides its native exports. In dev, the environment preserves that reserved
+specifier and ModuleRunner imports the same runtime module through its evaluator.
+The plugin does not emit JavaScript implementations of these helpers or resolve
+them to the Node test stub.
+
 ## Usage
 
 ```ts
