@@ -118,9 +118,18 @@ trusted host configuration and must return the exact supplied policy binding.
 Renewal, policy refresh and preparation progress independently across apps under
 operation bounds and original policy deadlines. Closing the reconciler revokes
 local authority synchronously; the host separately joins consumer execution.
-Production registration/refresh loops, trusted creator resource providers,
-remaining delivered operation handlers and ordinary worker/CLI composition remain
-required before replacing the existing runner.
+`runner::host::WorkerHost` owns the runtime-local lifecycle for a fixed enrolled
+signer. It registers before scanning, then drives registration, assignment scans,
+policy renewal and consumption independently. App-placement capacity follows the
+assignment bound; execution slots are a separate local limit. Transient manager
+outages retry without extending authority. Identity refusal or shutdown cancels
+pending refreshes, revokes local bindings and announces terminal draining while
+joining execution. Cancellation also retires the host; explicit `drain` joins
+retained slots, and the same host cannot become ready again. The host does not
+release assignments or discharge manager recovery responsibility.
+Production enrollment, trusted creator resource providers, remaining delivered
+operation handlers and ordinary worker/CLI composition remain required before
+replacing the existing runner.
 `service::reconciliation` persists the selected publication page and its progress
 in the creator job receipt. It reserves each item before attempting publication,
 so retries reach later items even when an earlier request stalls. Confirmation

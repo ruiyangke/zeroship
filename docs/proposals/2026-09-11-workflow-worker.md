@@ -2033,14 +2033,38 @@ completion cannot reinstall a retired association. Closure cancels preparation
 and revokes local admission; it does not release placement or discharge durable
 recovery responsibility, and the host must still join consumer execution.
 
-This native composition leaves registration/refresh scheduling and the production
-creator resource provider with the host. It does not replace enrollment bootstrap,
-zone eligibility, normal deployment recovery handoff or the private-zone cutover.
+`runner::host::WorkerHost` composes the runtime-local registration and refresh
+lifecycle with this reconciler and the authenticated job consumer. Initial
+registration succeeds before discovering placements. Registration, placement
+scans, policy renewal and job consumption then progress independently. Each loop
+waits after its operation instead of replaying missed ticks. Advertised capacity
+counts app placements, with execution slots bounded separately. Transient
+transport and service outages retry; identity refusal and invalid registration
+responses stop the host. No registration receipt creates local creator authority
+or a readiness promise for an app whose resources have not been prepared.
+
+Shutdown drops pending ready-registration and refresh futures before publishing
+draining. Local bindings close synchronously, and bounded draining publication
+runs alongside joined consumer shutdown. A failed manager exchange cannot skip
+joining execution or turn the same host ready again. Cancelling the lifecycle
+future also retires local authority; the owner must call `drain` to join retained
+slots before discarding their capacity. The manager's terminal worker tombstone
+fences a delayed ready registration whose outcome was unknown to the host.
+Shutdown does not fabricate assignment-release or recovery-completion evidence.
+
+This native composition leaves the production creator resource provider with the
+host. It does not replace enrollment bootstrap, zone eligibility, normal
+deployment recovery handoff or the private-zone cutover.
 Native HTTP tests verify signed endpoint assertions and replay rejection while
 creator fixtures open isolated SQLite journals. They cover failed and superseded
 scans, exact factory authority, replacement, cancellation, closure and independent
 policy refresh while another app's setup is stalled. Runner tests separately
 retain execution capacity until native shutdown joins.
+Host lifecycle tests cover startup ordering, registration retry, malformed and
+refused receipts, independent registration during a stalled scan, cancellation
+before startup and terminal draining. Creator fixtures verify that cancellation
+retires in-progress setup and that registration refusal revokes retained app
+authority before draining waits on the network.
 
 Native manager scheduling now prepares immutable deployment descriptors, records
 monotonic activation and publishes due cron/interval occurrences through the ORM.

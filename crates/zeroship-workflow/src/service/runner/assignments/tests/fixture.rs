@@ -25,6 +25,27 @@ pub(super) struct Fixture {
 }
 
 impl Fixture {
+    pub fn registration(
+        &self,
+        state: zeroship_core::workflow_coordination::WorkerState,
+        capacity: u32,
+    ) -> Exchange {
+        use zeroship_core::workflow_coordination::{RegisterWorker, RegisteredWorker};
+        Exchange::new(
+            endpoints::WORKFLOW_REGISTER,
+            json!(RegisterWorker {
+                capacity: capacity.try_into().unwrap(),
+                state,
+            }),
+            json!(RegisteredWorker {
+                worker_id: self.worker.clone(),
+                capacity: capacity.try_into().unwrap(),
+                state,
+                expires_at: 0.try_into().unwrap(),
+            }),
+        )
+    }
+
     pub fn new() -> Self {
         let worker = WorkerId::mint();
         let issuer = ServiceIssuer::parse(&format!(
@@ -197,6 +218,12 @@ pub(super) struct Exchange {
 }
 
 impl Exchange {
+    pub fn conflict(mut self) -> Self {
+        self.status = 409;
+        self.response = json!({"code":"conflict"});
+        self
+    }
+
     fn new(endpoint: ServiceEndpoint, request: Value, response: Value) -> Self {
         Self {
             endpoint,

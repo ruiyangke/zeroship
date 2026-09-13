@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use zeroship_core::workflow_coordination::WorkerId;
 
 mod fixture;
+mod lifecycle;
 use fixture::{claims, peer, Fixture};
 
 fn scope() -> AssignedScope {
