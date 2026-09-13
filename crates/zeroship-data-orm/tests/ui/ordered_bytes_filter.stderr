@@ -1,0 +1,24 @@
+error[E0599]: the method `lt` exists for struct `zeroship_data_orm::orm::Field<payload>`, but its trait bounds were not satisfied
+ --> tests/ui/ordered_bytes_filter.rs:4:36
+  |
+4 |     let _ = schema::posts::payload.lt(Some(vec![1_u8]));
+  |                                    ^^ method cannot be called on `zeroship_data_orm::orm::Field<payload>` due to unsatisfied trait bounds
+  |
+ ::: src/orm/codecs.rs
+  |
+  |         ($($name:ident),* $(,)?) => { $(#[derive(Debug)] pub enum $name {})* };
+  |                                                          ----------------- doesn't satisfy `_: OrderedSqlType`
+...
+  |     pub struct Nullable<S>(std::marker::PhantomData<S>);
+  |     ---------------------- doesn't satisfy `_: OrderedSqlType`
+  |
+ ::: src/orm/model.rs
+  |
+  | pub struct Field<C>(PhantomData<fn() -> C>);
+  | ------------------- doesn't satisfy `zeroship_data_orm::orm::Field<payload>: Iterator`
+  |
+  = note: the following trait bounds were not satisfied:
+          `zeroship_data_orm::orm::sql_types::Bytes: OrderedSqlType`
+          which is required by `Nullable<zeroship_data_orm::orm::sql_types::Bytes>: OrderedSqlType`
+          `zeroship_data_orm::orm::Field<payload>: Iterator`
+          which is required by `&mut zeroship_data_orm::orm::Field<payload>: Iterator`

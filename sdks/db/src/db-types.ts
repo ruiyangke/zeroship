@@ -229,7 +229,7 @@ export type TxQuery<
 
 /** Options for the transaction method. */
 export interface TransactionOptions {
-  /** PostgreSQL transaction isolation level. Defaults to the database default (read committed). */
+  /** Outermost transaction isolation. SQLite accepts only serializable; omission uses the backend default. */
   isolationLevel?: IsolationLevel;
 }
 

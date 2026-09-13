@@ -555,14 +555,23 @@ fn resolve_operand(
 ) -> Result<ResolvedOperand, DbError> {
     Ok(match operand {
         Operand::Path(path) => ResolvedOperand::Column(resolve_path(path, sources)?),
-        Operand::Aggregate(aggregate) => ResolvedOperand::Aggregate {
-            function: aggregate.func(),
-            column: aggregate
-                .argument()
-                .map(|path| resolve_path(path, sources))
-                .transpose()?,
-            distinct: aggregate.is_distinct(),
-        },
+        Operand::Aggregate(aggregate) => {
+            if let Some(path) = aggregate.argument() {
+                check_field(path, sources, true)?;
+                let definition = &source_for(path, sources)?.schema[path.root().as_str()];
+                if !crate::sql::descriptors::supports_aggregate(definition, aggregate.func()) {
+                    return Err(invalid("aggregate requires a compatible portable scalar column"));
+                }
+            }
+            ResolvedOperand::Aggregate {
+                function: aggregate.func(),
+                column: aggregate
+                    .argument()
+                    .map(|path| resolve_path(path, sources))
+                    .transpose()?,
+                distinct: aggregate.is_distinct(),
+            }
+        }
         Operand::Lit(_) => return Err(invalid("literal cannot be used as a resolved expression")),
     })
 }

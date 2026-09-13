@@ -50,8 +50,20 @@ impl ScopedExecutor for SqliteBackend {
         &self,
         app_id: &str,
         _schema: &SchemaName,
-        _begin: BeginIntent,
+        begin: BeginIntent,
     ) -> Result<Session, OpenSessionError> {
+        if let BeginIntent::Isolation(level) = begin {
+            if level != IsolationLevel::Serializable {
+                return Err(DbError::validation(
+                    "unsupported_isolation_level",
+                    format!(
+                        "db.transaction: SQLite supports only SERIALIZABLE isolation; requested {}",
+                        level.ansi_name(),
+                    ),
+                )
+                .into());
+            }
+        }
         let session = self
             .connection_driver(app_id)
             .await?

@@ -1,0 +1,20 @@
+error[E0599]: the method `sum` exists for struct `SourceColumn<title>`, but its trait bounds were not satisfied
+ --> tests/ui/aggregate_text_sum.rs:6:36
+  |
+6 |     p.column(schema::posts::title).sum();
+  |                                    ^^^ method cannot be called on `SourceColumn<title>` due to unsatisfied trait bounds
+  |
+ ::: src/orm/codecs.rs
+  |
+  |         ($($name:ident),* $(,)?) => { $(#[derive(Debug)] pub enum $name {})* };
+  |                                                          ----------------- doesn't satisfy `_: NumericAggregate`
+  |
+ ::: src/orm/read_builder.rs
+  |
+  | pub struct SourceColumn<C: Column> {
+  | ---------------------------------- doesn't satisfy `SourceColumn<title>: Iterator`
+  |
+  = note: the following trait bounds were not satisfied:
+          `zeroship_data_orm::orm::sql_types::Text: NumericAggregate`
+          `SourceColumn<title>: Iterator`
+          which is required by `&mut SourceColumn<title>: Iterator`

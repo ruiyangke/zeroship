@@ -1,0 +1,34 @@
+error[E0277]: the trait bound `i64: DecodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
+ --> tests/ui/scalar_wrong_decode.rs:6:45
+  |
+6 |     p.column(schema::posts::title).select::<i64>();
+  |                                    ------   ^^^ the trait `DecodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `i64`
+  |                                    |
+  |                                    required by a bound introduced by this call
+  |
+help: the following other types implement trait `DecodeValue<S>`
+ --> src/orm/codecs.rs
+  |
+  |           impl DecodeValue<$sql> for $rust {
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |           |
+  |           `i64` implements `DecodeValue<BigInt>`
+  |           `i64` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Integer>`
+...
+  | / integer_codec!(
+  | |     Integer, i32, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
+  | | );
+  | |_- in this macro invocation
+  | / integer_codec!(
+  | |     BigInt, i64, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize
+  | | );
+  | |_- in this macro invocation
+...
+  |   impl DecodeValue<Timestamp> for i64 {
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `i64` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Timestamp>`
+note: required by a bound in `orm::read_builder::scalars::<impl SourceColumn<C>>::select`
+ --> src/orm/read_builder/scalars.rs
+  |
+  |     pub fn select<R: DecodeValue<C::SqlType>>(&self) -> ScalarSelection<C::SqlType, R> {
+  |                      ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `orm::read_builder::scalars::<impl SourceColumn<C>>::select`
+  = note: this error originates in the macro `integer_codec` (in Nightly builds, run with -Z macro-backtrace for more info)

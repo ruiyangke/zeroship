@@ -1,0 +1,20 @@
+error[E0599]: the method `gt` exists for struct `SourceColumn<document>`, but its trait bounds were not satisfied
+ --> tests/ui/ordered_json_source.rs:4:61
+  |
+4 |     let _ = source.column(schema::predicate_rows::document).gt(Value::Null);
+  |                                                             ^^ method cannot be called on `SourceColumn<document>` due to unsatisfied trait bounds
+  |
+ ::: src/orm/codecs.rs
+  |
+  |         ($($name:ident),* $(,)?) => { $(#[derive(Debug)] pub enum $name {})* };
+  |                                                          ----------------- doesn't satisfy `_: OrderedSqlType`
+  |
+ ::: src/orm/read_builder.rs
+  |
+  | pub struct SourceColumn<C: Column> {
+  | ---------------------------------- doesn't satisfy `SourceColumn<document>: Iterator`
+  |
+  = note: the following trait bounds were not satisfied:
+          `zeroship_data_orm::orm::sql_types::Json: OrderedSqlType`
+          `SourceColumn<document>: Iterator`
+          which is required by `&mut SourceColumn<document>: Iterator`

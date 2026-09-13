@@ -1,8 +1,9 @@
 use super::*;
 use crate::driver::{CancellationHandle, DriverSession};
-use futures::{FutureExt, channel::oneshot};
-use std::{cell::Cell, cell::RefCell, future::Future, rc::Rc, task::Poll};
+use crate::transaction::reducer::CleanupCause;
 use crate::value::Value;
+use futures::{channel::oneshot, FutureExt};
+use std::{cell::Cell, cell::RefCell, future::Future, rc::Rc, task::Poll};
 
 type TerminalAnswer = (TerminalResult, Option<DbError>);
 
@@ -67,6 +68,10 @@ struct Fixture {
 
 fn admitted(app: &str) -> Fixture {
     crate::tx_lanes::with_mut(|l| assert!(l.try_claim_tx(app)));
+    admitted_on_claim(app)
+}
+
+fn admitted_on_claim(app: &str) -> Fixture {
     admit_in_preparing(app);
     let expected = expected_authority(app);
     let actions = apply(
@@ -315,6 +320,128 @@ async fn dropping_waiter_does_not_cancel_accepted_settlement() {
             );
             assert_eq!(fixture.wire.terminal_calls.get(), 1);
             assert!(!fixture.wire.discarded.get());
+        })
+        .await;
+}
+
+#[compio::test]
+async fn dropped_native_admission_stays_owned_until_cleanup_acknowledges_rollback() {
+    crate::OrmContext::new()
+        .scope(async {
+            let app = "dropped_native_admission";
+            let admission = super::super::TxAdmission::acquire(app.into()).await;
+            let fixture = admitted_on_claim(app);
+            drop(admission);
+            assert_eq!(
+                crate::tx_lanes::with(|l| l.transaction_reducer(app).map(TxReducer::state)),
+                Some(super::super::reducer::TxState::Cancelling)
+            );
+            let mut next = Box::pin(super::super::TxAdmission::acquire(app.into()));
+            assert_pending(next.as_mut());
+            compio::time::sleep(Duration::from_millis(1)).await;
+            assert_eq!(fixture.wire.cleanup_calls.get(), 1);
+            assert!(cancel(app).await.outcome().is_none());
+            assert_eq!(fixture.wire.cleanup_calls.get(), 1);
+            assert_pending(next.as_mut());
+            fixture.cleanup.send(CleanupAck::RolledBack).unwrap();
+            let next = compio::time::timeout(Duration::from_secs(1), next)
+                .await
+                .expect("a settled cleanup must release admission");
+            assert!(!fixture.wire.discarded.get());
+            drop(next);
+        })
+        .await;
+}
+
+#[compio::test]
+async fn dropped_retired_native_admission_cannot_cancel_a_replacement() {
+    crate::OrmContext::new()
+        .scope(async {
+            let app = "retired_native_admission";
+            let old_admission = super::super::TxAdmission::acquire(app.into()).await;
+            let old = admitted_on_claim(app);
+            old.cleanup.send(CleanupAck::RolledBack).unwrap();
+            assert!(matches!(
+                cancel(app).await.outcome(),
+                Some(TerminalOutcome::Cancelled(_))
+            ));
+            let replacement = admitted(app);
+            drop(old_admission);
+            assert_eq!(
+                crate::tx_lanes::with(|l| l.transaction_reducer(app).map(TxReducer::state)),
+                Some(super::super::reducer::TxState::Idle)
+            );
+            assert!(!replacement.wire.discarded.get());
+            replacement
+                .terminal
+                .send((TerminalResult::Committed, None))
+                .unwrap();
+            assert_eq!(
+                settle_root(app, SettleIntent::Commit).await.outcome(),
+                Some(TerminalOutcome::Committed)
+            );
+        })
+        .await;
+}
+
+#[compio::test]
+async fn startup_cancellation_without_an_installed_session_is_indeterminate() {
+    crate::OrmContext::new()
+        .scope(async {
+            let app = "cancel_native_startup";
+            let admission = super::super::TxAdmission::acquire(app.into()).await;
+            admit_in_preparing(app);
+            let opening = apply(
+                app,
+                TxEvent::AuthorityObserved {
+                    authority: authority_of(app).unwrap(),
+                    observed: Box::new(observation_for(&expected_authority(app))),
+                },
+            )
+            .unwrap();
+            let token = opening
+                .into_iter()
+                .find_map(|action| match action {
+                    Action::IssueBegin { token } => Some(token),
+                    _ => None,
+                })
+                .unwrap();
+            let completion = crate::tx_lanes::with(|l| l.transaction_completion(app)).unwrap();
+            drop(admission);
+            assert_eq!(
+                completion.wait().await.outcome(),
+                Some(TerminalOutcome::Indeterminate(CleanupCause::Cancelled))
+            );
+            let replacement = admitted(app);
+            let late_wire = Rc::new(Wire::default());
+            let late_session = Session::new(ControlledSession {
+                wire: late_wire.clone(),
+                terminal: RefCell::new(None),
+                cleanup: RefCell::new(None),
+            });
+            assert!(install_opened_session(app, &completion, late_session).is_err());
+            assert!(late_wire.discarded.get());
+            assert!(!replacement.wire.discarded.get());
+            let mut late = VecDeque::new();
+            extend(
+                &mut late,
+                app,
+                &completion,
+                TxEvent::BeginCompleted {
+                    token,
+                    outcome: BeginOutcome::Opened(BackendGeneration(next_backend_generation())),
+                },
+            );
+            assert!(late.is_empty());
+            assert_eq!(operation_generation(app), Some(replacement.generation));
+            replacement
+                .terminal
+                .send((TerminalResult::Committed, None))
+                .unwrap();
+            assert_eq!(
+                settle_root(app, SettleIntent::Commit).await.outcome(),
+                Some(TerminalOutcome::Committed)
+            );
         })
         .await;
 }

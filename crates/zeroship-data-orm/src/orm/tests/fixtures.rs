@@ -84,7 +84,7 @@ impl CollectionFixture {
     ) -> Self {
         crate::tests::fixtures::reset_engine();
         let directory = tempfile::tempdir().unwrap();
-        let binding = DbBinding::cold_start("orm_internal_fixture");
+        let binding = DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str());
         let file = directory
             .path()
             .join(format!("zs-{}.sqlite", binding.app_id()));
