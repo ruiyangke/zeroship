@@ -9,10 +9,6 @@ autotests = false
 name = "main"
 path = "tests/main.rs"
 
-[[test]]
-name = "service_replay_pg_test"
-path = "tests/service_replay_pg_test.rs"
-
 [dependencies]
 base64 = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
@@ -30,9 +26,7 @@ zeroship-authz = { workspace = true }
 zeroship-core = { workspace = true }
 
 [dev-dependencies]
-# The Postgres jti store's race test drives two connections from one compio
-# runtime. `polling` keeps it runnable in sandboxes that block io_uring, the
-# same split the `auth` and `core` crates use.
+# Database cases run in compio; fixtures own their PostgreSQL containers.
 compio = { workspace = true, features = ["polling"] }
 futures = { workspace = true }
 tempfile = { workspace = true }
