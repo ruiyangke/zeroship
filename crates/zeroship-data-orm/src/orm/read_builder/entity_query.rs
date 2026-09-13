@@ -70,6 +70,10 @@ impl<E: Entity> EntityCollection<E> {
 }
 
 impl<E: Entity> EntityQuery<E> {
+    pub fn with_related<R: Relation<Source = E>>(self, _: R) -> RelatedQuery<E, R> {
+        RelatedQuery::new(self)
+    }
+
     pub fn filter(mut self, filter: Filter<E>) -> Self {
         self.filter = filter;
         self
@@ -102,7 +106,7 @@ impl<E: Entity> EntityQuery<E> {
         self
     }
 
-    fn into_builder(self) -> Result<ReadBuilder, DbError> {
+    pub(super) fn into_builder(self) -> Result<ReadBuilder, DbError> {
         self.entity.validate()?;
         let mut query = ReadQuery::new(ReadSource::new(E::COLLECTION, "source"));
         query.source.include_deleted = self.options.include_deleted;

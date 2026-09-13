@@ -1,0 +1,80 @@
+{
+  "ir_version": 1,
+  "name": "typed_relations",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "authors",
+      "columns": [
+        {
+          "name": "name",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "handle",
+          "type": "text",
+          "nullable": false,
+          "unique": true
+        },
+        {
+          "name": "serial",
+          "type": "bigInt",
+          "nullable": false,
+          "unique": true
+        },
+        {
+          "name": "payload",
+          "type": "bytes",
+          "nullable": false
+        }
+      ],
+      "runtimeOptions": {
+        "softDelete": true,
+        "versioning": true
+      }
+    },
+    {
+      "op": "createTable",
+      "name": "posts",
+      "columns": [
+        {
+          "name": "title",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "authorId",
+          "type": "text",
+          "references": {
+            "table": "authors",
+            "column": "id",
+            "relation": "author"
+          }
+        },
+        {
+          "name": "authorHandle",
+          "type": "text",
+          "references": {
+            "table": "authors",
+            "column": "handle",
+            "relation": "authorByHandle"
+          }
+        },
+        {
+          "name": "authorSerial",
+          "type": "bigInt",
+          "references": {
+            "table": "authors",
+            "column": "serial",
+            "relation": "authorBySerial"
+          }
+        }
+      ],
+      "runtimeOptions": {
+        "softDelete": true,
+        "versioning": true
+      }
+    }
+  ]
+}
