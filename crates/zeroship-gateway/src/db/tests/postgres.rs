@@ -17,7 +17,7 @@ use super::super::{DbConfig, POOL};
 
 mod migrations;
 
-pub(crate) struct Database {
+pub struct Database {
     postgres: Container<GenericImage>,
     pub(crate) url: url::Url,
     pub(crate) admin: Client,

@@ -3,7 +3,7 @@ use futures::{future::join_all, poll};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-pub(crate) mod postgres;
+pub mod postgres;
 use postgres::Database;
 
 #[test]

@@ -1,5 +1,10 @@
 //! Revocation decisions through the router, using the migrated gateway role.
 
+#![allow(
+    clippy::future_not_send,
+    reason = "router fixtures stay on their compio runtime"
+)]
+
 use super::*;
 use crate::db::tests::postgres::Database;
 use std::sync::Arc;
@@ -72,7 +77,9 @@ impl CookieFixture {
             &self.client_id,
             &self.subject,
             None,
-            Instant::now() - Duration::from_secs(CACHE_TTL + 1),
+            Instant::now()
+                .checked_sub(Duration::from_secs(CACHE_TTL + 1))
+                .expect("clock supports an expired fixture entry"),
         );
     }
 
