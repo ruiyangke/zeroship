@@ -37,13 +37,14 @@ async fn dropping_native_transaction_interrupts_postgres_before_releasing_admiss
         ConnectOptions::new(server.url(), ProjectKeySource::unavailable())
             .max_connections(NonZeroUsize::new(1).unwrap())
             .connection_authority(),
-        vec![(
+        crate::schema::Schema::from_collections(vec![(
             "records".into(),
             value!({
                 "id":{"type":"string", "primaryKey":true, "required":true},
                 "title":{"type":"string", "required":true}
             }),
-        )],
+        )])
+        .unwrap(),
     )
     .await
     .unwrap();

@@ -1,4 +1,5 @@
 use super::resolved::ResolvedTable;
+use crate::schema::{ColumnSchema, FieldMap};
 use crate::{
     sql::{
         mapping::{self, QueryError},
@@ -32,7 +33,7 @@ impl From<crate::orm::ModelPredicate> for Input {
 impl Input {
     pub(crate) fn resolve(
         self,
-        schema: &Value,
+        schema: &FieldMap,
         table: &ResolvedTable,
         registration: &SqlRegistration,
     ) -> Result<ResolvedPredicate, QueryError> {
@@ -89,7 +90,7 @@ fn model_equality<'a>(predicate: &'a crate::orm::ModelPredicate, field: &str) ->
 
 pub(crate) fn resolve(
     filter: Value,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
@@ -99,7 +100,7 @@ pub(crate) fn resolve(
 
 pub(crate) fn resolve_model(
     predicate: crate::orm::ModelPredicate,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
@@ -139,7 +140,7 @@ fn validate_model_budget(predicate: &crate::orm::ModelPredicate) -> Result<(), Q
 
 fn resolve_model_inner(
     predicate: crate::orm::ModelPredicate,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
@@ -199,15 +200,15 @@ fn resolve_model_inner(
 
 fn resolve_column<'a>(
     field: &str,
-    schema: &'a Value,
+    schema: &'a FieldMap,
     table: &ResolvedTable,
-) -> Result<(Column, &'a Value), QueryError> {
+) -> Result<(Column, &'a ColumnSchema), QueryError> {
     mapping::validate_field_name(field)?;
     mapping::validate_value_operation(field, schema)?;
     let definition = schema
         .get(field)
         .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
-    if definition["filterable"].as_bool() == Some(false) {
+    if !definition.filterable {
         return Err(invalid(format!("field '{field}' is not filterable")));
     }
     let input = table
@@ -219,7 +220,7 @@ fn resolve_column<'a>(
 
 fn resolve_inner(
     filter: Value,
-    schema: &Value,
+    schema: &FieldMap,
     table: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
@@ -288,7 +289,7 @@ fn resolve_inner(
 fn condition(
     column: Column,
     field: &str,
-    definition: &Value,
+    definition: &ColumnSchema,
     operator: &str,
     value: Value,
     registration: &SqlRegistration,
@@ -389,7 +390,7 @@ fn condition(
 fn comparison(
     column: Column,
     field: &str,
-    definition: &Value,
+    definition: &ColumnSchema,
     op: CompareOp,
     value: Value,
     registration: &SqlRegistration,
@@ -416,8 +417,8 @@ fn comparison(
     })
 }
 
-fn validate_comparison(definition: &Value, op: CompareOp) -> Result<(), QueryError> {
-    use crate::sql::descriptors::{PredicateOperator, supports_predicate_operator};
+fn validate_comparison(definition: &ColumnSchema, op: CompareOp) -> Result<(), QueryError> {
+    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
     let operator = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
         PredicateOperator::Equality
     } else {
@@ -432,15 +433,15 @@ fn validate_comparison(definition: &Value, op: CompareOp) -> Result<(), QueryErr
     }
 }
 
-fn validate_equality(definition: &Value) -> Result<(), QueryError> {
-    use crate::sql::descriptors::{PredicateOperator, supports_predicate_operator};
+fn validate_equality(definition: &ColumnSchema) -> Result<(), QueryError> {
+    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
     supports_predicate_operator(definition, PredicateOperator::Equality)
         .then_some(())
         .ok_or_else(|| invalid("ordinary equality is not supported for this field type"))
 }
 
-fn validate_pattern(definition: &Value) -> Result<(), QueryError> {
-    use crate::sql::descriptors::{PredicateOperator, supports_predicate_operator};
+fn validate_pattern(definition: &ColumnSchema) -> Result<(), QueryError> {
+    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
     supports_predicate_operator(definition, PredicateOperator::Pattern)
         .then_some(())
         .ok_or_else(|| invalid("pattern operator requires a text field"))
@@ -448,7 +449,7 @@ fn validate_pattern(definition: &Value) -> Result<(), QueryError> {
 
 fn encode(
     field: &str,
-    definition: &Value,
+    definition: &ColumnSchema,
     storage: StorageType,
     mut value: Value,
     registration: &SqlRegistration,
@@ -494,7 +495,8 @@ fn operand_shape(operand: &ResolvedOperand) -> String {
         ResolvedOperand::Column(column) => column.name().as_str().to_owned(),
         ResolvedOperand::Comparison(comparison) => format!(
             "comparison({},{:?})",
-            comparison.column.name().as_str(), comparison.op,
+            comparison.column.name().as_str(),
+            comparison.op,
         ),
         ResolvedOperand::Aggregate {
             function,
@@ -517,10 +519,10 @@ mod tests {
     use crate::sql::SchemaName;
 
     fn resolves(definition: Value, filter: Value) -> Result<ResolvedPredicate, QueryError> {
-        let schema = crate::value!({
+        let schema = crate::tests::fixtures::native_fields(crate::value!({
             "id": {"type":"string", "required":true, "primaryKey":true},
             "field": definition,
-        });
+        }));
         let registration = SqlRegistration::sqlite();
         let table = ResolvedTable::new(
             &SchemaName::new("main").unwrap(),
@@ -566,27 +568,21 @@ mod tests {
             assert!(resolves(definition, filter).is_err());
         }
 
-        assert!(
-            resolves(
-                crate::value!({"type":"json"}),
-                crate::value!({"field":{"$eq":{"key":true}}}),
-            )
-            .is_ok()
-        );
-        assert!(
-            resolves(
-                crate::value!({"type":"calendarDate"}),
-                crate::value!({"field":{"$gte":"2026-01-01"}}),
-            )
-            .is_ok()
-        );
-        assert!(
-            resolves(
-                crate::value!({"type":"string"}),
-                crate::value!({"field":{"$like":"prefix%"}}),
-            )
-            .is_ok()
-        );
+        assert!(resolves(
+            crate::value!({"type":"json"}),
+            crate::value!({"field":{"$eq":{"key":true}}}),
+        )
+        .is_ok());
+        assert!(resolves(
+            crate::value!({"type":"calendarDate"}),
+            crate::value!({"field":{"$gte":"2026-01-01"}}),
+        )
+        .is_ok());
+        assert!(resolves(
+            crate::value!({"type":"string"}),
+            crate::value!({"field":{"$like":"prefix%"}}),
+        )
+        .is_ok());
     }
 
     #[test]
@@ -594,10 +590,10 @@ mod tests {
         use crate::orm::ModelPredicate;
         let registration = SqlRegistration::sqlite();
         let run = |definition, predicate| {
-            let schema = crate::value!({
+            let schema = crate::tests::fixtures::native_fields(crate::value!({
                 "id": {"type":"string", "required":true, "primaryKey":true},
                 "field": definition,
-            });
+            }));
             let table = ResolvedTable::new(
                 &SchemaName::new("main").unwrap(),
                 "records",
@@ -643,27 +639,23 @@ mod tests {
             deep = ModelPredicate::And(vec![deep]);
         }
         assert!(run(plain.clone(), deep).is_err());
-        assert!(
-            run(
-                plain.clone(),
-                ModelPredicate::Or(
-                    (0..crate::sql::joins::MAX_READ_PREDICATE_NODES)
-                        .map(|_| equality())
-                        .collect(),
-                )
+        assert!(run(
+            plain.clone(),
+            ModelPredicate::Or(
+                (0..crate::sql::joins::MAX_READ_PREDICATE_NODES)
+                    .map(|_| equality())
+                    .collect(),
             )
-            .is_err()
-        );
-        assert!(
-            run(
-                plain,
-                ModelPredicate::Membership {
-                    field: "field",
-                    op: MembershipOp::In,
-                    values: vec![Value::Null; crate::sql::MAX_MEMBERSHIP_LIST_LEN + 1],
-                }
-            )
-            .is_err()
-        );
+        )
+        .is_err());
+        assert!(run(
+            plain,
+            ModelPredicate::Membership {
+                field: "field",
+                op: MembershipOp::In,
+                values: vec![Value::Null; crate::sql::MAX_MEMBERSHIP_LIST_LEN + 1],
+            }
+        )
+        .is_err());
     }
 }

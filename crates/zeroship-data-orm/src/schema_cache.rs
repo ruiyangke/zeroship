@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::value::Value;
+use crate::schema::FieldMap;
 
 use crate::error::DbError;
 
@@ -13,7 +13,7 @@ use crate::binding::DbBinding;
 /// Collection descriptors keyed by the complete app, deploy and schema binding.
 #[derive(Debug, Default)]
 pub struct SchemaCache {
-    entries: HashMap<(DbBinding, String), Arc<Value>>,
+    entries: HashMap<(DbBinding, String), Arc<FieldMap>>,
 }
 
 impl SchemaCache {
@@ -36,7 +36,7 @@ impl SchemaCache {
     /// callback can observe a partial descriptor, removed collections do not
     /// survive a dev isolate restart, and an empty input leaves a schema-less
     /// binding empty.
-    pub fn replace_for_binding(&mut self, binding: &DbBinding, schemas: Vec<(String, Value)>) {
+    pub fn replace_for_binding(&mut self, binding: &DbBinding, schemas: Vec<(String, FieldMap)>) {
         self.entries.retain(|(owner, _), _| owner != binding);
         for (collection, schema) in schemas {
             self.entries
@@ -51,7 +51,7 @@ impl SchemaCache {
     /// schema" - the adapter's `descriptor::collection_schema` is the only thing
     /// that should call this, and it turns the miss into a typed error.
     #[must_use]
-    pub fn get(&self, binding: &DbBinding, collection: &str) -> Option<Arc<Value>> {
+    pub fn get(&self, binding: &DbBinding, collection: &str) -> Option<Arc<FieldMap>> {
         self.entries.get(&Self::key(binding, collection)).cloned()
     }
 
@@ -60,7 +60,7 @@ impl SchemaCache {
     /// uses it to walk every declared collection. Empty when the isolate has
     /// installed no schema.
     #[must_use]
-    pub fn entries_for_binding(&self, binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
+    pub fn entries_for_binding(&self, binding: &DbBinding) -> Vec<(String, Arc<FieldMap>)> {
         self.entries
             .iter()
             .filter(|(key, _)| key.0 == *binding)
@@ -77,15 +77,11 @@ impl SchemaCache {
     ///
     /// [`DbError::config`] with code `collection_not_declared` when the
     /// descriptor this isolate was built from does not declare `collection`.
-    pub fn require(&self, binding: &DbBinding, collection: &str) -> Result<Arc<Value>, DbError> {
+    pub fn require(&self, binding: &DbBinding, collection: &str) -> Result<Arc<FieldMap>, DbError> {
         self.get(binding, collection).ok_or_else(|| {
             DbError::config(
                 "collection_not_declared",
-                format!(
-                    "db: collection '{collection}' is not declared by this deploy's runtime schema \
-                     descriptor; the descriptor is the sole schema authority and nothing else may \
-                     be read"
-                ),
+                format!("collection '{collection}' has no installed ORM schema"),
             )
         })
     }
@@ -94,7 +90,7 @@ impl SchemaCache {
     /// production boot replaces a binding's complete descriptor through
     /// [`Self::replace_for_binding`].
     #[cfg(test)]
-    pub fn insert_one(&mut self, binding: &DbBinding, collection: &str, schema: Value) {
+    pub fn insert_one(&mut self, binding: &DbBinding, collection: &str, schema: FieldMap) {
         self.entries
             .insert(Self::key(binding, collection), Arc::new(schema));
     }
@@ -128,6 +124,12 @@ pub fn reset_for_tests() {
 mod tests {
     use super::*;
 
+    fn contract(default: i64) -> FieldMap {
+        let mut column = crate::schema::ColumnSchema::new(crate::schema::LogicalType::Integer);
+        column.default = Some(default.into());
+        [("value".into(), column)].into()
+    }
+
     fn binding(app: &str, deploy: &str) -> DbBinding {
         let schema = crate::sql::SchemaName::new(app).expect("fixture schema name");
         DbBinding::new(app, deploy, schema)
@@ -141,27 +143,18 @@ mod tests {
 
         cache.replace_for_binding(
             &a,
-            vec![
-                ("users".into(), crate::value!({"v": 1})),
-                ("posts".into(), crate::value!({"v": 1})),
-            ],
+            vec![("users".into(), contract(1)), ("posts".into(), contract(1))],
         );
-        cache.replace_for_binding(
-            &b,
-            vec![("users".into(), crate::value!({"v": 9}))],
-        );
+        cache.replace_for_binding(&b, vec![("users".into(), contract(9))]);
 
         // Replacing app_a with a SHORTER list must drop `posts` and must not
         // touch app_b - the retain is prefix-scoped, which is the property a
         // plain `clear()` would break.
-        cache.replace_for_binding(
-            &a,
-            vec![("users".into(), crate::value!({"v": 2}))],
-        );
+        cache.replace_for_binding(&a, vec![("users".into(), contract(2))]);
 
         assert_eq!(
             cache.get(&a, "users").as_deref(),
-            Some(&crate::value!({"v": 2})),
+            Some(&contract(2)),
             "the surviving collection must carry the NEW value"
         );
         assert!(
@@ -170,7 +163,7 @@ mod tests {
         );
         assert_eq!(
             cache.get(&b, "users").as_deref(),
-            Some(&crate::value!({"v": 9})),
+            Some(&contract(9)),
             "a different binding must be untouched by the replace"
         );
     }
@@ -181,10 +174,7 @@ mod tests {
         let old = binding("app_a", "deploy_1");
         let new = binding("app_a", "deploy_2");
 
-        cache.replace_for_binding(
-            &old,
-            vec![("users".into(), crate::value!({"v": 1}))],
-        );
+        cache.replace_for_binding(&old, vec![("users".into(), contract(1))]);
 
         assert!(
             cache.get(&new, "users").is_none(),
@@ -205,8 +195,8 @@ mod tests {
         cache.replace_for_binding(
             &a,
             vec![
-                ("users".into(), crate::value!({})),
-                ("posts".into(), crate::value!({})),
+                ("users".into(), FieldMap::new()),
+                ("posts".into(), FieldMap::new()),
             ],
         );
 
@@ -234,10 +224,7 @@ mod tests {
     fn an_undeclared_collection_is_an_error_and_never_a_silent_miss() {
         let mut cache = SchemaCache::new();
         let a = binding("app_a", "d1");
-        cache.replace_for_binding(
-            &a,
-            vec![("users".into(), crate::value!({"v": 1}))],
-        );
+        cache.replace_for_binding(&a, vec![("users".into(), contract(1))]);
 
         let err = cache
             .require(&a, "posts")
@@ -257,7 +244,7 @@ mod tests {
     fn empty_replacement_leaves_the_binding_schema_less() {
         let mut cache = SchemaCache::new();
         let a = binding("app_a", "d1");
-        cache.replace_for_binding(&a, vec![("users".into(), crate::value!({}))]);
+        cache.replace_for_binding(&a, vec![("users".into(), FieldMap::new())]);
         cache.replace_for_binding(&a, vec![]);
         assert!(cache.get(&a, "users").is_none());
         assert!(cache.entries_for_binding(&a).is_empty());

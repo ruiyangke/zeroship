@@ -1,6 +1,7 @@
-//! Descriptor validation and physical storage mapping for ORM operations.
+//! SQL input validation and physical storage mapping for ORM operations.
 
 use crate::{
+    schema::{ColumnSchema, FieldMap},
     sql::{Ident, IdentRole},
     value::Value,
 };
@@ -8,8 +9,8 @@ use std::collections::{BTreeSet, HashSet};
 
 pub use crate::sql::lifecycle::WriteAssignments;
 
-pub fn empty_read_schema() -> Value {
-    Value::Object(crate::value::Map::new())
+pub fn empty_read_schema() -> FieldMap {
+    FieldMap::new()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,7 +86,7 @@ pub fn validate_id_prefix(prefix: &str) -> Result<(), QueryError> {
     Ok(())
 }
 
-pub(crate) fn validate_value_operation(field: &str, schema: &Value) -> Result<(), QueryError> {
+pub(crate) fn validate_value_operation(field: &str, schema: &FieldMap) -> Result<(), QueryError> {
     if schema
         .get(field)
         .is_some_and(crate::sql::descriptors::is_encrypted)
@@ -110,20 +111,23 @@ pub fn raw_column_name(field: &str) -> String {
     format!("{RAW_COLUMN_PREFIX}{field}")
 }
 
-pub fn raw_column_for_field(field: &str, definition: &Value) -> Option<String> {
+pub fn raw_column_for_field(_field: &str, definition: &ColumnSchema) -> Option<String> {
     crate::sql::descriptors::effective_mask(definition)?;
-    Some(raw_column_name(field))
+    definition.storage.raw_column.clone()
 }
 
-pub fn declared_raw_column(field: &str, definition: &Value) -> Result<Option<String>, QueryError> {
-    let Some(derived) = raw_column_for_field(field, definition) else {
+pub fn declared_raw_column(
+    field: &str,
+    definition: &ColumnSchema,
+) -> Result<Option<String>, QueryError> {
+    if crate::sql::descriptors::effective_mask(definition).is_none() {
         return Ok(None);
-    };
-    let declared = definition
-        .get("storage")
-        .and_then(|storage| storage.get("rawColumn"))
-        .and_then(Value::as_str)
-        .unwrap_or(&derived);
+    }
+    let declared = definition.storage.raw_column.as_deref().ok_or_else(|| {
+        QueryError::InvalidIdent(format!(
+            "masked field '{field}' requires resolved raw storage"
+        ))
+    })?;
     Ident::parse_as(declared, IdentRole::StoredColumn)
         .map_err(|error| QueryError::InvalidIdent(error.to_string()))?;
     if Ident::parse_as(declared, IdentRole::Column).is_ok() {
@@ -134,33 +138,27 @@ pub fn declared_raw_column(field: &str, definition: &Value) -> Result<Option<Str
     Ok(Some(declared.to_owned()))
 }
 
-fn field_is_readable(definition: &Value) -> bool {
-    definition.get("readable").and_then(Value::as_bool) != Some(false)
-        && definition.get("projectable").and_then(Value::as_bool) != Some(false)
+fn field_is_readable(definition: &ColumnSchema) -> bool {
+    definition.readable && definition.projectable
 }
 
-fn field_needs_identity(definition: &Value) -> bool {
+fn field_needs_identity(definition: &ColumnSchema) -> bool {
     crate::sql::descriptors::is_encrypted(definition)
         || crate::sql::descriptors::effective_mask(definition).is_some()
 }
 
-pub(crate) fn value_column_for_field(field: &str, schema: &Value) -> String {
+pub(crate) fn value_column_for_field(field: &str, schema: &FieldMap) -> String {
     schema
         .get(field)
-        .and_then(|definition| definition.get("storage"))
-        .and_then(|storage| storage.get("valueColumn"))
-        .and_then(Value::as_str)
+        .and_then(|definition| definition.storage.value_column.as_deref())
         .unwrap_or(field)
         .to_owned()
 }
 
-pub(crate) fn implicit_read_fields(schema: &Value) -> Result<Vec<&str>, QueryError> {
-    let fields = schema.as_object().ok_or_else(|| {
-        QueryError::InvalidFilter("read schema must be a field-map object".into())
-    })?;
+pub(crate) fn implicit_read_fields(fields: &FieldMap) -> Result<Vec<&str>, QueryError> {
     let mut readable = fields
         .iter()
-        .filter(|(name, definition)| !is_schema_metadata_key(name) && field_is_readable(definition))
+        .filter(|(_, definition)| field_is_readable(definition))
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>();
     if fields
@@ -183,7 +181,7 @@ pub(crate) fn implicit_read_fields(schema: &Value) -> Result<Vec<&str>, QueryErr
 pub const SYNTHETIC_RESULT_COLUMNS: &[&str] = &["_distance", "_distance_m"];
 
 #[must_use]
-pub fn read_surface_columns(schema: &Value) -> BTreeSet<String> {
+pub fn read_surface_columns(schema: &FieldMap) -> BTreeSet<String> {
     let mut columns = crate::sql::descriptors::readable_fields(schema);
     columns.extend(
         SYNTHETIC_RESULT_COLUMNS
@@ -193,7 +191,7 @@ pub fn read_surface_columns(schema: &Value) -> BTreeSet<String> {
     columns
 }
 
-pub fn column_is_masked(name: &str, schema: &Value) -> bool {
+pub fn column_is_masked(name: &str, schema: &FieldMap) -> bool {
     schema
         .get(name)
         .and_then(crate::sql::descriptors::effective_mask)
@@ -311,12 +309,14 @@ mod tests {
 
     #[test]
     fn read_surfaces_follow_descriptor_metadata() {
-        let schema = value!({
+        let schema = crate::schema::CollectionSchema::from_fields(&value!({
             "id":{"type":"string","readable":false},
             "secret":{"type":"string","encrypted":true},
             "hidden":{"type":"string","readable":false},
             "_meta":{}
-        });
+        }))
+        .unwrap()
+        .into_fields();
         assert_eq!(implicit_read_fields(&schema).unwrap(), ["secret", "id"]);
         assert_eq!(
             read_surface_columns(&schema),
@@ -326,13 +326,22 @@ mod tests {
 
     #[test]
     fn raw_storage_must_remain_outside_creator_identifiers() {
-        let definition = value!({
-            "mask":{"kind":"full"},
-            "storage":{"rawColumn":"plaintext"}
+        let mut definition = ColumnSchema::new(crate::schema::LogicalType::Text);
+        definition.mask = Some(crate::schema::MaskSchema {
+            kind: "full".into(),
+            classification: "pii".into(),
         });
+        definition.storage.raw_column = Some("plaintext".into());
         assert!(declared_raw_column("secret", &definition).is_err());
+        definition.storage.raw_column = None;
+        assert!(declared_raw_column("secret", &definition).is_err());
+        let fields = crate::schema::CollectionSchema::from_fields(&value!({
+            "secret":{"type":"string", "mask":{"kind":"full"}}
+        }))
+        .unwrap()
+        .into_fields();
         assert_eq!(
-            declared_raw_column("secret", &value!({"mask":{"kind":"full"}})).unwrap(),
+            declared_raw_column("secret", &fields["secret"]).unwrap(),
             Some(raw_column_name("secret"))
         );
     }

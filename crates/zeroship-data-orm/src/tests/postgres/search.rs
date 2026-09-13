@@ -482,7 +482,7 @@ fn near_returns_within_radius() {
                 host.key_source(),
             );
             let binding = DbBinding::cold_start(app);
-            let schema = value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } });
+            let schema = crate::tests::fixtures::native_fields(value!({ "id": {"type":"integer", "primaryKey":true}, "location": { "type": "geoPoint" } }));
             let registration =
                 zeroship_data_orm::sql::registration::SqlRegistration::postgres();
             let rows = zeroship_data_orm::search::Search::spatial_near(

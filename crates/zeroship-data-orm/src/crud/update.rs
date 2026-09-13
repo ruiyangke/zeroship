@@ -1,4 +1,5 @@
 use super::{predicate, resolved::ResolvedTable};
+use crate::schema::FieldMap;
 use crate::{
     sql::{
         lifecycle::{AssignedValue, WriteAssignments},
@@ -17,7 +18,7 @@ use crate::{
 pub(crate) fn build_one(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     filter: predicate::Input,
     update: Value,
     generated: &WriteAssignments,
@@ -40,7 +41,7 @@ pub(crate) fn build_one(
 pub(crate) fn build_many(
     namespace: &SchemaName,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     filter: predicate::Input,
     update: Value,
     generated: &WriteAssignments,
@@ -63,7 +64,7 @@ pub(crate) fn build_many(
 struct BuildInput<'a> {
     namespace: &'a SchemaName,
     collection: &'a str,
-    schema: &'a Value,
+    schema: &'a FieldMap,
     filter: predicate::Input,
     update: Value,
     generated: &'a WriteAssignments,
@@ -205,6 +206,7 @@ fn invalid(message: impl Into<String>) -> QueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::schema::ColumnSchema;
     use crate::sql::{
         compiler::{CompileError, SqlCompiler, SqliteCompiler},
         registration::{SqlStorageCodecs, SQLITE_FAMILY},
@@ -219,7 +221,7 @@ mod tests {
     struct CountingCodecs(Arc<AtomicUsize>);
 
     impl SqlStorageCodecs for CountingCodecs {
-        fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+        fn storage_type(&self, definition: &ColumnSchema) -> Result<StorageType, CompileError> {
             SqlRegistration::sqlite().storage_type(definition)
         }
 
@@ -245,10 +247,10 @@ mod tests {
             compiler.support(),
         )
         .unwrap();
-        let schema = crate::value!({
+        let schema = crate::tests::fixtures::native_fields(crate::value!({
             "id":{"type":"string","primaryKey":true},
             "items":{"type":"array","items":"json"}
-        });
+        }));
         let resolved = ResolvedTable::new(
             &SchemaName::new("app").unwrap(),
             "entries",

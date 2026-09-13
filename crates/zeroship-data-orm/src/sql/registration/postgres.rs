@@ -1,4 +1,5 @@
 use super::SqlStorageCodecs;
+use crate::schema::{ColumnSchema, LogicalType};
 use crate::{
     sql::{compiler::CompileError, statement::StorageType},
     value::Value,
@@ -8,24 +9,28 @@ use crate::{
 pub(super) struct PostgresCodecs;
 
 impl SqlStorageCodecs for PostgresCodecs {
-    fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+    fn storage_type(&self, definition: &ColumnSchema) -> Result<StorageType, CompileError> {
         if crate::sql::descriptors::is_encrypted(definition) {
             return Ok(StorageType::Bytes);
         }
         if let Some(decimal) = crate::sql::decimal::storage(definition)? {
             return Ok(StorageType::ExactDecimal(decimal));
         }
-        Ok(match definition["type"].as_str() {
-            Some("string" | "text" | "id" | "ref" | "calendarDate") => StorageType::Text,
-            Some("boolean" | "bool") => StorageType::Boolean,
-            Some("integer" | "int" | "bigint" | "bigInt") => StorageType::Integer,
-            Some("number" | "float" | "double") => StorageType::Real,
-            Some("bytes") => StorageType::Bytes,
-            Some("date" | "timestamp" | "timestamptz") => StorageType::Timestamp,
-            Some("json" | "object" | "array" | "union") => StorageType::Json,
-            Some("vector") => StorageType::Vector,
-            Some("geoPoint") => StorageType::GeoPoint,
-            _ => return Err(unsupported_type()),
+        Ok(match definition.logical_type {
+            LogicalType::Text | LogicalType::CalendarDate => StorageType::Text,
+            LogicalType::Boolean => StorageType::Boolean,
+            LogicalType::Integer | LogicalType::BigInt => StorageType::Integer,
+            LogicalType::Number => StorageType::Real,
+            LogicalType::Bytes => StorageType::Bytes,
+            LogicalType::Timestamp => StorageType::Timestamp,
+            LogicalType::Json | LogicalType::Object | LogicalType::Array | LogicalType::Union => {
+                StorageType::Json
+            }
+            LogicalType::Vector => StorageType::Vector,
+            LogicalType::GeoPoint => StorageType::GeoPoint,
+            LogicalType::Time | LogicalType::Enum | LogicalType::Literal => {
+                return Err(unsupported_type())
+            }
         })
     }
 

@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::value::Value;
+use crate::schema::{ColumnSchema, FieldMap};
 
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_data_orm::error::DbError;
@@ -75,12 +75,12 @@ fn floor_from_live(live: &crate::sql::catalog::LiveSchema) -> ProtectionFloor {
 /// as it skips an absent block, and both therefore store plaintext under the
 /// field's own name. A fence that accepted `kind: "none"` would refuse the
 /// one-key deletion and wave through the one-word edit that does the same thing.
-pub(crate) fn descriptor_declares_mask(def: &Value) -> bool {
+pub(crate) fn descriptor_declares_mask(def: &ColumnSchema) -> bool {
     crate::sql::descriptors::effective_mask(def).is_some()
 }
 
 /// Whether the descriptor enables encryption, matching the write pipeline.
-pub(crate) fn descriptor_declares_encryption(def: &Value) -> bool {
+pub(crate) fn descriptor_declares_encryption(def: &ColumnSchema) -> bool {
     crate::sql::descriptors::is_encrypted(def)
 }
 
@@ -118,7 +118,7 @@ pub async fn refuse_protection_downgrade(
     route: &TxRoute,
     binding: &DbBinding,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<(), DbError> {
     let floor = resolve_floor(route, binding).await?;
     refuse_offences(&floor, collection, schema)
@@ -128,18 +128,17 @@ pub async fn refuse_protection_downgrade(
 fn refuse_offences(
     floor: &ProtectionFloor,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<(), DbError> {
     let Some(stored_columns) = floor.get(collection) else {
         return Ok(());
     };
-    let fields = schema.as_object();
 
     // Deterministic order: a refusal must name the same column on every run, or
     // the failure a creator sees depends on hash iteration.
     let mut offences: Vec<(&String, &'static str)> = Vec::new();
     for (column, stored) in stored_columns {
-        let def = fields.and_then(|f| f.get(column.as_str()));
+        let def = schema.get(column.as_str());
         // A column the descriptor no longer DECLARES AT ALL is not this fence's
         // business: nothing can be written to it, so nothing can be downgraded.
         let Some(def) = def else { continue };
@@ -188,6 +187,16 @@ mod tests {
     use crate::sql::catalog::{Classification, ColumnInfo, LiveSchema, MaskKind, MaskMeta};
 
     use crate::value;
+
+    fn test_fields(fields: crate::value::Value) -> FieldMap {
+        crate::schema::CollectionSchema::from_fields(&fields)
+            .unwrap()
+            .into_fields()
+    }
+
+    fn test_column(field: crate::value::Value) -> ColumnSchema {
+        ColumnSchema::from_descriptor(&field).unwrap()
+    }
 
     fn masked_column() -> ColumnInfo {
         ColumnInfo {
@@ -272,31 +281,33 @@ mod tests {
     fn kind_none_is_not_a_mask_declaration() {
         // The one-word edit and the one-key deletion reach the same write
         // behaviour, so the fence must read them the same way.
-        assert!(!descriptor_declares_mask(&value!({ "type": "string" })));
-        assert!(!descriptor_declares_mask(
-            &value!({ "type": "string", "mask": { "kind": "none" } })
-        ));
-        assert!(descriptor_declares_mask(
-            &value!({ "type": "string", "mask": { "kind": "last4" } })
-        ));
+        assert!(!descriptor_declares_mask(&test_column(
+            value!({ "type": "string" })
+        )));
+        assert!(!descriptor_declares_mask(&test_column(
+            value!({ "type": "string", "mask": { "kind": "none" } })
+        )));
+        assert!(descriptor_declares_mask(&test_column(
+            value!({ "type": "string", "mask": { "kind": "last4" } })
+        )));
         // No `kind` at all defaults to `full` in the write pass, so it IS a
         // declaration.
-        assert!(descriptor_declares_mask(
-            &value!({ "type": "string", "mask": { "classification": "pii" } })
-        ));
+        assert!(descriptor_declares_mask(&test_column(
+            value!({ "type": "string", "mask": { "classification": "pii" } })
+        )));
     }
 
     #[test]
     fn encryption_is_declared_by_the_boolean_flag() {
-        assert!(!descriptor_declares_encryption(
-            &value!({ "type": "string" })
-        ));
-        assert!(descriptor_declares_encryption(
-            &value!({ "type": "string", "encrypted": true })
-        ));
-        assert!(!descriptor_declares_encryption(
-            &value!({ "type": "string", "encrypted": false })
-        ));
+        assert!(!descriptor_declares_encryption(&test_column(
+            value!({ "type": "string" })
+        )));
+        assert!(descriptor_declares_encryption(&test_column(
+            value!({ "type": "string", "encrypted": true })
+        )));
+        assert!(!descriptor_declares_encryption(&test_column(
+            value!({ "type": "string", "encrypted": false })
+        )));
     }
 
     /// Removing masking or encryption from a descriptor is always refused.
@@ -305,7 +316,7 @@ mod tests {
         let floor = floor_from_live(&live_with("ssn", masked_column()));
         // The descriptor still declares the field - it just dropped the `mask`
         // key. That one deletion is the whole defect this fence exists for.
-        let downgraded = value!({ "ssn": { "type": "string" } });
+        let downgraded = test_fields(value!({ "ssn": { "type": "string" } }));
         let err = refuse_offences(&floor, "people", &downgraded)
             .expect_err("a dropped mask must be refused, not written in the clear");
         let rendered = format!("{err:?}");
@@ -322,7 +333,7 @@ mod tests {
         let enc_err = refuse_offences(
             &enc_floor,
             "people",
-            &value!({ "secret": { "type": "string" } }),
+            &test_fields(value!({ "secret": { "type": "string" } })),
         )
         .expect_err("a dropped encryption block must be refused too");
         assert!(
@@ -336,7 +347,7 @@ mod tests {
         refuse_offences(
             &floor,
             "people",
-            &value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+            &test_fields(value!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } })),
         )
         .expect("a descriptor that still declares the mask must be permitted");
     }
