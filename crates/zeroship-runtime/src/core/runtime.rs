@@ -922,6 +922,8 @@ pub(crate) struct RuntimeInner {
     plugins: Vec<Arc<dyn NativePlugin>>,
 
     pending_requests: HashMap<u64, PendingRequest>,
+    #[cfg(feature = "runtime_native_websocket")]
+    subscriptions: crate::rpc::subscription::Subscriptions,
     next_direct_request_id: u64,
 
     /// Notification channel to wake the pump task when new work is added.
@@ -1243,6 +1245,8 @@ impl RuntimeInner {
             state,
             plugins,
             pending_requests: HashMap::new(),
+            #[cfg(feature = "runtime_native_websocket")]
+            subscriptions: crate::rpc::subscription::Subscriptions::default(),
             next_direct_request_id: 1,
             pump_notify_tx: None,
             cpu_limit,
@@ -2125,6 +2129,15 @@ impl RuntimeInner {
         } else {
             None
         };
+        #[cfg(feature = "runtime_native_websocket")]
+        let subscription_id_str: Option<&str> = if application.rpc.is_some()
+            && is_ws_upgrade
+            && method.eq_ignore_ascii_case("GET")
+        {
+            extract_zs_v1_id(method, url)
+        } else {
+            None
+        };
 
         // NOTE: the env JSON is NOT marshalled here. Every tier that needs
         // the env reads the cached `state.env_obj` V8 global (built once in
@@ -2142,9 +2155,51 @@ impl RuntimeInner {
         let mut pending_rpc_call = None;
         // A pending call or response body takes ownership of cancellation.
         let mut pending_rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime> = None;
+        #[cfg(feature = "runtime_native_websocket")]
+        let mut subscriptions = std::mem::take(&mut self.subscriptions);
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
+
+                #[cfg(feature = "runtime_native_websocket")]
+                if let Some(rpc_id) = subscription_id_str {
+                    let registry = application.rpc.as_ref().unwrap().clone();
+                    let user_json = self.state.borrow().per_request_user.get(&request_id).cloned();
+                    let inputs = build_rpc_ctx_inputs(request_id, headers);
+                    let headers = std::sync::Arc::new(headers.to_vec());
+                    let (rpc_ctx, signal) = match crate::rpc::mint_rpc_ctx(
+                        scope,
+                        inputs.request_id,
+                        inputs.trace_id,
+                        method.to_string(),
+                        url.to_string(),
+                        headers,
+                        user_json,
+                        inputs.idempotency_key,
+                    ) {
+                        Ok(result) => result,
+                        Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
+                    };
+                    let abort_guard = self.app_id.as_ref().map(|app_id| {
+                        crate::rpc::abort::register_in_flight(app_id, request_id, signal.clone())
+                    });
+                    let lifetime = crate::rpc::lifetime::RequestLifetime {
+                        request_id,
+                        cancel: CancelFlag::new(),
+                        deadline: None,
+                        signal,
+                        _abort_guard: abort_guard,
+                    };
+                    let info = subscriptions.open(
+                        scope,
+                        &self.state,
+                        rpc_id.to_string(),
+                        registry,
+                        rpc_ctx,
+                        lifetime,
+                    );
+                    break 'dispatch Ok(DispatchResult::HttpResponse(info));
+                }
 
                 // ---- Tier 1: RPC fast path ----
                 // `rpc_id_str.is_some()` implies `application.rpc.is_some()`
@@ -2298,6 +2353,10 @@ impl RuntimeInner {
                 }
                 })
             });
+        #[cfg(feature = "runtime_native_websocket")]
+        {
+            self.subscriptions = subscriptions;
+        }
         self.disarm_cpu_timer();
 
         if self.check_v8_terminated() {
@@ -2937,6 +2996,17 @@ impl RuntimeInner {
                     crate::core::invocation::InvocationContext::connection(
                         self.state.borrow().ws_user.get(&ws_id).cloned(),
                     );
+                if self.subscriptions.owns(ws_id) {
+                    self.dispatch_subscription_turn(
+                        work,
+                        invocation_context,
+                        ws_id,
+                        |subscriptions, scope, state| {
+                            subscriptions.on_websocket_event(scope, state, ws_id);
+                        },
+                    );
+                    return;
+                }
                 // Native WebSocket events: drain the per-WS event
                 // queue and dispatch each event in FIFO order. Multiple
                 // events may have been coalesced under one OpResult
@@ -2970,6 +3040,33 @@ impl RuntimeInner {
                             scope, state, ws_id,
                         );
                     },
+                );
+            }
+            #[cfg(feature = "runtime_native_websocket")]
+            OpResult::SubscriptionAdvance { ws_id } => {
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::connection(
+                        self.state.borrow().ws_user.get(&ws_id).cloned(),
+                    );
+                self.dispatch_subscription_turn(
+                    work,
+                    invocation_context,
+                    ws_id,
+                    |subscriptions, scope, state| subscriptions.advance(scope, state, ws_id),
+                );
+            }
+            #[cfg(feature = "runtime_native_websocket")]
+            OpResult::SubscriptionTimer(timer) => {
+                let ws_id = timer.ws_id();
+                let invocation_context =
+                    crate::core::invocation::InvocationContext::connection(
+                        self.state.borrow().ws_user.get(&ws_id).cloned(),
+                    );
+                self.dispatch_subscription_turn(
+                    work,
+                    invocation_context,
+                    ws_id,
+                    |subscriptions, scope, state| subscriptions.on_timer(scope, state, timer),
                 );
             }
             OpResult::SocketEvent { socket_id } => {
@@ -3038,6 +3135,35 @@ impl RuntimeInner {
         self.cleanup_cancelled_requests();
         self.clear_executing_request();
         self.drain_new_tasks_into(work);
+    }
+
+    #[cfg(feature = "runtime_native_websocket")]
+    fn dispatch_subscription_turn<Dispatch>(
+        &mut self,
+        work: &mut AsyncWork,
+        invocation_context: crate::core::invocation::InvocationContext,
+        ws_id: u32,
+        dispatch: Dispatch,
+    ) where
+        Dispatch: FnOnce(
+            &mut crate::rpc::subscription::Subscriptions,
+            &mut v8::PinScope,
+            &SharedState,
+        ),
+    {
+        let mut subscriptions = std::mem::take(&mut self.subscriptions);
+        self.dispatch_native_turn(
+            work,
+            invocation_context,
+            |state| {
+                let mut state = state.borrow_mut();
+                state.executing_request_id = None;
+                state.executing_request_cancel = None;
+                state.executing_ws_user = state.ws_user.get(&ws_id).cloned();
+            },
+            |scope, state| dispatch(&mut subscriptions, scope, state),
+        );
+        self.subscriptions = subscriptions;
     }
 
     /// Handle a timer firing (pump path). Enters V8 to fire the callback,

@@ -177,38 +177,15 @@ pub struct HttpResult {
 // requires a rollback, restore from `git log --diff-filter=D --
 // crates/runtime/src/embed/websocket.js`.
 
-/// Runtime-injected bootstrap module. Becomes the new entry (`index.js`),
-/// wrapping the user's original entry (renamed internally to `__user__.js`).
+/// Runtime-owned host entry. Becomes `index.js` and imports the creator entry,
+/// which is renamed internally to `__user__.js`.
 ///
-/// The kernel invokes one of three entry points per request:
-///   - `user.default.rpc(name, input, ctx)`  for `/__zeroship/v1/<id>` (when set)
-///   - `user.default.fetchFast(method, url, bodyBytes, env)`  for non-RPC paths (when set)
-///   - `user.default.fetch(request, env, ctx)`  WinterCG slow path (always)
+/// It preserves creator fetch receivers, exposes the procedure dictionary for
+/// the Rust runtime to snapshot, supplies the optional index fallback, and
+/// currently retains the workflow entry owned by the workflow refactor.
+/// Unary, streaming and subscription RPC dispatch do not execute here.
 ///
-/// The synthetic SSR entry (emitted by `@zeroship/vite-plugin`) provides
-/// `default.{fetch, rpc}` and owns the `/__zeroship/v1/<id>` wire dispatch. Raw
-/// user code (no plugin) can export any subset; the bootstrap forwards
-/// whichever are present.
-///
-/// This module exists to:
-///   1. **WS-subscription dispatch**: WebSocket upgrades on `/__zeroship/v1/<id>`
-///      reach `_zsAcceptSubscription` → `dispatchSubscription` →
-///      `user.default.rpc(name, input, ctx)`. The kernel itself doesn't
-///      know about subscriptions — they ride entirely on user-space JS
-///      over the existing WebSocketPair primitive.
-///   2. **Bare-app fallback**: when the user's module doesn't export
-///      `default.fetch`, return a 404 (or the legacy `user.index()`
-///      convention for hand-written test apps).
-///   3. **Request-context binding**: before invoking user code, the
-///      kernel stashes the ctx + Request so nested modules can call
-///      `getRequest()` without threading the request everywhere.
-///
-/// The `default` export shape is `{ fetch, rpc, fetchFast, subscribe }`
-/// — `rpc` is the standalone RPC entry (kernel calls it directly when
-/// the URL matches /__zeroship/v1/<id>; symmetric to `default.fetch`),
-/// `fetchFast` is the optional zeroship-extension HTTP fast path for
-/// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
-/// Internal capability bridge module source.
+/// Internal workflow bridge module source.
 ///
 /// This module captures native capabilities before `./__user__.js` evaluates.
 /// Creator code does not receive these captured callbacks.
@@ -220,12 +197,7 @@ const ZS_WORKFLOW_BODY_FETCH_ERROR =
     "workflow bodies may not perform I/O directly — move fetch(...) inside step.run(...) or use step.sideEffect(...)";
 const ZS_WORKFLOW_BODY_TIMER_ERROR =
     "workflow bodies may not use timers directly — use step.sleep(...) instead";
-const enterKind = globalThis.__zsEnterKind;
-const exitKind = globalThis.__zsExitKind;
 const zsWorkflowRealFetch = globalThis.fetch;
-try { delete globalThis.__zsEnterKind; } catch (_e) {}
-try { delete globalThis.__zsExitKind; } catch (_e) {}
-try { delete globalThis.__zsClearKind; } catch (_e) {}
 class ZsNondeterministicError extends Error {
     constructor(message = "workflow replay is nondeterministic") {
         super(message);
@@ -272,89 +244,6 @@ function zsInstallWorkflowIoGuards() {
 }
 
 zsInstallWorkflowIoGuards();
-
-function isAsyncIterator(x) {
-    return x != null && typeof x === "object"
-        && typeof x[Symbol.asyncIterator] === "function"
-        && typeof x.next === "function";
-}
-
-function isParseable(s) {
-    return s != null && typeof s === "object" && typeof s.parse === "function";
-}
-
-function zodIssues(err) {
-    if (err && Array.isArray(err.issues)) return err.issues;
-    if (err && Array.isArray(err.errors)) return err.errors;
-    return [];
-}
-
-function isZodStringSchema(s) {
-    if (!s || typeof s !== "object") return false;
-    const def = s._def ?? s.def;
-    if (!def) return false;
-    if (def.typeName === "ZodString") return true;
-    if (def.type === "string") return true;
-    return false;
-}
-
-function mkErr(message, status, code, details) {
-    const e = new Error(message);
-    e.status = status;
-    e.code = code;
-    if (details !== undefined) e.details = details;
-    return e;
-}
-
-function enter(kind) {
-    return kind && typeof enterKind === "function" ? enterKind(kind) : -1;
-}
-
-function exit(token) {
-    if (token >= 0 && typeof exitKind === "function") exitKind(token);
-}
-
-export async function __zsDispatchRpc(rpc, name, input, ctx) {
-    if (rpc == null || typeof rpc !== "object") {
-        throw mkErr("RPC registry is not an object", 500, "INTERNAL");
-    }
-    const fn = rpc[name];
-    if (typeof fn !== "function") {
-        throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
-    }
-
-    const cfg = fn.config;
-    let validated = input;
-    if (cfg && isParseable(cfg.input)) {
-        try {
-            validated = cfg.input.parse(input);
-        } catch (e) {
-            throw mkErr("Invalid input", 400, "INVALID_ARGUMENT", { issues: zodIssues(e) });
-        }
-    }
-
-    const kind = cfg && typeof cfg.kind === "string" ? cfg.kind : undefined;
-    const token = enter(kind);
-    try {
-        const result = await fn(validated, ctx);
-        if (isAsyncIterator(result)) {
-            if (cfg && isZodStringSchema(cfg.output)) {
-                try { result.__zsOutputIsString = true; } catch (_e) {}
-            }
-            return result;
-        }
-        if (cfg && isParseable(cfg.output) && globalThis.__zsValidateOutput) {
-            try {
-                cfg.output.parse(result);
-            } catch (e) {
-                throw mkErr("Invalid handler output", 500, "INTERNAL", { issues: zodIssues(e) });
-            }
-        }
-        return result;
-    } finally {
-        exit(token);
-    }
-}
 
 class ZsWorkflowSuspendSignal extends Error {
     constructor(outcome) {
@@ -1429,7 +1318,7 @@ pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
 fn bootstrap_prefix_js() -> String {
     format!(
         r#"
-import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from "./{}";
+import {{ __zsWorkflowDispatch }} from "./{}";
 import * as user from "./__user__.js";
 
 "#,
@@ -1530,261 +1419,6 @@ function errorResponse(err) {
     });
 }
 
-// ── Subscription wire dispatch ────────────────────────────────────────────
-//
-// Subscription procedures are async generators wired over WebSocket per
-// `docs/proposals/rpc.md` §6 (Subscription wire). Frame protocol:
-//
-//   Client → server (first frame after upgrade):
-//     {"t":"hello","input":<json>}
-//
-//   Server → client:
-//     {"t":"data","value":<json>}    each yield
-//     {"t":"error","error":<env>}    on handler throw (envelope is
-//                                    field-compatible with errorResponse)
-//     {"t":"end"}                    normal completion
-//     {"t":"ping"} / {"t":"pong"}    keepalive (either direction)
-//
-// Pings: server sends every 30s; if a pong doesn't come back within 60s
-// we close 4408. Hello timeout: 5s after upgrade or close 4400.
-//
-// Implementation note: this runs entirely in user-space JS over the
-// existing WebSocketPair primitive — the kernel itself doesn't know
-// about subscriptions. The synthetic SSR entry detects WS-upgrade
-// requests on `/__zeroship/v1/<id>` and calls into `dispatchSubscription` to
-// hand off the server side of the pair. For the bootstrap fallback
-// (apps without the synthetic entry) we expose the same handler so
-// runtime tests + bare-bone apps can wire WS subscriptions directly.
-function _zsSubError(err) {
-    const env = {
-        message: (err && err.message) || String(err),
-        name:    (err && err.name)    || "Error",
-    };
-    if (err && typeof err.code === "string") env.code = err.code;
-    if (err && err.details !== undefined)    env.details = err.details;
-    if (err && typeof err.retryable === "boolean") env.retryable = err.retryable;
-    return env;
-}
-
-// Run an async iterator over `ws`. Emits `{"t":"data",value}` per yield,
-// `{"t":"end"}` on normal completion, `{"t":"error",error}` on throw.
-// Closes the socket cleanly afterward. Stops emitting when the socket
-// is no longer open (client closed). Calls `gen.return()` on early exit
-// so handler-side cleanup runs (clear timers, close DB watch, etc.).
-async function _zsRunSubscriptionGen(gen, ws) {
-    try {
-        while (true) {
-            // Cheap closed-check before pulling the next value — saves
-            // the (potentially expensive) async-gen step when the
-            // client is already gone.
-            if (ws.readyState !== 1 /* OPEN */) {
-                try { await gen.return(undefined); } catch (_e) {}
-                return;
-            }
-            let step;
-            try {
-                step = await gen.next();
-            } catch (err) {
-                if (ws.readyState === 1) {
-                    try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-                    try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
-                }
-                return;
-            }
-            if (step.done) {
-                if (ws.readyState === 1) {
-                    try { ws.send(JSON.stringify({ t: "end" })); } catch (_) {}
-                    try { ws.close(1000, ""); } catch (_) {}
-                }
-                return;
-            }
-            if (ws.readyState !== 1) {
-                try { await gen.return(undefined); } catch (_e) {}
-                return;
-            }
-            try {
-                ws.send(JSON.stringify({ t: "data", value: step.value }));
-            } catch (_) {
-                try { await gen.return(undefined); } catch (_e) {}
-                return;
-            }
-        }
-    } catch (err) {
-        // Defensive: any unexpected throw above bubbles here.
-        if (ws && ws.readyState === 1) {
-            try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-            try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
-        }
-    }
-}
-
-// dispatchSubscription — entry point for WS-subscription procedures.
-//
-// `methodName` is the wireId. `input` is the parsed input value
-// (already pulled out of the `{"t":"hello"}` frame by the caller).
-// `ws` is the *server-side* WebSocket of the pair created by the
-// caller; it's already been .accept()ed before we're invoked.
-//
-// Routes through `user.default.rpc(name, input, ctx)` — the symmetric
-// shape the synthetic SSR entry exposes. Subscription procedures are
-// async generators; the handler returns the iterator directly.
-async function dispatchSubscription(methodName, input, ws) {
-    try {
-        if (!user.default) {
-            throw Object.assign(
-                new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
-                { code: "INTERNAL" },
-            );
-        }
-        // Stage 5a: accept function-shape (legacy) OR dict-shape
-        // `default.rpc`. Dict-shape rides through the internal dispatcher, which
-        // returns the handler's value unchanged — so an AsyncIterator
-        // handler still surfaces as an iterator for `_zsRunSubscriptionGen`.
-        let rpcInvoker;
-        if (typeof user.default.rpc === "function") {
-            rpcInvoker = user.default.rpc;
-        } else if (user.default.rpc != null && typeof user.default.rpc === "object") {
-            const rpcDict = user.default.rpc;
-            rpcInvoker = (name, input) => __zsDispatchRpc(rpcDict, name, input);
-        } else {
-            throw Object.assign(
-                new Error("default.rpc not exported — subscription requires the synthetic SSR entry"),
-                { code: "INTERNAL" },
-            );
-        }
-        const gen = await rpcInvoker(methodName, input);
-        if (gen == null || typeof gen !== "object"
-            || typeof gen[Symbol.asyncIterator] !== "function"
-            || typeof gen.next !== "function") {
-            throw Object.assign(new Error("Subscription handler must return an async iterator"), {
-                code: "INTERNAL",
-            });
-        }
-        await _zsRunSubscriptionGen(gen, ws);
-    } catch (err) {
-        if (ws && ws.readyState === 1 /* OPEN */) {
-            try { ws.send(JSON.stringify({ t: "error", error: _zsSubError(err) })); } catch (_) {}
-            try { (typeof __wsServerClose === "function" ? __wsServerClose(ws, 1011, "") : ws.close(1011, "")); } catch (_) {}
-        }
-    }
-}
-
-// Build a Response that completes the WS-subscription upgrade. Spawns
-// the subscription pump as a side effect — the pump reads the `hello`
-// frame, runs the generator, and writes data frames; the kernel
-// handles the WS handshake from the returned Response.
-//
-// `urlStr` is the request URL (used to extract the wireId after the
-// `/__zeroship/v1/` prefix). On structural failure (bad URL, missing method)
-// we return an HTTP error response — the kernel will write that
-// instead of upgrading.
-function _zsAcceptSubscription(urlStr) {
-    let methodName = null;
-    try {
-        const u = new URL(urlStr);
-        const m = u.pathname.match(/^\/__zeroship\/v1\/(.+)$/);
-        if (m) methodName = decodeURIComponent(m[1]);
-    } catch (_e) {}
-    if (!methodName) {
-        return new Response('{"message":"missing wireId","name":"Error"}', {
-            status: 400, headers: { "Content-Type": "application/json" },
-        });
-    }
-
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    server.accept();
-
-    // Hello timeout — close 4400 if the client doesn't send `hello`
-    // within 5s. The first message handler clears this.
-    let helloTimer = setTimeout(() => {
-        if (server.readyState === 1) {
-            try { server.close(4400, "missing hello"); } catch (_) {}
-        }
-    }, 5000);
-
-    let pingTimer = null;
-    let pongDeadline = null;
-    function startPings() {
-        // Server sends ping every 30s. If client doesn't pong within
-        // 60s we close 4408.
-        pingTimer = setInterval(() => {
-            if (server.readyState !== 1) { clearInterval(pingTimer); return; }
-            try { server.send(JSON.stringify({ t: "ping" })); } catch (_) {}
-            if (pongDeadline === null) {
-                pongDeadline = setTimeout(() => {
-                    if (server.readyState === 1) {
-                        try { server.close(4408, "pong timeout"); } catch (_) {}
-                    }
-                }, 60000);
-            }
-        }, 30000);
-    }
-
-    // Wire the message router. The first message must be `hello`; any
-    // other shape closes the connection 4400.
-    let started = false;
-    server.addEventListener("message", function(ev) {
-        let msg;
-        try { msg = JSON.parse(typeof ev.data === "string" ? ev.data : String(ev.data)); }
-        catch (_e) {
-            try { server.close(4400, "invalid JSON"); } catch (_) {}
-            return;
-        }
-        if (!msg || typeof msg.t !== "string") {
-            try { server.close(4400, "missing frame tag"); } catch (_) {}
-            return;
-        }
-        if (msg.t === "ping") {
-            try { server.send(JSON.stringify({ t: "pong" })); } catch (_) {}
-            return;
-        }
-        if (msg.t === "pong") {
-            if (pongDeadline !== null) { clearTimeout(pongDeadline); pongDeadline = null; }
-            return;
-        }
-        if (!started && msg.t === "hello") {
-            started = true;
-            clearTimeout(helloTimer); helloTimer = null;
-            startPings();
-            // Kick off the dispatcher — fire-and-forget; errors are
-            // funnelled into ws frames inside dispatchSubscription.
-            dispatchSubscription(methodName, msg.input, server);
-            return;
-        }
-        // Frames after hello (other than ping/pong) are not part of
-        // the protocol — drop silently for forward-compat.
-    });
-
-    // On close, stop timers + ensure the generator gets a chance to
-    // tear down. (The generator's own `ws.readyState !== 1` check
-    // catches this on the next iteration.)
-    server.addEventListener("close", function() {
-        if (helloTimer !== null) { clearTimeout(helloTimer); helloTimer = null; }
-        if (pingTimer !== null) { clearInterval(pingTimer); pingTimer = null; }
-        if (pongDeadline !== null) { clearTimeout(pongDeadline); pongDeadline = null; }
-    });
-
-    // Return the WS-upgrade response — kernel writes the 101 + handshake
-    // headers from this and pumps frames between TCP and the pair.
-    return new Response(null, {
-        status: 101,
-        webSocket: client,
-        headers: { "Sec-WebSocket-Protocol": "zs.v1" },
-    });
-}
-
-// Detect a WS-upgrade request. The kernel/gateway already gates on
-// these — we re-check on the JS side so the bootstrap's fallback
-// router doesn't need to trust the path alone.
-function _zsIsWsUpgrade(request) {
-    if (request.method !== "GET") return false;
-    const upgrade = request.headers.get("upgrade");
-    if (!upgrade || upgrade.toLowerCase() !== "websocket") return false;
-    return true;
-}
-
 // The host finalizes startup before dispatch. Preserve the creator fetch receiver.
 const __USER_FETCH_RAW = user?.default?.fetch;
 const USER_FETCH = typeof __USER_FETCH_RAW === "function"
@@ -1816,8 +1450,6 @@ const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
 // Rust snapshots the procedure dictionary before publishing the application.
 const USER_RPC = user?.default?.rpc ?? null;
 
-const FALLBACK_ZS_V1_TAG = "/__zeroship/v1/";
-
 // Coerce a user-supplied page handler return value into a Response.
 // Strings/null are wrapped as text/html. Response is passed through.
 function coerceToHtmlResponse(result, status) {
@@ -1830,22 +1462,12 @@ function coerceToHtmlResponse(result, status) {
 }
 
 // Fallback fetch — used only when the user's module doesn't export a
-// default.fetch handler. Handles:
-//   - /__zeroship/v1/<id>    + WS upgrade  → dispatchSubscription
-//   - GET /           → user.index() if exported, returns HTML
-//   - else            → 404
+// default.fetch handler. It serves the optional index export and otherwise 404s.
 //
 // Unary /__zeroship/v1/<id> requests fall through here when there's no
 // `default.fetch`; we 404. Real apps ship via the synthetic SSR
 // entry which exports `default.{fetch, rpc}` and handles them.
 async function fallbackFetch(request) {
-    const urlStr = request.url;
-
-    const zsIdx = urlStr.indexOf(FALLBACK_ZS_V1_TAG);
-    if (zsIdx >= 0 && _zsIsWsUpgrade(request)) {
-        return _zsAcceptSubscription(urlStr);
-    }
-
     // GET / (or any path) → user.index() convention. The export
     // returns HTML (string or Response). Lets RPC-only apps still
     // render a UI without forcing creators to handle URL routing.
@@ -1876,11 +1498,6 @@ export default {
     workflow(envelope, ctx) {
         return __zsWorkflowDispatch(user, envelope, ctx);
     },
-    // Subscription dispatch. Caller hands in (name, input,
-    // server-side WebSocket already accepted). Used by the kernel's
-    // WS-upgrade path; tests can drive this directly via the
-    // runtime's WebSocketPair primitive.
-    subscribe: dispatchSubscription,
     // Standalone RPC entry. When set, the kernel calls this directly
     // for /__zeroship/v1/<id> requests and never builds a Request object.
     // Symmetric to fetch — independent kernel entry, not layered.
@@ -2981,23 +2598,6 @@ fn setup_globals_with_descriptor(
     // forwarder owns the wire pump now — see
     // `crate::streams::response_forwarder`.)
 
-    // WebSocket native callbacks. Cutover landing 3: the 5
-    // polyfill-driving globals (`__wsCreatePair` / `__wsLinkPair` /
-    // `__wsAccept` / `__wsSend` / `__wsClose`) are gone — all
-    // WebSocket traffic flows through the native class above.
-    //
-    // `__wsServerClose` is the privileged server-side close that
-    // bypasses the WHATWG user-API code restriction (1000 OR
-    // 3000-4999). Used by the bootstrap to issue protocol-level
-    // codes like 1011 (server error). Only the bootstrap reaches
-    // this; user app code keeps using `socket.close(code, reason)`.
-    {
-        let f =
-            v8::Function::new(scope, crate::websocket_native::ws_server_close_callback).unwrap();
-        let key = v8::String::new(scope, "__wsServerClose").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
-
     // env namespace
     {
         let env = v8::Object::new(scope);
@@ -3499,12 +3099,6 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     // in the `zeroship` JS module can read the per-request platform
     // ctx out of V8's embedder-data slot.
     crate::rpc::install_dispatch_globals(scope, global);
-    // B3 capability enforcement: install `__zsEnterKind` /
-    // `__zsExitKind` so the synthetic SSR entry can mark the active
-    // procedure kind around each user handler invocation. DB write
-    // callbacks + the native fetch callback consult `current_kind()`
-    // to refuse capability-violating ops.
-    crate::rpc::install_capability_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).

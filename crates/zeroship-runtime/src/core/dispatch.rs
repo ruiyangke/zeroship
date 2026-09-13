@@ -204,8 +204,8 @@ pub fn build_error_body(
     //
     //   - 4xx, which skips the sanitization rail entirely and is the status
     //     class an ANONYMOUS caller reaches most easily — `requireUser()`'s
-    //     401 and `__zsDispatchRpc`'s own 404 `NOT_FOUND` / 400
-    //     `INVALID_ARGUMENT` are all platform-minted 4xx, so "the creator
+    //     401 and native procedure resolution's `NOT_FOUND` /
+    //     `INVALID_ARGUMENT` failures are all platform-minted 4xx, so "the creator
     //     chose to throw it" is not true of the common cases;
     //   - the 5xx whitelist exemption, which was written to keep a
     //     developer-facing `code` on the wire and, being implemented as
@@ -912,8 +912,8 @@ mod tests {
     /// A 4xx skips the 5xx sanitization rail entirely, so before the fix the
     /// thrown `Error.stack` went verbatim to whoever made the request — and
     /// 4xx is the status class an ANONYMOUS caller can reach most easily
-    /// (`requireUser()`'s 401, `__zsDispatchRpc`'s own 404 `NOT_FOUND` and
-    /// 400 `INVALID_ARGUMENT`). The measured deployed body carried the
+    /// (`requireUser()`'s 401 and native procedure resolution's `NOT_FOUND`
+    /// and `INVALID_ARGUMENT`). The measured deployed body carried the
     /// internal module layout, the dispatcher frame names, and the
     /// `__zs_kind_bridge_<hash>` build fingerprint.
     ///
