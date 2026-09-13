@@ -163,15 +163,13 @@ table was rewritten, not inferred from nearby comments.
 
 ---
 
-## 4. `browser_auth_test` is not in the auth gate's binary list - FIXED
+## 4. Browser signout verification was missing from the auth runner — resolved
 
-`tests/run_auth_suite.sh` enumerated the other `AUTH_DB_URL`-gated binaries and
-named `zeroship-gateway:auth_token_anchors_test`, but not
-`zeroship-gateway:browser_auth_test`, whose `signout_local_...` test gates on the
-same variable. The blanket workspace run builds it; nothing ran its gated body
-with a database. Added to the list alongside the `GATEWAY_ANCHORS_DB_URL` export
-(`5646d3654`); the gate now reports `589 tests passed, 0 unexpected skips,
-1 allowlisted`, and the one remaining skip is the SMTP sink.
+The browser-auth integration target previously depended on shared database
+configuration and an explicit entry in `tests/run_auth_suite.sh`. Its cases
+now live beside `browser_auth` in the gateway library. Signout cases own
+migrated PostgreSQL containers and exercise the real session minter before
+revocation. The auth runner includes them through the library suite.
 
 ---
 

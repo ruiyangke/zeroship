@@ -2,33 +2,34 @@
 
 use super::*;
 
-pub(super) const MOCK_ISSUER: &str = "https://auth.zeroship.ai";
-pub(super) const TEST_BROKER_MASTER: &[u8] = b"gateway-anchor-test-broker-master-32-bytes";
+pub const MOCK_ISSUER: &str = "https://auth.zeroship.ai";
+pub const TEST_BROKER_MASTER: &[u8] = b"gateway-anchor-test-broker-master-32-bytes";
 
-pub(super) const GARBAGE_REFRESH_SECRET: &str = "rt_super_secret_family_lineage_DO_NOT_LOG";
+pub const GARBAGE_REFRESH_SECRET: &str = "rt_super_secret_family_lineage_DO_NOT_LOG";
 const GARBAGE_REFRESH_BODY: &str =
     r#"{"refresh_token":"rt_super_secret_family_lineage_DO_NOT_LOG","unexpected":true}"#;
-pub(super) const INITIAL_REFRESH_TOKEN: &str = "rt_initial_seed";
+pub const INITIAL_REFRESH_TOKEN: &str = "rt_initial_seed";
 
-pub(super) struct MockOP {
+pub struct MockOP {
     signing: SigningKey,
     kid: String,
-    pub(super) user_id: UserId,
+    pub user_id: UserId,
     client_id: String,
-    pub(super) refresh_calls: AtomicU32,
-    pub(super) invalid_grant: AtomicBool,
-    pub(super) garbage_2xx: AtomicBool,
+    pub refresh_calls: AtomicU32,
+    pub invalid_grant: AtomicBool,
+    pub garbage_2xx: AtomicBool,
     enforce_refresh_rotation: AtomicBool,
     refresh_pause: Mutex<Option<(flume::Sender<()>, flume::Receiver<()>)>>,
     presented_refresh_tokens: Mutex<Vec<String>>,
     current_refresh_token: Mutex<String>,
-    pub(super) revoked_refresh_tokens: Mutex<Vec<String>>,
-    pub(super) sid: String,
+    pub revoked_refresh_tokens: Mutex<Vec<String>>,
+    pub revoke_unavailable: AtomicBool,
+    pub sid: String,
     refresh_id_token: AtomicBool,
 }
 
 impl MockOP {
-    pub(super) fn pause_refresh(&self) -> (flume::Receiver<()>, flume::Sender<()>) {
+    pub fn pause_refresh(&self) -> (flume::Receiver<()>, flume::Sender<()>) {
         let (entered_tx, entered_rx) = flume::bounded(1);
         let (release_tx, release_rx) = flume::bounded(1);
         assert!(self
@@ -40,7 +41,7 @@ impl MockOP {
         (entered_rx, release_tx)
     }
 
-    pub(super) fn new(client_id: &str) -> Self {
+    pub fn new(client_id: &str) -> Self {
         let signing = SigningKey::from_bytes(&[42u8; 32]);
         let kid = crate::signing::jwk_thumbprint(&signing);
         Self {
@@ -56,20 +57,21 @@ impl MockOP {
             presented_refresh_tokens: Mutex::new(Vec::new()),
             current_refresh_token: Mutex::new(INITIAL_REFRESH_TOKEN.to_string()),
             revoked_refresh_tokens: Mutex::new(Vec::new()),
+            revoke_unavailable: AtomicBool::new(false),
             sid: format!("sid-{}", Uuid::new_v4().simple()),
             refresh_id_token: AtomicBool::new(true),
         }
     }
 
-    pub(super) fn enforce_refresh_reuse_detection(&self) {
+    pub fn enforce_refresh_reuse_detection(&self) {
         self.enforce_refresh_rotation.store(true, Ordering::SeqCst);
     }
 
-    pub(super) fn omit_refresh_id_token_on_refresh(&self) {
+    pub fn omit_refresh_id_token_on_refresh(&self) {
         self.refresh_id_token.store(false, Ordering::SeqCst);
     }
 
-    pub(super) fn presented_refresh_tokens(&self) -> Vec<String> {
+    pub fn presented_refresh_tokens(&self) -> Vec<String> {
         self.presented_refresh_tokens
             .lock()
             .expect("presented refresh tokens mutex")
@@ -150,7 +152,7 @@ impl MockOP {
         }))
     }
 
-    pub(super) fn logout_token(&self, jti: &str) -> String {
+    pub fn logout_token(&self, jti: &str) -> String {
         use ed25519_dalek::pkcs8::EncodePrivateKey;
         use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
@@ -178,10 +180,10 @@ impl MockOP {
     }
 }
 
-pub(super) const ROTATED_NAME: &str = "Rotated Name";
-pub(super) const ROTATED_AVATAR: &str = "https://cdn.example/rotated-avatar.png";
+pub const ROTATED_NAME: &str = "Rotated Name";
+pub const ROTATED_AVATAR: &str = "https://cdn.example/rotated-avatar.png";
 
-pub(super) fn now_secs() -> i64 {
+pub fn now_secs() -> i64 {
     i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -191,7 +193,7 @@ pub(super) fn now_secs() -> i64 {
     .unwrap()
 }
 
-pub(super) async fn boot_mock_op(op: Arc<MockOP>) -> (String, ntex::web::test::TestServer) {
+pub async fn boot_mock_op(op: Arc<MockOP>) -> (String, ntex::web::test::TestServer) {
     let srv = test::server(move || {
         let h = op.clone();
         async move {
@@ -234,6 +236,9 @@ async fn revoke_endpoint(
         .lock()
         .unwrap()
         .push(token.to_string());
+    if h.revoke_unavailable.load(Ordering::SeqCst) {
+        return web::HttpResponse::ServiceUnavailable().finish();
+    }
     web::HttpResponse::Ok().finish()
 }
 

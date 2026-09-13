@@ -1,20 +1,40 @@
 //! Owned gateway files, routes and database rows for browser identity tests.
 
-use super::*;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
-pub(super) const APP_HOST: &str = "myapp.zeroship.ai";
-pub(super) const APP_NAME: &str = "myapp";
+use ed25519_dalek::SigningKey;
+use ntex::web::{self, test};
+use uuid::Uuid;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
+
+use crate::{
+    blob_cache::{BlobCache, DiskBlobCache},
+    enforce, idempotency,
+    oidc_rp::{BrokerSecret, OidcRp},
+    proxy::HashRing,
+    session_token,
+    sync::RouteCache,
+    GateConfig, GateState,
+};
+
+mod op;
+pub use op::*;
+
+pub const APP_HOST: &str = "myapp.zeroship.ai";
+pub const APP_NAME: &str = "myapp";
 const PAIRWISE_TEST_SALT_SEED: &str = "pairwise-test-salt";
-pub(super) const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
-pub(super) const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
-pub(super) const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000000002";
-pub(super) const APP_ID: &str = "app_0000000000000000000000001";
+pub const BCL_REFRESH_APP_HOST: &str = "bcl-refresh.zeroship.ai";
+pub const BCL_REFRESH_APP_NAME: &str = "bcl-refresh";
+pub const BCL_REFRESH_APP_ID: &str = "app_0000000000000000000000002";
+pub const APP_ID: &str = "app_0000000000000000000000001";
 
 fn test_pairwise_salt() -> [u8; 32] {
     zeroship_core::crypto::derive_key(PAIRWISE_TEST_SALT_SEED)
 }
 
-pub(super) fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String {
+pub fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String {
     zeroship_core::auth::derive_pairwise(
         &test_pairwise_salt(),
         user_id,
@@ -22,14 +42,14 @@ pub(super) fn test_pairwise_subject(user_id: &UserId, app_host: &str) -> String 
     )
 }
 
-pub(super) fn build_state(
+pub fn build_state(
     op_base: &str,
     db: Option<crate::db::DbConfig>,
 ) -> (Arc<GateState>, tempfile::TempDir) {
     build_state_with_route(op_base, db, APP_ID, APP_NAME, APP_HOST, client_id())
 }
 
-pub(super) fn build_state_with_route(
+pub fn build_state_with_route(
     op_base: &str,
     db: Option<crate::db::DbConfig>,
     app_uuid: &str,
@@ -106,7 +126,7 @@ pub(super) fn build_state_with_route(
     (state, files)
 }
 
-fn build_route_map_for(
+pub fn build_route_map_for(
     app_uuid: &str,
     app_name: &str,
     app_host: &str,
@@ -153,12 +173,12 @@ macro_rules! anchors_bcl_app {
             )
             .service(
                 web::resource("/oidc/backchannel-logout")
-                    .route(web::post().to(backchannel_logout::handle)),
+                    .route(web::post().to($crate::backchannel_logout::handle)),
             )
     }};
 }
 
-pub(super) fn set_cookie_with_prefix(
+pub fn set_cookie_with_prefix(
     resp: &ntex::web::WebResponse,
     prefix: &str,
 ) -> Option<String> {
@@ -171,12 +191,12 @@ pub(super) fn set_cookie_with_prefix(
     None
 }
 
-pub(super) async fn read_json(resp: ntex::web::WebResponse) -> serde_json::Value {
+pub async fn read_json(resp: ntex::web::WebResponse) -> serde_json::Value {
     let bytes = test::read_body(resp).await;
     serde_json::from_slice(&bytes).expect("json body")
 }
 
-pub(super) fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> String {
+pub fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[String]) -> String {
     let token = state
         .session_issuer
         .as_ref()
@@ -197,13 +217,13 @@ pub(super) fn issue_session_cookie(state: &GateState, sub: &str, scopes: &[Strin
     let name = crate::oidc_rp::app_session_cookie_name();
     format!("{name}={token}")
 }
-pub(super) async fn seed_app_and_client(
+pub async fn seed_app_and_client(
     client: &compio_postgres::Client,
     user_id: &UserId,
 ) -> String {
     seed_app_and_client_for(client, user_id, APP_ID, APP_NAME, APP_HOST, client_id()).await
 }
-pub(super) async fn seed_app_and_client_for(
+pub async fn seed_app_and_client_for(
     client: &compio_postgres::Client,
     user_id: &UserId,
     app_uuid: &str,
@@ -248,24 +268,20 @@ pub(super) async fn seed_app_and_client_for(
         .execute(
             "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
-            &[
-                &app_uuid,
-                &format!("{app_name}-{}", user_id.as_str()),
-                &project_id,
-            ],
+            &[&app_uuid, &app_name, &project_id],
         )
         .await
         .expect("seed app");
     email
 }
-pub(super) async fn seed_relay_alias(
+pub async fn seed_relay_alias(
     client: &compio_postgres::Client,
     user_id: &UserId,
     relay_email: &str,
 ) {
     seed_relay_alias_for(client, client_id(), APP_HOST, user_id, relay_email).await;
 }
-pub(super) async fn seed_relay_alias_for(
+pub async fn seed_relay_alias_for(
     client: &compio_postgres::Client,
     client_id: &str,
     app_host: &str,
@@ -306,24 +322,24 @@ async fn unowned_project(pg: &compio_postgres::Client) -> String {
     project_id
 }
 
-pub(super) const REAL_EMAIL: &str = "user@example.com";
+pub const REAL_EMAIL: &str = "user@example.com";
 
-pub(super) fn client_id() -> &'static str {
+pub fn client_id() -> &'static str {
     static CLIENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         zeroship_core::typed_id::app_oauth_client_id(&AppId::parse(APP_ID).unwrap())
     });
     &CLIENT
 }
 
-pub(super) fn bcl_client_id() -> &'static str {
+pub fn bcl_client_id() -> &'static str {
     static CLIENT: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         zeroship_core::typed_id::app_oauth_client_id(&AppId::parse(BCL_REFRESH_APP_ID).unwrap())
     });
     &CLIENT
 }
 
-pub(super) async fn seed_user(client: &compio_postgres::Client, user: &UserId) {
+pub async fn seed_user(client: &compio_postgres::Client, user: &UserId) {
     seed_app_and_client(client, user).await;
 }
 
-pub(super) use {anchors_app, anchors_bcl_app};
+pub(crate) use {anchors_app, anchors_bcl_app};
