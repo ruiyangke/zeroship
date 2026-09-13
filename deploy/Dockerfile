@@ -335,7 +335,6 @@ WORKDIR /app
 COPY --from=sdks /build/node_modules /app/node_modules
 COPY --from=sdks /build/packages /app/packages
 COPY --from=sdks /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
-COPY --from=sdks /build/crates/zeroship-workflow-server/schema /app/crates/zeroship-workflow-server/schema
 COPY --from=sdks /build/crates/zeroship-workflow-manager/schema /app/crates/zeroship-workflow-manager/schema
 COPY --from=sdks /build/package.json /build/pnpm-workspace.yaml /app/
 # The corpus, from the `sdks` stage rather than the build context, so its

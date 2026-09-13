@@ -2,13 +2,11 @@
   "schema_version": [
     "id"
   ],
-  "workers": [
-    "id",
-    "worker_id"
+  "queue_scopes": [
+    "id"
   ],
-  "scopes": [
-    "id",
-    "app_id"
+  "workers": [
+    "id"
   ],
   "assignments": [
     "id",
@@ -27,5 +25,11 @@
     "request_id",
     "run_id",
     "ack_worker_id"
+  ],
+  "jobs": [
+    "id",
+    "app_id",
+    "deployment_id",
+    "worker_id"
   ]
 }

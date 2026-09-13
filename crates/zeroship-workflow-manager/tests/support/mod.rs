@@ -86,7 +86,8 @@ impl Fixture {
             .batch_execute(
                 "GRANT USAGE ON SCHEMA workflow_manager TO workflow_manager_test;
                  GRANT SELECT, INSERT, UPDATE, DELETE \
-                    ON ALL TABLES IN SCHEMA workflow_manager TO workflow_manager_test;",
+                    ON ALL TABLES IN SCHEMA workflow_manager TO workflow_manager_test;
+                 REVOKE INSERT, UPDATE, DELETE ON workflow_manager.schema_version FROM workflow_manager_test;",
             )
             .await
             .unwrap();

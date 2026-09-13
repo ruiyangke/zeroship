@@ -6,11 +6,11 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { table, t } from "../../../packages/zero-migrate/dist/index.js";
 import { compileSchema, writeArtifacts } from "./generate.mjs";
-import { workflowManagerSchema } from "./schema.ts";
+import { managerIdentityColumns, workflowManagerSchema } from "./schema.ts";
 
-test("compiles both queue backends with matching typed collection metadata", () => {
+test("compiles both manager backends with matching typed collection metadata", () => {
   const artifacts = compileSchema();
-  assert.deepEqual(artifacts.map(artifact => artifact.name), ["postgres.sql", "sqlite.sql", "schema.runtime.json"]);
+  assert.deepEqual(artifacts.map(artifact => artifact.name), ["postgres.sql", "sqlite.sql", "schema.runtime.json", "fingerprint.txt", "identity-columns.json"]);
   const { collections } = JSON.parse(artifacts.find(artifact => artifact.name === "schema.runtime.json").content);
   assert.equal(collections.queue_scopes.fields.id.primaryKey, true);
   assert.equal(collections.jobs.fields.id.primaryKey, true);
@@ -21,7 +21,32 @@ test("compiles both queue backends with matching typed collection metadata", () 
     ["app_id", "state", "available_at", "id"],
     ["app_id", "state", "lease_deadline", "id"],
   ]);
-  assert(collections.queue_scopes.indexes.some(index => index.unique && index.fields.join() === "app_id"));
+  for (const [name, duplicateIdentity] of [["queue_scopes", "app_id"], ["workers", "worker_id"]]) {
+    assert.equal(collections[name].fields[duplicateIdentity], undefined);
+    assert.equal(collections[name].indexes?.some(index => index.unique) ?? false, false);
+  }
+  assert.deepEqual(Object.keys(collections).sort(), Object.keys(managerIdentityColumns).sort());
+  assert.equal(collections.workers.fields.lock_version.default, 0);
+  for (const collection of Object.values(collections)) {
+    assert.deepEqual(Object.keys(collection.fields).filter(name => collection.fields[name].primaryKey), ["id"]);
+  }
+  for (const name of ["placement_receipts", "management"]) {
+    assert(collections[name].indexes.some(index => index.unique && index.fields.join() === "app_id,request_id"));
+  }
+  assert(collections.assignments.indexes.some(index => index.unique && index.fields.join() === "app_id,worker_id"));
+  assert.equal(collections.schema_version.fields.fingerprint.required, true);
+  assert.deepEqual(JSON.parse(artifacts.find(artifact => artifact.name === "identity-columns.json").content), managerIdentityColumns);
+});
+
+test("fingerprints change with emitted metadata schema", () => {
+  const fingerprint = outputs => outputs.find(output => output.name === "fingerprint.txt").content.trim();
+  const original = fingerprint(compileSchema());
+  assert.match(original, /^[a-f0-9]{64}$/);
+  const changed = fingerprint(compileSchema(namespace => {
+    workflowManagerSchema(namespace);
+    table("jobs", { schema: namespace }).index("jobs_created_idx").add({ on: ["created_at"] });
+  }));
+  assert.notEqual(changed, original);
 });
 
 test("refuses empty and incomplete schema recordings", () => {

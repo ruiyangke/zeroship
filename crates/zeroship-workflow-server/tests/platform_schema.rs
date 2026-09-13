@@ -29,7 +29,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         .await
         .unwrap();
     for sql in [
-        "SELECT app_id FROM workflow_coordination.scopes",
+        "SELECT id FROM workflow_manager.queue_scopes",
         "SELECT id,status,public_key FROM zeroship.worker_instances",
         "SELECT replay_key FROM service_authn.service_assertion_replay",
     ] {
@@ -43,8 +43,8 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
         "SELECT * FROM zeroship.app_deploys",
         "SELECT * FROM zeroship.plans",
         "UPDATE zeroship.worker_instances SET status='active'",
-        "UPDATE workflow_coordination.schema_version SET fingerprint='forged'",
-        "CREATE TABLE workflow_coordination.extra(id text PRIMARY KEY,data text)",
+        "UPDATE workflow_manager.schema_version SET fingerprint='forged'",
+        "CREATE TABLE workflow_manager.extra(id text PRIMARY KEY,data text)",
         "SET ROLE zeroship_workflow_migrator",
     ] {
         assert!(
@@ -56,14 +56,14 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     let schema = fixture
         .admin
         .query(
-            "SELECT nspname FROM pg_namespace WHERE nspname='workflow'",
+            "SELECT nspname FROM pg_namespace WHERE nspname IN ('workflow','workflow_coordination')",
             &[],
         )
         .await
         .unwrap();
     assert!(
         schema.is_empty(),
-        "central execution journal was provisioned"
+        "separate workflow schemas were provisioned"
     );
     let policies = fixture.admin.query("SELECT proname FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='zeroship' AND proname LIKE 'workflow_policy_%'",&[]).await.unwrap();
     assert!(
@@ -80,12 +80,12 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
             "REVOKE pg_read_all_data FROM zeroship_workflow",
         ),
         (
-            "GRANT UPDATE ON workflow_coordination.schema_version TO zeroship_workflow",
-            "REVOKE UPDATE ON workflow_coordination.schema_version FROM zeroship_workflow",
+            "GRANT UPDATE ON workflow_manager.schema_version TO zeroship_workflow",
+            "REVOKE UPDATE ON workflow_manager.schema_version FROM zeroship_workflow",
         ),
         (
-            "GRANT CREATE ON SCHEMA workflow_coordination TO zeroship_workflow",
-            "REVOKE CREATE ON SCHEMA workflow_coordination FROM zeroship_workflow",
+            "GRANT CREATE ON SCHEMA workflow_manager TO zeroship_workflow",
+            "REVOKE CREATE ON SCHEMA workflow_manager FROM zeroship_workflow",
         ),
     ] {
         fixture.admin.batch_execute(grant).await.unwrap();
@@ -96,6 +96,10 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     assert!(fixture.work.path().join("migrate.toml").is_file());
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the provisioned role's grants and refusals are checked against the same queue state"
+)]
 async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_postgres::Client) {
     use zeroship_core::{
         app_id::AppId,
@@ -119,11 +123,30 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             .iter()
             .map(|row| row.get::<_, String>(0))
             .collect::<Vec<_>>(),
-        ["jobs", "queue_scopes"]
+        [
+            "assignments",
+            "jobs",
+            "management",
+            "placement_receipts",
+            "queue_scopes",
+            "schema_version",
+            "workers"
+        ]
     );
     for table in &tables {
         assert_eq!(table.get::<_, String>(1), "zeroship_workflow_migrator");
     }
+    let version = runtime
+        .query_one(
+            "SELECT fingerprint FROM workflow_manager.schema_version WHERE id='manager'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        version.get::<_, String>(0),
+        include_str!("../../zeroship-workflow-manager/schema/fingerprint.txt").trim()
+    );
 
     let app = AppId::mint();
     let job = JobId::mint();
@@ -133,7 +156,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
     assert_eq!(
         runtime
             .execute(
-                "INSERT INTO workflow_manager.queue_scopes(id,app_id) VALUES($1,$1)",
+                "INSERT INTO workflow_manager.queue_scopes(id) VALUES($1)",
                 &[&app.as_str()],
             )
             .await
@@ -162,10 +185,16 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             .unwrap(),
         1
     );
-    assert_eq!(runtime.execute(
-        "UPDATE workflow_manager.queue_scopes SET lock_version=lock_version+1 WHERE app_id=$1",
-        &[&app.as_str()],
-    ).await.unwrap(), 1);
+    assert_eq!(
+        runtime
+            .execute(
+                "UPDATE workflow_manager.queue_scopes SET lock_version=lock_version+1 WHERE id=$1",
+                &[&app.as_str()],
+            )
+            .await
+            .unwrap(),
+        1
+    );
 
     for sql in [
         "SELECT * FROM customer.__zeroship_workflow_runs",
@@ -190,7 +219,8 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
         "UPDATE WITH GRANT OPTION",
         "DELETE WITH GRANT OPTION",
     ] {
-        for table in ["workflow_manager.jobs", "workflow_manager.queue_scopes"] {
+        for row in &tables {
+            let table = format!("workflow_manager.{}", row.get::<_, String>(0));
             let granted = fixture
                 .admin
                 .query_one(
@@ -223,7 +253,8 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             !schema.get::<_, bool>(0),
             "{role} can enter the queue namespace"
         );
-        for table in ["workflow_manager.jobs", "workflow_manager.queue_scopes"] {
+        for row in &tables {
+            let table = format!("workflow_manager.{}", row.get::<_, String>(0));
             for privilege in [
                 "SELECT",
                 "INSERT",
@@ -276,7 +307,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
     assert_eq!(
         runtime
             .execute(
-                "DELETE FROM workflow_manager.queue_scopes WHERE app_id=$1",
+                "DELETE FROM workflow_manager.queue_scopes WHERE id=$1",
                 &[&app.as_str()],
             )
             .await

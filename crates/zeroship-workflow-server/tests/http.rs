@@ -139,6 +139,22 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         assignment_revision: assignments[0].revision,
     };
     client.renew(&scope).await.unwrap();
+    fixture
+        .admin
+        .batch_execute("REVOKE UPDATE ON workflow_manager.assignments FROM zeroship_workflow")
+        .await
+        .unwrap();
+    let refused = client.renew(&scope).await;
+    fixture
+        .admin
+        .batch_execute("GRANT UPDATE ON workflow_manager.assignments TO zeroship_workflow")
+        .await
+        .unwrap();
+    assert_eq!(refused, Err(Error::Refused(FailureCode::Unavailable)));
+    let restored = client.renew(&scope).await.unwrap();
+    assert_eq!(restored.app_id, scope.app_id);
+    assert_eq!(restored.worker_id, worker);
+    assert_eq!(restored.revision, scope.assignment_revision);
     assert_eq!(
         client
             .pending_management(&AssignedScope {

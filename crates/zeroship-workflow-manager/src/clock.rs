@@ -6,11 +6,11 @@
 use crate::error::Error;
 use std::time::{Duration, Instant};
 use zeroship_data_orm::{
-    ConnectOptions,
     backend::BackendHandle,
     binding::DbBinding,
     encryption::ProjectKeySource,
     sql::registration::{POSTGRES_FAMILY, SQLITE_FAMILY},
+    ConnectOptions,
 };
 
 /// Independent connection to the queue's database clock; it reads no tables.
@@ -31,6 +31,7 @@ pub struct Sample {
 impl Clock {
     pub async fn connect(binding: DbBinding, url: &str, timeout: Duration) -> Result<Self, Error> {
         let backend = ConnectOptions::new(url, ProjectKeySource::unavailable())
+            .max_connections(std::num::NonZeroUsize::MIN)
             .connection_authority()
             .connect()
             .await?;

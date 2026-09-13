@@ -6,15 +6,16 @@
 use crate::{
     clock::{Clock, Sample},
     error::Error,
-    models::{self, Job, jobs, queue_scopes},
+    models::{self, jobs, queue_scopes, Job},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::{
     cell::Cell,
     collections::BTreeMap,
-    future::{Future, poll_fn, ready},
+    future::{poll_fn, ready, Future},
     io::Write,
+    num::NonZeroUsize,
     rc::Rc,
     task::Poll,
     time::{Duration, Instant},
@@ -25,17 +26,17 @@ use zeroship_core::{
     workflow_jobs::{Delivery, JobSpec, Settlement, SettlementReceipt},
 };
 use zeroship_data_orm::{
-    ConnectOptions, Value,
     binding::DbBinding,
     encryption::ProjectKeySource,
     error::DbError,
     orm::{Database, Entity, FindOptions, Operation, Output},
-    value,
+    value, ConnectOptions, Value,
 };
 
 /// Bounds leases, transaction waits and successor metadata.
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
+    pub max_connections: NonZeroUsize,
     pub lease: Duration,
     pub transaction_timeout: Duration,
     pub max_successors: usize,
@@ -45,6 +46,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            max_connections: NonZeroUsize::new(8).unwrap(),
             lease: Duration::from_secs(30),
             transaction_timeout: Duration::from_secs(5),
             max_successors: 256,
@@ -62,9 +64,9 @@ impl Default for Options {
 /// recover its durable receipt.
 #[derive(Clone, Debug)]
 pub struct Queue {
-    database: Database,
-    clock: Clock,
-    options: Options,
+    pub(crate) database: Database,
+    pub(crate) clock: Clock,
+    pub(crate) options: Options,
 }
 
 impl Queue {
@@ -86,7 +88,9 @@ impl Queue {
         }
         let database = Database::connect(
             binding.clone(),
-            ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
+            ConnectOptions::new(url, ProjectKeySource::unavailable())
+                .max_connections(options.max_connections)
+                .connection_authority(),
             models::collections()?,
         )
         .await?;
@@ -109,19 +113,8 @@ impl Queue {
     /// # Errors
     /// Refuses failed transactions; repeated registration preserves queue state.
     pub async fn register_scope(&self, app: &AppId) -> Result<(), Error> {
-        self.transact(|tx| async move {
-            tx.collection(queue_scopes::Entity::COLLECTION)?
-                .execute(Operation::Upsert {
-                    document: value!({
-                        "id":format!("wqs_{}", app.as_str().trim_start_matches("app_")),
-                        "app_id":app.as_str()
-                    }),
-                    conflict_fields: value!(["app_id"]),
-                })
-                .await?;
-            Ok(())
-        })
-        .await
+        self.transact(|tx| async move { register_scope_in(&tx, app).await })
+            .await
     }
 
     /// Submit immutable metadata; an outbox retry uses the same job identity.
@@ -143,11 +136,12 @@ impl Queue {
     /// # Errors
     /// Refuses expired authority and failed transactions.
     pub async fn claim(&self, assignment: &Assignment) -> Result<Option<Delivery>, Error> {
-        self.claim_authorized(assignment, || ready(Ok(assignment.clone())))
+        self.claim_authorized(assignment, |_| ready(Ok(assignment.clone())))
             .await
     }
 
     /// Revalidate placement after acquiring the app lock and before commit.
+    /// Each authorization callback receives the active transaction for scoped reads.
     ///
     /// # Errors
     /// Refuses revoked assignments, exhausted attempts and failed transactions.
@@ -157,13 +151,13 @@ impl Queue {
         mut authorize: F,
     ) -> Result<Option<Delivery>, Error>
     where
-        F: FnMut() -> Fut,
+        F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
     {
         let budget = Budget::new(self.options.transaction_timeout);
         self.transact_for(budget.clone(), |tx| async move {
             lock_scope(&tx, &assignment.app_id).await?;
-            let observed = authorize().await?;
+            let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             budget.cap(sample, authority.expires_at.get())?;
@@ -176,7 +170,7 @@ impl Queue {
                 due, value!({"limit":1,"select":["id"],"orderBy":{"available_at":1,"id":1}})
             ).await? else { return Err(Error::Storage); };
             let Some(row) = rows.first() else {
-                let observed = authorize().await?;
+                let observed = authorize(tx.clone()).await?;
                 let sample = self.clock.sample().await?;
                 let authority = current(assignment, observed, sample.millis)?;
                 budget.cap(sample, authority.expires_at.get())?;
@@ -200,7 +194,7 @@ impl Queue {
                 value!({"state":"leased","attempt":attempt,"worker_id":assignment.worker_id.as_str(),
                     "assignment_revision":assignment.revision.get(),"lease_deadline":deadline})
             ).await?;
-            let observed = authorize().await?;
+            let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             if deadline > authority.expires_at.get() || sample.millis >= deadline {
@@ -220,11 +214,12 @@ impl Queue {
         assignment: &Assignment,
         delivery: &Delivery,
     ) -> Result<Delivery, Error> {
-        self.heartbeat_authorized(assignment, delivery, || ready(Ok(assignment.clone())))
+        self.heartbeat_authorized(assignment, delivery, |_| ready(Ok(assignment.clone())))
             .await
     }
 
     /// Revalidate placement while extending the stored delivery lease.
+    /// Each authorization callback receives the active transaction for scoped reads.
     ///
     /// # Errors
     /// Refuses stale delivery identity, revoked placement and failed transactions.
@@ -235,14 +230,14 @@ impl Queue {
         mut authorize: F,
     ) -> Result<Delivery, Error>
     where
-        F: FnMut() -> Fut,
+        F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
     {
         bound(assignment, delivery)?;
         let budget = Budget::new(self.options.transaction_timeout);
         self.transact_for(budget.clone(), |tx| async move {
             lock_scope(&tx, &assignment.app_id).await?;
-            let observed = authorize().await?;
+            let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             budget.cap(sample, authority.expires_at.get())?;
@@ -261,7 +256,7 @@ impl Queue {
             )?;
             let deadline = self.deadline(&authority, sample.millis)?;
             update(&tx, fence(delivery), value!({"lease_deadline":deadline})).await?;
-            let observed = authorize().await?;
+            let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             if deadline > authority.expires_at.get() || sample.millis >= deadline {
@@ -297,8 +292,8 @@ impl Queue {
         self.settle_authorized(
             assignment,
             settlement,
-            || ready(Ok(assignment.clone())),
-            || ready(Ok(settlement.delivery.worker_id.clone())),
+            |_| ready(Ok(assignment.clone())),
+            |_| ready(Ok(settlement.delivery.worker_id.clone())),
         )
         .await
     }
@@ -307,6 +302,7 @@ impl Queue {
     /// checks current enrollment of the original worker through `authorize_replay`;
     /// expired or replaced placement does not erase its immutable receipt.
     /// Replay neither renews placement nor admits successor writes.
+    /// Both callbacks receive the active transaction for scoped metadata reads.
     ///
     /// # Errors
     /// Refuses revoked active delivery, conflicting successors and failed transactions.
@@ -318,9 +314,9 @@ impl Queue {
         mut authorize_replay: R,
     ) -> Result<SettlementReceipt, Error>
     where
-        F: FnMut() -> Fut,
+        F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
-        R: FnMut() -> Replay,
+        R: FnMut(Database) -> Replay,
         Replay: Future<Output = Result<WorkerId, Error>>,
     {
         let delivery = &settlement.delivery;
@@ -372,12 +368,12 @@ impl Queue {
                 {
                     return Err(Error::Conflict);
                 }
-                if authorize_replay().await? != delivery.worker_id {
+                if authorize_replay(tx.clone()).await? != delivery.worker_id {
                     return Err(Error::Denied);
                 }
                 return Ok(receipt);
             }
-            let observed = authorize().await?;
+            let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             live(&job, sample.millis)?;
@@ -399,7 +395,7 @@ impl Queue {
                 }),
             )
             .await?;
-            let observed = authorize().await?;
+            let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             live(&job, sample.millis)?;
@@ -454,7 +450,7 @@ impl Queue {
         Ok(())
     }
 
-    async fn transact<T, F, Fut>(&self, body: F) -> Result<T, Error>
+    pub(crate) async fn transact<T, F, Fut>(&self, body: F) -> Result<T, Error>
     where
         F: FnOnce(Database) -> Fut,
         Fut: Future<Output = Result<T, Error>>,
@@ -463,7 +459,7 @@ impl Queue {
             .await
     }
 
-    async fn transact_for<T, F, Fut>(&self, budget: Budget, body: F) -> Result<T, Error>
+    pub(crate) async fn transact_for<T, F, Fut>(&self, budget: Budget, body: F) -> Result<T, Error>
     where
         F: FnOnce(Database) -> Fut,
         Fut: Future<Output = Result<T, Error>>,
@@ -498,11 +494,21 @@ impl Queue {
     }
 }
 
-async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
+pub(super) async fn register_scope_in(tx: &Database, app: &AppId) -> Result<(), Error> {
+    tx.collection(queue_scopes::Entity::COLLECTION)?
+        .execute(Operation::Upsert {
+            document: value!({"id":app.as_str()}),
+            conflict_fields: value!(["id"]),
+        })
+        .await?;
+    Ok(())
+}
+
+pub(super) async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
     let result = tx
         .collection(queue_scopes::Entity::COLLECTION)?
         .execute(Operation::Update {
-            filter: value!({"app_id":app.as_str()}),
+            filter: value!({"id":app.as_str()}),
             patch: value!({"$inc":{"lock_version":0}}),
             many: true,
         })
@@ -601,14 +607,14 @@ fn digest(bytes: &[u8]) -> String {
 /// The stored lease can shorten the caller's wait after its app lock is acquired.
 /// A dispatched commit may finish after this wait; its receipt resolves retries.
 #[derive(Clone)]
-struct Budget(Rc<Cell<Instant>>);
+pub(super) struct Budget(Rc<Cell<Instant>>);
 
 impl Budget {
-    fn new(timeout: Duration) -> Self {
+    pub(crate) fn new(timeout: Duration) -> Self {
         Self(Rc::new(Cell::new(Instant::now() + timeout)))
     }
 
-    fn cap(&self, sample: Sample, deadline: i64) -> Result<(), Error> {
+    pub(crate) fn cap(&self, sample: Sample, deadline: i64) -> Result<(), Error> {
         let remaining = deadline
             .checked_sub(sample.millis)
             .filter(|remaining| *remaining > 0)
