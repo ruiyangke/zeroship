@@ -323,14 +323,8 @@ async fn workflow_advance_keeps_in_flight_run_on_pinned_deploy_after_redeploy() 
         );
         assert_eq!(output["first"]["mark"], "A");
         assert_eq!(output["bodyRuns"], 2, "replay the original journal prefix");
-        assert!(crate::cache::has_pinned_workflow_app(
-            &case.app_id,
-            &deploy_a
-        ));
-        assert!(crate::cache::has_pinned_workflow_app(
-            &case.app_id,
-            &deploy_b
-        ));
+        assert!(crate::cache::get_workflow_runtime(&case.app_id, &deploy_a).is_some());
+        assert!(crate::cache::get_workflow_runtime(&case.app_id, &deploy_b).is_some());
     })
     .await;
 }
@@ -368,10 +362,7 @@ async fn workflow_advance_pinned_isolate_budget_lru_evicts_per_app() {
             .to_request();
         let resp_a = test::call_service(&app, req_a).await;
         assert_eq!(resp_a.status(), StatusCode::OK);
-        assert!(crate::cache::has_pinned_workflow_app(
-            &case.app_id,
-            &deploy_a
-        ));
+        assert!(crate::cache::get_workflow_runtime(&case.app_id, &deploy_a).is_some());
 
         case.journal
             .seed_run("run_test_lru_b", "Checkout", &deploy_b)
@@ -389,14 +380,8 @@ async fn workflow_advance_pinned_isolate_budget_lru_evicts_per_app() {
             .to_request();
         let resp_b = test::call_service(&app, req_b).await;
         assert_eq!(resp_b.status(), StatusCode::OK);
-        assert!(!crate::cache::has_pinned_workflow_app(
-            &case.app_id,
-            &deploy_a
-        ));
-        assert!(crate::cache::has_pinned_workflow_app(
-            &case.app_id,
-            &deploy_b
-        ));
+        assert!(!crate::cache::get_workflow_runtime(&case.app_id, &deploy_a).is_some());
+        assert!(crate::cache::get_workflow_runtime(&case.app_id, &deploy_b).is_some());
     })
     .await;
 }
