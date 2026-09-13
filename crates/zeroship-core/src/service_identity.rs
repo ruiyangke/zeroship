@@ -497,6 +497,10 @@ pub mod endpoints {
         "POST",
         "/v1/management/status",
     );
+    pub const WORKFLOW_SCHEDULE_REGISTER: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/schedules/register");
+    pub const WORKFLOW_SCHEDULE_ACTIVATE: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/schedules/activate");
     pub const WORKFLOW_REGISTER: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
@@ -603,6 +607,8 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::WORKFLOW_RECOVERY,
                     endpoints::WORKFLOW_MANAGE,
                     endpoints::WORKFLOW_MANAGEMENT_STATUS,
+                    endpoints::WORKFLOW_SCHEDULE_REGISTER,
+                    endpoints::WORKFLOW_SCHEDULE_ACTIVATE,
                     endpoints::WORKER_APP_LOGS,
                 ],
             ),

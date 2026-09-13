@@ -3,7 +3,7 @@
 
 use compio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::{channel::oneshot, future::Either};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 use zeroship_core::{
     app_id::AppId,
@@ -11,9 +11,9 @@ use zeroship_core::{
         InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
         ServiceTrustBundle, TransportAssertionVerifier,
     },
-    service_identity::{ServiceEndpoint, endpoints, verify_service_call},
+    service_identity::{endpoints, verify_service_call, ServiceEndpoint},
     service_peers::{
-        CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKFLOW_SERVICE_NAME, service_issuer,
+        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME,
     },
     workflow_coordination::{FailureCode, WorkerId},
     workflow_deployments::{HoldReceipt, HoldScope, HoldState, QueueHoldRequest},
@@ -72,67 +72,70 @@ impl Exchange {
     }
 }
 
-async fn peer(exchanges: Vec<Exchange>, test: impl AsyncFnOnce(QueueDeploymentHolds)) {
-    let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let auth = signer(service_issuer(WORKFLOW_SERVICE_NAME).unwrap());
-    let client = QueueDeploymentHolds::new(
-        &format!("http://{}", listener.local_addr().unwrap()),
-        auth.clone(),
-        Options::default(),
-    )
-    .unwrap();
-    let (issuer, key) = auth.signing_identity().unwrap();
-    let mut trust = ServiceTrustBundle::new();
-    trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
-    let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
-    let audience = service_issuer(CONTROL_SERVICE_NAME).unwrap();
-    let (done, completed) = oneshot::channel();
-    let server = async {
-        let mut previous = None;
-        for exchange in exchanges {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let (path, authorization, body) = request(&mut stream).await;
-            assert_eq!(path, exchange.endpoint.path_template());
-            assert_eq!(body, json!(exchange.request));
-            assert_ne!(previous.as_ref(), Some(&authorization));
-            verify_service_call(
-                &verifier,
-                Some(&authorization),
-                audience.as_str(),
-                exchange.endpoint,
-            )
-            .await
-            .unwrap();
-            assert!(
+fn peer(
+    exchanges: Vec<Exchange>,
+    test: impl AsyncFnOnce(QueueDeploymentHolds),
+) -> impl std::future::Future<Output = ()> {
+    Box::pin(async move {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let auth = signer(service_issuer(WORKFLOW_SERVICE_NAME).unwrap());
+        let client = QueueDeploymentHolds::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            auth.clone(),
+            Options::default(),
+        )
+        .unwrap();
+        let (issuer, key) = auth.signing_identity().unwrap();
+        let mut trust = ServiceTrustBundle::new();
+        trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
+        let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
+        let audience = service_issuer(CONTROL_SERVICE_NAME).unwrap();
+        let (done, completed) = oneshot::channel();
+        let server = async {
+            let mut previous = None;
+            for exchange in exchanges {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let (path, authorization, body) = request(&mut stream).await;
+                assert_eq!(path, exchange.endpoint.path_template());
+                assert_eq!(body, json!(exchange.request));
+                assert_ne!(previous.as_ref(), Some(&authorization));
                 verify_service_call(
+                    &verifier,
+                    Some(&authorization),
+                    audience.as_str(),
+                    exchange.endpoint,
+                )
+                .await
+                .unwrap();
+                assert!(verify_service_call(
                     &verifier,
                     Some(&authorization),
                     audience.as_str(),
                     exchange.endpoint
                 )
                 .await
-                .is_err()
-            );
-            previous = Some(authorization);
-            let bytes = serde_json::to_vec(&exchange.response).unwrap();
-            let mut response = format!("HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", exchange.status, bytes.len()).into_bytes();
-            response.extend(bytes);
-            stream.write_all(response).await.0.unwrap();
-            stream.flush().await.unwrap();
-        }
-        match futures::future::select(completed, Box::pin(listener.accept())).await {
-            Either::Left((result, _)) => result.unwrap(),
-            Either::Right(_) => panic!("unexpected hold request"),
-        }
-    };
-    compio::time::timeout(Duration::from_secs(10), async {
-        futures::join!(server, async {
-            test(client).await;
-            done.send(()).unwrap();
-        });
+                .is_err());
+                previous = Some(authorization);
+                let bytes = serde_json::to_vec(&exchange.response).unwrap();
+                let mut response = format!("HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", exchange.status, bytes.len()).into_bytes();
+                response.extend(bytes);
+                stream.write_all(response).await.0.unwrap();
+                stream.flush().await.unwrap();
+            }
+            match futures::future::select(completed, Box::pin(listener.accept())).await {
+                Either::Left((result, _)) => result.unwrap(),
+                Either::Right(_) => panic!("unexpected hold request"),
+            }
+        };
+        compio::time::timeout(Duration::from_secs(10), async {
+            futures::join!(server, async {
+                test(client).await;
+                done.send(()).unwrap();
+            });
+        })
+        .await
+        .expect("queue hold client fixture hung");
     })
-    .await
-    .expect("queue hold client fixture hung");
 }
 
 async fn request(stream: &mut compio::net::TcpStream) -> (String, String, Value) {

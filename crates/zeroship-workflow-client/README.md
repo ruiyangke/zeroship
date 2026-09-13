@@ -15,5 +15,12 @@ charging the full request exchange. A late heartbeat cannot revive an expired
 grant. The executor must also enforce its original hard execution deadline.
 Exact settlement receipts remain retryable after local lease expiry.
 
+`ControlCoordinator::register_schedules` prepares input-free metadata and checks
+the complete accepted declaration. `activate_schedules` checks the returned job's
+app, deployment, operation and activation revision. These publication methods
+require the exact Control service signer. Callers preserve the original command
+and revision after an uncertain reply; an activation receipt means durable
+manager acceptance, while creator readiness is a separate job outcome.
+
 Run `cargo test -p zeroship-workflow-client` for wire, cancellation, timeout and
 TLS contracts.

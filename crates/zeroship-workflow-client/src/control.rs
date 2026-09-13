@@ -9,15 +9,18 @@ use zeroship_core::{
         AssignScope, Assignment, ManageRun, ManagementReceipt, ManagementStatus, RegisteredWorker,
         Revision, ScopePage, VerifyAssignment, WorkerPage, WorkerState, AUDIENCE,
     },
+    workflow_jobs::{JobOperation, JobSpec},
+    workflow_schedules::{ActivateSchedules, RegisterSchedules},
 };
 
 /// A runtime-local coordinator client bound to the trusted Control signer.
 ///
-/// The client exchanges placement and management metadata. Assignment receipts
+/// The client exchanges placement, management and schedule metadata. Assignment receipts
 /// never grant access to customer credentials, journals or payloads.
 #[derive(Clone, Debug)]
 pub struct ControlCoordinator {
     transport: Transport,
+    schedule_publisher: bool,
 }
 
 impl ControlCoordinator {
@@ -32,6 +35,7 @@ impl ControlCoordinator {
         if issuer.principal() != role.principal() {
             return Err(Error::Unauthenticated);
         }
+        let schedule_publisher = issuer == &role;
         Ok(Self {
             transport: Transport::new(
                 url,
@@ -39,7 +43,56 @@ impl ControlCoordinator {
                 ServiceIssuer::parse(AUDIENCE).map_err(|_| Error::InvalidConfig)?,
                 options,
             )?,
+            schedule_publisher,
         })
+    }
+
+    /// Prepare immutable schedule metadata using the Control service signer.
+    /// An exact echo acknowledges preparation; it does not activate the deployment.
+    ///
+    /// # Errors
+    /// Refuses instance credentials, failed exchanges and any changed declaration.
+    pub async fn register_schedules(
+        &self,
+        request: &RegisterSchedules,
+    ) -> Result<RegisterSchedules, Error> {
+        if !self.schedule_publisher {
+            return Err(Error::Unauthenticated);
+        }
+        let receipt: RegisterSchedules = self
+            .transport
+            .post(endpoints::WORKFLOW_SCHEDULE_REGISTER, request)
+            .await?;
+        if receipt != *request {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(receipt)
+    }
+
+    /// Activate a prepared deployment with a stable platform-chosen revision.
+    /// Retry the original revision after uncertainty. The receipt acknowledges
+    /// durable manager work, not completion by the creator worker.
+    ///
+    /// # Errors
+    /// Refuses instance credentials, failed exchanges and foreign activation receipts.
+    pub async fn activate_schedules(&self, request: &ActivateSchedules) -> Result<JobSpec, Error> {
+        if !self.schedule_publisher {
+            return Err(Error::Unauthenticated);
+        }
+        let job: JobSpec = self
+            .transport
+            .post(endpoints::WORKFLOW_SCHEDULE_ACTIVATE, request)
+            .await?;
+        if job.app_id != request.app_id
+            || job.deployment_id != request.deployment_id
+            || job.operation
+                != (JobOperation::Activate {
+                    revision: request.revision,
+                })
+        {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(job)
     }
 
     /// # Errors
