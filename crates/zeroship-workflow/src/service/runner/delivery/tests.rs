@@ -1,4 +1,5 @@
 use super::*;
+mod consumer;
 use crate::{
     operations::{RunState, StartOptions},
     service::{

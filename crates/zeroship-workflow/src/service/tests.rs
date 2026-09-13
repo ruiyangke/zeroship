@@ -22,11 +22,11 @@ fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
 }
 
 mod background_scope;
+mod delivery;
 #[path = "../../../../tests/fixtures/workflow_deployments.rs"]
 pub(super) mod deployment_fixture;
 mod deployment_retention;
 mod deployments;
-mod delivery;
 mod frontier_models;
 mod graph;
 mod ingress_models;
@@ -38,9 +38,9 @@ mod output_writes;
 mod payload_models;
 mod payloads;
 mod policy;
-mod publication;
-mod restart_models;
+pub(super) mod publication;
 mod requests;
+mod restart_models;
 mod runner;
 #[path = "../../../../tests/fixtures/s3.rs"]
 mod s3_fixture;

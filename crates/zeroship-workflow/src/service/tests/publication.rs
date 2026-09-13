@@ -99,13 +99,13 @@ case!(
     retention
 );
 
-pub(super) struct Manager {
+pub(in crate::service) struct Manager {
     _directory: tempfile::TempDir,
     path: std::path::PathBuf,
-    pub(super) queue: Queue,
+    pub(in crate::service) queue: Queue,
 }
 impl Manager {
-    pub(super) async fn new(app: &AppId) -> Self {
+    pub(in crate::service) async fn new(app: &AppId) -> Self {
         Self::with_options(app, Options::default()).await
     }
     pub(super) async fn with_options(app: &AppId, options: Options) -> Self {

@@ -1243,7 +1243,7 @@ fallbacks.
 | Native coordinator | `coordinator::Options::{worker_ttl, assignment_ttl, batch_limit, max_pending_management}` bounds placement and command behavior. |
 | Native queue | `Options::{max_connections, lease, transaction_timeout, max_successors, max_metadata_bytes}` bounds storage concurrency, delivery and metadata transactions. |
 | Metadata client | Client `Options::{timeout, max_request_bytes, max_response_bytes}` bounds the complete exchange. Each call uses the host signer. |
-| Customer host | Normal creator DB/storage, trusted app identity, policy snapshot and execution limits. Existing `WorkerOptions` slot/execution limits remain relevant; worker maintenance scheduling settings disappear with their loops. |
+| Customer host | Normal creator DB/storage, trusted app identity and policy snapshot. `ConsumerOptions` bounds slots, assigned scopes, claim polling and backoff; `DeliveryOptions` bounds execution and finalization. Worker maintenance scheduling settings disappear with their loops. |
 | Scheduling/recovery host policy | Explicit misfire, overlap, reconciliation and capacity/backpressure bounds. New setting names are finalized with those modules, not invented CLI switches. |
 
 Policy snapshots are host-owned and revisioned. Expired remote metadata does not
@@ -1509,11 +1509,40 @@ through the existing executor and payload pipeline. SQLite journal tests with
 deterministic metadata/executor fixtures cover paired renewal, retained ACK
 content, redelivery without execution, changed lease identity, hard execution
 limits and a blocked shutdown that stops renewing without freeing its slot.
-The remote metadata adapter uses `WorkerCoordinator`; full host and authenticated
-executor integration remain separate verification obligations.
+The remote metadata adapter uses `WorkerCoordinator`; authenticated executor
+integration remains a separate verification obligation.
+
+`runner::consumer::JobConsumer` now drives manager claims through that slot.
+Its trusted host supplies a bounded snapshot of `ConsumerScope` values, each
+pairing an app-bound creator handle with its own executor and task payload store.
+Cloning a binding preserves its local identity. Replacing or removing it cancels
+its in-flight claim and execution; the occupied slot stays unavailable until
+native shutdown joins. A caller that abandons the consumer future must drain it
+before discarding it; restarting consumption also drains first. Other free slots
+may serve current bindings. Manager and creator fences remain authoritative when
+an old and replacement attempt overlap across different slots or workers.
+
+Claim selection rotates between eligible apps with per-app idle and failure
+delays. Concurrent claim I/O for the same app is serialized locally; execution
+capacity is shared across all bindings. The consumer validates returned app,
+worker and assignment identities before creator acceptance. It does not derive
+policy leases from wall-clock placement timestamps, register its own app scope,
+scan the creator journal or retire durable recovery responsibility on shutdown.
+The placement/runtime host must authenticate and refresh binding snapshots;
+manager claim and heartbeat operations verify current placement and enrollment.
+
+Consumer tests cover separate creator databases, foreign delivery rejection,
+capacity and scope rotation, atomic binding replacement, claim cancellation,
+and execution retained through a blocked drain. A native coordinator/queue test
+drives publication, creator execution, checkpointing and exact ACK retry through
+separate ORM databases. These tests use a deterministic executor; they do not
+establish V8, authenticated network or production host composition.
 
 Manager cron/timer discovery, scope deadline orchestration, capacity activation,
-and the worker consumer host loop still require implementation and integration.
+and ordinary worker/CLI consumer composition still require implementation and integration.
+The consumer currently accepts advance jobs; the queue claim is not filtered by
+operation. Other delivered operation handlers must land before switching a host
+that receives cron, management, reconciliation or collection jobs to this loop.
 Publication intents and advance-job receipts exist in the journal; their
 manager-dispatched reconciliation and settlement integration remain unwired. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
@@ -1525,6 +1554,14 @@ advancement. Remove their producers, consumers, schema/grant dependencies and
 configuration together at cutover. Do not describe the production boundary as
 complete while those paths remain. There are no production users requiring
 compatibility aliases or parallel legacy modes.
+
+The V8 executor still calls `Runtime::call_workflow_dispatch`, and runtime startup
+still supplies its workflow replay entry. Bootstrap retirement must preserve that
+live contract until a workflow-owned cutover removes the duplicated interpreter
+and bootstrap wiring. Coordinate changes to `zeroship-runtime/src/core/init.rs`,
+`core/runtime.rs` and `sdks/bootstrap/src/dispatcher.ts` with their startup owner;
+verify outcome batches, task-bound payload reads, interruption and joined shutdown
+through the replacement before deleting the old source.
 
 ### Decisions still requiring an explicit contract
 

@@ -79,7 +79,19 @@ the authenticated worker client implements that metadata interface. The slot
 renews manager and creator authority together, retains interrupted execution
 until native shutdown joins, and retries exact settlement after a committed
 creator result. This slot performs no journal discovery or calendar evaluation.
-The manager-dispatched host loop and production cutover remain unfinished.
+`runner::consumer::JobConsumer` claims manager jobs through that transport and
+shares bounded execution capacity across trusted `ConsumerScope` bindings. Each
+binding pairs an app handle with its own executor and creator storage. The host
+replaces the authorized snapshot through `ConsumerBindings`; unchanged binding
+clones preserve active work, while replacement or removal cancels the previous
+binding. A cancelled execution retains its slot until shutdown joins. Selection
+rotates between eligible apps and bounds claim I/O, idle polling and error retries.
+The consumer performs no calendar evaluation, journal discovery or independent
+maintenance. Native tests connect it to the ORM coordinator and queue using a
+separate manager database, including a lost settlement acknowledgement.
+The consumer currently handles advance jobs. Other delivered operation handlers,
+authenticated placement refresh, manager recovery dispatch and ordinary worker/CLI
+composition remain required before replacing the existing runner.
 `zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers
