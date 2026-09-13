@@ -1540,8 +1540,12 @@ checks do not establish a completed distributed workflow system.
 
 Native recovery contracts cover replica races, absence of workers, restart,
 activation changes, deadline persistence and atomic publication rollback. The
-canonical platform migration test also executes recovery with the runtime role
-and checks table ownership and denial of worker, gateway and app access.
+canonical platform migration test also executes recovery and scheduling with the
+runtime role and checks table ownership and denial of worker, gateway and app
+access. Authenticated queue HTTP tests and the runtime's combined plugin and
+lazy-bundle import regressions pass after the native ORM and module ownership
+merge. These checks do not establish the final production host composition or
+ambient worker-login isolation.
 
 The ORM owner's cancellation fix passes the creator lifecycle and receipt tests
 with their database barriers still held. The shared ORM typed-read allocation
