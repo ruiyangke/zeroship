@@ -5,8 +5,6 @@ const todo = (id: string, done = false): Todo => ({
   id,
   created_at: 1_700_000_000_000,
   updated_at: 1_700_000_000_000,
-  created_by: null,
-  updated_by: null,
   version: 1,
   userId: "usr_public",
   title: id,
@@ -14,7 +12,6 @@ const todo = (id: string, done = false): Todo => ({
   tags: [],
   done,
   archived: false,
-  deleted_at: null,
 });
 
 describe("todo utilities", () => {

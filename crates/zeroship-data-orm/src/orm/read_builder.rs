@@ -358,7 +358,8 @@ impl<P: ReadSelection> ReadBuilder<P> {
             .validate_schemas()
             .and_then(|()| self.selection.validate(&self.database, &sources))
             .map(|()| self.database.read(self.query));
-        async move {
+        // Keep execution and projection state out of the caller's async state.
+        Box::pin(async move {
             if let Some(error) = self.error {
                 return Err(error);
             }
@@ -377,6 +378,6 @@ impl<P: ReadSelection> ReadBuilder<P> {
                     self.selection.decode(&mut 0, &mut record)
                 })
                 .collect()
-        }
+        })
     }
 }
