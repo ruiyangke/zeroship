@@ -1,5 +1,6 @@
 //! Execution slots for customer workers and local development.
 
+pub mod assignments;
 mod budget;
 pub mod consumer;
 pub mod delivery;
