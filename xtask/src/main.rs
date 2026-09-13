@@ -1,3 +1,4 @@
+mod auth;
 mod data;
 mod migrations;
 mod storage;
@@ -34,6 +35,8 @@ enum Task {
 
 #[derive(Subcommand)]
 enum Suite {
+    /// Run auth, authorization, mailer and gateway tests with owned services.
+    Auth,
     /// Build the Node host and test the platform corpus on owned PostgreSQL.
     Migrations,
     /// Check workspace dependency and feature declarations.
@@ -59,6 +62,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let result = match args.command {
+        Task::Test { suite: Suite::Auth } => auth::run(),
         Task::Test {
             suite: Suite::Migrations,
         } => migrations::run(),

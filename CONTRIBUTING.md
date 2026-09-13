@@ -108,17 +108,18 @@ demand and are not tracked in git:
 ./crates/runtime/tests/setup-wpt.sh
 ```
 
-Database and end-to-end suites (bring up the dev Postgres via
-`docker compose -f deploy/compose/docker-compose.yml up -d postgres`, or point at your
-own server):
+The native auth suite builds the platform migration host and runs the complete
+auth, authn, authz, mailer and gateway packages. Tests own their PostgreSQL,
+SMTP and HTTP fixtures through Rust; Docker is required. No external test
+database URL or generated backend overlay is needed.
 
+```bash
+cargo xtask test auth
 ```
-tests/run_auth_suite.sh         # the auth live-database gate. Uses a SHARED
-                                # database named after this tree's migration
-                                # set, so two agents on one commit can run it
-                                # at the same time; --database <name> for a
-                                # private one. TEST_DB in the environment is
-                                # refused. docs/runbooks/local-dev.md says why.
+
+The remaining shell suites still need their configured development backends:
+
+```bash
 tests/run_billing_suite.sh      # migrate + test zeroship-control and zeroship-migrate-server
 tests/run_worker_suite.sh       # migrate + test zeroship-worker
 tests/sweep_test_databases.sh   # reclaim the test databases no branch can ask
