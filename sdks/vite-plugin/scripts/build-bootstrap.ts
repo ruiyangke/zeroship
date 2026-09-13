@@ -17,12 +17,13 @@ await build({
   // for external npm packages. ModuleRunner is small and self-contained.
   //
   // BUT `zeroship` MUST stay external — bundling it would bake the stub's
-  // empty `env` into the bootstrap; at runtime the V8 kernel synthesizes the
-  // real `"zeroship"` virtual module (`crates/zeroship-runtime/src/core/zeroship_module.rs`)
-  // that exposes the live native namespaces.
+  // empty `env` into the development host; at runtime the V8 kernel
+  // synthesizes the real `"zeroship"` virtual module
+  // (`crates/zeroship-runtime/src/core/zeroship_module.rs`) that exposes the
+  // live native namespaces.
   external: ["zeroship"],
   banner: {
-    js: "// Auto-generated dev bootstrap for zeroship V8 runtime\n",
+    js: "// Auto-generated ModuleRunner host for zeroship V8 development\n",
   },
 });
 

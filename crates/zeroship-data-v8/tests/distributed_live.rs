@@ -277,11 +277,10 @@ fn runtime_for(
         .env_vars(env_vars)
         .plugins(plugins)
         .app_id(runtime_app_id)
-        // The worker vector's `RuntimeState.runtime_descriptor` slot
-        // (`crates/zeroship-worker/src/sync.rs:40-70` resolves the blob;
-        // `crates/zeroship-runtime/src/core/init.rs:3415-3434` validates it and
-        // exposes it as `globalThis.__zsRuntimeDescriptor`). All three isolates
-        // in this target are the same deploy, so they carry the same document.
+        // The worker vector's `RuntimeState.runtime_descriptor` slot carries the
+        // blob resolved by `crates/zeroship-worker/src/sync.rs`; native startup
+        // validates it and passes it directly to plugins. All isolates in this
+        // target are the same deploy, so they carry the same document.
         .runtime_descriptor(Some(RUNTIME_DESCRIPTOR.to_string()))
         .build()
 }

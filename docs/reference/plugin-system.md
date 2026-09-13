@@ -106,4 +106,7 @@ Implementations: [procedure frames](../../crates/zeroship-runtime/src/rpc/capabi
 
 Creator-facing APIs should stay small. If a feature can be expressed in JS on top of `fetch` or the existing native primitives, it belongs in an SDK package rather than a new runtime plugin.
 
-Platform-only DB internals are not part of the public plugin contract. The bootstrap layer resolves those privately when installing schema; creator code should treat `env.db` as the typed document API described in [docs/reference/db.md](../reference/db.md).
+Platform-only DB internals are not part of the public plugin contract. `DbPlugin`
+registers its private adapter module and native startup invokes it with the
+validated descriptor and DB handle. Creator code should treat `env.db` as the
+typed document API described in [db.md](db.md).

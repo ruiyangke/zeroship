@@ -401,8 +401,8 @@ A driver author implements connection mechanics. A host integrating that driver
 with the multi-tenant ORM supplies the corresponding authority and metadata
 services. Neither task changes Rust models or worker TypeScript.
 
-Mask policy comes from the app's `defineMaskPolicy()` declaration. Bootstrap
-installs it in memory for the app-at-deploy binding, including the empty default.
+Mask policy comes from the app's `defineMaskPolicy()` declaration. Native plugin
+finalization installs it in memory for the app-at-deploy binding, including the empty default.
 The declaration is fixed after startup; changing it requires a new deployment.
 Neither PostgreSQL nor SQLite persists policy, and unmask authorization never
 loads policy from a database or sidecar. Policy installation opens no connection.

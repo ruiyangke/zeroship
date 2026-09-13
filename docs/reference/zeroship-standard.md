@@ -56,9 +56,9 @@ the original callable and metadata. The generated fetch export retains the
 user's receiver without wrapping RPC dispatch. The runtime-owned dispatch path
 is `/__zeroship/v1/<wireId>`; user code does not route that path manually.
 
-The Vite dev loader currently normalizes live modules through
-`sdks/bootstrap/src/dev-entry.ts`. Its callable dispatch bridge is separate
-from the deployed dictionary contract.
+The Vite development host builds live entry snapshots through
+`sdks/vite-plugin/src/dev-bootstrap/entry.ts`. It returns the same dictionary
+shape to the runtime; native code invokes the captured procedures.
 
 Production RPC resources require explicit wire IDs:
 

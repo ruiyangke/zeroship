@@ -702,7 +702,7 @@ export function devServerPlugin(
       //
       // The runtime's ModuleRunner calls this to fetch transformed modules
       // from Vite's environment. V8 can't open the bidirectional transport
-      // Vite uses for browser HMR, so the dev bootstrap uses plain HTTP.
+      // Vite uses for browser HMR, so the ModuleRunner host uses plain HTTP.
 
       server.middlewares.use(
         async (
@@ -848,7 +848,7 @@ export function devServerPlugin(
 
       if (!existsSync(bootstrapPath)) {
         console.warn(
-          "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (run the bootstrap bundler first)"
+          "[zeroship] dev-bootstrap.js not found — skipping runtime spawn (build the Vite plugin first)"
         );
       } else {
         let restartTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1244,9 +1244,8 @@ export function devServerPlugin(
             return;
           }
 
-          // Forward path as-is — the dev-bootstrap's `default.fetch`
-          // dispatches /__zeroship/v1/<id> through `default.rpc`, mirroring
-          // production.
+          // Forward path as-is. The child runtime uses the same native RPC
+          // dispatcher for development entry snapshots and production entries.
           const proxyReq = http.request(
             `http://localhost:${devPort}${url}`,
             { method: req.method, headers: req.headers },
