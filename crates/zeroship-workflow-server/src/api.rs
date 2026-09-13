@@ -5,6 +5,7 @@
 )]
 
 mod jobs;
+mod schedules;
 
 use crate::{coordinator::Error, SharedState};
 use ntex::{
@@ -31,6 +32,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
 }
 pub fn configure_with_limit(config: &mut web::ServiceConfig, limit: usize) {
     jobs::configure(config);
+    schedules::configure(config);
     config
         .state(web::types::JsonConfig::default().limit(limit))
         .service(web::resource("/healthz").route(web::get().to(health)))

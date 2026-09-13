@@ -36,6 +36,16 @@ expiry. Registration cannot nominate an app or revive an expired placement.
 Service assertions use a shared PostgreSQL replay store across server replicas.
 Handlers authenticate before buffering bounded JSON bodies.
 
+Control publishes immutable, input-free deployment schedules through
+`POST /v1/schedules/register` and selects their activation revision through
+`POST /v1/schedules/activate`. These routes require the exact `svc/control`
+signer; an instance signer or worker assignment cannot grant this capability.
+Registration echoes the accepted declaration, and activation returns its durable
+job. Replaying an accepted older activation preserves its receipt without
+replacing current schedules. An empty declaration removes future scheduling
+while retaining previously accepted occurrences and their deployment holds.
+The normal deploy transaction still needs its durable publication handoff.
+
 `POST /v1/jobs/{submit,claim,heartbeat,settle}` binds worker identity to its
 enrolled signing key. Native callbacks recheck that exact key and stored app
 placement after queue locks and before commit. Workers cannot submit manager-owned
@@ -68,6 +78,7 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `tests/coordinator.rs`: native store, fencing and recovery contracts.
 - `tests/http.rs`: real server processes, replicas, revocation and restart.
 - `tests/http_jobs.rs`: job delivery, scoped publication and enrollment changes during lock waits.
+- `tests/http_schedules.rs`: Control-only publication, immutable replies and schedule replacement without workers.
 - `tests/driver.rs`: process-owned scheduling and retention recovery without workers.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.
 

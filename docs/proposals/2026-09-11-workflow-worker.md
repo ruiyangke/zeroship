@@ -466,6 +466,16 @@ branch. That branch checks current enrollment of the original worker, compares
 the stored complete settlement identity and admits no new successor writes.
 Changing the job, attempt, outcome or successor contents is a conflict.
 
+Control scheduling uses the same bounded authenticated transport through
+`POST /v1/schedules/register` and `POST /v1/schedules/activate`. The server checks
+the exact `svc/control` issuer before buffering either request. Worker placement
+and instance credentials grant neither operation. Registration returns the
+accepted typed declaration, which the client compares in full; native storage
+canonicalizes its ordering independently. Activation returns the stable job,
+whose app, deployment, operation and revision must match the original request.
+These routes require no enrolled or assigned worker. Normal deployment callers
+still need the durable publication handoff described below.
+
 ### Delivery, execution and settlement
 
 ```text
