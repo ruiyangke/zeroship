@@ -57,67 +57,14 @@ pub async fn drain_pg() {
     }
 }
 
-/// The database every live-DB test in this crate dials, or a REFUSAL.
-///
-/// THE ONE PLACE THIS CRATE RESOLVES A DSN. Until 2026-08-21 there were
-/// eighteen: this function, fifteen private `db_url()` copies beside it, and
-/// two more in the lib's own `#[cfg(test)]` modules (`src/http_util.rs`,
-/// `src/cron/spend_recompute.rs`), each carrying the same
-///
-///   .unwrap_or_else(|| "postgresql://postgres:zeroship@localhost:5440/\
-///                       zeroship_billing_test".to_string())
-///
-/// A silent fallback is bad in the ordinary way -- a run with no configuration
-/// reports passes for work it did not do -- and this one was worse than that.
-/// It named the BILLING database from files like `authz_guard_oauth_test.rs`
-/// and `deploy_test.rs`, which have nothing to do with billing, so the failure
-/// mode was not "no database" but "the wrong database, silently".
-///
-/// WHAT THE PREFLIGHT ADDS ON TOP OF DELETING THE FALLBACK. Having a DSN is not
-/// the same as having a database. On 2026-08-21 the overlay named the shared
-/// `zeroship` database on :5440 and that database's `zeroship` schema had been
-/// dropped out from under it, so every test here connected, ran its fixture and
-/// failed inside an assertion with `42P01 relation "zeroship.plans" does not
-/// exist`. Forty-one modules share this target, so that presented as a wall of
-/// named tests FAILING with a database error -- which is what a real regression
-/// looks like. It cost two people an evening.
-///
-/// [`platform_fixture::live_db::require`] ends the process with one block
-/// instead. See its header for why exiting beats panicking here.
-///
-/// MEMOISED, so the probe costs one connection per test binary rather than one
-/// per test.
+/// The migrated PostgreSQL instance owned by this test binary.
 pub fn require_control_db() -> String {
-    static CHECKED: OnceLock<String> = OnceLock::new();
-    CHECKED
-        .get_or_init(|| {
-            // The pair is `platform_fixture::live_db::PLATFORM_SCHEMAS`, whose
-            // doc comment carries what each half separates and why naming the
-            // journal also asks whether the journal is CURRENT. It was spelled
-            // out here, and in two other places, until it became one constant.
-            platform_fixture::live_db::require_configured(
-                zeroship_core::config::test_database_url_opt(),
-                platform_fixture::live_db::PLATFORM_SCHEMAS,
-            )
-        })
-        .clone()
+    test_database::url()
 }
 
 /// Refuse the calling test because a backend it requires is not there.
 ///
-/// THE NON-DATABASE PEER OF [`require_control_db`], and deliberately the same
-/// vocabulary: a run with no backend is a REFUSAL - the statement that no
-/// verdict was reachable - not a skip, which cargo counts as a pass. Every
-/// caller below used to announce a skip instead, so a checkout without a
-/// broker, or without the durable-workflows harness, reported those targets
-/// green while running none of their subjects.
-///
-/// It PANICS rather than ending the process, which is where it parts company
-/// with `platform_fixture::live_db`. That module exits because an unmigrated
-/// database voids EVERY module in a target and hundreds of FAILED lines are
-/// the presentation it exists to remove. These backends void a handful of
-/// tests in a target whose other modules need nothing from them, so the
-/// per-test verdict is the informative one and the siblings must still run.
+/// A missing non-database backend is a failed test rather than a skipped one.
 ///
 /// A refusal names the REMEDY, not just the gap: `remedy` is the command to
 /// run and what it does, so a first encounter needs no source dive.
@@ -996,5 +943,5 @@ pub fn lite_billing_stack(
     })
 }
 
-#[path = "../../../../tests/fixtures/platform_db/mod.rs"]
-mod platform_fixture;
+#[path = "../../src/test_database/mod.rs"]
+mod test_database;

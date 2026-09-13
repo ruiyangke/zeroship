@@ -579,7 +579,7 @@ mod tests {
 /// snapshot, so it needs a reachable, migrated PostgreSQL and panics on connect
 /// without one.
 ///
-/// Included in ordinary cargo test; tests/run_billing_suite.sh prepares the DB.
+/// Included in ordinary cargo test with a crate-owned PostgreSQL fixture.
 #[cfg(test)]
 mod live_db_tests {
     use std::collections::BTreeMap;
@@ -637,7 +637,7 @@ mod live_db_tests {
     }
 
     fn db_url() -> String {
-        crate::test_live_db::require()
+        crate::test_database::url()
     }
 
     async fn pg(db_url: &str) -> compio_postgres::Client {
