@@ -694,6 +694,7 @@ async fn consent_deny_redirects_access_denied_to_registered_redirect_uri() {
             absolute_query_param(&loc, "state").as_deref(),
             Some("state-deny")
         );
+        assert_eq!(absolute_query_param(&loc, "iss").as_deref(), Some(ISSUER));
     })
     .await;
 }
