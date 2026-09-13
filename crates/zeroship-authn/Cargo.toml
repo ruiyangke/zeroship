@@ -3,6 +3,15 @@ name = "zeroship-authn"
 version = "0.1.0"
 edition = "2021"
 description = "Shared control-plane bearer authentication primitives"
+autotests = false
+
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
+[[test]]
+name = "service_replay_pg_test"
+path = "tests/service_replay_pg_test.rs"
 
 [dependencies]
 base64 = { workspace = true }
@@ -25,6 +34,11 @@ zeroship-core = { workspace = true }
 # runtime. `polling` keeps it runnable in sandboxes that block io_uring, the
 # same split the `auth` and `core` crates use.
 compio = { workspace = true, features = ["polling"] }
+futures = { workspace = true }
+tempfile = { workspace = true }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
+toml = { workspace = true }
+url = { workspace = true }
 
 [lints]
 workspace = true
