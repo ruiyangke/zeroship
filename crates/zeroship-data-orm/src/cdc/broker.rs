@@ -171,15 +171,9 @@ impl Subscription {
     /// subscription and open a new one with the fresh read-set —
     /// matches the proposal's "fingerprint change ⇒ resubscribe" rule.
     ///
-    /// **NO PRODUCTION CALLER, measured 2026-09-02.** All ten call sites are in
-    /// this file's own `#[cfg(test)]` module (it begins at line 1106; the calls
-    /// run 1374-1612), so `read_set` is `None` on every real subscription and
-    /// `Subscription::accepts` below returns `true` for every event -
-    /// delivery is coarse-grained. The producer half is disconnected too:
-    /// `read_set::Active::begin` has no caller outside its module, so nothing
-    /// is ever recorded to pass here. See the header of
-    /// `crates/zeroship-data-orm/src/cdc/read_set.rs` for the full measurement and
-    /// what wiring it would take.
+    /// The V8 adapter supplies a snapshot from the invoking procedure's
+    /// capture when opening a subscription. An empty snapshot leaves delivery
+    /// coarse; captures belonging to other procedures are not consulted.
     pub fn set_read_set(&self, entries: Vec<ReadSetEntry>) {
         self.lock_inner().read_set = Some(entries);
     }

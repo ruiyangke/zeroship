@@ -78,11 +78,13 @@ async fn exercise(db: &Database) {
         );
     }
 
-    let (prepared, reads) = db.context.with(|| {
-        let capture = crate::cdc::read_set::Active::begin(true);
-        let prepared = nodes.find(value!({"title":"absent"}), value!({"with":{"parent":true}}));
-        (prepared, capture.take())
+    let capture = crate::cdc::read_set::Capture::new(true);
+    let prepared = db.context.with(|| {
+        capture.with(|| {
+            nodes.find(value!({"title":"absent"}), value!({"with":{"parent":true}}))
+        })
     });
+    let reads = capture.snapshot();
     assert!(
         reads
             .iter()

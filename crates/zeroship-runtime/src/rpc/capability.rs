@@ -2,7 +2,7 @@
 //!
 //! The frame is stored under an isolate-private key in continuation-preserved
 //! embedder data. Updating a frame clones the surrounding map so pending
-//! requests and user AsyncLocalStorage stores keep their captured context.
+//! requests and user `AsyncLocalStorage` stores keep their captured context.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -59,6 +59,14 @@ fn current_frame<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v
     let key = frame_key(scope);
     let value = map.get(scope, key.into())?;
     v8::Local::<v8::Array>::try_from(value).ok()
+}
+
+/// Opaque storage owned by the current procedure frame. Native plugins may
+/// attach isolate-private state whose lifetime must follow that continuation.
+pub fn current_procedure_frame<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    current_frame(scope).map(Into::into)
 }
 
 fn set_frame<'s>(scope: &mut v8::PinScope<'s, '_>, value: v8::Local<'s, v8::Value>) {
@@ -169,10 +177,10 @@ fn exit_kind_callback(
     if token < 1.0 || token.fract() != 0.0 || token as u64 != dispatch_generation(scope) {
         return;
     }
-    if let Some(frame) = current_frame(scope) {
-        if let Some(parent) = frame.get_index(scope, 2) {
-            set_frame(scope, parent);
-        }
+    if let Some(frame) = current_frame(scope)
+        && let Some(parent) = frame.get_index(scope, 2)
+    {
+        set_frame(scope, parent);
     }
 }
 
