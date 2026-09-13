@@ -394,9 +394,6 @@ importers:
 
   examples/db-e2e:
     dependencies:
-      '@zeroship/bootstrap':
-        specifier: workspace:*
-        version: link:../../sdks/bootstrap
       '@zeroship/db':
         specifier: workspace:*
         version: link:../../sdks/db
@@ -1405,9 +1402,6 @@ importers:
       '@types/react-dom':
         specifier: 'catalog:'
         version: 19.2.3(@types/react@19.2.14)
-      '@zeroship/bootstrap':
-        specifier: workspace:*
-        version: link:../bootstrap
       '@zeroship/rpc':
         specifier: workspace:*
         version: link:../rpc
@@ -1819,9 +1813,6 @@ importers:
       '@rollup/plugin-inject':
         specifier: ^5.0.5
         version: 5.0.5(rollup@4.60.2)
-      '@zeroship/bootstrap':
-        specifier: workspace:*
-        version: link:../bootstrap
       '@zeroship/db':
         specifier: workspace:*
         version: link:../db

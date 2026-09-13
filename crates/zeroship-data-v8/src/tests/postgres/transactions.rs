@@ -834,27 +834,15 @@ const _procedures = {
 fn unmigrated_app_streaming_response_names_migrate() {
     let (_postgres, url) = require_pg();
     let app_id = uuid::Uuid::new_v4().simple().to_string();
-    let src = [
-        r#"import { env } from "zeroship";"#,
-        include_str!("../../../../../sdks/bootstrap/dist/fetch-handler.js"),
-        r#"
-globalThis.__zsDispatch = async (rpc, name, input, ctx) => rpc[name](input, ctx);
-
+    let src = r#"
+import { env } from "zeroship";
 async function* streamBeforeMigrate(_input, _ctx) {
     await env.db.collection("notes").find({}, {});
     yield "unreachable";
 }
 streamBeforeMigrate.config = { kind: "stream" };
-const _procedures = { streamBeforeMigrate };
-const _fetch = createFetchHandler(async () => ({
-    userDefault: {},
-    fetch: undefined,
-    rpc: _procedures,
-}));
-export default { fetch: _fetch, rpc: _procedures };
-"#,
-    ]
-    .join("\n");
+export default { rpc: { streamBeforeMigrate } };
+"#;
 
     let (status, body) = dispatch_zs_for_app(&url, &src, "streamBeforeMigrate", Some(&app_id));
     assert_eq!(

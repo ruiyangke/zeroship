@@ -10,7 +10,6 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@zeroship/bootstrap": "workspace:*",
     "@zeroship/db": "workspace:*",
     "@zeroship/rpc": "workspace:*",
     "@zeroship/server": "workspace:*",
