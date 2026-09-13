@@ -12,7 +12,7 @@
 #
 # It closes the gap the other harnesses leave: `e2e_app_primitives_auth.sh`
 # proves the WORKER side (signed `ZeroShip-User` → AuthPlugin → requireUser) over
-# /dispatch, and `oidc_rp_e2e` proves the gateway session mint/validate; this
+# /dispatch, and the gateway source tests cover session minting and revocation; this
 # proves the SEAM — the gateway turning a session cookie into a signed
 # `ZeroShip-User` and forwarding it so an `auth: user` RPC actually runs.
 #
