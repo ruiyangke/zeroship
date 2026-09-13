@@ -16,6 +16,7 @@
 mod common;
 
 mod account_deletion_test;
+mod account_linking;
 mod audit_retention_test;
 mod check_config_smtp_test;
 mod cli_device_refresh_test;
@@ -25,8 +26,6 @@ mod device_grant_test;
 mod e2e_github;
 mod e2e_google;
 mod enum_defense;
-mod link_lockout_test;
-mod link_ratelimit_test;
 mod logout_test;
 mod email_verification;
 mod magic_login;
