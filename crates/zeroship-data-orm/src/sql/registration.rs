@@ -298,6 +298,47 @@ mod tests {
     }
 
     #[test]
+    fn json_nesting_budget_counts_embedded_fragments_and_empty_containers() {
+        let limit = crate::sql::codecs::MAX_JSON_DEPTH;
+        let nested = |depth, mut value| {
+            for _ in 0..depth {
+                value = Value::Array(vec![value]);
+            }
+            value
+        };
+        let encoded = |depth| format!("{}null{}", "[".repeat(depth), "]".repeat(depth));
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            let valid = nested(limit / 2, Value::Json(encoded(limit / 2 - 1)));
+            registration.encode(StorageType::Json, valid).unwrap();
+            for invalid in [
+                nested(limit / 2 + 1, Value::Json(encoded(limit - limit / 2))),
+                nested(limit, Value::Array(vec![])),
+                nested(limit, Value::Object(Default::default())),
+            ] {
+                assert!(registration.encode(StorageType::Json, invalid).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_json_nesting_can_be_decoded() {
+        let limit = crate::sql::codecs::MAX_JSON_DEPTH;
+        let encoded = format!("{}null{}", "[".repeat(limit), "]".repeat(limit));
+        let mut native = Value::Null;
+        for _ in 0..limit {
+            native = Value::Array(vec![native]);
+        }
+        for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+            for value in [native.clone(), Value::Json(encoded.clone())] {
+                registration.encode(StorageType::Json, value).unwrap();
+                registration
+                    .decode(StorageType::Json, Value::Json(encoded.clone()))
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn registrations_reject_invalid_and_excessively_nested_json() {
         for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
             assert!(registration
