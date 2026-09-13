@@ -109,11 +109,11 @@ pub(crate) fn compile_module(
 /// but only transitively imported creator modules are compiled. Registered
 /// plugin adapters and their dependency graphs are also compiled.
 ///
-/// Returns the entrypoint module's namespace object (contains exports).
-pub fn load_modules(
+/// Returns the compiled entry module without evaluating creator code.
+pub(crate) fn compile_modules(
     scope: &mut v8::PinScope,
     entries: &[ModuleEntry],
-) -> Result<v8::Global<v8::Value>, String> {
+) -> Result<v8::Global<v8::Module>, String> {
     if entries.is_empty() {
         return Err("No modules to load".into());
     }
@@ -238,106 +238,150 @@ pub fn load_modules(
     // Store registry in isolate slot for the resolve callback
     scope.set_slot(registry.clone());
 
-    // Instantiate the entrypoint.
-    // resolve_callback only does lookups — all modules are pre-compiled.
+    let entry = registry.borrow().compiled.get(entrypoint).cloned()
+        .ok_or_else(|| format!("Entrypoint not compiled: {entrypoint}"))?;
+    Ok(entry)
+}
+
+/// An evaluated module whose top-level promise is owned by the host.
+pub(crate) struct ModuleEvaluation {
+    pub namespace: v8::Global<v8::Value>,
+    pub promise: Option<v8::Global<v8::Promise>>,
+}
+
+impl ModuleEvaluation {
+    pub fn is_ready(&self, scope: &mut v8::PinScope) -> Result<bool, String> {
+        self.promise.as_ref().map_or(Ok(true), |promise| promise_ready(scope, promise))
+    }
+}
+
+pub(crate) fn error_detail(scope: &mut v8::PinScope, error: v8::Local<v8::Value>) -> String {
+    v8::tc_scope!(let tc, scope);
+    let fallback = error.to_rust_string_lossy(tc);
+    let Some(object) = error.to_object(tc) else { return fallback; };
+    let key = v8::String::new(tc, "stack").unwrap();
+    match object.get(tc, key.into()) {
+        Some(stack) if stack.is_string() => stack.to_rust_string_lossy(tc),
+        _ => fallback,
+    }
+}
+
+pub(crate) fn promise_ready(
+    scope: &mut v8::PinScope,
+    promise: &v8::Global<v8::Promise>,
+) -> Result<bool, String> {
+    let promise = v8::Local::new(scope, promise);
+    match promise.state() {
+        v8::PromiseState::Pending => Ok(false),
+        v8::PromiseState::Fulfilled => Ok(true),
+        v8::PromiseState::Rejected => {
+            let error = promise.result(scope);
+            Err(error_detail(scope, error))
+        }
+    }
+}
+
+pub(crate) fn evaluate_module(
+    scope: &mut v8::PinScope,
+    module: &v8::Global<v8::Module>,
+) -> Result<ModuleEvaluation, String> {
+    v8::tc_scope!(let tc, scope);
+    let module = v8::Local::new(tc, module);
+    if module.get_status() == v8::ModuleStatus::Uninstantiated
+        && module.instantiate_module(tc, resolve_callback) != Some(true)
     {
-        let reg = registry.borrow();
-        let module_global = reg.compiled.get(entrypoint)
-            .ok_or_else(|| format!("Entrypoint not compiled: {entrypoint}"))?;
-        let module = v8::Local::new(scope, module_global);
-
-        let ok = module.instantiate_module(scope, resolve_callback);
-        if ok.is_none() || ok == Some(false) {
-            return Err(format!("Failed to instantiate: {entrypoint}"));
-        }
+        return Err(tc.exception().map_or_else(
+            || "module instantiation failed".into(), |error| error_detail(tc, error),
+        ));
     }
+    let result = module.evaluate(tc).ok_or_else(|| {
+        tc.exception().map_or_else(
+            || "module evaluation failed".into(), |error| error_detail(tc, error),
+        )
+    })?;
+    let promise = v8::Local::<v8::Promise>::try_from(result).ok().map(|promise| {
+        promise.mark_as_handled();
+        v8::Global::new(tc, promise)
+    });
+    let namespace = v8::Global::new(tc, module.get_module_namespace());
+    Ok(ModuleEvaluation { namespace, promise })
+}
 
-    // Evaluate.
-    //
-    // The registry borrow is released BEFORE `module.evaluate()`: a
-    // top-level `await import(...)` in the entry (e.g. the bootstrap
-    // `runtime-entry.js`'s `import("zeroship:db/internal")`)
-    // fires the dynamic-import host callback synchronously during evaluate
-    // AND during the microtask checkpoint below. That callback may
-    // `borrow_mut()` the registry to cache a freshly-resolved module — so
-    // holding a shared borrow across evaluate would `RefCell`-panic
-    // (a non-unwinding abort). We only need the borrow to fetch the
-    // module handle; clone it out and drop the guard immediately.
-    let entry_module_g = {
-        let reg = registry.borrow();
-        reg.compiled.get(entrypoint).unwrap().clone()
-    };
-    let eval_rejection: Option<v8::Global<v8::Value>> = {
-        let module = v8::Local::new(scope, &entry_module_g);
-
-        let (result_global, sync_exc) = {
-            v8::tc_scope!(let tc, scope);
-            let r = module.evaluate(tc);
-            if tc.has_caught() {
-                let exc = tc.exception().map(|e| v8::Global::new(tc, e));
-                (None, exc)
-            } else {
-                (r.map(|v| v8::Global::new(tc, v)), None)
-            }
-        };
-
-        crate::core::init::perform_microtask_checkpoint(scope);
-
-        if let Some(exc) = sync_exc {
-            let local = v8::Local::new(scope, &exc);
-            tracing::error!(
-                error = %local.to_rust_string_lossy(scope),
-                "v8 evaluate sync threw"
-            );
-            return Err(format!("Failed to evaluate: {entrypoint}"));
-        }
-
-        let Some(result_g) = result_global else {
-            return Err(format!("Failed to evaluate: {entrypoint}"));
-        };
-        let result = v8::Local::new(scope, &result_g);
-        if result.is_promise() {
-            let promise: v8::Local<v8::Promise> = result.try_into().unwrap();
-            if promise.state() == v8::PromiseState::Rejected {
-                Some(v8::Global::new(scope, promise.result(scope)))
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    };
-
-    if let Some(rej) = eval_rejection {
-        let local = v8::Local::new(scope, &rej);
-        let error = local.to_rust_string_lossy(scope);
-        let mut detail = error.clone();
-        tracing::error!(
-            error = %error,
-            "v8 evaluate rejected"
-        );
-        if let Some(obj) = local.to_object(scope) {
-            let stack_key = v8::String::new(scope, "stack").unwrap();
-            if let Some(stack_val) = obj.get(scope, stack_key.into())
-                && !stack_val.is_undefined()
-            {
-                detail = stack_val.to_rust_string_lossy(scope);
-                tracing::error!(stack = %stack_val.to_rust_string_lossy(scope), "v8 evaluate rejected stack");
-            }
-        }
-        return Err(format!("Evaluate rejected: {entrypoint}: {detail}"));
+/// Load a module graph whose evaluation settles during its microtask checkpoint.
+/// Runtime application startup uses the retained evaluation promise instead.
+///
+/// # Errors
+/// Returns the linking or evaluation failure, or rejects a still-pending graph.
+pub fn load_modules(
+    scope: &mut v8::PinScope,
+    entries: &[ModuleEntry],
+) -> Result<v8::Global<v8::Value>, String> {
+    let module = compile_modules(scope, entries)?;
+    let evaluation = evaluate_module(scope, &module)?;
+    crate::core::init::perform_microtask_checkpoint(scope);
+    if !evaluation.is_ready(scope)? {
+        return Err("module evaluation requires the runtime startup pump".into());
     }
+    Ok(evaluation.namespace)
+}
 
-    // Extract the namespace.
-    let namespace = {
-        let reg = registry.borrow();
-        let module_global = reg.compiled.get(entrypoint).unwrap();
-        let module = v8::Local::new(scope, module_global);
-        let ns = module.get_module_namespace();
-        v8::Global::new(scope, ns)
+/// Invoke an SDK module export after its module evaluation has settled.
+/// The caller owns the returned promise and its initialization arguments.
+///
+/// # Errors
+/// Returns a module lookup, linking or scheduling failure. Asynchronous module
+/// evaluation and export invocation failures reject the returned promise.
+pub fn invoke_module_export(
+    scope: &mut v8::PinScope,
+    specifier: &str,
+    export: &str,
+    args: &[v8::Local<v8::Value>],
+) -> Result<v8::Global<v8::Promise>, String> {
+    let registry = scope.get_slot::<SharedRegistry>().cloned()
+        .ok_or_else(|| "module registry is not initialized".to_string())?;
+    let module = registry.borrow().get(specifier).cloned()
+        .ok_or_else(|| format!("module {specifier:?} is not registered"))?;
+    let evaluation = evaluate_module(scope, &module)?;
+    let namespace = v8::Local::new(scope, evaluation.namespace);
+    let name = v8::String::new(scope, export).ok_or("could not allocate export name")?;
+    let args = v8::Array::new_with_elements(scope, args);
+    let data = v8::Array::new_with_elements(scope, &[namespace, name.into(), args.into()]);
+    let callback = v8::Function::builder(invoke_export_callback).data(data.into())
+        .build(scope).ok_or("could not allocate export invocation")?;
+    let promise = if let Some(promise) = evaluation.promise {
+        v8::Local::new(scope, promise)
+    } else {
+        let resolver = v8::PromiseResolver::new(scope).ok_or("could not allocate evaluation promise")?;
+        let undefined = v8::undefined(scope);
+        resolver.resolve(scope, undefined.into());
+        resolver.get_promise(scope)
     };
+    let result = promise.then(scope, callback).ok_or("could not schedule module export")?;
+    result.mark_as_handled();
+    Ok(v8::Global::new(scope, result))
+}
 
-    Ok(namespace)
+#[expect(clippy::needless_pass_by_value, reason = "V8 callback signature")]
+fn invoke_export_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut rv: v8::ReturnValue,
+) {
+    let data = v8::Local::<v8::Array>::try_from(args.data()).unwrap();
+    let namespace = data.get_index(scope, 0).unwrap().to_object(scope).unwrap();
+    let name = data.get_index(scope, 1).unwrap();
+    let Some(value) = namespace.get(scope, name) else { return; };
+    let Ok(function) = v8::Local::<v8::Function>::try_from(value) else {
+        let name = name.to_rust_string_lossy(scope);
+        let message = v8::String::new(scope, &format!("module export {name:?} is not callable")).unwrap();
+        let error = v8::Exception::type_error(scope, message);
+        scope.throw_exception(error);
+        return;
+    };
+    let values = v8::Local::<v8::Array>::try_from(data.get_index(scope, 2).unwrap()).unwrap();
+    let values: Vec<_> = (0..values.length()).map(|i| values.get_index(scope, i).unwrap()).collect();
+    let undefined = v8::undefined(scope);
+    if let Some(result) = function.call(scope, undefined.into(), &values) { rv.set(result); }
 }
 
 /// V8 resolve callback — lookups only, never compiles.

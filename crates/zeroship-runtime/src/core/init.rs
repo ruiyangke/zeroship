@@ -2178,21 +2178,18 @@ export default {
 // Shared initialization: polyfills + module loading
 // ===========================================================================
 
-/// Load polyfills and ES modules.
-///
-/// Shared by both `Isolate::ensure_initialized` and `ConcurrentIsolate::ensure_initialized`.
-/// Returns the entry module's namespace object (so the caller can resolve
-/// `default.fetch` without a reach-through global). `None` if module loading
-/// failed (error is already logged).
-///
-/// The `plugins` slice receives the fully validated runtime descriptor before
-/// any creator module evaluates. Plugins that do not consume schema metadata
-/// keep the default no-op hook.
-pub fn load_polyfills_and_modules(
+/// Compiled entry and plugin preparation promises retained by native startup.
+pub(crate) struct PreparedApplication {
+    pub entry: v8::Global<v8::Module>,
+    pub descriptor: Option<serde_json::Value>,
+    pub promises: Vec<v8::Global<v8::Promise>>,
+}
+
+pub(crate) fn prepare_application(
     scope: &mut v8::PinScope,
     modules: &[crate::modules::ModuleEntry],
     plugins: &[std::sync::Arc<dyn crate::plugin::NativePlugin>],
-) -> Result<v8::Global<v8::Value>, String> {
+) -> Result<PreparedApplication, String> {
     crate::core::plugin_modules::register(scope, plugins, modules)?;
     let runtime_descriptor = setup_globals_with_descriptor(scope)?;
     let app_id = crate::plugin::runtime_app_id(scope);
@@ -2368,16 +2365,16 @@ pub fn load_polyfills_and_modules(
     // indirection we want.
     let wrapped = wrap_with_bootstrap(modules);
 
-    // Load ES modules and return the entry module's namespace object.
-    // The kernel reads `default.fetch` directly off the namespace — no more
-    // `__rpc` copy loop, no more `DISPATCH_JS`, no more URL-path router.
-    match crate::modules::load_modules(scope, &wrapped) {
-        Ok(namespace) => Ok(namespace),
-        Err(e) => {
-            tracing::error!(error = %e, "v8 module loading failed");
-            Err(e)
+    // Compile the graph and retain adapter preparation before creator evaluation.
+    let entry = crate::modules::compile_modules(scope, &wrapped)?;
+    let mut promises = Vec::new();
+    for plugin in plugins {
+        let namespace = crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
+        if let Some(promise) = plugin.prepare_runtime(scope, namespace, runtime_descriptor.as_ref())? {
+            promises.push(promise);
         }
     }
+    Ok(PreparedApplication { entry, descriptor: runtime_descriptor, promises })
 }
 
 /// Rewrite the user's module list so the bootstrap is the new entry.
@@ -2996,7 +2993,7 @@ fn zs_get_request_ctx_callback(
 /// construct a Request since there's no URL/header work to do).
 ///
 /// The kernel stores the Request at call_fetch_handler's slow-path entry,
-/// immediately after it constructs one via HTTP_CREATE_REQUEST_JS. Stored
+/// immediately after it calls `build_kernel_request`. Stored
 /// keyed by the same `executing_request_id` that drives per_request_user
 /// / waitUntil / logs, so cleanup rides on `drain_request_logs`.
 fn zs_get_request_callback(

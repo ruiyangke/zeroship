@@ -184,6 +184,7 @@ mod rpc_eviction;
 mod rpc;
 mod rpc_superjson;
 mod schema_init;
+mod startup;
 mod serve_health_and_env;
 mod streams_native;
 mod streams;
