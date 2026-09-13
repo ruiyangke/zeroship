@@ -457,18 +457,18 @@ export const naming = {
 /** Persisted-row type for a Collection — `Row<S>` for `Collection<S, _>`. */
 export type InferRow<C> =
   C extends { readonly _schema_brand?: infer S } ? Row<S> :
-  C extends import("./collection").Collection<infer S, any> ? Row<S> :
+  C extends import("./collection").Collection<infer S, any, any> ? Row<S> :
   never;
 
 /** Insert-shape type for a Collection — `RowInput<S>` for `Collection<S, _>`. */
 export type InferRowInput<C> =
   C extends { readonly _schema_brand?: infer S } ? RowInput<S> :
-  C extends import("./collection").Collection<infer S, any> ? RowInput<S> :
+  C extends import("./collection").Collection<infer S, any, any> ? RowInput<S> :
   never;
 
 /** Branded `Id<N>` for a Collection — `Id<"users">` for `Collection<_, "users">`. */
 export type InferId<C> =
-  C extends import("./collection").Collection<infer S, infer N extends string> ? Id<N, RowId<S>> :
+  C extends import("./collection").Collection<infer S, infer N extends string, any> ? Id<N, RowId<S>> :
   never;
 
 /**
