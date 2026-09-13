@@ -319,3 +319,6 @@ pub fn test_gateway_service_auth() -> zeroship_core::service_peers::ServiceAuth 
         Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
     )
 }
+
+#[cfg(test)]
+mod tests;
