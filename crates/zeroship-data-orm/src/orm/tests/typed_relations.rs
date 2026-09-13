@@ -131,8 +131,8 @@ async fn exercise(postgres: bool) {
 
     let rows = posts
         .query()
-        .order_by(posts::title.asc())
         .with_related(posts::relations::author)
+        .order_by(posts::title.asc())
         .all::<Post, Author>()
         .await
         .unwrap();
@@ -142,6 +142,27 @@ async fn exercise(postgres: bool) {
     assert_eq!(rows[1].1.as_ref(), Some(&author));
     assert_eq!(rows[2].0.author_id, None);
     assert_eq!(rows[2].1, None);
+
+    assert_eq!(
+        posts
+            .query()
+            .with_related(posts::relations::author)
+            .limit(1)
+            .unwrap()
+            .offset(100)
+            .unwrap()
+            .count()
+            .await
+            .unwrap(),
+        3
+    );
+    assert!(!posts
+        .query()
+        .with_related(posts::relations::author)
+        .filter(posts::title.eq("absent").unwrap())
+        .exists()
+        .await
+        .unwrap());
 
     let paged = posts
         .query()

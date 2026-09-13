@@ -1293,3 +1293,5 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
         "survives"
     );
 }
+
+mod typed_read_terminals;

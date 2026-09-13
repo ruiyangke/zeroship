@@ -3,6 +3,7 @@ use super::*;
 
 mod composition;
 mod predicates;
+mod terminals;
 pub use composition::{IntoReadOperand, ReadOperand, ReadOrder, ReadPredicate};
 mod entity_query;
 pub use entity_query::{EntityQuery, FieldOrder};
@@ -34,6 +35,12 @@ impl<E: Entity> EntityCollection<E> {
     }
 }
 impl<E: Entity> EntityAlias<E> {
+    #[must_use]
+    pub fn include_deleted(mut self) -> Self {
+        self.source.include_deleted = true;
+        self
+    }
+
     fn origin(&self) -> ReadOrigin {
         ReadOrigin {
             database: self.database.identity.clone(),
@@ -189,6 +196,7 @@ pub struct ReadBuilder<P = ()> {
     database: Database,
     query: ReadQuery,
     selection: P,
+    validate_selection: fn(&P, &Database, &[ReadSource]) -> Result<(), DbError>,
     error: Option<DbError>,
     schemas: Vec<SchemaExpectation>,
 }
@@ -252,6 +260,7 @@ impl Database {
             database: self.clone(),
             query: ReadQuery::new(source.source.clone()),
             selection: (),
+            validate_selection: |_, database, _| database.check_scope(),
             error: (!Rc::ptr_eq(&self.identity, &source.database.identity))
                 .then(|| read::invalid("read sources must belong to the same database handle")),
             schemas: vec![SchemaExpectation {
@@ -338,7 +347,7 @@ impl<P> ReadBuilder<P> {
         if let Err(error) = self.register_origins(predicate.origins, &self.sources()) {
             self.error.get_or_insert(error);
         }
-        self.query.filter = predicate.expression;
+        self.query.filter = Predicate::And(vec![self.query.filter, predicate.expression]);
         self
     }
     pub fn group_by<C: ReadableColumn>(mut self, column: SourceColumn<C>) -> Self {
@@ -358,7 +367,7 @@ impl<P> ReadBuilder<P> {
         if let Err(error) = self.register_origins(predicate.origins, &self.sources()) {
             self.error.get_or_insert(error);
         }
-        self.query.having = predicate.expression;
+        self.query.having = Predicate::And(vec![self.query.having, predicate.expression]);
         self
     }
     pub fn order_by(mut self, key: ReadOrder) -> Self {
@@ -389,38 +398,9 @@ impl<P> ReadBuilder<P> {
             database: self.database,
             query: self.query,
             selection,
+            validate_selection: S::validate,
             error: None,
             schemas: self.schemas,
-        })
-    }
-}
-impl<P: ReadSelection> ReadBuilder<P> {
-    pub fn all(self) -> impl Future<Output = Result<Vec<P::Output>, DbError>> {
-        let sources = self.sources();
-        let work = self
-            .validate_schemas()
-            .and_then(|()| self.selection.validate(&self.database, &sources))
-            .map(|()| self.database.read(self.query));
-        // Keep execution and projection state out of the caller's async state.
-        Box::pin(async move {
-            if let Some(error) = self.error {
-                return Err(error);
-            }
-            for expected in &self.schemas {
-                expected.validate(&self.database)?;
-            }
-            self.selection.validate(&self.database, &sources)?;
-            let Output::Rows { rows, .. } = work?.await? else {
-                return Err(DbError::internal("read returned a count"));
-            };
-            rows.into_iter()
-                .map(|row| {
-                    let Value::Object(mut record) = row else {
-                        return Err(DbError::internal("read returned a non-object"));
-                    };
-                    self.selection.decode(&mut 0, &mut record)
-                })
-                .collect()
         })
     }
 }
