@@ -33,9 +33,18 @@ catch-up boundary and remaining allowance. Occurrences wait for their own
 activation job to complete; replacement stops future generation without changing
 already queued jobs. Claims and receipt replay verify stored job linkage, and
 frontier extension checks the immutable descriptor and calendar interpretation.
-Creator activation and cron acceptance are handled by the customer engine. The
-manager scheduling loop and ordinary host composition still need integration
-before production scheduling can be enabled.
+Creator activation and cron acceptance are handled by the customer engine.
+The server drives due scheduling through the native manager. Normal deployment
+publication and ordinary worker/CLI composition still need integration.
+
+`driver::Driver` visits bounded calendar, recovery and unfinished-hold pages.
+Each lane captures its upper identity and advances past an attempted candidate
+before I/O. A shared lane deadline bounds scans and candidate operations; failed
+items remain durable and retry after the finite sweep wraps. Cancellation retains
+scan progress and rotates the next lane. The host owns cadence and shutdown.
+The driver needs no worker registration, placement or creator database. Retention
+processing resumes acquiring/releasing intents; releasing a held deployment still
+requires the host's explicit release operation and its dependency checks.
 
 `recovery::Recovery` stores persistent scope responsibility and publishes due
 reconciliation into this queue. Repeated activation registration preserves its
@@ -67,7 +76,7 @@ provisioning remain explicit host operations.
 
 The native library is composed by the workflow server under
 the [workflow proposal](../../docs/proposals/2026-09-11-workflow-worker.md).
-The worker consumer, manager scheduling loop and CLI composition still require cutover.
+Normal deployment publication, the worker consumer and CLI composition still require cutover.
 
 Run `cargo test -p zeroship-workflow-manager` for PostgreSQL Testcontainers and
 SQLite queue, scheduling and retention contracts.

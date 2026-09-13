@@ -18,6 +18,8 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
             "service_key_file":dir.path().join("unread-workflow-key"),
             "control_url":"https://control.example.test",
             "batch_limit":3,
+            "driver_interval_ms":250,
+            "driver_lane_timeout_ms":1500,
         }}))
         .unwrap(),
     )
@@ -57,7 +59,16 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
     )
     .unwrap();
     assert_eq!(*settings.batch_limit.get(), 2);
-    ServerOptions::resolve(&settings).unwrap();
+    let options = ServerOptions::resolve(&settings).unwrap();
+    assert_eq!(options.driver.page_limit, 2);
+    assert_eq!(
+        options.driver_interval,
+        std::time::Duration::from_millis(250)
+    );
+    assert_eq!(
+        options.driver.lane_timeout,
+        std::time::Duration::from_millis(1500)
+    );
 
     let missing = Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
         .env_clear()
@@ -79,6 +90,16 @@ fn config_check_validates_toml_and_flags_without_opening_dependencies() {
         .output()
         .unwrap();
     assert!(!invalid.status.success());
+    for flag in ["--driver-interval-ms", "--driver-lane-timeout-ms"] {
+        let invalid = Command::new(env!("CARGO_BIN_EXE_zeroship-workflow-server"))
+            .env_clear()
+            .args(["--check-config", "--config"])
+            .arg(&config)
+            .args([flag, "0"])
+            .output()
+            .unwrap();
+        assert!(!invalid.status.success(), "accepted {flag}=0");
+    }
     for flag in ["--payload-url", "--max-running", "--lease-ms"] {
         assert!(WorkflowSettingsSources::try_parse_from([
             "zeroship-workflow-server",

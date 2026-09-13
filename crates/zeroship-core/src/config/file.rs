@@ -392,6 +392,10 @@ pub struct WorkflowSection {
     pub max_pending_management: Option<usize>,
     /// Interval between expired service-assertion cleanup sweeps.
     pub replay_sweep_ms: Option<u64>,
+    /// Delay between completed native manager passes.
+    pub driver_interval_ms: Option<u64>,
+    /// Deadline for each lane in a native manager pass.
+    pub driver_lane_timeout_ms: Option<u64>,
     /// Platform coordination metadata login; no customer database credentials.
     pub database_url: Option<String>,
 }

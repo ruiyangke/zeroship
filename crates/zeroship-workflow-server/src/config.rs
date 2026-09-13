@@ -75,6 +75,12 @@ pub struct WorkflowSettings {
     /// Interval between expired service-assertion cleanup sweeps.
     #[config(name = "workflow.replay_sweep_ms", default = 30000)]
     pub replay_sweep_ms: Operational<u64>,
+    /// Delay between completed native manager passes.
+    #[config(name = "workflow.driver_interval_ms", default = 1000)]
+    pub driver_interval_ms: Operational<u64>,
+    /// Deadline for each scheduling, recovery or retention lane in a manager pass.
+    #[config(name = "workflow.driver_lane_timeout_ms", default = 10000)]
+    pub driver_lane_timeout_ms: Operational<u64>,
     /// Platform coordination metadata login; no customer database credentials.
     #[config(name = "workflow.database_url")]
     pub database_url: Secret<String>,
