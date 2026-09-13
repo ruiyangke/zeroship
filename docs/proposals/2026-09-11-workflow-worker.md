@@ -2131,6 +2131,17 @@ and bootstrap wiring. Coordinate changes to `zeroship-runtime/src/core/init.rs`,
 verify outcome batches, task-bound payload reads, interruption and joined shutdown
 through the replacement before deleting the old source.
 
+Retained-entry workflow lookup now captures the constructor-to-export binding
+before invoking a workflow. Parent lookup and child frontiers use the same
+binding; neither minification nor mutation of `Function.name` changes a target.
+Named exports and explicit `default.workflows` entries must agree, and ambiguous
+aliases or unexported child constructors fail dispatch. The native module-graph
+contract verifies generic named-export forwarding without a Vite collector.
+Vite/bootstrap removal remains coordinated with its owner; these native tests
+do not establish that its pending producer cutover has shipped. Local workflow
+tasks use ordinary retained bundles, independently of the live development
+HTTP/RPC entry snapshots, and require no asynchronous `loadWorkflow` bridge.
+
 ### Decisions still requiring an explicit contract
 
 | Decision | Fixed requirement and remaining choice |
