@@ -508,6 +508,10 @@ enum IngressOperation {
     Resume,
     Restart,
     Ingest,
+    IssueToken,
+    RevokeRunTokens,
+    RevokeTopicTokens,
+    RevokeAppTokens,
 }
 
 const INGRESS_OPERATIONS: &[IngressOperation] = &[
@@ -517,6 +521,10 @@ const INGRESS_OPERATIONS: &[IngressOperation] = &[
     IngressOperation::Resume,
     IngressOperation::Restart,
     IngressOperation::Ingest,
+    IngressOperation::IssueToken,
+    IngressOperation::RevokeRunTokens,
+    IngressOperation::RevokeTopicTokens,
+    IngressOperation::RevokeAppTokens,
 ];
 
 struct IngressCall {
@@ -563,6 +571,21 @@ impl IngressCall {
             )
             .await
             .unwrap();
+        if matches!(operation, IngressOperation::RevokeTopicTokens) {
+            scope
+                .issue_signal_token(
+                    &RequestId::mint(),
+                    SignalTokenRequest {
+                        target: SignalTarget::Topic {
+                            topic: format!("issued-{run}"),
+                        },
+                        types: ["ready".into()].into(),
+                        lifetime_seconds: 60,
+                    },
+                )
+                .await
+                .unwrap();
+        }
         Self {
             scope,
             operation,
@@ -575,7 +598,7 @@ impl IngressCall {
     async fn invoke(&self) -> Result<serde_json::Value, WorkflowServiceError> {
         use crate::{
             operations::{RestartOptions, RunOperation},
-            service::capability::SignalTarget,
+            service::{capability::SignalTarget, SignalTokenRequest},
         };
         let message = SignalOptions {
             signal_type: "ready".into(),
@@ -619,8 +642,83 @@ impl IngressCall {
                     )
                     .await?,
             ),
+            IngressOperation::IssueToken => serde_json::to_value(
+                self.scope
+                    .issue_signal_token(
+                        &self.request,
+                        SignalTokenRequest {
+                            target: SignalTarget::Topic {
+                                topic: format!("issued-{}", self.run),
+                            },
+                            types: ["ready".into()].into(),
+                            lifetime_seconds: 60,
+                        },
+                    )
+                    .await?,
+            ),
+            IngressOperation::RevokeRunTokens => serde_json::to_value(
+                self.scope
+                    .revoke_signal_tokens(
+                        &self.request,
+                        Some(SignalTarget::Run {
+                            run_id: self.run.clone(),
+                        }),
+                    )
+                    .await?,
+            ),
+            IngressOperation::RevokeTopicTokens => serde_json::to_value(
+                self.scope
+                    .revoke_signal_tokens(
+                        &self.request,
+                        Some(SignalTarget::Topic {
+                            topic: format!("issued-{}", self.run),
+                        }),
+                    )
+                    .await?,
+            ),
+            IngressOperation::RevokeAppTokens => {
+                serde_json::to_value(self.scope.revoke_signal_tokens(&self.request, None).await?)
+            }
         };
         Ok(result.unwrap())
+    }
+
+    async fn epoch(&self) -> Option<i64> {
+        let (table, filter) = match self.operation {
+            IngressOperation::RevokeRunTokens => (
+                "runs",
+                json!({"app_id":self.scope.app_id().as_str(),"id":self.run}),
+            ),
+            IngressOperation::RevokeTopicTokens => (
+                "topics",
+                json!({"app_id":self.scope.app_id().as_str(),"topic":format!("issued-{}", self.run)}),
+            ),
+            IngressOperation::RevokeAppTokens => {
+                ("app_state", json!({"app_id":self.scope.app_id().as_str()}))
+            }
+            _ => return None,
+        };
+        let tx = self.scope.service.begin().await.unwrap();
+        let rows = journal_rows(&tx, table, filter).await;
+        assert_eq!(rows.len(), 1);
+        let epoch = rows[0].integer("signal_epoch").unwrap();
+        tx.commit().await.unwrap();
+        Some(epoch)
+    }
+
+    async fn assert_token_effect(&self, result: &serde_json::Value, previous_epoch: Option<i64>) {
+        if let Some(previous) = previous_epoch {
+            let expected = previous.checked_add(1).unwrap();
+            assert_eq!(result["epoch"].as_i64(), Some(expected));
+            assert_eq!(self.epoch().await, Some(expected));
+        }
+        if matches!(self.operation, IngressOperation::IssueToken) {
+            assert!(!result.as_str().expect("issued capability token").is_empty());
+            let tx = self.scope.service.begin().await.unwrap();
+            let topics = journal_rows(&tx, "topics", json!({"app_id":self.scope.app_id().as_str(),"topic":format!("issued-{}", self.run)})).await;
+            assert_eq!(topics.len(), 1);
+            tx.commit().await.unwrap();
+        }
     }
 }
 
@@ -652,6 +750,7 @@ async fn ingress_state(
         "generations",
         "steps",
         "signals",
+        "topics",
         "broadcasts",
         "requests",
         "outbox",
@@ -694,7 +793,9 @@ async fn ingress_receipt_expiry(store: Rc<OrmStore>) {
     let mut revision = 1;
     for &operation in INGRESS_OPERATIONS {
         let call = IngressCall::prepare(&service, &app, operation).await;
+        let previous_epoch = call.epoch().await;
         let accepted = call.invoke().await.unwrap();
+        call.assert_token_effect(&accepted, previous_epoch).await;
         let before = ingress_state(&service, &app).await;
         revision += 1;
         service
@@ -710,6 +811,7 @@ async fn ingress_receipt_expiry(store: Rc<OrmStore>) {
             )
             .unwrap();
         assert_eq!(call.invoke().await.unwrap(), accepted, "{operation:?}");
+        call.assert_token_effect(&accepted, previous_epoch).await;
         assert_eq!(ingress_state(&service, &app).await, before, "{operation:?}");
         revision += 1;
         service
@@ -819,6 +921,7 @@ async fn postgres_ingress_revocation_after_writes_rolls_back() {
     let mut revision = 1;
     for &operation in INGRESS_OPERATIONS {
         let call = IngressCall::prepare(&service, &app, operation).await;
+        let previous_epoch = call.epoch().await;
         let before = ingress_state(&service, &app).await;
         let barrier = IngressBarrier::install(&fixture.admin_url).await;
         let pending =
@@ -851,6 +954,7 @@ async fn postgres_ingress_revocation_after_writes_rolls_back() {
         );
         barrier.remove().await;
         assert_eq!(ingress_state(&service, &app).await, before, "{operation:?}");
+        assert_eq!(call.epoch().await, previous_epoch, "{operation:?}");
         revision += 1;
         service
             .policies
@@ -858,6 +962,7 @@ async fn postgres_ingress_revocation_after_writes_rolls_back() {
             .unwrap();
         let accepted = call.invoke().await.unwrap();
         assert_eq!(call.invoke().await.unwrap(), accepted, "{operation:?}");
+        call.assert_token_effect(&accepted, previous_epoch).await;
         assert_ne!(ingress_state(&service, &app).await, before, "{operation:?}");
     }
 }
@@ -871,8 +976,17 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
     let fixture = PostgresFixture::start().await;
     let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
     let service = signed_ingress(service);
-    for (offset, refresh) in [false, true].into_iter().enumerate() {
-        let call = IngressCall::prepare(&service, &app, IngressOperation::Start).await;
+    for (offset, (operation, refresh)) in [
+        IngressOperation::Start,
+        IngressOperation::IssueToken,
+        IngressOperation::RevokeAppTokens,
+    ]
+    .into_iter()
+    .flat_map(|operation| [(operation, false), (operation, true)])
+    .enumerate()
+    {
+        let call = IngressCall::prepare(&service, &app, operation).await;
+        let previous_epoch = call.epoch().await;
         let before = ingress_state(&service, &app).await;
         let barrier = IngressBarrier::install(&fixture.admin_url).await;
         let revision = 2 + i64::try_from(offset).unwrap() * 2;
@@ -916,6 +1030,7 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
         barrier.unlock().await;
         barrier.remove().await;
         assert_eq!(ingress_state(&service, &app).await, before);
+        assert_eq!(call.epoch().await, previous_epoch);
         if refresh {
             assert!(
                 service.policies.authority(&app).is_ok(),
@@ -926,7 +1041,8 @@ async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_at
             .policies
             .install(&app, configured_policy(revision + 1, AppPolicy::default()))
             .unwrap();
-        assert!(call.invoke().await.is_ok());
+        let accepted = call.invoke().await.unwrap();
+        call.assert_token_effect(&accepted, previous_epoch).await;
     }
 }
 
@@ -1064,7 +1180,11 @@ async fn disabled_ingress_semantics(store: Rc<OrmStore>) {
     for call in calls {
         let result = call.invoke().await;
         match call.operation {
-            IngressOperation::Signal | IngressOperation::Broadcast => {
+            IngressOperation::Signal
+            | IngressOperation::Broadcast
+            | IngressOperation::RevokeRunTokens
+            | IngressOperation::RevokeTopicTokens
+            | IngressOperation::RevokeAppTokens => {
                 assert!(result.is_ok(), "{:?}: {result:?}", call.operation);
             }
             _ => assert!(

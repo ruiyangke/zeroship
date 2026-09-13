@@ -183,14 +183,17 @@ extending an existing task lease. History and completion under an already live
 claim remain available. Deploy selection also comes from the trusted host,
 through `activate_deploy`, without querying platform tables.
 
-Ordinary start, signal, broadcast, lifecycle and signal-ingress operations capture
-the host policy revision and deadline before journal I/O. Fresh mutations recheck
-that authority after the app lock and before commit. The original deadline also
+Ordinary start, signal, broadcast, lifecycle, signal-token and signal-ingress
+operations capture the host policy revision and deadline before journal I/O.
+Fresh mutations recheck that authority after the app lock and before commit. The original deadline also
 bounds database waits; refreshing the host snapshot cannot extend an operation
 already in progress. Revocation observed before commit rolls back staged writes.
 Exact committed request receipts remain replayable under their existing identity
 and capability checks. These are local operation fences; distributed policy
 delivery and archive quiescence still need host coordination.
+Signal-token issuance and revocation retain the original token or epoch in their
+request receipt. Retrying a committed revocation cannot advance its epoch again;
+revocation remains available under a live policy that disables new admission.
 
 Workflow execution reuses the app's existing deployed bundle under a durable
 deployment hold. `with_deployments` binds `AppDeployments`: the normal app blob
