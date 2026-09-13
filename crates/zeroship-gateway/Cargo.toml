@@ -79,6 +79,9 @@ compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde
 chrono = { version = "0.4", default-features = false, features = ["std", "serde", "clock"] }
 
 [dev-dependencies]
+# Database cases own their containers and run on compio.
+compio = { workspace = true, features = ["polling"] }
+testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 # The generated-controls test parses an overlay fixture to prove the
 # observability tier is read from the canonical TOML path.
 toml = { workspace = true }
