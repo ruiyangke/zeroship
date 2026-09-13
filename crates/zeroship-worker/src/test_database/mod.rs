@@ -1,4 +1,4 @@
-//! PostgreSQL fixtures own their server, catalog and connection drivers.
+//! `PostgreSQL` fixtures own their server, catalog and connection drivers.
 
 #![allow(
     clippy::future_not_send,
@@ -18,7 +18,7 @@ mod migrations;
 
 type Driver = compio::runtime::JoinHandle<Result<(), compio_postgres::Error>>;
 
-pub(crate) struct Database {
+pub struct Database {
     postgres: Container<GenericImage>,
     url: url::Url,
     pub(crate) admin: Client,
