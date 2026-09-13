@@ -8,12 +8,8 @@
 // (`scripts/post-build.mjs`) strips the `export {};` line so the file
 // content is pure top-level JS suitable for splicing.
 //
-// Stage 7 of the @zeroship/db refactor moved `installSchema` into the
-// `@zeroship/bootstrap` package. This entry dynamic-imports that package
-// (runtime-provided — `crates/zeroship-runtime/src/core/bootstrap_modules.rs`
-// satisfies the specifier, so the import resolves synchronously through
-// the microtask checkpoint `load_modules` invokes after
-// `module.evaluate()`).
+// DbPlugin supplies the compiled DB SDK adapter under zeroship:db/internal.
+// The runtime owns module resolution independently of the creator artifact.
 //
 // Schema install MUST NOT block module evaluation. `installSchema`
 // plants the typed `Collection` wrappers on `env.db` SYNCHRONOUSLY (so
@@ -124,9 +120,8 @@ function runtimeDescriptorFields(value: Record<string, unknown> | undefined): Re
     "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
   );
 }
-// The object passed as installSchema's first arg is only the descriptor's field
-// map. If the descriptor is present but not v2-shaped, throw: corrupt
-// descriptors must never degrade to schema-less boots.
+// Validate the descriptor before resolving its native handle. A corrupt
+// descriptor must never degrade to a schema-less boot.
 const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
 if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
@@ -142,20 +137,15 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   const envDb = envObj && envObj.db;
 
   if (envDb != null) {
-    const sdk = await import("@zeroship/bootstrap/install-schema") as {
+    const sdk = await import("zeroship:db/internal") as {
       installSchema?: (
-        schema: unknown,
         env: unknown,
-        options?: { descriptor?: unknown },
+        descriptor: unknown,
       ) => { collections: unknown };
     };
     if (typeof sdk.installSchema === "function") {
       // `installSchema` plants the Collection wrappers synchronously.
-      sdk.installSchema(schema, envDb, {
-        // **P5 S3** — the descriptor is the source of truth; _installSchemaInner
-        // reads it and ignores the first arg for options.
-        descriptor: hasDescriptor ? descriptor : undefined,
-      });
+      sdk.installSchema(envDb, descriptor);
 
       // Keep only the asynchronous mask-policy flush off the module-eval
       // critical path. The shared dispatcher awaits it before the first
@@ -163,7 +153,7 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
       globalThis.__zsSchemaReady = (async () => {
         // Seal the app declaration before dispatch. Install an empty policy
         // when none was declared so runtime code cannot add one later.
-        const policyMod = await import("@zeroship/db/internal") as {
+        const policyMod = await import("zeroship:db/internal") as {
           _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
         };
         const pending = typeof policyMod._flushPendingMaskPolicy === "function"

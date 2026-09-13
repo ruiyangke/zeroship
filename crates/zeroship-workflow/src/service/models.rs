@@ -1,10 +1,15 @@
-//! Journal model metadata comes from the canonical migration artifact.
+//! Native journal models and binding metadata.
 
 use super::{schema, store::database_error};
 use crate::WorkflowServiceError;
-use zeroship_data_orm::{binding::DbBinding, descriptor, orm::FromRow, Value};
+use zeroship_data_orm::{
+    binding::DbBinding,
+    descriptor,
+    orm::FromRow,
+    schema::{CollectionSchema, Schema},
+};
 
-zeroship_data_orm::orm::schema!(pub journal = "../../schema/schema.runtime.json");
+mod schema_definition;
 pub use journal::{
     __zeroship_workflow_app_state as app_state, __zeroship_workflow_broadcasts as broadcasts,
     __zeroship_workflow_deployment_holds as deployment_holds,
@@ -22,6 +27,7 @@ pub use journal::{
     __zeroship_workflow_tasks as tasks, __zeroship_workflow_topics as topics,
     __zeroship_workflow_waits as waits,
 };
+pub use schema_definition::journal;
 
 #[derive(FromRow)]
 #[orm(entity = schema_version)]
@@ -196,29 +202,22 @@ pub struct PayloadRecord {
     pub expires_at: i64,
 }
 
-/// Compose the journal with the app's existing descriptors in one publication.
-/// A conflicting host descriptor fails without replacing the previous binding.
+/// Publish the journal alongside the app's existing models.
+/// Conflicting metadata leaves the previous binding intact.
 pub fn install(binding: &DbBinding) -> Result<(), WorkflowServiceError> {
-    let artifact: Value =
-        serde_json::from_str(schema::RUNTIME_DESCRIPTOR).map_err(|_| schema::incompatible())?;
-    let tables = artifact["collections"]
-        .as_object()
-        .ok_or_else(schema::incompatible)?;
     let mut collections: std::collections::BTreeMap<_, _> =
         descriptor::declared_collections(binding)
             .into_iter()
-            .map(|(name, fields)| (name, fields.as_ref().clone()))
+            .map(|(name, fields)| (name, CollectionSchema::new(fields.as_ref().clone())))
             .collect();
-    for (name, table) in tables {
-        let fields = table.get("fields").ok_or_else(schema::incompatible)?;
-        if let Some(existing) = collections.get(name) {
-            if existing != fields {
+    for (name, fields) in journal::schema().into_collections() {
+        if let Some(existing) = collections.get(&name) {
+            if existing != &fields {
                 return Err(schema::incompatible());
             }
         } else {
-            collections.insert(name.clone(), fields.clone());
+            collections.insert(name, fields);
         }
     }
-    descriptor::install_collections(binding, collections.into_iter().collect())
-        .map_err(database_error)
+    descriptor::install_collections(binding, Schema::new(collections)).map_err(database_error)
 }

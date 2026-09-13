@@ -69,7 +69,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
                 "id": "b_bind",
                 "occurred_at": 1_756_700_000_000_i64,
             });
-            let runtime_schema = crate::tests::fixtures::schema::generated_fields(schema.clone());
+            let runtime_schema = crate::tests::fixtures::generated_schema(schema.clone());
             let bq = compile_insert(
                 &crate::sql::SchemaName::new(app).expect("fixture schema name"),
                 coll,

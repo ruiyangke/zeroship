@@ -1494,9 +1494,6 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 22.19.17
-      '@zeroship/bootstrap':
-        specifier: workspace:*
-        version: link:../bootstrap
       fflate:
         specifier: 0.8.2
         version: 0.8.2

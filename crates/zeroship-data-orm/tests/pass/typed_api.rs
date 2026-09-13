@@ -2,7 +2,8 @@
 
 use zeroship_data_orm::{Database, orm::*};
 
-schema!(pub schema = "../fixtures/schema.runtime.json");
+include!("../fixtures/posts_schema.rs");
+posts_schema!(pub schema);
 use schema::posts;
 
 #[derive(FromRow)]

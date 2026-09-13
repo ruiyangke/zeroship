@@ -1,4 +1,5 @@
 //! Immutable SQL compiler and storage-codec registration.
+use crate::schema::{ColumnSchema, FieldMap};
 
 use super::{
     compiler::{
@@ -77,7 +78,7 @@ impl fmt::Debug for RegistrationIdentity {
 }
 
 pub trait SqlStorageCodecs: Send + Sync {
-    fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError>;
+    fn storage_type(&self, definition: &ColumnSchema) -> Result<StorageType, CompileError>;
     fn encode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError>;
     fn decode(&self, storage: StorageType, value: Value) -> Result<Value, CompileError>;
 }
@@ -214,7 +215,7 @@ impl SqlRegistration {
         Ok(plan)
     }
 
-    pub fn storage_type(&self, definition: &Value) -> Result<StorageType, CompileError> {
+    pub fn storage_type(&self, definition: &ColumnSchema) -> Result<StorageType, CompileError> {
         self.codecs.storage_type(definition)
     }
 
@@ -239,7 +240,7 @@ impl SqlRegistration {
 
     pub fn decode_rows(
         &self,
-        schema: &Value,
+        schema: &FieldMap,
         rows: &mut [Value],
     ) -> Result<(), crate::sql::codecs::CodecError> {
         crate::sql::codecs::decode_rows(self, schema, rows)
@@ -263,6 +264,28 @@ fn validate_json(value: &Value) -> Result<(), CompileError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_boolean_metadata_decodes_native_and_artifact_columns_identically() {
+        use crate::schema::{ColumnSchema, FieldMap, LogicalType};
+
+        for definition in [
+            ColumnSchema::new(LogicalType::Boolean),
+            ColumnSchema::from_descriptor(&crate::value!({"type":"bool"})).unwrap(),
+        ] {
+            let fields: FieldMap = [("active".into(), definition)].into_iter().collect();
+            let mut rows = vec![crate::value!({"active": 1})];
+            SqlRegistration::sqlite()
+                .decode_rows(&fields, &mut rows)
+                .unwrap();
+            assert_eq!(rows, vec![crate::value!({"active": true})]);
+
+            let mut invalid = vec![crate::value!({"active": 2})];
+            assert!(SqlRegistration::sqlite()
+                .decode_rows(&fields, &mut invalid)
+                .is_err());
+        }
+    }
 
     #[test]
     fn registration_identity_delimits_each_component() {

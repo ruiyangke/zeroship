@@ -26,12 +26,15 @@ impl<E: Entity, R: Relation<Source = E>> RelatedQuery<E, R> {
                 let source_schema =
                     crate::descriptor::collection_schema(&database.binding, E::COLLECTION)?;
                 let target = database.entity::<R::Target>()?;
-                let definition = &source_schema[R::FIELD];
-                if definition.get("relation").and_then(Value::as_str) != Some(R::NAME)
-                    || definition.get("refTarget").and_then(Value::as_str)
-                        != Some(R::Target::COLLECTION)
-                    || definition.get("refColumn").and_then(Value::as_str) != Some(R::TARGET_COLUMN)
-                {
+                let matches = source_schema
+                    .get(R::FIELD)
+                    .and_then(|column| column.reference.as_ref())
+                    .is_some_and(|reference| {
+                        reference.name.as_deref() == Some(R::NAME)
+                            && reference.collection == R::Target::COLLECTION
+                            && reference.column == R::TARGET_COLUMN
+                    });
+                if !matches {
                     return Err(schema_mismatch_for(E::COLLECTION));
                 }
                 let mut fields = P::COLUMNS

@@ -864,7 +864,7 @@ content-addressed `runtime_descriptor` blob
 the standalone migration service. At runtime boot, Rust validates the
 descriptor and plugin-db publishes its collection field maps natively before
 creator modules evaluate. `@zeroship/bootstrap`'s
-`installSchema(schema, env.db, { descriptor })` walks the same descriptor to
+`installSchema(env.db, descriptor)` walks the same descriptor to
 plant typed `Collection` wrappers on the native `env.db`. So both directions
 meet at one wire type - the v2
 `RuntimeSchemaDescriptor`: gen-types *emits* it, the `.zship` packer *carries*

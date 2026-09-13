@@ -1,10 +1,11 @@
 //! Plan and execute collection operations for Rust callers and the V8 adapter.
 //!
-//! Synchronous planning captures descriptors, records read dependencies and sanitizes
+//! Synchronous planning captures model metadata, records read dependencies and sanitizes
 //! unmask hints before execution can yield. Async execution uses the captured route
 //! for ordinary queries and search, then applies result protection and decoding.
 //! V8 promise creation and delivery belong to the adapter.
 
+use crate::schema::{FieldMap, LogicalType};
 use crate::value::Value;
 
 use crate::assignments::AssignmentPlan;
@@ -613,7 +614,7 @@ pub(crate) async fn run_update_one(
     };
     // Compile descriptor-declared write assignments after supplied values for
     // those fields have been removed.
-    let autobump = AssignmentPlan::from_schema(&schema)?.write_assignments(
+    let autobump = AssignmentPlan::from_schema(&schema).write_assignments(
         &schema,
         actor_id.as_deref(),
         false,
@@ -704,7 +705,7 @@ pub(crate) async fn run_update_many(
     // No `skip_*` knob is set: the pass stripped every column the
     // charter re-assigns on write, so the patch cannot carry a
     // competing assignment for the builder to defer to.
-    let autobump = AssignmentPlan::from_schema(&schema)?.write_assignments(
+    let autobump = AssignmentPlan::from_schema(&schema).write_assignments(
         &schema,
         actor_id.as_deref(),
         false,
@@ -862,7 +863,7 @@ pub(crate) async fn run_update_many(
 fn extract_concurrency_guard(
     filter: &predicate::Input,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
 ) -> Result<Option<assignment_pass::ConcurrencyGuard>, DbError> {
     if let Some(filter) = filter.dynamic() {
         return assignment_pass::extract_concurrency_guard(filter, collection, schema);
@@ -911,7 +912,7 @@ pub(crate) fn plan_delete_input(
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     let autobump =
-        AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, true, false);
+        AssignmentPlan::from_schema(&schema).write_assignments(&schema, actor_id, true, false);
     let builder = delete::Builder::new(
         binding.schema(),
         collection,
@@ -997,7 +998,7 @@ pub(crate) fn plan_restore_input(
 ) -> Result<crate::sql::compiler::CompiledQuery, DbError> {
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     let autobump =
-        AssignmentPlan::from_schema(&schema)?.write_assignments(&schema, actor_id, false, true);
+        AssignmentPlan::from_schema(&schema).write_assignments(&schema, actor_id, false, true);
     let marker = soft_delete_column(&schema)?.ok_or_else(|| {
         DbError::validation(
             "restore_not_supported",
@@ -1172,7 +1173,7 @@ pub async fn run_upsert(
     let result = async {
         let mut retry = guard_identity.then(|| doc.clone());
         let mut doc = doc;
-        let assignments = AssignmentPlan::from_schema(&schema)?.write_assignments(
+        let assignments = AssignmentPlan::from_schema(&schema).write_assignments(
             &schema,
             actor_id.as_deref(),
             false,
@@ -1324,12 +1325,10 @@ pub fn plan_search(
         None => {
             let readable = crate::sql::descriptors::readable_fields(&schema);
             let mut vectors = schema
-                .as_object()
-                .into_iter()
-                .flatten()
+                .iter()
                 .filter(|(name, definition)| {
                     readable.contains(name.as_str())
-                        && definition.get("type").and_then(Value::as_str) == Some("vector")
+                        && definition.logical_type == LogicalType::Vector
                 })
                 .map(|(name, _)| name.as_str());
             let field = vectors.next().filter(|_| vectors.next().is_none()).ok_or_else(|| {
@@ -1544,18 +1543,10 @@ pub async fn prepare_insert_many_docs_for_binding(
     .await
 }
 
-/// Test helper that resolves the runtime data-access schema the way the CRUD
-/// passes do — through [`crate::descriptor::collection_schema`], the data
-/// plane's sole schema authority. Lets a test assert that the metadata the
-/// read/write passes will act on is exactly the descriptor entry the deploy
-/// installed, and that an undeclared collection is a typed refusal rather than
-/// an absent schema.
+/// Return an owned copy of the model metadata used by CRUD passes.
 #[cfg(test)]
-pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<Value, DbError> {
+pub fn runtime_schema_for_tests(app_id: &str, collection: &str) -> Result<FieldMap, DbError> {
     let binding = DbBinding::cold_start(app_id);
-    // Deep-clone out of the shared store: the helper's callers own and mutate
-    // their copy, and handing them the isolate's `Arc` would let one test
-    // observe another's edit.
     crate::descriptor::collection_schema(&binding, collection).map(|facts| (*facts).clone())
 }
 
@@ -1589,7 +1580,7 @@ async fn encryption_pass_dispatch(
     keys: &crate::encryption::KeyStore,
     app_id: &str,
     collection: &str,
-    schema: &Value,
+    schema: &FieldMap,
     row_pk: &str,
     doc: &mut Value,
     sidechannel: &mut mask_pass::MaskPlaintextSidechannel,
@@ -1606,30 +1597,12 @@ async fn encryption_pass_dispatch(
     .await
 }
 
-/// Cheap walk: does any field def on `schema` carry `encrypted`?
-fn schema_has_encrypted_columns(schema: &Value) -> bool {
-    schema
-        .as_object()
-        .is_some_and(|o| o.values().any(crate::sql::descriptors::is_encrypted))
+fn schema_has_encrypted_columns(schema: &FieldMap) -> bool {
+    schema.values().any(crate::sql::descriptors::is_encrypted)
 }
 
-/// Cheap walk: does any field def on `schema` carry a
-/// `mask` entry with `kind != "none"`? Drives the per-write mask pass.
-fn schema_has_masked_columns(schema: &Value) -> bool {
+fn schema_has_masked_columns(schema: &FieldMap) -> bool {
     schema
-        .as_object()
-        .map(|o| {
-            o.values().any(|def| {
-                def.get("mask")
-                    .and_then(|v| v.as_object())
-                    .map(|m| {
-                        m.get("kind")
-                            .and_then(|k| k.as_str())
-                            .map(|k| k != "none")
-                            .unwrap_or(true) // missing kind defaults to "full" → masked
-                    })
-                    .unwrap_or(false)
-            })
-        })
-        .unwrap_or(false)
+        .values()
+        .any(|column| crate::sql::descriptors::effective_mask(column).is_some())
 }

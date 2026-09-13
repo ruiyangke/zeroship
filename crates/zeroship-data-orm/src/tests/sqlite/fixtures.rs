@@ -29,7 +29,7 @@ pub(super) fn fresh_backend(host: &Host) -> (SqliteBackend, tempfile::TempDir) {
 pub(super) fn compile_insert(
     namespace: &crate::sql::SchemaName,
     collection: &str,
-    schema: &crate::value::Value,
+    schema: &crate::schema::FieldMap,
     document: &crate::value::Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::insert::build_one(
@@ -44,7 +44,7 @@ pub(super) fn compile_insert(
 pub(super) fn compile_insert_many(
     namespace: &crate::sql::SchemaName,
     collection: &str,
-    schema: &crate::value::Value,
+    schema: &crate::schema::FieldMap,
     documents: &crate::value::Value,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     let mut queries = crate::crud::insert::build_many(
@@ -71,7 +71,7 @@ pub(super) fn compile_find(
     offset: Option<i64>,
     order_by: Option<&crate::value::Value>,
     select: Option<&crate::value::Value>,
-    schema: &crate::value::Value,
+    schema: &crate::schema::FieldMap,
 ) -> Result<crate::sql::compiler::CompiledQuery, crate::sql::mapping::QueryError> {
     crate::crud::read::find(
         namespace,

@@ -12,45 +12,34 @@
 pub use zeroship_core::workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
-    Value,
     error::DbError,
     orm::{Database, Entity, FindOptions, FromRow, Operation, Output},
     value,
 };
+
+#[cfg(test)]
+use zeroship_data_orm::Value;
 
 mod catalog;
 mod error;
 mod local;
 pub use error::Error;
 
-zeroship_data_orm::orm::schema!(pub models = "../../schema/deployments/schema.runtime.json");
+mod schema_definition;
 use models::{app_deploy_holds as holds, app_deploys as deploys};
+pub use schema_definition::models;
 
-pub const RUNTIME_DESCRIPTOR: &str = include_str!("../../schema/deployments/schema.runtime.json");
 pub const POSTGRES_SCHEMA: &str = include_str!("../../schema/deployments/postgres.sql");
 pub const SQLITE_SCHEMA: &str = include_str!("../../schema/deployments/sqlite.sql");
 
 /// Collection metadata for composition with the host's normal deployment models.
 ///
 /// # Errors
-/// Rejects an invalid compiled deployment descriptor or missing collection fields.
-pub fn collections() -> Result<Vec<(String, Value)>, Error> {
-    let descriptor: Value =
-        serde_json::from_str(RUNTIME_DESCRIPTOR).map_err(|_| invalid_storage())?;
-    descriptor["collections"]
-        .as_object()
-        .ok_or_else(invalid_storage)?
-        .iter()
-        .map(|(name, collection)| {
-            Ok((
-                name.clone(),
-                collection
-                    .get("fields")
-                    .ok_or_else(invalid_storage)?
-                    .clone(),
-            ))
-        })
-        .collect()
+/// Rejects invalid native model declarations.
+pub fn collections() -> Result<zeroship_data_orm::schema::Schema, Error> {
+    let schema = models::schema();
+    schema.validate()?;
+    Ok(schema)
 }
 
 #[derive(FromRow)]

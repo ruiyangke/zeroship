@@ -1,5 +1,15 @@
 use super::*;
 
+zeroship_data_orm::orm::schema! {
+    business {
+        orders {
+            #[orm(primary_key)]
+            id: Text,
+            body: Text,
+        }
+    }
+}
+
 #[compio::test]
 async fn workflow_tables_share_the_app_database_without_changing_business_data() {
     let directory = tempfile::tempdir().unwrap();
@@ -11,13 +21,7 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
     let database = zeroship_data_orm::orm::Database::from_schema(
         store.binding.clone(),
         store.backend.clone(),
-        vec![(
-            "orders".into(),
-            zeroship_data_orm::value!({
-                "id": {"type":"string", "primaryKey":true, "writable":true, "required":true},
-                "body": {"type":"string", "required":true}
-            }),
-        )],
+        business::schema(),
     )
     .unwrap();
     database
@@ -103,18 +107,23 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
 
 #[compio::test]
 async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
-    use zeroship_data_orm::{descriptor, orm::Database, value};
+    use zeroship_data_orm::{
+        descriptor,
+        orm::Database,
+        schema::{CollectionSchema, ColumnSchema, LogicalType, Schema},
+    };
     let directory = tempfile::tempdir().unwrap();
     let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
     let table = "__zeroship_workflow_schema_version";
-    let fields = value!({
-        "id":{"type":"string", "primaryKey":true, "required":true},
-        "fingerprint":{"type":"string"},
-    });
+    let mut id = ColumnSchema::new(LogicalType::Text);
+    id.primary_key = true;
+    let mut fingerprint = ColumnSchema::new(LogicalType::Text);
+    fingerprint.required = false;
+    let fields = CollectionSchema::new([("id".into(), id), ("fingerprint".into(), fingerprint)]);
     let database = Database::from_schema(
         store.binding.clone(),
         store.backend.clone(),
-        vec![(table.into(), fields.clone())],
+        Schema::new([(table.into(), fields.clone())]),
     )
     .unwrap();
     assert!(OrmStore::new(
@@ -127,7 +136,7 @@ async fn conflicting_journal_metadata_cannot_replace_the_app_descriptor() {
     let retained = database
         .context()
         .with(|| descriptor::collection_schema(&store.binding, table).unwrap());
-    assert_eq!(retained.as_ref(), &fields);
+    assert_eq!(retained.as_ref(), fields.fields());
     assert!(database.collection("__zeroship_workflow_requests").is_err());
 }
 

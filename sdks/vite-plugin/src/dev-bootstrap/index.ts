@@ -102,7 +102,7 @@ const entry = devEntry({
   // `false` for builders the user constructed.
   async getInstallSchema() {
     const r = await getRunner();
-    const mod = await r.import("@zeroship/bootstrap/install-schema") as {
+    const mod = await r.import("@zeroship/db/internal") as {
       installSchema: Parameters<typeof devEntry>[0]["getInstallSchema"] extends (() => Promise<infer T>) | undefined ? T : never;
     };
     return mod.installSchema;

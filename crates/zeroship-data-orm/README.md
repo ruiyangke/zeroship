@@ -16,9 +16,9 @@ Use the `bench_row_decode` and `bench_first_row_or_null` targets with
 `cargo bench -p zeroship-data-orm`. They exercise the row codec without
 constructing a V8 runtime.
 
-The host supplies a `DbBinding`, a `BackendHandle`, and the deployment's runtime
-collection descriptors. `Database::new` takes an explicit `OrmContext` with installed descriptors;
-`Database::from_schema` creates an independent context, validates and installs field maps. `Database::connect`
+The host supplies a `DbBinding`, a `BackendHandle`, and native collection metadata.
+`Database::new` takes an explicit `OrmContext` with installed metadata;
+`Database::from_schema` creates an independent context, validates and installs a `Schema`. `Database::connect`
 opens the configured backend through `ConnectOptions`, using the same URL grammar
 as the worker. Application functions take a backend-independent `&Database`. Schema changes and
 physical table creation belong to the migration engine and its service.
@@ -30,23 +30,29 @@ default per-app role narrowing.
 SQLite requires filesystem storage. Memory selectors and URI options are
 rejected; tests create and own their temporary database files explicitly.
 
-Rust collection metadata comes from the same migration-generated
-`schema.runtime.json` used by the worker. The `schema!` macro reads the artifact
-at compile time, with paths relative to the Rust source file, like `include_str!`.
-Cargo tracks that artifact as a compilation input. The generated modules contain
-collection identities, logical column types, typed fields, and write capabilities.
-The macro performs no database I/O.
-The artifact is a build input; a running Rust service does not need the file or
-V8. `Database::from_schema` accepts in-memory descriptors, and generated entities
-expose their embedded descriptors through `Entity::schema()`.
+Rust applications declare collection metadata with `schema!`. The macro emits
+native `CollectionSchema` definitions, typed columns, relation selectors, and
+write capabilities. Cargo compiles the declarations without a runtime artifact.
+Creator hosts decode `schema.runtime.json` into the same metadata through
+`Schema::from_runtime_descriptor`. Registration validates the complete schema
+before publishing it. Migrations continue to own physical table creation.
 
-For a descriptor declaring `posts` with required `title`, nullable `payload`,
-and nullable `nickname`, an application can write:
+For example:
 
 ```rust
 use zeroship_data_orm::{Database, orm::*};
 
-schema!(pub models = "../generated/zeroship/schema.runtime.json");
+schema! {
+    pub models {
+        posts {
+            #[orm(primary_key, assign(on = insert, by = typed_id))]
+            id: Text,
+            title: Text,
+            payload: Nullable<Bytes>,
+            nickname: Nullable<Text>,
+        }
+    }
+}
 use models::posts;
 
 #[derive(Debug, FromRow)]
@@ -94,6 +100,9 @@ async fn publish(db: &Database, payload: Vec<u8>) -> Result<Vec<Post>, DbError> 
 }
 ```
 
+Register these declarations with `Database::connect(binding, options, models::schema())`.
+The schema describes the mapped tables; registration does not create them.
+
 `FromRow<Entity>` is independent of write inputs. A projection can derive it
 with only the fields it needs; `find` selects those columns. Use
 `#[orm(column = "databaseName")]` when a Rust field has another name. Missing
@@ -102,7 +111,7 @@ metadata. Nullable columns require nullable decoders. Missing fields in an actua
 result remain errors, rather than being silently filled with Rust defaults.
 
 An entity accepts any `Insertable<Entity>` and `Changeset<Entity>`. Insert derives
-check that required fields without database defaults are supplied. Descriptor-assigned fields
+check that required fields without database defaults are supplied. Generator-assigned fields
 are generated as read-only columns. The runtime still validates every operation,
 including operations from handwritten trait implementations.
 
@@ -146,8 +155,8 @@ encoding happens at the database boundary. Custom domain types can implement
 logical type) without deriving Serde. `Protected<T>` retains a classified field's
 masked display when the protection pipeline withholds its value.
 
-`Database::entity` compares generated field metadata with the installed runtime
-descriptor and refuses a mismatch. A typed handle also refuses changes to that
+`Database::entity` compares canonical field metadata with the installed schema
+and refuses a mismatch. A typed handle also refuses changes to that
 metadata after it was created. This checks the descriptor bound by the host;
 physical catalog protection checks remain in the shared protection pipeline.
 
@@ -191,8 +200,8 @@ required; startup failure fails the test. No external database URL is needed:
 cargo test -p zeroship-data-orm --lib orm::tests::postgres_native_models_round_trip
 ```
 
-The fixtures render the migration IR into physical tables and check its generated
-runtime descriptor against the artifact used by `schema!`.
+The fixtures render migration IR into physical tables and exercise native mappings
+against them. Artifact parity tests compare decoded metadata with native declarations.
 
 `OrmContext` owns descriptors, immutable startup policies, catalog protection
 floors, and transaction lanes. Cloned database handles share that owner;

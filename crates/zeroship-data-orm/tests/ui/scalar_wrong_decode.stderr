@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `i64: DecodeValue<zeroship_data_orm::orm::sql_types::Text>` is not satisfied
- --> tests/ui/scalar_wrong_decode.rs:6:45
+ --> tests/ui/scalar_wrong_decode.rs:7:45
   |
-6 |     p.column(schema::posts::title).select::<i64>();
+7 |     p.column(schema::posts::title).select::<i64>();
   |                                    ------   ^^^ the trait `DecodeValue<zeroship_data_orm::orm::sql_types::Text>` is not implemented for `i64`
   |                                    |
   |                                    required by a bound introduced by this call
@@ -12,7 +12,7 @@ help: the following other types implement trait `DecodeValue<S>`
   |           impl DecodeValue<$sql> for $rust {
   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   |           |
-  |           `i64` implements `DecodeValue<BigInt>`
+  |           `i64` implements `DecodeValue<zeroship_data_orm::orm::sql_types::BigInt>`
   |           `i64` implements `DecodeValue<zeroship_data_orm::orm::sql_types::Integer>`
 ...
   | / integer_codec!(

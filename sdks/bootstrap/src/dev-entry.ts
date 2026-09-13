@@ -7,7 +7,7 @@
  * evaluations) and the `envDb` getter (so the dev entry doesn't
  * hard-code the runtime's `__zs_env()` indirection). This module owns:
  *
- *   1. Lazy descriptor install via `installSchema(schema, env.db)` on first
+ *   1. Lazy descriptor install via `installSchema(env.db, descriptor)` on first
  *      request when dev has injected `__zsRuntimeDescriptor`. Going
  *      top-level-await on the user import would block dev startup on
  *      potentially-failing user code; lazy is the right tradeoff for dev.
@@ -34,7 +34,7 @@
  */
 
 import "./dispatcher.js";
-import { installSchema as bundledInstallSchema } from "./install-schema.js";
+import { installSchema as bundledInstallSchema } from "@zeroship/db/internal";
 import { createFetchHandler } from "./fetch-handler.js";
 import { createDevAuthProvider } from "./dev-auth.js";
 import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";
@@ -275,12 +275,8 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     const platform =
       typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
     installSchema(
-      schema as Parameters<typeof installSchema>[0],
-      envDb as Parameters<typeof installSchema>[1],
-      {
-        // **P5 S3** — descriptor mode is the only runtime schema source.
-        descriptor: hasDescriptor ? descriptor : undefined,
-      } as Parameters<typeof installSchema>[2],
+      envDb as Parameters<typeof installSchema>[0],
+      descriptor as Parameters<typeof installSchema>[1],
     );
     schemaReady = (async () => {
       const policyMod = options.getDbInternal

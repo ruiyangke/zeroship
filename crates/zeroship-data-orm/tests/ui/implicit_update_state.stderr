@@ -1,7 +1,7 @@
 error[E0277]: the trait bound `Option<std::string::String>: ChangeInput<nickname>` is not satisfied
- --> tests/ui/implicit_update_state.rs:3:10
+ --> tests/ui/implicit_update_state.rs:4:10
   |
-3 | #[derive(Changeset)]
+4 | #[derive(Changeset)]
   |          ^^^^^^^^^ the trait `ChangeInput<nickname>` is not implemented for `Option<std::string::String>`
   |
 help: the trait `ChangeInput<C>` is implemented for `zeroship_data_orm::orm::Change<T>`

@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 // Import directly from the schema / types modules so the test bundle
 // does not transitively pull in `db-types.ts`, which imports `env` from the
 // runtime-supplied "zeroship" module (unavailable in node test env).
-import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
+import { validateRefTargets } from "@zeroship/db/internal";
 // Import t and schema through the package entry (the compiled dist)
 // so the `TypeBuilder` instance identity matches the one bootstrap's
 // dist imports via `@zeroship/db/internal`. Importing from `../src/`

@@ -18,7 +18,7 @@ impl<'a> VectorSearch<'a> {
         limit: usize,
         metric: crate::sql::descriptors::VectorMetric,
         filter: &Value,
-        schema: &Value,
+        schema: &crate::schema::FieldMap,
         registration: &crate::sql::registration::SqlRegistration,
     ) -> Result<Self, DbError> {
         Ok(Self {
@@ -56,7 +56,7 @@ impl<'a> SpatialSearch<'a> {
         radius_m: f64,
         filter: &Value,
         limit: Option<usize>,
-        schema: &Value,
+        schema: &crate::schema::FieldMap,
         registration: &crate::sql::registration::SqlRegistration,
     ) -> Result<Self, DbError> {
         let limit = crate::crud::search::spatial_limit(limit)?;
@@ -116,10 +116,10 @@ mod tests {
     #[test]
     fn spatial_search_materializes_its_default_limit() {
         let binding = DbBinding::cold_start("spatial_limit");
-        let schema = value!({
+        let schema = crate::tests::fixtures::native_fields(value!({
             "id":{"type":"integer","required":true,"primaryKey":true},
             "location":{"type":"geoPoint"}
-        });
+        }));
         let request = SpatialSearch::compile(
             &binding,
             "places",
@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn sqlite_spatial_search_selects_an_unreadable_identity_for_internal_ranking() {
         let binding = DbBinding::cold_start("spatial_hidden_identity");
-        let schema = value!({
+        let schema = crate::tests::fixtures::native_fields(value!({
             "id":{
                 "type":"integer",
                 "required":true,
@@ -146,7 +146,7 @@ mod tests {
                 "readable":false
             },
             "location":{"type":"geoPoint"}
-        });
+        }));
         let request = SpatialSearch::compile(
             &binding,
             "places",

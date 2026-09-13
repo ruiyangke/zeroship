@@ -119,7 +119,9 @@ composition remains unfinished; the journal-reading collector has not yet been r
 `OrmStore::connect` accepts the host's `DbBinding`, connection factory and keys.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.
-Journal reads and writes use ORM collections and generated models. Restart copies retained checkpoints and
+Journal reads and writes use ORM collections and native Rust schema models.
+Parity tests compare the model declarations with the migration metadata.
+Restart copies retained checkpoints and
 payload references through paged ORM reads and batch inserts in its transaction,
 preserving effect origins and compensation metadata. Each table has an `id`
 primary key; app-scoped domain keys use unique indexes and scoped foreign keys.

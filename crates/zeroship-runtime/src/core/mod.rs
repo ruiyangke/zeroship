@@ -4,7 +4,6 @@
 //! plumbing). Everything in this module is internal scaffolding that
 //! wires V8 to the compio event loop.
 
-pub mod bootstrap_modules;
 pub mod channel;
 pub mod dev_auth;
 pub mod dispatch;
@@ -16,6 +15,7 @@ pub mod native_modules;
 pub mod node_error;
 pub(crate) mod panic_util;
 pub mod plugin;
+pub(crate) mod plugin_modules;
 pub mod runtime;
 pub mod serve;
 pub mod state;

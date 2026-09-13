@@ -3,31 +3,22 @@ use zeroship_core::{
     app_id::AppId,
     workflow_jobs::{DeploymentId, JobId, JobSpec},
 };
-use zeroship_data_orm::{orm::FromRow, Value};
+use zeroship_data_orm::{orm::FromRow, schema::Schema};
 
-zeroship_data_orm::orm::schema!(pub schema = "../schema/schema.runtime.json");
+mod schema_definition;
 pub use schema::{
     assignments, jobs, management, placement_receipts, queue_scopes, recovery_scopes, workers,
 };
+pub use schema_definition::schema;
 
 /// Canonical metadata for a host's native platform database binding.
 ///
 /// # Errors
-/// Refuses incomplete or invalid generated collection metadata.
-pub fn collections() -> Result<Vec<(String, Value)>, Error> {
-    let descriptor: Value = serde_json::from_str(include_str!("../schema/schema.runtime.json"))
-        .map_err(|_| Error::Storage)?;
-    descriptor["collections"]
-        .as_object()
-        .ok_or(Error::Storage)?
-        .iter()
-        .map(|(name, collection)| {
-            Ok((
-                name.clone(),
-                collection.get("fields").ok_or(Error::Storage)?.clone(),
-            ))
-        })
-        .collect()
+/// Refuses invalid native model declarations.
+pub fn collections() -> Result<Schema, Error> {
+    let schema = schema::schema();
+    schema.validate()?;
+    Ok(schema)
 }
 
 #[derive(FromRow)]
