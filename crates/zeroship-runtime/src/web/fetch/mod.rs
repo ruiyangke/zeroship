@@ -264,7 +264,7 @@ fn fetch_callback(
     //
     // The check fires BEFORE admission control / Request coercion so
     // a refused fetch doesn't consume a `MAX_PENDING_FETCHES` slot.
-    match crate::rpc::current_kind() {
+    match crate::rpc::current_kind(scope) {
         Some(crate::rpc::ProcedureKind::Query) => {
             let exc = crate::rpc::build_capability_violation(
                 scope,

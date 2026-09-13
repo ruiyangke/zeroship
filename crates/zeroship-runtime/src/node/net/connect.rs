@@ -165,7 +165,7 @@ pub(super) fn capability_violation(message: impl Into<String>) -> OpError {
 fn validate_connect_kind(scope: &mut v8::PinScope, violated: &str) -> Result<(), OpError> {
     use crate::rpc::ProcedureKind;
 
-    let Some(kind) = crate::rpc::current_kind() else {
+    let Some(kind) = crate::rpc::current_kind(scope) else {
         return Ok(());
     };
     let wrapper = match kind {

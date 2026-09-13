@@ -19,13 +19,14 @@ use crate::context::with_mut as ctx_mut;
 use zeroship_data_orm::error::DbError;
 
 // Private imports used to compose ORM operations with isolate state.
-use zeroship_data_orm::cdc::{broker, read_set};
+use zeroship_data_orm::cdc::broker;
 #[cfg(test)]
 use zeroship_data_orm::sql::mapping;
 use zeroship_data_orm::{backend, descriptor, metrics, transaction, tx_route};
 
 pub(crate) mod context;
 pub mod op_error;
+mod read_capture;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
