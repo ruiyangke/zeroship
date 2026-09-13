@@ -12,6 +12,7 @@ const NEXT: u32 = 1;
 const STRING_OUTPUT: u32 = 2;
 const FINISHED: u32 = 3;
 const FRAME: u32 = 4;
+const RETURNED: u32 = 5;
 
 pub(super) fn start<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -31,6 +32,7 @@ pub(super) fn start<'s>(
             hint.into(),
             finished.into(),
             frame,
+            finished.into(),
         ],
     );
     let reader = v8::Object::new(scope);
@@ -52,8 +54,12 @@ pub(super) fn start<'s>(
         let key = v8::String::new(scope, name).unwrap();
         reader.create_data_property(scope, key.into(), function.into());
     }
-    let stream_id = crate::streams::response_forwarder::begin_forward_reader(scope, reader, true)
-        .map_err(InvocationError::InvalidTarget)?;
+    let stream_id = crate::streams::response_forwarder::begin_forward_reader(
+        scope,
+        reader,
+        crate::streams::response_forwarder::ForwardMode::Rpc,
+    )
+    .map_err(InvocationError::InvalidTarget)?;
     Ok(ResponseInfo::Stream {
         status: 200,
         headers: vec![
@@ -111,13 +117,8 @@ fn error_result<'s>(
         .and_then(|context| context.request_id)
         .unwrap_or_default();
     let error = super::response::exception(scope, &error);
-    let response = super::response::into_http(error, request_id).ok()?;
-    let ResponseInfo::Complete { body, .. } = response else {
-        return None;
-    };
-    let mut bytes = b"e:".to_vec();
-    bytes.extend_from_slice(&body);
-    bytes.extend_from_slice(b"\nd:{}\n");
+    let bytes = terminal_error(error, request_id).ok()?;
+    close_iterator(scope, data);
     read_result(scope, Some(&bytes))
 }
 
@@ -199,6 +200,7 @@ fn encode_step<'s>(
         .map_err(|_| InvocationError::InvalidTarget("iterator result must be an object".into()))?;
     if property(scope, step, "done")?.boolean_value(scope) {
         finish(scope, data);
+        close_iterator(scope, data);
         return Ok(b"d:{}\n".to_vec());
     }
     let value = property(scope, step, "value")?;
@@ -255,25 +257,55 @@ fn cancel_callback<'s>(
         return;
     };
     let result = in_frame(scope, data, |scope| {
-        if finished(scope, data) {
-            return None;
-        }
         finish(scope, data);
-        attempt(scope, |scope| {
-            let iterator =
-                v8::Local::<v8::Object>::try_from(data.get_index(scope, ITERATOR)?).ok()?;
-            let key = v8::String::new(scope, "return")?;
-            let method =
-                v8::Local::<v8::Function>::try_from(iterator.get(scope, key.into())?).ok()?;
-            let result = method.call(scope, iterator.into(), &[])?;
-            let resolver = v8::PromiseResolver::new(scope)?;
-            resolver.get_promise(scope).mark_as_handled();
-            resolver.resolve(scope, result)?;
-            Some(resolver.get_promise(scope))
-        })
-        .ok()
+        close_iterator(scope, data)
     });
     if let Some(result) = result {
         rv.set(result.into());
     }
+}
+
+fn close_iterator<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    data: v8::Local<'s, v8::Array>,
+) -> Option<v8::Local<'s, v8::Promise>> {
+    if data
+        .get_index(scope, RETURNED)
+        .is_some_and(|value| value.is_true())
+    {
+        return None;
+    }
+    let returned = v8::Boolean::new(scope, true);
+    data.set_index(scope, RETURNED, returned.into());
+    attempt(scope, |scope| {
+        let iterator = v8::Local::<v8::Object>::try_from(data.get_index(scope, ITERATOR)?).ok()?;
+        let key = v8::String::new(scope, "return")?;
+        let method = v8::Local::<v8::Function>::try_from(iterator.get(scope, key.into())?).ok()?;
+        let result = method.call(scope, iterator.into(), &[])?;
+        let resolver = v8::PromiseResolver::new(scope)?;
+        resolver.get_promise(scope).mark_as_handled();
+        resolver.resolve(scope, result)?;
+        Some(resolver.get_promise(scope))
+    })
+    .ok()
+}
+
+pub(crate) fn terminal_error(
+    result: crate::state::DispatchResult,
+    request_id: u64,
+) -> Result<Vec<u8>, String> {
+    let result = match result {
+        crate::state::DispatchResult::Error(message) => {
+            super::response::error_value(message, 500, "INTERNAL")
+        }
+        result => result,
+    };
+    let ResponseInfo::Complete { body, .. } = super::response::into_http(result, request_id)?
+    else {
+        return Err("RPC error did not produce an error envelope".into());
+    };
+    let mut bytes = b"e:".to_vec();
+    bytes.extend_from_slice(&body);
+    bytes.extend_from_slice(b"\nd:{}\n");
+    Ok(bytes)
 }

@@ -182,6 +182,7 @@ mod rpc_ctx;
 mod rpc_dispatch;
 mod rpc_error;
 mod rpc_eviction;
+mod rpc_lifetime;
 mod rpc;
 mod rpc_superjson;
 mod schema_init;

@@ -228,6 +228,17 @@ pub fn build_error_body(
     build_verbose_error_body(message, name, extras)
 }
 
+/// Serialize a fixed host failure without granting creator errors an exemption
+/// from redaction. Host messages are static and have no application details.
+pub(crate) fn build_host_error_body(message: &'static str, code: crate::rpc::ZsErrorCode) -> String {
+    build_verbose_error_body(message, "Error", ErrorExtras {
+        stack: None,
+        code: Some(code.as_wire_str()),
+        details_json: None,
+        retryable: Some(code.default_retryable()),
+    })
+}
+
 /// Platform-authored error codes whose fixed messages may cross the server-error rail.
 /// Native and SDK-canonical spellings both appear because callers can use either surface.
 fn is_public_error_code(code: &str) -> bool {

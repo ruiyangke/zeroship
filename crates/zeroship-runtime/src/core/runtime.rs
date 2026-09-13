@@ -847,13 +847,9 @@ struct PendingRequest {
     cancel: CancelFlag,
     origin: PendingOrigin,
     rpc_call: Option<crate::rpc::dispatch::RpcCall>,
-    /// Keeps the per-request `AbortController` registered with
-    /// `crate::rpc::abort` until the promise settles. Drop unregisters
-    /// (covers normal settle, cancellation sweep, and pump-side
-    /// timeout / CPU termination removals). `None` for non-RPC paths
-    /// and for runtimes built without an `app_id`.
-    #[allow(dead_code)]
-    abort_guard: Option<crate::rpc::abort::AbortGuard>,
+    /// Host cancellation and eviction ownership until settlement or transfer
+    /// to the response forwarder.
+    rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime>,
 }
 
 fn send_pending_error(req: PendingRequest, error: impl Into<DispatchError>) {
@@ -1414,7 +1410,7 @@ impl RuntimeInner {
             // them, so this iteration must not park waiting for an event —
             // nothing would ever wake it (`setTimeout` does not `notify_pump`).
             let mut ready_timers_pending = false;
-            let startup_deadline;
+            let request_deadline;
 
             // Upgrade the Weak back-reference for this iteration's synchronous
             // V8 work. If it returns `None`, the `Runtime` handle has been
@@ -1434,7 +1430,16 @@ impl RuntimeInner {
                         rt.exit_isolate();
                     }
                     if matches!(rt.startup, StartupState::Failed(_)) { return; }
-                    startup_deadline = rt.startup_deadline();
+                    let cancellation_cpu_start = crate::core::init::thread_cpu_time();
+                    rt.cleanup_cancelled_requests();
+                    rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
+                    crate::streams::response_forwarder::queue_cancellations(&rt.state, Instant::now());
+                    request_deadline = rt.startup_deadline().into_iter()
+                        .chain(rt.pending_requests.values().filter_map(|request| {
+                            request.rpc_lifetime.as_ref().and_then(|request| request.deadline)
+                        }))
+                        .chain(crate::streams::response_forwarder::next_deadline(&rt.state))
+                        .min();
                 }
 
                 // PHASE 1 — drain new spawned ops/timers/fetches + flush
@@ -1480,7 +1485,7 @@ impl RuntimeInner {
                     let mut rt = runtime.borrow_mut();
                     rt.enter_isolate();
                     rt.drain_new_tasks_into(&mut work);
-                    rt.service_forwarder_resumes();
+                    rt.service_forwarder_resumes(&mut work);
                     rt.service_js_driver_commands(&mut work);
                     rt.advance_startup();
                     rt.exit_isolate();
@@ -1493,13 +1498,13 @@ impl RuntimeInner {
                 // event await below.
             }
 
-            let wake_deadline = match (ready_timers_pending, startup_deadline) {
+            let wake_deadline = match (ready_timers_pending, request_deadline) {
                 (true, Some(deadline)) => Some(deadline.min(Instant::now() + READY_TIMER_PASS_TICK)),
                 (true, None) => Some(Instant::now() + READY_TIMER_PASS_TICK),
                 (false, deadline) => deadline,
             };
             let cancel_runtime = runtime.clone();
-            let mut startup_cancel = futures::future::poll_fn(move |cx| {
+            let mut request_cancel = futures::future::poll_fn(move |cx| {
                 let Some(runtime) = cancel_runtime.upgrade() else {
                     return std::task::Poll::Ready(());
                 };
@@ -1509,6 +1514,13 @@ impl RuntimeInner {
                     if request.ctx.cancel.is_cancelled() {
                         return std::task::Poll::Ready(());
                     }
+                }
+                for request in rt.pending_requests.values() {
+                    request.cancel.register_waker(cx.waker());
+                    if request.cancel.is_cancelled() { return std::task::Poll::Ready(()); }
+                }
+                if crate::streams::response_forwarder::poll_cancellation(&rt.state, cx) {
+                    return std::task::Poll::Ready(());
                 }
                 std::task::Poll::Pending
             }).fuse();
@@ -1543,7 +1555,7 @@ impl RuntimeInner {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1551,7 +1563,7 @@ impl RuntimeInner {
                         futures::select! {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1559,14 +1571,14 @@ impl RuntimeInner {
                         futures::select! {
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
                     (false, false) => {
                         futures::select! {
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                             _ = tick => None,
                         }
                     }
@@ -1581,27 +1593,27 @@ impl RuntimeInner {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                     (true, false) => {
                         futures::select! {
                             r = work.pending_ops.select_next_some() => Some(AsyncEvent::Op(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                     (false, true) => {
                         futures::select! {
                             r = work.pending_timers.select_next_some() => Some(AsyncEvent::Timer(r)),
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                     (false, false) => {
                         futures::select! {
                             _ = notify_rx.next() => None,
-                            _ = startup_cancel => None,
+                            _ = request_cancel => None,
                         }
                     }
                 }
@@ -1739,7 +1751,10 @@ impl RuntimeInner {
                 // which re-runs PHASE 1. No yield is needed here — reaching this
                 // point means the wait above already awaited a real deadline.
                 let Some(runtime) = runtime.upgrade() else { return; };
-                runtime.borrow_mut().cleanup_cancelled_requests();
+                let mut rt = runtime.borrow_mut();
+                let cancellation_cpu_start = crate::core::init::thread_cpu_time();
+                rt.cleanup_cancelled_requests();
+                rt.bill_pump_cpu(crate::core::init::thread_cpu_time().saturating_sub(cancellation_cpu_start));
             }
         }
     }
@@ -2051,12 +2066,8 @@ impl RuntimeInner {
         // inside the RPC fast-path block.
         let mut pending_origin = PendingOrigin::Fetch;
         let mut pending_rpc_call = None;
-        // When the RPC fast path returns a pending Promise, this
-        // carries the per-request `AbortGuard` from inside the
-        // V8 scope out to `store_fetch_pending`. Otherwise the guard
-        // would drop at the end of the `enter_v8!` block, leaving
-        // the registry empty for async procedures.
-        let mut pending_abort_guard: Option<crate::rpc::abort::AbortGuard> = None;
+        // A pending call or response body takes ownership of cancellation.
+        let mut pending_rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime> = None;
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
@@ -2103,19 +2114,18 @@ impl RuntimeInner {
                         headers_arc,
                         user_json,
                         inputs.idempotency_key,
-                        self.app_id.is_some(),
                     );
-                    let (rpc_ctx_object, mut local_abort_guard) = match mint_result {
+                    let (rpc_ctx_object, mut local_rpc_lifetime) = match mint_result {
                         Ok((ctx_obj, signal)) => {
-                            let guard = match (self.app_id.as_ref(), signal) {
-                                (Some(aid), Some(signal)) => Some(crate::rpc::abort::register_in_flight(
-                                    aid,
-                                    request_id,
-                                    signal,
-                                )),
-                                _ => None,
+                            let abort_guard = self.app_id.as_ref().map(|app_id| {
+                                crate::rpc::abort::register_in_flight(app_id, request_id, signal.clone())
+                            });
+                            let request = crate::rpc::lifetime::RequestLifetime {
+                                request_id, cancel: ctx.cancel.clone(),
+                                deadline: self.wall_timeout.and_then(|timeout| wall_start.checked_add(timeout)),
+                                signal, _abort_guard: abort_guard,
                             };
-                            (ctx_obj, guard)
+                            (ctx_obj, Some(request))
                         }
                         Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
                     };
@@ -2123,10 +2133,10 @@ impl RuntimeInner {
                     if result.is_err() {
                         pending_origin = PendingOrigin::Rpc;
                         pending_rpc_call = call;
-                        pending_abort_guard = local_abort_guard.take();
+                        pending_rpc_lifetime = local_rpc_lifetime.take();
                     } else if let Ok(DispatchResult::HttpResponse(ResponseInfo::Stream {stream_id, ..})) = &result {
-                        crate::streams::response_forwarder::retain_abort_guard(
-                            &self.state, *stream_id, local_abort_guard.take(),
+                        crate::streams::response_forwarder::retain_request(
+                            scope, &self.state, *stream_id, local_rpc_lifetime.take().expect("RPC request lifetime"),
                         );
                     }
                     break 'dispatch result;
@@ -2315,14 +2325,10 @@ impl RuntimeInner {
                 // when the promise settles. DO NOT call
                 // `discard_request_state` here — only after settle.
                 //
-                // `pending_abort_guard` is `Some` only on the RPC fast
-                // path with `app_id` configured; the guard rides
-                // alongside the PendingRequest entry and unregisters
-                // when the request settles or is cancelled.
                 self.clear_executing_request();
                 self.store_fetch_pending(
                     request_id, promise, ctx, cpu_elapsed, wall_start, pending_origin,
-                    pending_rpc_call, pending_abort_guard,
+                    pending_rpc_call, pending_rpc_lifetime,
                 )
             }
         }
@@ -2343,7 +2349,7 @@ impl RuntimeInner {
         wall_start: Instant,
         origin: PendingOrigin,
         rpc_call: Option<crate::rpc::dispatch::RpcCall>,
-        abort_guard: Option<crate::rpc::abort::AbortGuard>,
+        rpc_lifetime: Option<crate::rpc::lifetime::RequestLifetime>,
     ) -> crate::FetchOutcome {
         let (tx, rx) = channel::result_slot();
 
@@ -2356,7 +2362,7 @@ impl RuntimeInner {
             cancel: ctx.cancel.clone(),
             origin,
             rpc_call,
-            abort_guard,
+            rpc_lifetime,
         });
         self.notify_pump();
 
@@ -2385,7 +2391,7 @@ impl RuntimeInner {
             cancel: ctx.cancel.clone(),
             origin: PendingOrigin::Workflow,
             rpc_call: None,
-            abort_guard: None,
+            rpc_lifetime: None,
         });
         self.notify_pump();
 
@@ -2405,7 +2411,13 @@ impl RuntimeInner {
         info: ResponseInfo,
         _cpu_time: Duration,
     ) -> crate::FetchOutcome {
-        let logs = self.drain_request_logs(request_id);
+        let logs = if matches!(&info, ResponseInfo::Stream { stream_id, .. }
+            if crate::streams::response_forwarder::owns_request(&self.state, *stream_id))
+        {
+            self.state.borrow_mut().per_request_logs.remove(&request_id).unwrap_or_default()
+        } else {
+            self.drain_request_logs(request_id)
+        };
         match info {
             ResponseInfo::Complete { status, headers, body } => {
                 crate::FetchOutcome::Response { status, headers, body, logs }
@@ -2472,35 +2484,29 @@ impl RuntimeInner {
         self.fire_ready_timers_pump(work);
     }
 
-    /// Re-arm any upload forwarders that paused for backpressure and whose
-    /// consumer has since drained the buffer (it enqueued the stream-id in
-    /// `RuntimeState::forwarder_resumes`). Runs inside the pump's V8 scope —
-    /// `resume_read` needs a scope to call `reader.read()`. Called from the
-    /// pump's PHASE 1 with the isolate already entered.
-    fn service_forwarder_resumes(&mut self) {
+    /// Drive resumed readers and cancellation through the guarded native-turn
+    /// path. It settles promises resolved by callbacks and drains cleanup work
+    /// before the pump can park again.
+    fn service_forwarder_resumes(&mut self, work: &mut AsyncWork) {
         let pending: Vec<u32> = {
-            let mut s = self.state.borrow_mut();
-            if s.forwarder_resumes.is_empty() {
-                return;
-            }
-            s.forwarder_resumes.drain(..).collect()
+            let mut state = self.state.borrow_mut();
+            if state.forwarder_resumes.is_empty() { return; }
+            state.forwarder_resumes.drain(..).collect()
         };
-        let state = self.state.clone();
-        enter_v8!(self, |scope| {
-            for stream_id in pending {
-                crate::streams::response_forwarder::resume_read(scope, &state, stream_id);
-            }
-        });
-        // Resumed reads and cancellation can issue native work after this
-        // pump pass has drained the task queues. Arrange another drain before
-        // parking so an awaited iterator return does not strand its timer.
-        let issued_work = {
-            let state = self.state.borrow();
-            !state.spawned_ops.is_empty()
-                || !state.spawned_timers.is_empty()
-                || !state.ready_timers.is_empty()
-        };
-        if issued_work { self.notify_pump(); }
+        self.dispatch_native_turn(
+            work,
+            crate::core::invocation::InvocationContext::default(),
+            |state| {
+                let mut state = state.borrow_mut();
+                state.executing_request_id = None;
+                state.executing_request_cancel = None;
+            },
+            move |scope, state| {
+                for stream_id in pending {
+                    crate::streams::response_forwarder::resume_read(scope, state, stream_id);
+                }
+            },
+        );
     }
 
     /// Resolve parked Trusted JS-driver command promises from the Rust mailbox.
@@ -3419,46 +3425,43 @@ impl RuntimeInner {
     }
 
     fn cleanup_cancelled_requests(&mut self) {
-        let cancelled: Vec<u64> = self
-            .pending_requests
-            .iter()
-            .filter(|(_, req)| req.cancel.is_cancelled())
-            .map(|(&id, _)| id)
-            .collect();
+        use crate::rpc::lifetime::Cancellation;
+        let now = Instant::now();
+        let cancelled: Vec<_> = self.pending_requests.iter().filter_map(|(&id, request)| {
+            request.rpc_lifetime.as_ref().and_then(|request| request.cancellation(now))
+                .or_else(|| request.cancel.is_cancelled().then_some(Cancellation::Cancelled))
+                .map(|reason| (id, reason))
+        }).collect();
 
-        if cancelled.is_empty() {
-            return;
-        }
-
-        for id in cancelled {
-            let Some(req) = self.pending_requests.remove(&id) else {
-                continue;
-            };
-
-            // Notify the caller. If the handler already timed out, the
-            // receiver is dropped and this send is a no-op — that's fine,
-            // it just means we don't double-error.
-            send_pending_error(req, "Request timed out");
-
-            // Drop every piece of per-request state that was still live
-            // when cancellation fired. Before this fix, only `logs` got
-            // drained; the rest leaked until the isolate was torn down.
-            //
-            //   - `per_request_user` / `per_request_logs`: owned by the
-            //     HashMap keyed on request_id. Covered by drain_request_logs.
-            //   - Timers owned by the request: `timer_owner` maps timer_id
-            //     → request_id. We walk that map, pull out the matching
-            //     timer callbacks, and drop them. The compio `sleep` future
-            //     the pump is holding will still fire, but when
-            //     `fire_timer_callback` runs there's no callback to
-            //     invoke, so no user JS executes.
-            //   - Orphan promise resolvers: `pending_resolvers` keyed by
-            //     op_id. We don't maintain a request_id → op_id index,
-            //     but `executing_request_cancel` short-circuits any op
-            //     that checks it (fetch does). For ops that don't check,
-            //     the resolver just holds a handle — freed when the
-            //     isolate next GCs, bounded memory.
-            let _logs = self.drain_request_logs(id);
+        for (id, reason) in cancelled {
+            let Some(req) = self.pending_requests.remove(&id) else { continue; };
+            if let Some(request) = &req.rpc_lifetime {
+                request.cancel.cancel();
+                self.enter_isolate();
+                self.arm_cpu_timer();
+                let settled = enter_v8!(self, |scope| {
+                    let abort = |scope: &mut v8::PinScope| {
+                        v8::tc_scope!(let tc, scope);
+                        let reason = reason.exception(tc);
+                        request.signal.abort(tc, reason);
+                    };
+                    if let Some(call) = &req.rpc_call { call.with_frame(scope, abort); }
+                    else { abort(scope); }
+                    crate::core::init::perform_microtask_checkpoint(scope);
+                    collect_settled_promises(scope, &mut self.pending_requests, &self.state)
+                });
+                self.disarm_cpu_timer();
+                self.check_v8_terminated();
+                self.exit_isolate();
+                for (id, req, result) in settled {
+                    self.send_settled_reply_any(id, req, result, Duration::ZERO);
+                }
+                let response = crate::rpc::dispatch::response::into_http(reason.response(), id);
+                self.send_settled_reply_any(id, req, SettledResult::Http(response), Duration::ZERO);
+            } else {
+                send_pending_error(req, "Request timed out");
+                let _logs = self.drain_request_logs(id);
+            }
             self.drop_timers_owned_by(id);
         }
     }
@@ -3498,6 +3501,9 @@ fn collect_settled_promises(
     let settled_ids: Vec<u64> = pending_requests
         .iter()
         .filter_map(|(&id, req)| {
+            if req.cancel.is_cancelled() || req.rpc_lifetime.as_ref()
+                .is_some_and(|request| request.cancellation(Instant::now()).is_some())
+            { return None; }
             let p = v8::Local::new(scope, &req.promise);
             if p.state() != v8::PromiseState::Pending {
                 Some(id)
@@ -3524,8 +3530,8 @@ fn collect_settled_promises(
                         .map(|result| {
                             let response = crate::rpc::dispatch::response::into_http(result, id);
                             if let Ok(ResponseInfo::Stream {stream_id, ..}) = &response {
-                                crate::streams::response_forwarder::retain_abort_guard(
-                                    state, *stream_id, req.abort_guard.take(),
+                                crate::streams::response_forwarder::retain_request(
+                                    scope, state, *stream_id, req.rpc_lifetime.take().expect("RPC request lifetime"),
                                 );
                             }
                             SettledResult::Http(response)

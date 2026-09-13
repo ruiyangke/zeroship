@@ -24,6 +24,7 @@ pub mod capability;
 pub mod ctx_holder;
 pub mod dispatch;
 pub mod error;
+pub(crate) mod lifetime;
 pub mod superjson;
 
 pub use abort::{entered_for_eviction, register_in_flight, AbortGuard};
