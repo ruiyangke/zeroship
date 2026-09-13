@@ -172,6 +172,32 @@ pub struct PolicyRefresh {
 }
 
 impl HostPolicies {
+    /// Run host setup under a binding from this registry and its original lease.
+    ///
+    /// Authority is captured when this method is called, before the returned
+    /// future is polled. Refreshing or replacing the binding cannot extend this
+    /// operation. Cancellation drops the operation; its owner must stop or
+    /// quarantine native work that could outlive that future.
+    ///
+    /// # Errors
+    /// Rejects another registry's binding without polling the operation. Missing,
+    /// expired or revoked authority also prevents setup or cancels it in flight.
+    pub fn run_bound<'a, T: 'a>(
+        self: &Arc<Self>,
+        binding: &PolicyBinding,
+        operation: impl Future<Output = Result<T, WorkflowServiceError>> + 'a,
+    ) -> LocalBoxFuture<'a, Result<T, WorkflowServiceError>> {
+        let authority = if binding.belongs_to(self) {
+            binding.authority()
+        } else {
+            Err(WorkflowServiceError::PermissionDenied)
+        };
+        Box::pin(async move {
+            let authority = authority?;
+            authority.run(operation).await
+        })
+    }
+
     /// Explicitly replace this app's binding, preserving source revision/content
     /// high water. The replacement starts without installed authority.
     ///

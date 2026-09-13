@@ -115,6 +115,7 @@ mod schema_binding;
 mod schema_metadata;
 mod signal_models;
 mod task_models;
+mod task_scope;
 mod topic_initialization;
 mod worker;
 use deployment_fixture::{Deployments, Sources};
