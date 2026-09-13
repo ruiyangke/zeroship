@@ -73,7 +73,13 @@ can read its committed result but cannot admit new work. Receipt records survive
 history removal; their presence also excludes the run from the old poller until
 that path is removed. `JobReceipt::settlement` binds the outcome to the current
 delivery; successor publication currently uses the durable outbox independently.
-The manager-dispatched consumer and production cutover remain unfinished.
+`runner::delivery::DeliverySlot` consumes an already authorized advance job using
+the existing executor and payload pipeline. Its host supplies `JobTransport`;
+the authenticated worker client implements that metadata interface. The slot
+renews manager and creator authority together, retains interrupted execution
+until native shutdown joins, and retries exact settlement after a committed
+creator result. This slot performs no journal discovery or calendar evaluation.
+The manager-dispatched host loop and production cutover remain unfinished.
 `zeroship-workflow-manager::deployments::DeploymentHolds` accepts an authorized
 platform ORM database. Holds survive
 reconnection, and generation checks reject stale releases. The collector helpers

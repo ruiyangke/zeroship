@@ -1,6 +1,7 @@
 //! Execution slots for customer workers and local development.
 
 mod budget;
+pub mod delivery;
 pub use budget::{ExecutionBudget, ExecutionGuard};
 mod worker;
 pub use worker::{WorkerOptions, WorkflowWorker};

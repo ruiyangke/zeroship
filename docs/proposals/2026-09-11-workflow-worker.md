@@ -1178,8 +1178,8 @@ The delivered-job slot retains the current manager grant, creator `DeliveredTask
 and executor handle together. It renews the manager grant first, then the creator
 claim, and updates the execution guard only when both succeed. The original hard
 execution deadline remains fixed through code loading, input reads, execution
-and joined shutdown. Payload preparation and final journal writes retain their
-own bounded finalization budget and live lease checks. Cancellation drains native
+and the executor's payload preparation. Joined shutdown and final journal writes
+have a bounded finalization budget with live lease checks. Cancellation drains native
 operations before creator release or slot reuse. After a durable creator outcome,
 the slot retries immutable settlement metadata without running app code again.
 `WorkerCoordinator::release` releases an app assignment; it is not a job NACK.
@@ -1504,8 +1504,16 @@ lost-ACK redelivery without another execution. Retained outcomes survive creator
 history removal and reopening. These contracts do not prove the production
 scope-duty admission handshake or the executor/queue consumer integration.
 
+`runner::delivery::DeliverySlot` now drives an already authorized advance job
+through the existing executor and payload pipeline. SQLite journal tests with
+deterministic metadata/executor fixtures cover paired renewal, retained ACK
+content, redelivery without execution, changed lease identity, hard execution
+limits and a blocked shutdown that stops renewing without freeing its slot.
+The remote metadata adapter uses `WorkerCoordinator`; full host and authenticated
+executor integration remain separate verification obligations.
+
 Manager cron/timer discovery, scope deadline orchestration, capacity activation,
-the simple worker consumer still require implementation and integration.
+and the worker consumer host loop still require implementation and integration.
 Publication intents and advance-job receipts exist in the journal; their
 manager-dispatched reconciliation and settlement integration remain unwired. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
