@@ -51,10 +51,10 @@ fn eval<'s>(scope: &mut v8::PinScope<'s, '_>, src: &str) -> v8::Local<'s, v8::Va
 
 /// Read fixture bytes from the core crate's superjson_fixtures directory.
 fn fx(name: &str) -> Vec<u8> {
-    // Tests run with CARGO_MANIFEST_DIR = crates/runtime; reach into the
+    // CARGO_MANIFEST_DIR names the runtime crate; reach into the
     // sibling crate.
     let path = format!(
-        "{}/../core/tests/superjson_fixtures/{name}.json",
+        "{}/../zeroship-core/tests/superjson_fixtures/{name}.json",
         env!("CARGO_MANIFEST_DIR")
     );
     std::fs::read(&path).unwrap_or_else(|_| panic!("fixture missing: {path}"))
