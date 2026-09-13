@@ -231,7 +231,7 @@ async fn policy_revocation_while_waiting_for_customer_lock_prevents_admission() 
     blocker.batch_execute("COMMIT").await.unwrap();
     assert!(matches!(
         starting.await.unwrap(),
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(WorkflowServiceError::Unavailable(_))
     ));
     let runs: i64 = observer
         .query_one(
@@ -497,5 +497,591 @@ async fn customer_schema_binding_is_explicit_and_independent_of_app_identity() {
             name.starts_with("__zeroship_workflow_"),
             "unreserved journal relation {name}"
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum IngressOperation {
+    Start,
+    Signal,
+    Broadcast,
+    Resume,
+    Restart,
+    Ingest,
+}
+
+const INGRESS_OPERATIONS: &[IngressOperation] = &[
+    IngressOperation::Start,
+    IngressOperation::Signal,
+    IngressOperation::Broadcast,
+    IngressOperation::Resume,
+    IngressOperation::Restart,
+    IngressOperation::Ingest,
+];
+
+struct IngressCall {
+    scope: crate::service::AppWorkflows,
+    operation: IngressOperation,
+    request: RequestId,
+    run: String,
+    token: crate::service::capability::CapabilityToken,
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "native ingress fixtures stay on their owning compio thread"
+)]
+impl IngressCall {
+    async fn prepare(service: &WorkflowService, app: &AppId, operation: IngressOperation) -> Self {
+        use crate::service::{capability::SignalTarget, SignalTokenRequest};
+        let scope = service.for_app(app.clone());
+        let run = scope
+            .start(&RequestId::mint(), "Example", StartOptions::default())
+            .await
+            .unwrap()
+            .id;
+        if matches!(operation, IngressOperation::Resume) {
+            scope
+                .transition(
+                    &RequestId::mint(),
+                    &run,
+                    crate::operations::RunOperation::Pause,
+                )
+                .await
+                .unwrap();
+        }
+        let token = scope
+            .issue_signal_token(
+                &RequestId::mint(),
+                SignalTokenRequest {
+                    target: SignalTarget::Run {
+                        run_id: run.clone(),
+                    },
+                    types: ["ready".into()].into(),
+                    lifetime_seconds: 60,
+                },
+            )
+            .await
+            .unwrap();
+        Self {
+            scope,
+            operation,
+            request: RequestId::mint(),
+            run,
+            token,
+        }
+    }
+
+    async fn invoke(&self) -> Result<serde_json::Value, WorkflowServiceError> {
+        use crate::{
+            operations::{RestartOptions, RunOperation},
+            service::capability::SignalTarget,
+        };
+        let message = SignalOptions {
+            signal_type: "ready".into(),
+            payload: json!({"marker":"private"}),
+        };
+        let result = match self.operation {
+            IngressOperation::Start => serde_json::to_value(
+                self.scope
+                    .start(&self.request, "Example", StartOptions::default())
+                    .await?,
+            ),
+            IngressOperation::Signal => {
+                serde_json::to_value(self.scope.signal(&self.request, &self.run, message).await?)
+            }
+            IngressOperation::Broadcast => serde_json::to_value(
+                self.scope
+                    .broadcast(&self.request, "updates", message)
+                    .await?,
+            ),
+            IngressOperation::Resume => serde_json::to_value(
+                self.scope
+                    .transition(&self.request, &self.run, RunOperation::Resume)
+                    .await?,
+            ),
+            IngressOperation::Restart => serde_json::to_value(
+                self.scope
+                    .restart(&self.request, &self.run, RestartOptions::default())
+                    .await?,
+            ),
+            IngressOperation::Ingest => serde_json::to_value(
+                self.scope
+                    .service
+                    .ingest_signal(
+                        &self.request,
+                        self.token.as_str(),
+                        self.scope.app_id(),
+                        &SignalTarget::Run {
+                            run_id: self.run.clone(),
+                        },
+                        message,
+                    )
+                    .await?,
+            ),
+        };
+        Ok(result.unwrap())
+    }
+}
+
+fn signed_ingress(service: WorkflowService) -> WorkflowService {
+    use crate::service::SignalAuthority;
+    use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
+    service.with_signal_authority(Arc::new(
+        SignalAuthority::new(
+            Arc::new(ServiceSigningKey::generate()),
+            ServiceTrustBundle::new(),
+        )
+        .unwrap(),
+    ))
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "journal snapshots stay on their owning compio thread"
+)]
+async fn ingress_state(
+    service: &WorkflowService,
+    app: &AppId,
+) -> Vec<Vec<zeroship_data_orm::Value>> {
+    let tx = service.begin().await.unwrap();
+    let mut snapshot = Vec::new();
+    for table in [
+        "app_state",
+        "runs",
+        "generations",
+        "steps",
+        "signals",
+        "broadcasts",
+        "requests",
+        "outbox",
+        "job_publications",
+    ] {
+        snapshot.push(
+            journal_rows(&tx, table, json!({"app_id":app.as_str()}))
+                .await
+                .into_iter()
+                .map(|row| row.0)
+                .collect(),
+        );
+    }
+    tx.commit().await.unwrap();
+    snapshot
+}
+
+#[compio::test]
+async fn sqlite_ingress_receipts_replay_after_host_policy_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    ingress_receipt_expiry(Rc::new(
+        sqlite_store(&directory.path().join("app.sqlite")).await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_ingress_receipts_replay_after_host_policy_expiry() {
+    let fixture = PostgresFixture::start().await;
+    ingress_receipt_expiry(Rc::new(fixture.store.clone())).await;
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "native ingress fixtures stay on their owning compio thread"
+)]
+async fn ingress_receipt_expiry(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let service = signed_ingress(service);
+    let mut revision = 1;
+    for &operation in INGRESS_OPERATIONS {
+        let call = IngressCall::prepare(&service, &app, operation).await;
+        let accepted = call.invoke().await.unwrap();
+        let before = ingress_state(&service, &app).await;
+        revision += 1;
+        service
+            .policies
+            .install(
+                &app,
+                PolicySnapshot::lease(
+                    revision.try_into().unwrap(),
+                    AppPolicy::default(),
+                    Instant::now(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(call.invoke().await.unwrap(), accepted, "{operation:?}");
+        assert_eq!(ingress_state(&service, &app).await, before, "{operation:?}");
+        revision += 1;
+        service
+            .policies
+            .install(&app, configured_policy(revision, AppPolicy::default()))
+            .unwrap();
+    }
+}
+
+struct IngressBarrier {
+    blocker: compio_postgres::Client,
+    observer: compio_postgres::Client,
+    blocker_pid: i32,
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "database barriers stay on their owning compio thread"
+)]
+impl IngressBarrier {
+    async fn install(url: &str) -> Self {
+        let blocker = connect(url).await;
+        blocker
+            .batch_execute(
+                "CREATE FUNCTION customer.ingress_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN PERFORM pg_advisory_xact_lock(73921864); RETURN NEW; END $$;
+             CREATE TRIGGER ingress_barrier BEFORE INSERT ON customer.__zeroship_workflow_requests
+             FOR EACH ROW EXECUTE FUNCTION customer.ingress_barrier();",
+            )
+            .await
+            .unwrap();
+        let blocker_pid = blocker
+            .query_one("SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        blocker
+            .query_one("SELECT pg_advisory_lock(73921864)", &[])
+            .await
+            .unwrap();
+        Self {
+            blocker,
+            observer: connect(url).await,
+            blocker_pid,
+        }
+    }
+
+    async fn blocked(&self) -> i32 {
+        compio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting = self.observer.query(
+                    "SELECT pid FROM pg_stat_activity WHERE usename='customer_worker' AND wait_event_type='Lock' AND $1=ANY(pg_blocking_pids(pid))",
+                    &[&self.blocker_pid],
+                ).await.unwrap();
+                if let Some(worker) = waiting.first() {
+                    assert_eq!(waiting.len(), 1);
+                    return worker.get(0);
+                }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.expect("ingress must reach the receipt write after its app lock and mutations")
+    }
+
+    async fn rolled_back(&self, worker: i32) {
+        let budget = Duration::from_secs(2);
+        assert!(budget.as_millis() < u128::from(zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS));
+        compio::time::timeout(budget, async {
+            loop {
+                let active: bool = self.observer.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND xact_start IS NOT NULL)", &[&worker],
+                ).await.unwrap().get(0);
+                if !active { return; }
+                compio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }).await.expect("expired ingress must roll back while its receipt write remains blocked");
+    }
+
+    async fn unlock(&self) {
+        assert!(self
+            .blocker
+            .query_one("SELECT pg_advisory_unlock(73921864)", &[])
+            .await
+            .unwrap()
+            .get::<_, bool>(0));
+    }
+
+    async fn remove(&self) {
+        self.blocker
+            .batch_execute(
+                "DROP TRIGGER ingress_barrier ON customer.__zeroship_workflow_requests;
+             DROP FUNCTION customer.ingress_barrier();",
+            )
+            .await
+            .unwrap();
+    }
+}
+
+#[compio::test]
+async fn postgres_ingress_revocation_after_writes_rolls_back() {
+    use futures::{
+        future::{select, Either},
+        FutureExt,
+    };
+    let fixture = PostgresFixture::start().await;
+    let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
+    let service = signed_ingress(service);
+    let mut revision = 1;
+    for &operation in INGRESS_OPERATIONS {
+        let call = IngressCall::prepare(&service, &app, operation).await;
+        let before = ingress_state(&service, &app).await;
+        let barrier = IngressBarrier::install(&fixture.admin_url).await;
+        let pending =
+            match select(barrier.blocked().boxed_local(), call.invoke().boxed_local()).await {
+                Either::Left((_, pending)) => pending,
+                Either::Right((result, _)) => {
+                    panic!("{operation:?} finished before its write barrier: {result:?}")
+                }
+            };
+        revision += 1;
+        service
+            .policies
+            .install(
+                &app,
+                configured_policy(
+                    revision,
+                    AppPolicy {
+                        admission: false,
+                        dispatch: false,
+                        ingress: false,
+                        ..AppPolicy::default()
+                    },
+                ),
+            )
+            .unwrap();
+        barrier.unlock().await;
+        assert!(
+            matches!(pending.await, Err(WorkflowServiceError::Unavailable(_))),
+            "{operation:?}"
+        );
+        barrier.remove().await;
+        assert_eq!(ingress_state(&service, &app).await, before, "{operation:?}");
+        revision += 1;
+        service
+            .policies
+            .install(&app, configured_policy(revision, AppPolicy::default()))
+            .unwrap();
+        let accepted = call.invoke().await.unwrap();
+        assert_eq!(call.invoke().await.unwrap(), accepted, "{operation:?}");
+        assert_ne!(ingress_state(&service, &app).await, before, "{operation:?}");
+    }
+}
+
+#[compio::test]
+async fn postgres_ingress_expiry_cancels_blocked_write_without_refreshing_the_attempt() {
+    use futures::{
+        future::{select, Either},
+        FutureExt,
+    };
+    let fixture = PostgresFixture::start().await;
+    let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
+    let service = signed_ingress(service);
+    for (offset, refresh) in [false, true].into_iter().enumerate() {
+        let call = IngressCall::prepare(&service, &app, IngressOperation::Start).await;
+        let before = ingress_state(&service, &app).await;
+        let barrier = IngressBarrier::install(&fixture.admin_url).await;
+        let revision = 2 + i64::try_from(offset).unwrap() * 2;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        service
+            .policies
+            .install(
+                &app,
+                PolicySnapshot::lease(revision.try_into().unwrap(), AppPolicy::default(), deadline)
+                    .unwrap(),
+            )
+            .unwrap();
+        let (worker, pending) =
+            match select(barrier.blocked().boxed_local(), call.invoke().boxed_local()).await {
+                Either::Left(result) => result,
+                Either::Right((result, _)) => {
+                    panic!("ingress finished before its write barrier: {result:?}")
+                }
+            };
+        if refresh {
+            service
+                .policies
+                .install(
+                    &app,
+                    PolicySnapshot::lease(
+                        revision.try_into().unwrap(),
+                        AppPolicy::default(),
+                        deadline + Duration::from_secs(30),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            compio::time::timeout(Duration::from_secs(5), pending)
+                .await
+                .unwrap(),
+            Err(WorkflowServiceError::Unavailable(_))
+        ));
+        barrier.rolled_back(worker).await;
+        barrier.unlock().await;
+        barrier.remove().await;
+        assert_eq!(ingress_state(&service, &app).await, before);
+        if refresh {
+            assert!(
+                service.policies.authority(&app).is_ok(),
+                "the refreshed host lease remains live"
+            );
+        }
+        service
+            .policies
+            .install(&app, configured_policy(revision + 1, AppPolicy::default()))
+            .unwrap();
+        assert!(call.invoke().await.is_ok());
+    }
+}
+
+#[compio::test]
+async fn sqlite_captured_ingress_deadline_rolls_back_native_transaction() {
+    let directory = tempfile::tempdir().unwrap();
+    captured_transaction_deadline(Rc::new(
+        sqlite_store(&directory.path().join("app.sqlite")).await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_captured_ingress_deadline_rolls_back_native_transaction() {
+    let fixture = PostgresFixture::start().await;
+    captured_transaction_deadline(Rc::new(fixture.store.clone())).await;
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "native transactions stay on their owning compio thread"
+)]
+async fn captured_transaction_deadline(store: Rc<OrmStore>) {
+    use crate::service::{app::lock_app, policy::CapturedPolicy};
+    use futures::{
+        future::{select, Either},
+        FutureExt,
+    };
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let before = ingress_state(&service, &app).await;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    service
+        .policies
+        .install(
+            &app,
+            PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
+        )
+        .unwrap();
+    let captured = CapturedPolicy::capture(&service.policies, &app);
+    let (written, observe) = futures::channel::oneshot::channel();
+    let operation = captured.run(async {
+        let mut tx = service.begin().await?;
+        lock_app(&mut tx, &app).await?;
+        captured.check(&service.policies, &app)?;
+        journal_update(
+            &tx,
+            "app_state",
+            json!({"app_id":app.as_str()}),
+            json!({"signal_epoch":123}),
+        )
+        .await;
+        assert_eq!(
+            journal_rows(&tx, "app_state", json!({"app_id":app.as_str()})).await[0]
+                .integer("signal_epoch")
+                .unwrap(),
+            123
+        );
+        written.send(()).unwrap();
+        futures::future::pending::<()>().await;
+        tx.commit().await
+    });
+    let pending = match select(observe.boxed_local(), operation.boxed_local()).await {
+        Either::Left((observed, pending)) => {
+            observed.unwrap();
+            pending
+        }
+        Either::Right((result, _)) => {
+            panic!("transaction ended before its pending continuation: {result:?}")
+        }
+    };
+    service
+        .policies
+        .install(
+            &app,
+            PolicySnapshot::lease(
+                2.try_into().unwrap(),
+                AppPolicy::default(),
+                deadline + Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        compio::time::timeout(Duration::from_secs(3), pending)
+            .await
+            .unwrap(),
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert!(service.policies.authority(&app).is_ok());
+    assert_eq!(ingress_state(&service, &app).await, before);
+}
+
+#[compio::test]
+async fn sqlite_ingress_keeps_explicit_disabled_policy_semantics() {
+    let directory = tempfile::tempdir().unwrap();
+    disabled_ingress_semantics(Rc::new(
+        sqlite_store(&directory.path().join("app.sqlite")).await,
+    ))
+    .await;
+}
+
+#[compio::test]
+async fn postgres_ingress_keeps_explicit_disabled_policy_semantics() {
+    let fixture = PostgresFixture::start().await;
+    disabled_ingress_semantics(Rc::new(fixture.store.clone())).await;
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "native ingress fixtures stay on their owning compio thread"
+)]
+async fn disabled_ingress_semantics(store: Rc<OrmStore>) {
+    let (service, app, _, _deployments) = registered_service(store).await;
+    let service = signed_ingress(service);
+    let mut calls = Vec::new();
+    for &operation in INGRESS_OPERATIONS {
+        calls.push(IngressCall::prepare(&service, &app, operation).await);
+    }
+    let controls = IngressCall::prepare(&service, &app, IngressOperation::Start).await;
+    service
+        .policies
+        .install(
+            &app,
+            configured_policy(
+                2,
+                AppPolicy {
+                    admission: false,
+                    dispatch: false,
+                    ingress: false,
+                    ..AppPolicy::default()
+                },
+            ),
+        )
+        .unwrap();
+    for call in calls {
+        let result = call.invoke().await;
+        match call.operation {
+            IngressOperation::Signal | IngressOperation::Broadcast => {
+                assert!(result.is_ok(), "{:?}: {result:?}", call.operation);
+            }
+            _ => assert!(
+                matches!(result, Err(WorkflowServiceError::PermissionDenied)),
+                "{:?}: {result:?}",
+                call.operation
+            ),
+        }
+    }
+    for operation in [
+        crate::operations::RunOperation::Pause,
+        crate::operations::RunOperation::Cancel,
+    ] {
+        assert!(controls
+            .scope
+            .transition(&RequestId::mint(), &controls.run, operation)
+            .await
+            .is_ok());
     }
 }

@@ -4,7 +4,9 @@ use super::{
         mint_signal_capability, verify_signal_capability, CapabilityToken, SignalGrant,
         SignalTarget, WORKFLOW_AUDIENCE,
     },
-    models, signals,
+    models,
+    policy::CapturedPolicy,
+    signals,
     store::Transaction,
     types::digest,
     AppWorkflows, RequestId, WorkflowService,
@@ -202,61 +204,73 @@ impl WorkflowService {
         target: &SignalTarget,
         options: SignalOptions,
     ) -> Result<IngressReceipt, WorkflowServiceError> {
-        let authority = authority(self)?;
-        let mut tx = self.begin().await?;
-        let now = tx.now().await?;
-        let grant = verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
-        if &grant.app_id != app || &grant.target != target {
-            return Err(WorkflowServiceError::NotFound(
-                "workflow signal target not found".into(),
-            ));
-        }
-        if !grant.types.contains(&options.signal_type) {
-            return Err(WorkflowServiceError::PermissionDenied);
-        }
-        let policy = lock_app(&mut tx, app).await?;
-        let now = tx.now().await?;
-        verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
-        if app_epoch(&mut tx, app).await? != grant.app_epoch
-            || target_epoch(&mut tx, app, target, false).await? != grant.epoch
-        {
-            return Err(WorkflowServiceError::Unauthenticated);
-        }
-        let digest = digest(&(target, &options))?;
-        if let Some(receipt) = request_result(&tx, app, request, "signal_ingress", &digest).await? {
-            return Ok(receipt);
-        }
-        policy.admit()?;
-        if !policy.ingress {
-            return Err(WorkflowServiceError::PermissionDenied);
-        }
-        if encode(&options.payload)?.len() > policy.max_input_bytes {
-            return Err(WorkflowServiceError::PayloadTooLarge);
-        }
-        let result = match target {
-            SignalTarget::Run { run_id } => {
-                let delivered =
-                    signals::deliver(&mut tx, app, run_id, &options, "ingress", now).await?;
-                IngressReceipt::Direct { id: delivered.id }
-            }
-            SignalTarget::Topic { topic } => {
-                let broadcast =
-                    signals::publish(&mut tx, app, topic, &options, "ingress", now).await?;
-                IngressReceipt::Topic { id: broadcast.id }
-            }
-        };
-        store_request(
-            &mut tx,
-            app,
-            request,
-            "signal_ingress",
-            &digest,
-            &result,
-            now,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
+        let captured = CapturedPolicy::capture(&self.policies, app);
+        captured
+            .run(async {
+                let authority = authority(self)?;
+                let mut tx = self.begin().await?;
+                let now = tx.now().await?;
+                let grant =
+                    verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
+                if &grant.app_id != app || &grant.target != target {
+                    return Err(WorkflowServiceError::NotFound(
+                        "workflow signal target not found".into(),
+                    ));
+                }
+                if !grant.types.contains(&options.signal_type) {
+                    return Err(WorkflowServiceError::PermissionDenied);
+                }
+                let policy = lock_app(&mut tx, app).await?;
+                let now = tx.now().await?;
+                verify_signal_capability(token, &authority.trust, now.div_euclid(1000))?;
+                if app_epoch(&mut tx, app).await? != grant.app_epoch
+                    || target_epoch(&mut tx, app, target, false).await? != grant.epoch
+                {
+                    return Err(WorkflowServiceError::Unauthenticated);
+                }
+                let digest = digest(&(target, &options))?;
+                if let Some(receipt) =
+                    request_result(&tx, app, request, "signal_ingress", &digest).await?
+                {
+                    return Ok(receipt);
+                }
+                captured.recheck(&self.policies, app)?;
+                policy.admit()?;
+                captured.check(&self.policies, app)?;
+                if !policy.ingress {
+                    return Err(WorkflowServiceError::PermissionDenied);
+                }
+                if encode(&options.payload)?.len() > policy.max_input_bytes {
+                    return Err(WorkflowServiceError::PayloadTooLarge);
+                }
+                let result = match target {
+                    SignalTarget::Run { run_id } => {
+                        let delivered =
+                            signals::deliver(&mut tx, app, run_id, &options, "ingress", now)
+                                .await?;
+                        IngressReceipt::Direct { id: delivered.id }
+                    }
+                    SignalTarget::Topic { topic } => {
+                        let broadcast =
+                            signals::publish(&mut tx, app, topic, &options, "ingress", now).await?;
+                        IngressReceipt::Topic { id: broadcast.id }
+                    }
+                };
+                store_request(
+                    &mut tx,
+                    app,
+                    request,
+                    "signal_ingress",
+                    &digest,
+                    &result,
+                    now,
+                )
+                .await?;
+                captured.check(&self.policies, app)?;
+                tx.commit().await?;
+                Ok(result)
+            })
+            .await
     }
 }
 fn authority(service: &WorkflowService) -> Result<Arc<SignalAuthority>, WorkflowServiceError> {
