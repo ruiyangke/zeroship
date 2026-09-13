@@ -13,6 +13,11 @@ use zeroship_data_orm::{
     ConnectOptions,
 };
 
+pub const RESOLUTION_MILLIS: i64 = 1;
+
+const SQLITE_CLOCK_SQL: &str = "SELECT CAST(strftime('%s','now') AS INTEGER) * 1000 \
+    + CAST(substr(strftime('%f','now'),4,3) AS INTEGER) AS now";
+
 /// Independent connection to the queue's database clock; it reads no tables.
 #[derive(Clone, Debug)]
 pub struct Clock {
@@ -60,9 +65,7 @@ impl Clock {
             POSTGRES_FAMILY => {
                 "SELECT CAST(FLOOR(EXTRACT(EPOCH FROM clock_timestamp()) * 1000) AS BIGINT) AS now"
             }
-            SQLITE_FAMILY => {
-                "SELECT CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER) AS now"
-            }
+            SQLITE_FAMILY => SQLITE_CLOCK_SQL,
             _ => return Err(Error::Storage),
         };
         let started = Instant::now();
@@ -79,5 +82,27 @@ impl Clock {
             .filter(|now| *now >= 0)
             .ok_or(Error::Storage)?;
         Ok(Sample { millis, started })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_clock_extraction_preserves_fractional_epoch_ticks() {
+        let database = rusqlite::Connection::open_in_memory().unwrap();
+        let sql = SQLITE_CLOCK_SQL.replace("'now'", "?1");
+        for (instant, expected) in [
+            ("1970-01-01 00:00:00.001", 1_i64),
+            ("2026-09-13 06:00:00.004", 1_789_279_200_004),
+            ("2026-09-13 06:00:00.999", 1_789_279_200_999),
+            ("2026-09-13 06:00:01.000", 1_789_279_201_000),
+        ] {
+            let observed: i64 = database
+                .query_row(&sql, [instant], |row| row.get(0))
+                .unwrap();
+            assert_eq!(observed, expected, "{instant}");
+        }
     }
 }

@@ -1,16 +1,16 @@
 # zeroship-workflow-server
 
 An authenticated host for native workflow coordination. Worker registration,
-app placement, wake hints and management persist through the shared ORM in
+app placement, job delivery, wake hints and management persist through the shared ORM in
 `zeroship-workflow-manager`. The server owns HTTP authentication, configuration,
 process lifecycle and startup database-authority checks. It constructs no customer
 execution engine or payload store.
 
 The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
-changes the target: this server will own cron, durable timers and a metadata job
-queue. Native queue and placement operations now share the manager's database
-and transaction handle. Production queue endpoints, manager scheduling and the
-worker consumer still require cutover. Existing workers still discover due
+defines manager-owned cron, durable timers and the metadata job queue. Native
+queue and placement operations share the manager's database and transaction
+handle. The job HTTP endpoints and typed client are implemented; manager
+scheduling and the worker consumer still require cutover. Existing workers still discover due
 customer work; that behavior does not define the target role split.
 
 Control authorizes placement and queues typed pause, resume, cancellation or
@@ -20,6 +20,14 @@ management. Every worker mutation checks app, worker, assignment revision and
 expiry. Registration cannot nominate an app or revive an expired placement.
 Service assertions use a shared PostgreSQL replay store across server replicas.
 Handlers authenticate before buffering bounded JSON bodies.
+
+`POST /v1/jobs/{submit,claim,heartbeat,settle}` binds worker identity to its
+enrolled signing key. Native callbacks recheck that exact key and stored app
+placement after queue locks and before commit. Workers cannot submit manager-owned
+cron or management commands. Exact settlement replay checks current enrollment
+of the original worker even after placement expires. Claim and heartbeat replies
+transfer remaining lease duration after commit; worker wall clocks are not used
+to interpret the manager's absolute timestamps.
 
 Assignments and mutation receipts survive restart. Wake revisions reject stale
 or conflicting publication. A worker cannot release the last active placement;
@@ -44,6 +52,7 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `../zeroship-workflow-manager/schema/schema.ts`: the shared migration DSL definition.
 - `tests/coordinator.rs`: native store, fencing and recovery contracts.
 - `tests/http.rs`: real server processes, replicas, revocation and restart.
+- `tests/http_jobs.rs`: job delivery, scoped publication and enrollment changes during lock waits.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.
 
 Run `cargo test -p zeroship-workflow-server` for the host contracts. Required

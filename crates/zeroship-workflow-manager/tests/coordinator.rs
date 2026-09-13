@@ -10,7 +10,7 @@
 )]
 mod support;
 
-use std::{num::NonZeroU32, time::Duration};
+use std::{cell::Cell, future::ready, num::NonZeroU32, time::Duration};
 use support::{Admin, Backend, Fixture};
 use zeroship_core::{
     app_id::AppId,
@@ -20,7 +20,9 @@ use zeroship_core::{
         ManagementOperation, ManagementOutcome, RegisterWorker, RequestId, RunId, RunOperation,
         RunState, WorkerId, WorkerState,
     },
-    workflow_jobs::{DeploymentId, JobId, JobOperation, JobSpec},
+    workflow_jobs::{
+        DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
+    },
 };
 use zeroship_data_orm::{
     orm::{Database, Operation, Output},
@@ -523,7 +525,14 @@ async fn claim_authority(fixture: &Fixture) {
         revision: (original.revision.get() + 1).try_into().unwrap(),
         ..original.clone()
     };
-    assert_eq!(coordinator.claim(&forged).await, Err(Error::Denied));
+    assert!(matches!(
+        coordinator
+            .claim_job(&forged.worker_id, &scope(&forged), || std::future::ready(
+                Ok(forged.worker_id.clone())
+            ))
+            .await,
+        Err(Error::Denied)
+    ));
     assert_ready(&database, &spec).await;
     let replacement = coordinator
         .assign(&AssignScope {
@@ -534,13 +543,27 @@ async fn claim_authority(fixture: &Fixture) {
         .await
         .unwrap();
     assert!(replacement.revision > original.revision);
-    assert_eq!(coordinator.claim(&original).await, Err(Error::Denied));
+    assert!(matches!(
+        coordinator
+            .claim_job(&original.worker_id, &scope(&original), || {
+                std::future::ready(Ok(original.worker_id.clone()))
+            })
+            .await,
+        Err(Error::Denied)
+    ));
     assert_ready(&database, &spec).await;
     let foreign_worker = Assignment {
         worker_id: WorkerId::mint(),
         ..replacement.clone()
     };
-    assert_eq!(coordinator.claim(&foreign_worker).await, Err(Error::Denied));
+    assert!(matches!(
+        coordinator
+            .claim_job(&foreign_worker.worker_id, &scope(&foreign_worker), || {
+                std::future::ready(Ok(foreign_worker.worker_id.clone()))
+            })
+            .await,
+        Err(Error::Denied)
+    ));
     assert_ready(&database, &spec).await;
     let foreign = AppId::mint();
     queue.register_scope(&foreign).await.unwrap();
@@ -548,7 +571,14 @@ async fn claim_authority(fixture: &Fixture) {
         app_id: foreign,
         ..replacement.clone()
     };
-    assert_eq!(coordinator.claim(&foreign_scope).await, Err(Error::Denied));
+    assert!(matches!(
+        coordinator
+            .claim_job(&foreign_scope.worker_id, &scope(&foreign_scope), || {
+                std::future::ready(Ok(foreign_scope.worker_id.clone()))
+            })
+            .await,
+        Err(Error::Denied)
+    ));
     assert_ready(&database, &spec).await;
 
     let assignment_filter = value!({"app_id":app.as_str(),"worker_id":worker.as_str()});
@@ -559,7 +589,14 @@ async fn claim_authority(fixture: &Fixture) {
         value!({"expires_at":0}),
     )
     .await;
-    assert_eq!(coordinator.claim(&replacement).await, Err(Error::Denied));
+    assert!(matches!(
+        coordinator
+            .claim_job(&replacement.worker_id, &scope(&replacement), || {
+                std::future::ready(Ok(replacement.worker_id.clone()))
+            })
+            .await,
+        Err(Error::Denied)
+    ));
     assert_ready(&database, &spec).await;
     let current = coordinator
         .assign(&AssignScope {
@@ -576,7 +613,14 @@ async fn claim_authority(fixture: &Fixture) {
         value!({"expires_at":0}),
     )
     .await;
-    assert_eq!(coordinator.claim(&current).await, Err(Error::Denied));
+    assert!(matches!(
+        coordinator
+            .claim_job(&current.worker_id, &scope(&current), || std::future::ready(
+                Ok(current.worker_id.clone())
+            ))
+            .await,
+        Err(Error::Denied)
+    ));
     assert_ready(&database, &spec).await;
     register(&coordinator, &worker, 1).await;
     let stored_expiry = current.expires_at.get() - 1;
@@ -587,13 +631,26 @@ async fn claim_authority(fixture: &Fixture) {
         value!({"expires_at":stored_expiry}),
     )
     .await;
-    let delivery = coordinator.claim(&current).await.unwrap().unwrap();
+    let delivery = coordinator
+        .claim_job(&current.worker_id, &scope(&current), || {
+            std::future::ready(Ok(current.worker_id.clone()))
+        })
+        .await
+        .unwrap()
+        .unwrap()
+        .delivery;
     assert_eq!(delivery.job, spec);
     assert_eq!(delivery.worker_id, worker);
     assert_eq!(delivery.assignment_revision, current.revision);
     assert_eq!(delivery.attempt.get(), 1);
     assert!(delivery.deadline.get() <= stored_expiry);
-    assert_eq!(coordinator.claim(&current).await.unwrap(), None);
+    assert!(coordinator
+        .claim_job(&current.worker_id, &scope(&current), || std::future::ready(
+            Ok(current.worker_id.clone())
+        ))
+        .await
+        .unwrap()
+        .is_none());
     let leased = row(&database, "jobs", value!({"id":spec.id.as_str()})).await;
     assert_eq!(leased["state"], value!("leased"));
     assert_eq!(leased["attempt"], value!(1));
@@ -602,4 +659,428 @@ async fn claim_authority(fixture: &Fixture) {
         leased["assignment_revision"],
         value!(current.revision.get())
     );
+}
+
+case!(
+    sqlite_worker_publication_restricts_manager_operations,
+    postgres_worker_publication_restricts_manager_operations,
+    worker_publication
+);
+case!(
+    sqlite_delivery_revalidates_enrollment_and_replays_after_reassignment,
+    postgres_delivery_revalidates_enrollment_and_replays_after_reassignment,
+    delivery_enrollment
+);
+
+fn job(app: &AppId) -> JobSpec {
+    JobSpec {
+        id: JobId::mint(),
+        app_id: app.clone(),
+        deployment_id: DeploymentId::mint(),
+        operation: JobOperation::Advance {
+            run_id: RunId::mint(),
+            generation: 0,
+            revision: 1.try_into().unwrap(),
+        },
+        available_at: 0.try_into().unwrap(),
+    }
+}
+
+fn publication(assignment: &Assignment, job: JobSpec) -> SubmitJob {
+    SubmitJob {
+        scope: scope(assignment),
+        job,
+    }
+}
+
+fn manager_operations() -> [JobOperation; 2] {
+    [
+        JobOperation::Cron {
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+            revision: 1.try_into().unwrap(),
+            scheduled_at: 0.try_into().unwrap(),
+        },
+        JobOperation::Management {
+            request_id: RequestId::mint(),
+            run_id: RunId::mint(),
+        },
+    ]
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "publication rejection controls share the same scoped queue"
+)]
+async fn worker_publication(fixture: &Fixture) {
+    let (coordinator, queue) = host(fixture, Options::default()).await;
+    let worker = WorkerId::mint();
+    register(&coordinator, &worker, 1).await;
+    let assigned = coordinator
+        .assign(&placement(&AppId::mint(), &worker))
+        .await
+        .unwrap();
+    let database = fixture.database().await;
+    for operation in manager_operations() {
+        let mut spec = job(&assigned.app_id);
+        spec.operation = operation;
+        let request = publication(&assigned, spec.clone());
+        assert_eq!(
+            coordinator
+                .submit_job(&worker, &request, || ready(Ok(worker.clone())))
+                .await,
+            Err(Error::Denied)
+        );
+        assert!(rows(&database, "jobs", value!({"id":spec.id.as_str()}))
+            .await
+            .is_empty());
+    }
+    let foreign = AppId::mint();
+    queue.register_scope(&foreign).await.unwrap();
+    let spec = job(&assigned.app_id);
+    for request in [
+        publication(&assigned, job(&foreign)),
+        SubmitJob {
+            scope: AssignedScope {
+                app_id: foreign,
+                ..scope(&assigned)
+            },
+            job: spec.clone(),
+        },
+        SubmitJob {
+            scope: AssignedScope {
+                assignment_revision: (assigned.revision.get() + 1).try_into().unwrap(),
+                ..scope(&assigned)
+            },
+            job: spec.clone(),
+        },
+    ] {
+        assert_eq!(
+            coordinator
+                .submit_job(&worker, &request, || ready(Ok(worker.clone())))
+                .await,
+            Err(Error::Denied)
+        );
+        assert!(
+            rows(&database, "jobs", value!({"id":request.job.id.as_str()}))
+                .await
+                .is_empty()
+        );
+    }
+    let request = publication(&assigned, spec.clone());
+    assert_eq!(
+        coordinator
+            .submit_job(&worker, &request, || ready(Ok(WorkerId::mint())))
+            .await,
+        Err(Error::Denied)
+    );
+    for _ in 0..2 {
+        assert_eq!(
+            coordinator
+                .submit_job(&worker, &request, || ready(Ok(worker.clone())))
+                .await
+                .unwrap(),
+            spec
+        );
+    }
+    assert_eq!(
+        rows(
+            &database,
+            "jobs",
+            value!({"app_id":assigned.app_id.as_str()})
+        )
+        .await
+        .len(),
+        1
+    );
+    let grant = coordinator
+        .claim_job(&worker, &scope(&assigned), || ready(Ok(worker.clone())))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.lease().unwrap().delivery, grant.delivery);
+    for operation in manager_operations() {
+        let mut successor = job(&assigned.app_id);
+        successor.operation = operation;
+        let command = Settlement {
+            delivery: grant.delivery.clone(),
+            outcome: JobOutcome::Completed,
+            successors: vec![successor.clone()],
+        };
+        assert_eq!(
+            coordinator
+                .settle_job(&worker, &command, || ready(Ok(worker.clone())))
+                .await,
+            Err(Error::Denied)
+        );
+        assert_eq!(
+            row(&database, "jobs", value!({"id":spec.id.as_str()})).await["state"],
+            value!("leased")
+        );
+        assert!(
+            rows(&database, "jobs", value!({"id":successor.id.as_str()}))
+                .await
+                .is_empty()
+        );
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "enrollment failures and receipt replay share one delivery"
+)]
+async fn delivery_enrollment(fixture: &Fixture) {
+    let (coordinator, _) = host(fixture, Options::default()).await;
+    let worker = WorkerId::mint();
+    register(&coordinator, &worker, 1).await;
+    let assigned = coordinator
+        .assign(&placement(&AppId::mint(), &worker))
+        .await
+        .unwrap();
+    let database = fixture.database().await;
+    let spec = job(&assigned.app_id);
+    let request = publication(&assigned, spec.clone());
+    let checks = Cell::new(0);
+    let enrollment = || {
+        checks.set(checks.get() + 1);
+        ready(if checks.get() == 2 {
+            Err(Error::Denied)
+        } else {
+            Ok(worker.clone())
+        })
+    };
+    assert_eq!(
+        coordinator.submit_job(&worker, &request, enrollment).await,
+        Err(Error::Denied)
+    );
+    assert_eq!(checks.get(), 2);
+    assert!(rows(&database, "jobs", value!({"id":spec.id.as_str()}))
+        .await
+        .is_empty());
+    coordinator
+        .submit_job(&worker, &request, || ready(Ok(worker.clone())))
+        .await
+        .unwrap();
+    checks.set(0);
+    assert!(matches!(
+        coordinator
+            .claim_job(&worker, &scope(&assigned), enrollment)
+            .await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(checks.get(), 2);
+    assert_ready(&database, &spec).await;
+
+    // The wire selector carries identity only; renewal of the stored placement
+    // may extend authority even when an old in-memory snapshot has expired.
+    let stale = Assignment {
+        expires_at: 0.try_into().unwrap(),
+        ..assigned.clone()
+    };
+    let grant = coordinator
+        .claim_job(&worker, &scope(&stale), || ready(Ok(worker.clone())))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.delivery.job, spec);
+    assert!(matches!(
+        coordinator
+            .heartbeat_job(&WorkerId::mint(), &grant.delivery, || ready(Ok(
+                worker.clone()
+            )))
+            .await,
+        Err(Error::Denied)
+    ));
+    let mut foreign_delivery = grant.delivery.clone();
+    foreign_delivery.worker_id = WorkerId::mint();
+    assert!(matches!(
+        coordinator
+            .heartbeat_job(&worker, &foreign_delivery, || ready(Ok(worker.clone())))
+            .await,
+        Err(Error::Denied)
+    ));
+    let before = row(&database, "jobs", value!({"id":spec.id.as_str()})).await;
+    checks.set(0);
+    assert!(matches!(
+        coordinator
+            .heartbeat_job(&worker, &grant.delivery, enrollment)
+            .await,
+        Err(Error::Denied)
+    ));
+    assert_eq!(checks.get(), 2);
+    assert_eq!(
+        row(&database, "jobs", value!({"id":spec.id.as_str()})).await,
+        before
+    );
+    let renewed = coordinator
+        .heartbeat_job(&worker, &grant.delivery, || ready(Ok(worker.clone())))
+        .await
+        .unwrap();
+    assert_eq!(renewed.delivery.attempt, grant.delivery.attempt);
+    assert!(renewed.delivery.deadline >= grant.delivery.deadline);
+    let successor = job(&assigned.app_id);
+    let command = Settlement {
+        delivery: renewed.delivery,
+        outcome: JobOutcome::Completed,
+        successors: vec![successor.clone()],
+    };
+    checks.set(0);
+    assert_eq!(
+        coordinator.settle_job(&worker, &command, enrollment).await,
+        Err(Error::Denied)
+    );
+    assert_eq!(checks.get(), 2);
+    assert_eq!(
+        row(&database, "jobs", value!({"id":spec.id.as_str()})).await["state"],
+        value!("leased")
+    );
+    assert!(
+        rows(&database, "jobs", value!({"id":successor.id.as_str()}))
+            .await
+            .is_empty()
+    );
+    let receipt = coordinator
+        .settle_job(&worker, &command, || ready(Ok(worker.clone())))
+        .await
+        .unwrap();
+    update(
+        &database,
+        "assignments",
+        value!({"app_id":assigned.app_id.as_str()}),
+        value!({"expires_at":0}),
+    )
+    .await;
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &command, || ready(Ok(worker.clone())))
+            .await
+            .unwrap(),
+        receipt
+    );
+    let replacement_worker = WorkerId::mint();
+    register(&coordinator, &replacement_worker, 1).await;
+    coordinator
+        .assign(&AssignScope {
+            request_id: RequestId::mint(),
+            app_id: assigned.app_id.clone(),
+            worker_id: replacement_worker.clone(),
+            expected_revision: None,
+        })
+        .await
+        .unwrap();
+    update(
+        &database,
+        "workers",
+        value!({"id":worker.as_str()}),
+        value!({"expires_at":0}),
+    )
+    .await;
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &command, || ready(Ok(worker.clone())))
+            .await
+            .unwrap(),
+        receipt
+    );
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &command, || ready(Err(Error::Denied)))
+            .await,
+        Err(Error::Denied)
+    );
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &command, || ready(Ok(replacement_worker.clone())))
+            .await,
+        Err(Error::Denied)
+    );
+    assert_eq!(
+        coordinator
+            .settle_job(&replacement_worker, &command, || ready(Ok(
+                replacement_worker.clone()
+            )))
+            .await,
+        Err(Error::Denied)
+    );
+    let mut changed = command.clone();
+    changed.outcome = JobOutcome::Waiting;
+    assert_eq!(
+        coordinator
+            .settle_job(&worker, &changed, || ready(Ok(worker.clone())))
+            .await,
+        Err(Error::Conflict)
+    );
+    assert_eq!(
+        rows(&database, "jobs", value!({"id":successor.id.as_str()}))
+            .await
+            .len(),
+        1
+    );
+}
+
+#[compio::test]
+async fn postgres_job_enrollment_is_checked_after_waiting_for_scope_lock() {
+    let fixture = Fixture::new(Backend::Postgres).await;
+    let (coordinator, _) = host(&fixture, Options::default()).await;
+    let worker = WorkerId::mint();
+    register(&coordinator, &worker, 1).await;
+    let assigned = coordinator
+        .assign(&placement(&AppId::mint(), &worker))
+        .await
+        .unwrap();
+    let request = publication(&assigned, job(&assigned.app_id));
+    let Admin::Postgres(admin) = &fixture.admin else {
+        unreachable!()
+    };
+    admin.batch_execute("BEGIN").await.unwrap();
+    assert_eq!(
+        admin
+            .query(
+                "SELECT id FROM workflow_manager.queue_scopes WHERE id=$1 FOR UPDATE",
+                &[&assigned.app_id.as_str()]
+            )
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let revoked = Cell::new(false);
+    let checks = Cell::new(0);
+    let release = async {
+        compio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                admin.query_one("SELECT pg_stat_clear_snapshot()", &[]).await.unwrap();
+                let blocked: bool = admin.query_one(
+                    "SELECT EXISTS(SELECT 1 FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.usename='workflow_manager_test' AND NOT l.granted AND l.locktype='transactionid' AND a.query LIKE '%queue_scopes%' AND pg_backend_pid()=ANY(pg_blocking_pids(a.pid)))", &[],
+                ).await.unwrap().get(0);
+                if blocked { break; }
+                compio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("job publication must reach the locked manager scope");
+        assert_eq!(checks.get(), 0);
+        revoked.set(true);
+        admin.batch_execute("ROLLBACK").await.unwrap();
+    };
+    let publication = coordinator.submit_job(&worker, &request, || {
+        checks.set(checks.get() + 1);
+        assert!(
+            revoked.get(),
+            "enrollment must be loaded after the scope wait"
+        );
+        ready(Err(Error::Denied))
+    });
+    let (result, ()) = futures::join!(publication, release);
+    assert_eq!(result, Err(Error::Denied));
+    assert_eq!(checks.get(), 1);
+    assert!(rows(
+        &fixture.database().await,
+        "jobs",
+        value!({"id":request.job.id.as_str()})
+    )
+    .await
+    .is_empty());
+    coordinator
+        .submit_job(&worker, &request, || ready(Ok(worker.clone())))
+        .await
+        .unwrap();
 }

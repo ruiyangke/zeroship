@@ -131,76 +131,78 @@ impl Exchange {
     }
 }
 
-async fn peer(
-    fixture: &Fixture,
+fn peer<'a>(
+    fixture: &'a Fixture,
     exchanges: Vec<Exchange>,
-    test: impl AsyncFnOnce(WorkerCoordinator),
-) {
-    let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = WorkerCoordinator::new(
-        &format!("http://{}", listener.local_addr().unwrap()),
-        fixture.auth.clone(),
-        Options::default(),
-    )
-    .unwrap();
-    let (issuer, key) = fixture.auth.signing_identity().unwrap();
-    let mut trust = ServiceTrustBundle::new();
-    trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
-    let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
-    let (done, completed) = oneshot::channel();
-    let server = async {
-        let mut previous = None;
-        for exchange in exchanges {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let observed = request(&mut stream).await;
-            assert_eq!(observed.path, exchange.endpoint.path_template());
-            assert_eq!(observed.body, exchange.request);
-            assert_ne!(previous.as_ref(), Some(&observed.authorization));
-            verify_service_call(
-                &verifier,
-                Some(&observed.authorization),
-                AUDIENCE,
-                exchange.endpoint,
-            )
-            .await
-            .unwrap();
-            assert!(verify_service_call(
-                &verifier,
-                Some(&observed.authorization),
-                AUDIENCE,
-                exchange.endpoint,
-            )
-            .await
-            .is_err());
-            previous = Some(observed.authorization);
-            if !exchange.delay.is_zero() {
-                let received = Instant::now();
-                compio::time::sleep(exchange.delay).await;
-                assert!(received.elapsed() >= exchange.delay);
-            }
-            let body = serde_json::to_vec(&exchange.response).unwrap();
-            let mut response = format!(
+    test: impl AsyncFnOnce(WorkerCoordinator) + 'a,
+) -> impl std::future::Future<Output = ()> + 'a {
+    Box::pin(async move {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = WorkerCoordinator::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            fixture.auth.clone(),
+            Options::default(),
+        )
+        .unwrap();
+        let (issuer, key) = fixture.auth.signing_identity().unwrap();
+        let mut trust = ServiceTrustBundle::new();
+        trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
+        let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
+        let (done, completed) = oneshot::channel();
+        let server = async {
+            let mut previous = None;
+            for exchange in exchanges {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let observed = request(&mut stream).await;
+                assert_eq!(observed.path, exchange.endpoint.path_template());
+                assert_eq!(observed.body, exchange.request);
+                assert_ne!(previous.as_ref(), Some(&observed.authorization));
+                verify_service_call(
+                    &verifier,
+                    Some(&observed.authorization),
+                    AUDIENCE,
+                    exchange.endpoint,
+                )
+                .await
+                .unwrap();
+                assert!(verify_service_call(
+                    &verifier,
+                    Some(&observed.authorization),
+                    AUDIENCE,
+                    exchange.endpoint,
+                )
+                .await
+                .is_err());
+                previous = Some(observed.authorization);
+                if !exchange.delay.is_zero() {
+                    let received = Instant::now();
+                    compio::time::sleep(exchange.delay).await;
+                    assert!(received.elapsed() >= exchange.delay);
+                }
+                let body = serde_json::to_vec(&exchange.response).unwrap();
+                let mut response = format!(
                 "HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
                 exchange.status, body.len()
             )
             .into_bytes();
-            response.extend(body);
-            stream.write_all(response).await.0.unwrap();
-            stream.flush().await.unwrap();
-        }
-        match futures::future::select(completed, Box::pin(listener.accept())).await {
-            Either::Left((result, _)) => result.unwrap(),
-            Either::Right(_) => panic!("client sent an unexpected HTTP request"),
-        }
-    };
-    compio::time::timeout(Duration::from_secs(10), async {
-        futures::join!(server, async {
-            test(client).await;
-            done.send(()).unwrap();
-        });
+                response.extend(body);
+                stream.write_all(response).await.0.unwrap();
+                stream.flush().await.unwrap();
+            }
+            match futures::future::select(completed, Box::pin(listener.accept())).await {
+                Either::Left((result, _)) => result.unwrap(),
+                Either::Right(_) => panic!("client sent an unexpected HTTP request"),
+            }
+        };
+        compio::time::timeout(Duration::from_secs(10), async {
+            futures::join!(server, async {
+                test(client).await;
+                done.send(()).unwrap();
+            });
+        })
+        .await
+        .expect("job client contract hung");
     })
-    .await
-    .expect("job client contract hung");
 }
 
 struct Request {
@@ -352,7 +354,7 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
             assert_eq!(
                 client.submit_job(&submit).await.unwrap_err(),
                 Error::InvalidResponse
-            )
+            );
         },
     )
     .await;
@@ -378,7 +380,7 @@ async fn submission_and_settlement_receipts_cannot_substitute_metadata() {
                 assert_eq!(
                     client.settle_job(&command).await.unwrap_err(),
                     Error::InvalidResponse
-                )
+                );
             },
         )
         .await;
@@ -423,7 +425,7 @@ async fn claim_rejects_foreign_and_malformed_lease_metadata() {
                 assert_eq!(
                     client.claim_job(&fixture.scope).await.unwrap_err(),
                     Error::InvalidResponse
-                )
+                );
             },
         )
         .await;

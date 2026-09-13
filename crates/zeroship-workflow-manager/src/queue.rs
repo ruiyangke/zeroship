@@ -4,7 +4,7 @@
 )]
 
 use crate::{
-    clock::{Clock, Sample},
+    clock::{Clock, Sample, RESOLUTION_MILLIS},
     error::Error,
     models::{self, jobs, queue_scopes, Job},
 };
@@ -15,15 +15,15 @@ use std::{
     collections::BTreeMap,
     future::{poll_fn, ready, Future},
     io::Write,
-    num::NonZeroUsize,
+    num::{NonZeroU64, NonZeroUsize},
     rc::Rc,
     task::Poll,
     time::{Duration, Instant},
 };
 use zeroship_core::{
     app_id::AppId,
-    workflow_coordination::{Assignment, WorkerId},
-    workflow_jobs::{Delivery, JobSpec, Settlement, SettlementReceipt},
+    workflow_coordination::{Assignment, VerifyAssignment, WorkerId},
+    workflow_jobs::{Delivery, DeliveryLease, JobSpec, Settlement, SettlementReceipt},
 };
 use zeroship_data_orm::{
     binding::DbBinding,
@@ -67,6 +67,53 @@ pub struct Queue {
     pub(crate) database: Database,
     pub(crate) clock: Clock,
     pub(crate) options: Options,
+}
+
+/// A committed delivery with the manager's original monotonic lease budget.
+/// Response construction must consume only the authority still remaining.
+#[derive(Debug, Clone)]
+pub struct DeliveryGrant {
+    pub delivery: Delivery,
+    expires_at: Instant,
+}
+
+impl DeliveryGrant {
+    fn new(delivery: Delivery, sample: Sample, assignment_expires: Instant) -> Result<Self, Error> {
+        let expires_at = local_deadline(sample, delivery.deadline.get())?.min(assignment_expires);
+        if expires_at <= Instant::now() {
+            return Err(Error::Timeout);
+        }
+        Ok(Self {
+            delivery,
+            expires_at,
+        })
+    }
+
+    fn cap(&mut self, sample: Sample) -> Result<(), Error> {
+        self.expires_at = self
+            .expires_at
+            .min(local_deadline(sample, self.delivery.deadline.get())?);
+        if self.expires_at <= Instant::now() {
+            return Err(Error::Timeout);
+        }
+        Ok(())
+    }
+
+    /// Convert to wire authority after commit, charging all intervening waits.
+    ///
+    /// # Errors
+    /// Refuses exhausted or unrepresentable remaining authority.
+    pub fn lease(&self) -> Result<DeliveryLease, Error> {
+        let remaining = self.expires_at.saturating_duration_since(Instant::now());
+        let remaining_ms = u64::try_from(remaining.as_millis())
+            .ok()
+            .and_then(NonZeroU64::new)
+            .ok_or(Error::Timeout)?;
+        Ok(DeliveryLease {
+            delivery: self.delivery.clone(),
+            remaining_ms,
+        })
+    }
 }
 
 impl Queue {
@@ -142,7 +189,7 @@ impl Queue {
     /// Refuses foreign apps, revoked authority, changed job identities and failed transactions.
     pub async fn submit_authorized<F, Fut>(
         &self,
-        assignment: &Assignment,
+        assignment: &VerifyAssignment,
         job: &JobSpec,
         mut authorize: F,
     ) -> Result<JobSpec, Error>
@@ -175,8 +222,8 @@ impl Queue {
     ///
     /// # Errors
     /// Refuses expired authority and failed transactions.
-    pub async fn claim(&self, assignment: &Assignment) -> Result<Option<Delivery>, Error> {
-        self.claim_authorized(assignment, |_| ready(Ok(assignment.clone())))
+    pub async fn claim(&self, assignment: &Assignment) -> Result<Option<DeliveryGrant>, Error> {
+        self.claim_authorized(&assignment.into(), |_| ready(Ok(assignment.clone())))
             .await
     }
 
@@ -187,9 +234,9 @@ impl Queue {
     /// Refuses revoked assignments, exhausted attempts and failed transactions.
     pub async fn claim_authorized<F, Fut>(
         &self,
-        assignment: &Assignment,
+        assignment: &VerifyAssignment,
         mut authorize: F,
-    ) -> Result<Option<Delivery>, Error>
+    ) -> Result<Option<DeliveryGrant>, Error>
     where
         F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
@@ -202,6 +249,7 @@ impl Queue {
             let authority = current(assignment, observed, sample.millis)?;
             budget.cap(sample, authority.expires_at.get())?;
             let now = sample.millis;
+            let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
             let due = value!({"app_id":assignment.app_id.as_str(), "$or":[
                 {"state":"ready", "available_at":{"$lte":now}},
                 {"state":"leased", "lease_deadline":{"$lte":now}}
@@ -225,14 +273,15 @@ impl Queue {
             budget.cap(sample, deadline)?;
             let delivery = Delivery {
                 job: job.spec()?, worker_id: assignment.worker_id.clone(),
-                assignment_revision: assignment.revision,
+                assignment_revision: assignment.assignment_revision,
                 attempt: attempt.try_into().map_err(|_| Error::Storage)?,
                 deadline: deadline.try_into().map_err(|_| Error::Storage)?,
             };
+            let mut grant = DeliveryGrant::new(delivery, sample, assignment_expires)?;
             update(&tx,
                 value!({"id":id,"app_id":assignment.app_id.as_str(),"state":job.state,"attempt":job.attempt}),
                 value!({"state":"leased","attempt":attempt,"worker_id":assignment.worker_id.as_str(),
-                    "assignment_revision":assignment.revision.get(),"lease_deadline":deadline})
+                    "assignment_revision":assignment.assignment_revision.get(),"lease_deadline":deadline})
             ).await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
@@ -241,7 +290,8 @@ impl Queue {
                 return Err(Error::Denied);
             }
             budget.cap(sample, deadline.min(authority.expires_at.get()))?;
-            Ok(Some(delivery))
+            grant.cap(sample)?;
+            Ok(Some(grant))
         }).await
     }
 
@@ -253,9 +303,11 @@ impl Queue {
         &self,
         assignment: &Assignment,
         delivery: &Delivery,
-    ) -> Result<Delivery, Error> {
-        self.heartbeat_authorized(assignment, delivery, |_| ready(Ok(assignment.clone())))
-            .await
+    ) -> Result<DeliveryGrant, Error> {
+        self.heartbeat_authorized(&assignment.into(), delivery, |_| {
+            ready(Ok(assignment.clone()))
+        })
+        .await
     }
 
     /// Revalidate placement while extending the stored delivery lease.
@@ -265,10 +317,10 @@ impl Queue {
     /// Refuses stale delivery identity, revoked placement and failed transactions.
     pub async fn heartbeat_authorized<F, Fut>(
         &self,
-        assignment: &Assignment,
+        assignment: &VerifyAssignment,
         delivery: &Delivery,
         mut authorize: F,
-    ) -> Result<Delivery, Error>
+    ) -> Result<DeliveryGrant, Error>
     where
         F: FnMut(Database) -> Fut,
         Fut: Future<Output = Result<Assignment, Error>>,
@@ -281,6 +333,7 @@ impl Queue {
             let sample = self.clock.sample().await?;
             let authority = current(assignment, observed, sample.millis)?;
             budget.cap(sample, authority.expires_at.get())?;
+            let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
             let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
                 .await?
                 .ok_or(Error::Conflict)?;
@@ -295,6 +348,14 @@ impl Queue {
                     .min(job.lease_deadline.ok_or(Error::Storage)?),
             )?;
             let deadline = self.deadline(&authority, sample.millis)?;
+            let mut grant = DeliveryGrant::new(
+                Delivery {
+                    deadline: deadline.try_into().map_err(|_| Error::Storage)?,
+                    ..delivery.clone()
+                },
+                sample,
+                assignment_expires,
+            )?;
             update(&tx, fence(delivery), value!({"lease_deadline":deadline})).await?;
             let observed = authorize(tx.clone()).await?;
             let sample = self.clock.sample().await?;
@@ -310,10 +371,8 @@ impl Queue {
                     .get()
                     .min(job.lease_deadline.ok_or(Error::Storage)?),
             )?;
-            Ok(Delivery {
-                deadline: deadline.try_into().map_err(|_| Error::Storage)?,
-                ..delivery.clone()
-            })
+            grant.cap(sample)?;
+            Ok(grant)
         })
         .await
     }
@@ -330,7 +389,7 @@ impl Queue {
         settlement: &Settlement,
     ) -> Result<SettlementReceipt, Error> {
         self.settle_authorized(
-            assignment,
+            &assignment.into(),
             settlement,
             |_| ready(Ok(assignment.clone())),
             |_| ready(Ok(settlement.delivery.worker_id.clone())),
@@ -348,7 +407,7 @@ impl Queue {
     /// Refuses revoked active delivery, conflicting successors and failed transactions.
     pub async fn settle_authorized<F, Fut, R, Replay>(
         &self,
-        assignment: &Assignment,
+        assignment: &VerifyAssignment,
         settlement: &Settlement,
         mut authorize: F,
         mut authorize_replay: R,
@@ -534,7 +593,7 @@ impl Queue {
     }
 }
 
-pub(super) async fn register_scope_in(tx: &Database, app: &AppId) -> Result<(), Error> {
+pub async fn register_scope_in(tx: &Database, app: &AppId) -> Result<(), Error> {
     tx.collection(queue_scopes::Entity::COLLECTION)?
         .execute(Operation::Upsert {
             document: value!({"id":app.as_str()}),
@@ -544,7 +603,7 @@ pub(super) async fn register_scope_in(tx: &Database, app: &AppId) -> Result<(), 
     Ok(())
 }
 
-pub(super) async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
+pub async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
     let result = tx
         .collection(queue_scopes::Entity::COLLECTION)?
         .execute(Operation::Update {
@@ -593,23 +652,22 @@ async fn update(tx: &Database, filter: Value, patch: Value) -> Result<(), Error>
     }
 }
 
-fn current(original: &Assignment, mut observed: Assignment, now: i64) -> Result<Assignment, Error> {
-    if original.app_id != observed.app_id
-        || original.worker_id != observed.worker_id
-        || original.revision != observed.revision
-        || original.expires_at.get() <= now
-        || observed.expires_at.get() <= now
+fn current(
+    original: &VerifyAssignment,
+    observed: Assignment,
+    now: i64,
+) -> Result<Assignment, Error> {
+    if original != &VerifyAssignment::from(&observed) || observed.expires_at.get() <= now
     {
         return Err(Error::Denied);
     }
-    observed.expires_at = original.expires_at.min(observed.expires_at);
     Ok(observed)
 }
 
-fn bound(assignment: &Assignment, delivery: &Delivery) -> Result<(), Error> {
+fn bound(assignment: &VerifyAssignment, delivery: &Delivery) -> Result<(), Error> {
     if assignment.app_id != delivery.job.app_id
         || assignment.worker_id != delivery.worker_id
-        || assignment.revision != delivery.assignment_revision
+        || assignment.assignment_revision != delivery.assignment_revision
     {
         return Err(Error::Denied);
     }
@@ -647,7 +705,7 @@ fn digest(bytes: &[u8]) -> String {
 /// The stored lease can shorten the caller's wait after its app lock is acquired.
 /// A dispatched commit may finish after this wait; its receipt resolves retries.
 #[derive(Clone)]
-pub(super) struct Budget(Rc<Cell<Instant>>);
+pub struct Budget(Rc<Cell<Instant>>);
 
 impl Budget {
     pub(crate) fn new(timeout: Duration) -> Self {
@@ -655,22 +713,29 @@ impl Budget {
     }
 
     pub(crate) fn cap(&self, sample: Sample, deadline: i64) -> Result<(), Error> {
-        let remaining = deadline
-            .checked_sub(sample.millis)
-            .filter(|remaining| *remaining > 0)
-            .ok_or(Error::Denied)?;
-        let deadline = sample
-            .started
-            .checked_add(Duration::from_millis(
-                u64::try_from(remaining).map_err(|_| Error::Invalid)?,
-            ))
-            .ok_or(Error::Invalid)?;
+        let deadline = local_deadline(sample, deadline)?;
         self.0.set(self.0.get().min(deadline));
         if self.0.get() <= Instant::now() {
             return Err(Error::Timeout);
         }
         Ok(())
     }
+}
+
+fn local_deadline(sample: Sample, deadline: i64) -> Result<Instant, Error> {
+    // The database sample is floored. Charge its resolution so the conversion
+    // cannot retain the unobserved fraction of the final clock tick.
+    let remaining = deadline
+        .checked_sub(sample.millis)
+        .and_then(|remaining| remaining.checked_sub(RESOLUTION_MILLIS))
+        .filter(|remaining| *remaining > 0)
+        .ok_or(Error::Denied)?;
+    sample
+        .started
+        .checked_add(Duration::from_millis(
+            u64::try_from(remaining).map_err(|_| Error::Invalid)?,
+        ))
+        .ok_or(Error::Invalid)
 }
 
 async fn bounded<T>(budget: Budget, future: impl Future<Output = T>) -> Result<T, Error> {
@@ -726,5 +791,121 @@ impl Write for Metadata {
     }
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zeroship_core::workflow_jobs::{DeploymentId, JobId, JobOperation};
+
+    fn delivery(deadline: i64) -> Delivery {
+        Delivery {
+            job: JobSpec {
+                id: JobId::mint(),
+                app_id: AppId::mint(),
+                deployment_id: DeploymentId::mint(),
+                operation: JobOperation::Reconcile {},
+                available_at: 0.try_into().unwrap(),
+            },
+            worker_id: WorkerId::mint(),
+            assignment_revision: 1.try_into().unwrap(),
+            attempt: 1.try_into().unwrap(),
+            deadline: deadline.try_into().unwrap(),
+        }
+    }
+
+    #[test]
+    fn later_clock_samples_can_only_shorten_a_grant() {
+        let started = Instant::now();
+        let mut grant = DeliveryGrant::new(
+            delivery(120_000),
+            Sample {
+                millis: 60_000,
+                started,
+            },
+            started + Duration::from_secs(60),
+        )
+        .unwrap();
+        let original = grant.expires_at;
+        grant
+            .cap(Sample {
+                millis: 0,
+                started: started + Duration::from_secs(1),
+            })
+            .unwrap();
+        assert_eq!(
+            grant.expires_at, original,
+            "a backwards clock sample cannot add authority"
+        );
+        grant
+            .cap(Sample {
+                millis: 100_000,
+                started: started + Duration::from_secs(2),
+            })
+            .unwrap();
+        let shortened = grant.expires_at;
+        assert!(shortened < original);
+        grant
+            .cap(Sample {
+                millis: 0,
+                started: started + Duration::from_secs(3),
+            })
+            .unwrap();
+        assert_eq!(
+            grant.expires_at, shortened,
+            "later observations cannot undo a shortened budget"
+        );
+    }
+
+    #[test]
+    fn original_assignment_sample_caps_a_grant_created_after_clock_regression() {
+        let started = Instant::now();
+        let assignment_expires = local_deadline(
+            Sample {
+                millis: 100_000,
+                started,
+            },
+            120_000,
+        )
+        .unwrap();
+        let grant = DeliveryGrant::new(
+            delivery(120_000),
+            Sample {
+                millis: 0,
+                started: started + Duration::from_secs(1),
+            },
+            assignment_expires,
+        )
+        .unwrap();
+        assert_eq!(grant.expires_at, assignment_expires);
+        assert!(grant.expires_at < started + Duration::from_secs(120));
+    }
+
+    #[test]
+    fn an_expired_grant_cannot_serialize_positive_authority() {
+        let grant = DeliveryGrant {
+            delivery: delivery(i64::MAX),
+            expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+        };
+        let cloned = grant.clone();
+        assert_eq!(grant.lease(), Err(Error::Timeout));
+        assert_eq!(cloned.lease(), Err(Error::Timeout));
+    }
+
+    #[test]
+    fn quantized_clock_sample_cannot_grant_its_unobserved_final_fraction() {
+        let sample = Sample {
+            millis: 10_000,
+            started: Instant::now(),
+        };
+        assert_eq!(
+            local_deadline(sample, sample.millis + RESOLUTION_MILLIS),
+            Err(Error::Denied)
+        );
+        assert_eq!(
+            local_deadline(sample, sample.millis + RESOLUTION_MILLIS + 1),
+            Ok(sample.started + Duration::from_millis(1))
+        );
     }
 }
