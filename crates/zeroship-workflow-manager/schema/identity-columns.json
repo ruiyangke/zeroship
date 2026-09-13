@@ -52,6 +52,10 @@
     "app_id",
     "deployment_id"
   ],
+  "schedule_disables": [
+    "id",
+    "app_id"
+  ],
   "schedule_scopes": [
     "id",
     "activation_id"

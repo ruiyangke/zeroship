@@ -46,6 +46,11 @@ replacing current schedules. An empty declaration removes future scheduling
 while retaining previously accepted occurrences and their deployment holds.
 The normal deploy transaction still needs its durable publication handoff.
 
+`POST /v1/schedules/disable` uses that same Control authority and app revision
+sequence. It records a historical receipt even before the app's first activation.
+Delayed retries cannot disable a newer restore. Calendar disable preserves
+accepted jobs and recovery; it does not acknowledge worker policy changes.
+
 `POST /v1/jobs/{submit,claim,heartbeat,settle}` binds worker identity to its
 enrolled signing key. Native callbacks recheck that exact key and stored app
 placement after queue locks and before commit. Workers cannot submit manager-owned

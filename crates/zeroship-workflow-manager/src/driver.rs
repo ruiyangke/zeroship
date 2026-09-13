@@ -10,7 +10,7 @@ use crate::{
         schema::{deployment_holds, schedules},
     },
     recovery::{self, Recovery},
-    scheduling::{self, Scheduler},
+    scheduling::{self, Due as Scheduled, Scheduler},
     Error, Queue,
 };
 use std::{
@@ -161,13 +161,11 @@ impl Driver {
     async fn lane(&mut self, lane: usize) -> LaneReport {
         let deadline = Deadline(Instant::now() + self.options.lane_timeout);
         let page = match lane {
-            0 => scan::<_, Scheduled>(
+            0 => scan_schedules(
                 &self.queue,
                 &mut self.cursors[lane],
                 deadline,
                 self.options.page_limit,
-                schedules::id,
-                |now| Ok(schedules::next_at.lte(Some(now))?),
             )
             .await
             .map(|rows| rows.into_iter().map(Candidate::Scheduled).collect()),
@@ -286,12 +284,6 @@ trait ScanRow {
     fn id(&self) -> &str;
 }
 
-#[derive(FromRow)]
-#[orm(entity = schedules)]
-struct Scheduled {
-    id: String,
-    app_id: String,
-}
 impl ScanRow for Scheduled {
     fn id(&self) -> &str {
         &self.id
@@ -335,6 +327,39 @@ impl Candidate {
             Self::Hold(row) => row.id(),
         }
     }
+}
+
+async fn scan_schedules(
+    queue: &Queue,
+    cursor: &mut Cursor,
+    deadline: Deadline,
+    limit: u32,
+) -> Result<Vec<Scheduled>, Error> {
+    if cursor.upper.is_none() {
+        let upper = deadline
+            .run(queue.transact(|tx| async move {
+                scheduling::due_in(&tx, queue.clock.now().await?, None, None, true, 1).await
+            }))
+            .await?;
+        cursor.upper = upper.into_iter().next().map(|row| row.id);
+    }
+    let Some(upper) = cursor.upper.as_deref() else {
+        return Ok(Vec::new());
+    };
+    let after = cursor.after.as_deref();
+    deadline
+        .run(queue.transact(|tx| async move {
+            scheduling::due_in(
+                &tx,
+                queue.clock.now().await?,
+                after,
+                Some(upper),
+                false,
+                limit,
+            )
+            .await
+        }))
+        .await
 }
 
 async fn scan<C, R>(

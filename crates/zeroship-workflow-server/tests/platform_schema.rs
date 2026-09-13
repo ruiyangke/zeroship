@@ -116,6 +116,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     for table in [
         "schedule_deployments",
         "schedule_activations",
+        "schedule_disables",
         "schedule_scopes",
         "schedules",
         "schedule_occurrences",
@@ -311,6 +312,7 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             "recovery_scopes",
             "schedule_activations",
             "schedule_deployments",
+            "schedule_disables",
             "schedule_occurrences",
             "schedule_scopes",
             "schedules",

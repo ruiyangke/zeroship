@@ -196,6 +196,7 @@ impl Coordinator {
             "management",
             "schedule_deployments",
             "schedule_activations",
+            "schedule_disables",
             "schedule_scopes",
             "schedules",
             "schedule_occurrences",
@@ -238,7 +239,8 @@ impl Coordinator {
              SELECT app_id,request_id,run_id,actor,operation,restart_name,restart_occurrence,restart_deploy,created_at,outcome,run_state,ack_worker_id,ack_revision FROM workflow_manager.management LIMIT 0;
              SELECT id,app_id,definition,interpretation,created_at FROM workflow_manager.schedule_deployments LIMIT 0;
              SELECT id,app_id,deployment_id,revision,activated_at FROM workflow_manager.schedule_activations LIMIT 0;
-             SELECT id,revision,activation_id FROM workflow_manager.schedule_scopes LIMIT 0;
+             SELECT id,app_id,revision,created_at FROM workflow_manager.schedule_disables LIMIT 0;
+             SELECT id,revision,activation_id,enabled FROM workflow_manager.schedule_scopes LIMIT 0;
              SELECT id,app_id,name,activation_id,revision,definition,next_at,anchor_at,catch_up_until,catch_up_remaining FROM workflow_manager.schedules LIMIT 0;
              SELECT id,app_id,schedule_id,revision,scheduled_at,run_id,job_id,activation_id FROM workflow_manager.schedule_occurrences LIMIT 0;
              SELECT id,deployment_id,activation_revision,next_due_at,pending_job_id FROM workflow_manager.recovery_scopes LIMIT 0;"

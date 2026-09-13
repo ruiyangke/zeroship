@@ -22,5 +22,10 @@ require the exact Control service signer. Callers preserve the original command
 and revision after an uncertain reply; an activation receipt means durable
 manager acceptance, while creator readiness is a separate job outcome.
 
+`disable_schedules` checks the exact accepted app and revision. A historical
+disable receipt remains valid after restore without disabling the newer revision.
+This operation acknowledges calendar publication fencing, not creator policy or
+executor quiescence.
+
 Run `cargo test -p zeroship-workflow-client` for wire, cancellation, timeout and
 TLS contracts.
