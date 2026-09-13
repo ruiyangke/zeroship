@@ -692,15 +692,8 @@ jobs:
   # "PostgreSQL never came up on localhost:<port>". Loud, but from a different
   # mechanism than the one the harness advertises.
   #
-  # POSTGRES_DB: zeroship for the same reason, and it is the same kind of
-  # claim - truth in the overlay, not a test that needs it. compose sets it, so
-  # the overlay's DSN names `zeroship`; without it the DSN names a database that
-  # does not exist on the service container. Nothing in either gate dials that
-  # DSN today, because both scripts export PG_TEST_URL for their whole cargo run
-  # and `database_url_opt` prefers it (crates/core/src/config/test_overlay.rs:131)
-  # - so the overlay's own database is the unreachable fallback arm. Make it
-  # real anyway; a generated topology that is only accidentally unread is not a
-  # correct one.
+  # The generated overlay must name an existing database even when the billing
+  # runner selects its own migrated database through PG_TEST_URL.
   billing-gate:
     runs-on: ubuntu-latest
     services:
@@ -816,56 +809,21 @@ jobs:
           name: data-test-results
           path: target/nextest/data/junit.xml
 
-  # Required worker database verification. Workflow advancement reads the platform
-  # schema, so the suite creates and migrates its database before ordinary tests.
-  # This job builds the worker's V8 dependencies independently of auth-gate.
-  #
-  # THE SCRIPT DOES NOT SKIP. Without an overlay, a server, or the `zero-migrate`
-  # CLI it exits 2 naming the fix and never reaches `cargo test`, so this job
-  # cannot go green having run nothing.
-  worker-live-gate:
+  # Worker fixtures own their databases and apply the platform corpus.
+  worker-tests:
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:17
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: zeroship
-          POSTGRES_DB: zeroship
-        ports:
-          - 5440:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
-    env:
-      PG_HOST: localhost
-      PG_PORT: 5440
-      PG_USER: postgres
-      PG_PASS: zeroship
-      PG_DB: zeroship
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Twice load-bearing, same as billing-gate / auth-gate / data-tests:
-      # zeroship-worker depends on zeroship-runtime, which `include_str!`s three
-      # gitignored SDK dist files, AND deploy/ops/db-migrate.sh is a Node program
-      # that the suite script shells out to.
       - uses: actions/setup-node@v4
         with:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
-      # The suite reads its server's coordinates from the generated overlay and
-      # from nowhere else; without this file it refuses rather than guessing.
-      - name: Write the test overlay naming this job's service containers
-        run: bash tests/provision_test_backends.sh --check
-      - name: Run the worker live-database gate
-        run: tests/run_worker_suite.sh
+      - name: Run native worker tests with owned services
+        run: cargo xtask test worker
 
   # Gate the SDK type-level + unit suites. In particular this runs
   # @zeroship/migrate's `check` (tsc + the `tsconfig.types.json`

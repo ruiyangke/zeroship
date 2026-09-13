@@ -44,24 +44,12 @@ base64 = { workspace = true }
 cyper = { workspace = true }
 tracing = { workspace = true }
 
-# Database verification is mandatory in ordinary cargo test runs.
-# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
-# migrated platform database required by these tests.
-
 [dev-dependencies]
-# DEV-only, and zeroship-migrate-server does not depend on zeroship-worker, so
-# no cycle (same pattern as zeroship-data-v8's and zeroship-control's
-# dev-dependency on it). The workflow-advance handler tests seed an app by
-# INSERTing into zeroship.apps directly, which - like every such seed in this
-# workspace - skips the migration apply that creates the app's app_<uuid>
-# workflow journal schema in production; PgStore::provision holds no CREATE
-# and cannot make that schema itself (2a44ea8ef), so the tests call the
-# migration service's own provisioning statement first.
+# The fixture uses the migration service's journal schema provisioner.
 zeroship-migrate-server = { workspace = true }
-# The generated-controls test parses an overlay fixture to prove a persisted
-# entry cannot enable the unsigned workflow-advance ingress.
+# Parse generated configuration and compose private migration host settings.
 toml = { workspace = true }
-# The kernel dispatch test owns its Redis container and temporary storage dirs.
+# Rust fixtures own PostgreSQL, Redis and temporary storage.
 tempfile = { workspace = true }
 testcontainers = { version = "0.28", default-features = false, features = ["blocking", "watchdog"] }
 tar = { workspace = true }

@@ -3,7 +3,7 @@
 # provision_test_backends.sh - stand up the backends the test suites REQUIRE.
 #
 # Provisions the shared PostgreSQL service still used by the shell suites.
-# Mailer, auth, authn, KV and Redis driver tests own their servers through
+# Auth, mailer, worker, KV and Redis driver tests own their servers through
 # Testcontainers.
 #
 # PostgreSQL comes from deploy/compose so its logical-decoding and prepared-

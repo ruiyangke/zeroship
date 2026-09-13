@@ -6,7 +6,7 @@
 # THE LOGIC IS NOW IN RUST: xtask/src/platform_db/suite_db.rs (the
 # decisions), src/admin.rs (the server), src/fingerprint.rs (the name), reached
 # through `zs-testkit suite-db`. This file provides the function names and
-# exported variables consumed by the remaining worker and billing runners.
+# exported variables consumed by the remaining billing runner.
 # The Rust modules describe schema fingerprints and the provisioning lock.
 # Shared schema selection does not establish fixture isolation.
 #

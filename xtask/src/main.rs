@@ -3,6 +3,7 @@ mod data;
 mod migrations;
 mod storage;
 mod workflow;
+mod worker;
 
 #[path = "../../tests/fixtures/postgres/image.rs"]
 mod postgres_image;
@@ -37,6 +38,8 @@ enum Task {
 enum Suite {
     /// Run auth, authorization, mailer and gateway tests with owned services.
     Auth,
+    /// Run worker tests with owned `PostgreSQL` and Redis fixtures.
+    Worker,
     /// Build the Node host and test the platform corpus on owned PostgreSQL.
     Migrations,
     /// Check workspace dependency and feature declarations.
@@ -63,6 +66,7 @@ fn main() -> ExitCode {
     }
     let result = match args.command {
         Task::Test { suite: Suite::Auth } => auth::run(),
+        Task::Test { suite: Suite::Worker } => worker::run(),
         Task::Test {
             suite: Suite::Migrations,
         } => migrations::run(),
