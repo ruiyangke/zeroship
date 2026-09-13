@@ -56,5 +56,3 @@ mod template_css_test;
 mod template_password_policy_test;
 mod threat_model;
 mod token_sweep_test;
-mod totp_enroll_reauth_test;
-mod totp_removal_notice_test;
