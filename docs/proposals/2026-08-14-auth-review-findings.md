@@ -74,18 +74,18 @@ did not hold.
 
 ---
 
-## 2. Fourteen gateway auth tests never ran, and could not pass - FIXED (`77de1cd0e`, `5646d3654`)
+## 2. Gateway auth database cases did not run - FIXED (`77de1cd0e`, `5646d3654`)
 
-`GATEWAY_ANCHORS_DB_URL` is set nowhere in the repository, so 13 tests in
-`crates/zeroship-gateway/tests/auth_token_anchors_test.rs` and 1 in
-`browser_auth_test.rs` returned without executing. They cover, among other
-things:
+The original anchor and browser auth integration targets returned without
+executing when `GATEWAY_ANCHORS_DB_URL` was absent. Anchor cases now live in
+`crates/zeroship-gateway/src/auth_token/tests/` and own migrated PostgreSQL
+containers. Their coverage includes:
 
 - code exchange sets both the session and anchor cookies, with no token in the body
 - the per-app relay alias is substituted so an app never sees the real email
 - missing alias fails closed to an empty email rather than disclosing one
-- anchor absolute expiry is `created_at + 30d` and does not slide
-- reload recovery mints a fresh cookie with exactly one OP refresh
+- anchor absolute expiry follows `ANCHOR_ABS_DAYS` and does not slide
+- reload recovery rotates the stored family and mints a fresh cookie
 - back-channel logout revokes a session whose `sid` survived a refresh
 - `invalid_grant` deletes the anchor and forces re-login
 - a refresh/reset race fails closed with no fresh cookie
@@ -426,15 +426,12 @@ exactly like "no callers, as expected".
 
 ---
 
-## 13. The `CI` fail-loud guard has never fired - OPEN, low priority
+## 13. Anchor database verification depended on an environment guard — resolved
 
-`auth_token_anchors_test.rs` panics if `CI` is set while
-`GATEWAY_ANCHORS_DB_URL` is not, so the coverage hole cannot survive in CI. The
-mechanism is sound - `declared_env!` resolves to `std::env::var`
-(`crates/zeroship-core/src/config/env.rs:20`), with no registry gate that would swallow
-it - but it has never run: the repository has no GitHub Actions history
-(`gh run list` returns HTTP 404), so `.github/workflows/ci.yml` is aspirational.
-Worth knowing before treating any CI-only guard as load-bearing.
+Anchor cases now run in the gateway library under ordinary `cargo test`.
+Private fixtures in `crates/zeroship-gateway/src/auth_token/tests/` own their
+migrated PostgreSQL containers. Missing Docker or failed migrations fail the
+run; database verification no longer depends on `CI` or a configured URL.
 
 ---
 

@@ -2,7 +2,7 @@
 //!
 //! These drive the REAL `OidcRp` token path (`refresh_token_public` →
 //! `post_token` → `op_client::call`) against a loopback MOCK OP (an
-//! in-process ntex test server), exactly like `auth_token_anchors_test.rs`.
+//! in-process ntex test server), as in the private `auth_token::tests` modules.
 //! Nothing about the breaker, the reused client, or the bounded timeout is
 //! stubbed — the only fake is the OP itself, which:
 //!
