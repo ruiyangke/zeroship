@@ -8,7 +8,6 @@
 //! missing row data fall back to collection invalidation to avoid dropping changes.
 //! This module owns neither V8 callbacks nor subscription lifecycle.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crate::schema::FieldMap;
@@ -295,165 +294,8 @@ fn lower_operand(mask_kind: Option<MaskKind>, value: &Value) -> Value {
     Value::String(apply_mask_kind(kind, &value_to_text(value)))
 }
 
-/// Thread-local read capture. The host supplies whether this dispatch records reads;
-/// the ORM does not query runtime procedure state.
-struct Capture {
-    /// `false` installs an inert capture: entries are dropped rather than
-    /// buffered. Kept representable rather than refusing to install, because
-    /// the caller learns the kind and opens the scope at the same moment and
-    /// should not have to branch.
-    recording: bool,
-    /// Which dispatch frame this buffer belongs to. See [`ensure_capture`];
-    /// a buffer whose generation is stale belongs to a handler that has
-    /// already returned and must not be read by the next one.
-    ///
-    /// `None` for a capture installed by the test-only [`Active`] guard,
-    /// which brackets its own lifetime explicitly and is never reset by
-    /// generation.
-    generation: Option<u64>,
-    entries: Vec<ReadSetEntry>,
-}
-
-thread_local! {
-    /// `Some(capture)` when read-set capture is active on this thread.
-    /// `None` outside any query handler (the default) — `record_if_active`
-    /// is a no-op then.
-    static CURRENT_BUFFER: RefCell<Option<Capture>> = const { RefCell::new(None) };
-}
-
-/// RAII guard that activates read-set capture on construction and
-/// returns the captured buffer on drop via [`Active::take`].
-///
-/// Construction is intentionally side-effecting: if a guard already
-/// exists on this thread we panic — nested query handlers don't make
-/// sense in the current dispatch model (every procedure runs to
-/// completion before another starts on the same isolate). The panic is
-/// a loud failure mode for the (currently impossible) case so future
-/// refactors that introduce nesting must explicitly engage with the
-/// capture-merge semantics.
-#[derive(Debug)]
-#[cfg(test)]
-pub struct Active {
-    _no_send: std::marker::PhantomData<*const ()>,
-}
-
-#[cfg(test)]
-impl Active {
-    /// Begin capturing. Subsequent [`record_if_active`] calls append to
-    /// this guard's buffer until [`Active::take`] or drop.
-    ///
-    /// `recording` is the caller's answer to "is the active procedure a
-    /// `Query`?" - read-set capture is a `query()`-only feature, and the layer
-    /// that opens the scope is the layer that knows the kind. Passing `false`
-    /// installs an inert scope: calls are dropped, `take` yields nothing.
-    pub fn begin(recording: bool) -> Self {
-        CURRENT_BUFFER.with(|c| {
-            let mut slot = c.borrow_mut();
-            assert!(
-                slot.is_none(),
-                "read-set capture already active on this thread"
-            );
-            *slot = Some(Capture {
-                recording,
-                generation: None,
-                entries: Vec::new(),
-            });
-        });
-        Self {
-            _no_send: std::marker::PhantomData,
-        }
-    }
-
-    /// End capture and return the buffer. After this the guard is
-    /// inert; dropping it is a no-op.
-    #[must_use]
-    pub fn take(self) -> Vec<ReadSetEntry> {
-        CURRENT_BUFFER
-            .with(|c| c.borrow_mut().take())
-            .map(|capture| capture.entries)
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-impl Drop for Active {
-    fn drop(&mut self) {
-        // Defensive: if `take` wasn't called, the buffer would leak
-        // into the next handler. Clear it.
-        CURRENT_BUFFER.with(|c| {
-            let _ = c.borrow_mut().take();
-        });
-    }
-}
-
-/// True if a read-set capture is active on this thread.
-pub fn is_active() -> bool {
-    CURRENT_BUFFER.with(|c| c.borrow().is_some())
-}
-
-/// Install a capture for dispatch frame `generation`, or keep the existing one
-/// if it already belongs to that frame.
-///
-/// # Why a generation and not an RAII guard
-///
-/// The production capture cannot be a guard held across the handler: the
-/// handler is JS, and the two Rust functions that bracket it
-/// (`__zsEnterKind` / `__zsExitKind`) live in `zeroship-runtime`, which sits
-/// BELOW this crate and must not call up into it. So the boundary is pulled
-/// rather than pushed - the caller passes the frame's generation, and a buffer
-/// tagged with an older one is discarded rather than inherited.
-///
-/// The kind alone cannot substitute. `current_kind()` reads `Some(Query)` for
-/// two consecutive query handlers exactly as it does for one; the `None`
-/// between them is only visible from inside the runtime.
-///
-/// `recording` is the caller's answer to "is this frame a `query()`?", for the
-/// same reason `Active::begin` takes it: the kind is ambient adapter state
-/// and this module does not reach for it.
-pub fn ensure_capture(generation: u64, recording: bool) {
-    CURRENT_BUFFER.with(|c| {
-        let mut slot = c.borrow_mut();
-        let stale = match slot.as_ref() {
-            // A test guard owns its own lifetime; never reset it from here.
-            Some(cap) => cap.generation.is_some_and(|g| g != generation),
-            None => true,
-        };
-        if stale || slot.is_none() {
-            *slot = Some(Capture {
-                recording,
-                generation: Some(generation),
-                entries: Vec::new(),
-            });
-        }
-    });
-}
-
-/// The entries recorded for `collection` in the current capture.
-///
-/// **Clones rather than drains.** One handler may open several subscriptions -
-/// `db.live(fn)` calls `subscribe(name)` once per collection the tracker saw -
-/// and each must get the read-set, so taking the buffer would leave every
-/// subscription after the first with nothing.
-///
-/// Filtered by collection because the emptiness of the RESULT is what the
-/// caller branches on, and an unfiltered non-empty buffer would let a
-/// subscription attach a read-set containing no entry for its own collection.
-/// `Subscription::accepts` skips non-matching entries and then returns
-/// `false`, so that subscription would go permanently silent.
-pub fn snapshot_for(collection: &str) -> Vec<ReadSetEntry> {
-    CURRENT_BUFFER.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|cap| {
-                cap.entries
-                    .iter()
-                    .filter(|e| e.collection == collection)
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default()
-    })
-}
+mod capture;
+pub use capture::{Capture, is_active};
 
 /// If a capture is active AND the active procedure kind is `Query`,
 /// append an entry built from `(collection, filter)`. No-op otherwise.
@@ -466,26 +308,20 @@ pub fn snapshot_for(collection: &str) -> Vec<ReadSetEntry> {
 ///
 /// **That gate is carried by the capture, not looked up here.** The kind is
 /// ambient adapter state; whoever opened the scope resolved it once, at the one
-/// moment it is unambiguous. See `Capture::recording`.
+/// moment it is unambiguous. See [`Capture::new`].
 ///
 /// `schema` is the collection's descriptor entry; every call site already holds
 /// one because the read builder it just called takes the same value. It is
 /// needed to lower a predicate on a masked column - see [`normalise_filter`].
 pub fn record_if_active(collection: &str, filter: &Value, schema: &FieldMap) {
-    if !is_active() {
+    if !capture::is_recording() {
         return;
     }
     let entry = ReadSetEntry {
         collection: collection.to_string(),
         predicate: normalise_filter(filter, schema),
     };
-    CURRENT_BUFFER.with(|c| {
-        if let Some(capture) = c.borrow_mut().as_mut() {
-            if capture.recording {
-                capture.entries.push(entry);
-            }
-        }
-    });
+    capture::record(entry);
 }
 
 // ---------------------------------------------------------------------------
@@ -668,115 +504,4 @@ mod tests {
         assert!(!entry.matches(&row(&[("userId", "99")])));
     }
 
-    // These tests cover capture lifetime and recording. Adapter tests cover the
-    // procedure-kind decision passed into capture.
-
-    #[test]
-    fn record_no_op_when_inactive() {
-        // No `Active::begin` — record should be a no-op.
-        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
-        assert!(!is_active());
-    }
-
-    /// **A recording scope still ends at its guard.** Distinct from the kind
-    /// gate: an inert scope drops entries, this one has none left to drop.
-    #[test]
-    fn drop_clears_buffer_even_without_take() {
-        {
-            let _g = Active::begin(true);
-            assert!(is_active());
-        }
-        assert!(!is_active(), "drop must clear the buffer");
-    }
-
-    // -----------------------------------------------------------------
-    // The production lifecycle: `ensure_capture` + `snapshot_for`.
-    //
-    // These bind the WIRING, not the predicate logic the tests above
-    // cover. Before the wiring landed, `Active::begin` had no production
-    // caller and `set_read_set` had none outside `broker.rs`'s own tests,
-    // so every subscription ran coarse.
-    // -----------------------------------------------------------------
-
-    /// The buffer must NOT survive into the next handler. Without the
-    /// generation check, one isolate thread serving two query handlers in a
-    /// row would attach the first handler's reads to the second's
-    /// subscription - delivering the wrong rows to the wrong subscriber.
-    #[test]
-    fn ensure_capture_resets_on_a_new_dispatch_generation() {
-        ensure_capture(1, true);
-        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
-        assert_eq!(snapshot_for("messages").len(), 1);
-
-        // Same frame: the buffer is kept and appended to.
-        ensure_capture(1, true);
-        record_if_active("messages", &value!({ "userId": 7 }), &FieldMap::new());
-        assert_eq!(snapshot_for("messages").len(), 2, "same frame must append");
-
-        // New frame: the buffer is discarded.
-        ensure_capture(2, true);
-        assert!(
-            snapshot_for("messages").is_empty(),
-            "a new dispatch generation must not inherit the previous frame's reads"
-        );
-        CURRENT_BUFFER.with(|c| {
-            let _ = c.borrow_mut().take();
-        });
-    }
-
-    /// `snapshot_for` clones. `db.live(fn)` opens one subscription per
-    /// collection the tracker saw, so a draining read would leave every
-    /// subscription after the first with nothing.
-    #[test]
-    fn snapshot_for_clones_and_filters_by_collection() {
-        ensure_capture(10, true);
-        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
-        record_if_active("todos", &value!({ "done": false }), &FieldMap::new());
-
-        assert_eq!(snapshot_for("messages").len(), 1);
-        assert_eq!(
-            snapshot_for("messages").len(),
-            1,
-            "snapshot must clone, not drain - the second subscription needs it too"
-        );
-        assert_eq!(snapshot_for("todos").len(), 1);
-        assert_eq!(snapshot_for("messages")[0].collection, "messages");
-        CURRENT_BUFFER.with(|c| {
-            let _ = c.borrow_mut().take();
-        });
-    }
-
-    /// The cliff `v8_classes::subscription` guards against. `accepts` reads
-    /// `Some(vec![])` as "take nothing" (`broker`'s
-    /// `b8b_empty_read_set_filters_everything_on_collection`), so a
-    /// subscription on a collection this handler never read must be left
-    /// coarse rather than handed an empty set - otherwise it goes silent,
-    /// which is strictly worse than the delivery it replaced.
-    #[test]
-    fn snapshot_for_is_empty_when_that_collection_was_never_read() {
-        ensure_capture(20, true);
-        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
-        assert!(
-            snapshot_for("todos").is_empty(),
-            "an unread collection yields nothing, so the caller must skip set_read_set"
-        );
-        CURRENT_BUFFER.with(|c| {
-            let _ = c.borrow_mut().take();
-        });
-    }
-
-    /// A non-query frame installs an inert capture, so a `mutation` that
-    /// opens a subscription attaches no read-set and stays coarse.
-    #[test]
-    fn ensure_capture_is_inert_when_not_recording() {
-        ensure_capture(30, false);
-        record_if_active("messages", &value!({ "userId": 42 }), &FieldMap::new());
-        assert!(
-            snapshot_for("messages").is_empty(),
-            "a non-query frame must record nothing"
-        );
-        CURRENT_BUFFER.with(|c| {
-            let _ = c.borrow_mut().take();
-        });
-    }
 }
