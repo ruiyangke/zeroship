@@ -920,7 +920,7 @@ mod tests {
             .uri(&format!("/dispatch/{}", app_id.as_str()))
             .header(
                 "authorization",
-                crate::handler::tests::gateway_authorization(),
+                crate::identity_fixture::gateway_authorization(),
             )
             .set_payload(frame)
             .to_request()
@@ -1024,7 +1024,7 @@ mod tests {
 
             let logs = crate::logs::new_store();
             let config = Arc::new(crate::WorkerConfig {
-                service_auth: crate::handler::tests::test_service_auth(),
+                service_auth: crate::identity_fixture::service_auth(),
                 // Dead port: this scenario must not need the control plane
                 // (SharedEnvs is already current when PHASE 2 swaps).
                 control_url: "http://127.0.0.1:1".to_string(),

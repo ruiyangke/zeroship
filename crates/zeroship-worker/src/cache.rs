@@ -14,6 +14,9 @@ use zeroship_runtime::{EnvSnapshot, ModuleEntry, NetPolicy};
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::{Runtime, RuntimeLimits};
 
+#[cfg(test)]
+pub(crate) mod fixture;
+
 struct IsolateEntry {
     runtime: Runtime,
     last_used: std::time::Instant,
