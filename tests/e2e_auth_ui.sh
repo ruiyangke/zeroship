@@ -168,16 +168,10 @@ bash "$PROJECT/scripts/link-playwright.sh" \
   || die "could not link the Nix Playwright test package"
 
 step "Build release binaries"
-# These are the three JS files embedded by the runtime dependency graph. Build
-# their two owning packages every time so a present but stale dist file cannot
-# enter a freshly compiled release binary. The scoped build does not touch the
-# vendored N-API package under third_party.
+# Build the database facade before compiling the native adapter that embeds it.
 pnpm --filter @zeroship/db build >"$BUILD_LOG" 2>&1 \
   || fail_from_log "$BUILD_LOG" "database SDK prerequisite build"
-pnpm --filter @zeroship/bootstrap build >>"$BUILD_LOG" 2>&1 \
-  || fail_from_log "$BUILD_LOG" "bootstrap SDK prerequisite build"
 for path in \
-  "$ROOT/sdks/bootstrap/dist/runtime-entry.js" \
   "$ROOT/sdks/db/dist/internal.js"; do
   [ -f "$path" ] || die "SDK build did not produce $path"
 done

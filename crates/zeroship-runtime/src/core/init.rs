@@ -571,8 +571,8 @@ async function wfReadStepOutputBytes(outputRead, name, occurrence) {
     return outputRead(name, occurrence);
 }
 
-// Runtime dispatcher copy: keep behavior in lock-step with
-// sdks/bootstrap/src/dispatcher.ts and sdks/workflows/src/journal.ts.
+// Runtime workflow drain barrier. The workflow SDK owns the related journal
+// behavior.
 class ZsDispatchMicrotaskQuiescenceBarrier {
     #version = 0;
     #stopped = false;

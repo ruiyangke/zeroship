@@ -272,12 +272,10 @@ test("generated imports contain only application targets", () => {
     const code = buildServerEntrySource({ userEntryRel: "./user.mjs", bindings });
     const allowed = new Set(["./user.mjs", "./bound.mjs"]);
     assertEntryImports(code, allowed);
-    for (const forbidden of ["@zeroship/db/internal", "@zeroship/bootstrap/fetch-handler"]) {
-      assert.throws(
-        () => assertEntryImports(code + "\nimport " + JSON.stringify(forbidden) + ";", allowed),
-        /unexpected entry import/,
-      );
-    }
+    assert.throws(
+      () => assertEntryImports(code + '\nimport "@zeroship/db/internal";', allowed),
+      /unexpected entry import/,
+    );
   }
   assert.throws(() => assertEntryImports("export default {};", new Set()), /application targets/);
 });

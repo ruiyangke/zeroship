@@ -1430,26 +1430,6 @@ importers:
         specifier: workspace:*
         version: link:../..
 
-  sdks/bootstrap:
-    dependencies:
-      '@zeroship/types':
-        specifier: workspace:*
-        version: link:../types
-    devDependencies:
-      tsx:
-        specifier: 'catalog:'
-        version: 4.21.0
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
-      zeroship:
-        specifier: workspace:*
-        version: link:../..
-    optionalDependencies:
-      superjson:
-        specifier: ^2.2.6
-        version: 2.2.6
-
   sdks/control:
     devDependencies:
       '@arethetypeswrong/cli':
