@@ -117,7 +117,8 @@ impl Queue {
             .await
     }
 
-    /// Submit immutable metadata; an outbox retry uses the same job identity.
+    /// Submit immutable metadata from a trusted manager operation.
+    /// Worker publication uses [`Self::submit_authorized`] to fence its outbox retry.
     ///
     /// # Errors
     /// Refuses unknown apps, reused identities with different content and storage failures.
@@ -126,6 +127,45 @@ impl Queue {
         self.transact(|tx| async move {
             lock_scope(&tx, &job.app_id).await?;
             self.insert(&tx, job, self.clock.now().await?).await?;
+            Ok(job.clone())
+        })
+        .await
+    }
+
+    /// Publish an app's immutable job under its current host-authenticated assignment.
+    /// Invoke the host's enrollment and placement checks after the app lock and
+    /// before commit, including exact publication retries. The callback receives the active
+    /// transaction so placement reads share the queue's serialization boundary.
+    /// The host must separately authorize the requested operation's provenance.
+    ///
+    /// # Errors
+    /// Refuses foreign apps, revoked authority, changed job identities and failed transactions.
+    pub async fn submit_authorized<F, Fut>(
+        &self,
+        assignment: &Assignment,
+        job: &JobSpec,
+        mut authorize: F,
+    ) -> Result<JobSpec, Error>
+    where
+        F: FnMut(Database) -> Fut,
+        Fut: Future<Output = Result<Assignment, Error>>,
+    {
+        if job.app_id != assignment.app_id {
+            return Err(Error::Denied);
+        }
+        self.encode(job)?;
+        let budget = Budget::new(self.options.transaction_timeout);
+        self.transact_for(budget.clone(), |tx| async move {
+            lock_scope(&tx, &assignment.app_id).await?;
+            let observed = authorize(tx.clone()).await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            budget.cap(sample, authority.expires_at.get())?;
+            self.insert(&tx, job, sample.millis).await?;
+            let observed = authorize(tx.clone()).await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            budget.cap(sample, authority.expires_at.get())?;
             Ok(job.clone())
         })
         .await

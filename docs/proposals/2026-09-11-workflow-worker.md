@@ -378,6 +378,39 @@ the worker and allowable app; all referenced jobs, deployments and successors
 must agree with that scope. Unknown or cross-app references must not become a
 probe into another tenant's state through differing payloads or diagnostics.
 
+### Authenticated delivery boundary
+
+The HTTP cutover must expose the following worker requests through the existing
+bounded, authenticated metadata transport. These are the required host contracts;
+the current queue library alone does not expose these production endpoints.
+
+| Operation | Request metadata | Authority and reply checks |
+| --- | --- | --- |
+| Submit | Assigned app/revision and immutable job specification. | Current enrolled signer and stored placement; exact specification in the receipt. |
+| Claim | Assigned app/revision. | Current enrolled signer and stored placement; delivered app, worker and assignment revision must match. |
+| Heartbeat | Delivery identity. | Stored attempt and live lease; reply preserves the immutable job, worker, assignment revision and attempt. |
+| Settle | Delivery, closed outcome and immutable successors. | Active delivery authority for writes, or original-worker enrollment for an exact stored receipt; reply matches app, job, attempt and outcome. |
+
+Derive worker identity from the verified instance signer. An echoed worker must
+match it. A request cannot supply its own assignment expiry. Resolve placement
+from manager records, and perform revalidation inside the queue transaction after
+the app lock and before commit. The enrollment check retains the originally
+verified key identity; a replacement key under the same worker ID must not keep
+an earlier key's pending request authorized. Revalidation queries registry state
+without consuming the signed assertion's replay token again.
+
+App placement grants scoped execution and publication, not manager scheduling
+authority. Worker submission and successors must reject manager-origin cron and
+management operations unless they resolve to matching authoritative manager
+records. Normal manager scheduling uses the trusted native submission path.
+Operation provenance is additional to the queue's app and identity checks.
+
+An exact settled receipt may outlive its original placement. Do not reject it in
+a current-placement preflight before the queue can select its receipt-replay
+branch. That branch checks current enrollment of the original worker, compares
+the stored complete settlement identity and admits no new successor writes.
+Changing the job, attempt, outcome or successor contents is a conflict.
+
 ### Delivery, execution and settlement
 
 ```text
