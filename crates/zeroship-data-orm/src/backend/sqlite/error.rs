@@ -22,6 +22,7 @@
 //! from `libsqlite3_sys` constants (which would force a `use` for
 //! each — the integers are part of the SQLite stable ABI).
 
+use rusqlite::ffi::SQLITE_CONSTRAINT_PRIMARYKEY;
 use zeroship_data_orm::error::DbError;
 
 // ---------------------------------------------------------------------------
@@ -98,14 +99,12 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
             DbError::LockContention { message: msg }
         }
 
-        // Unique violation — wire `.code = "unique_violation"`,
-        // wrapped in a SchemaRefused envelope so the SDK's
-        // existing PG-side unique-violation parser sees a uniform
-        // wire payload across backends. The envelope mirrors the
-        // `cic_failed` shape the PG IndexBuilder emits at
-        // `crates/zeroship-data-orm/src/backend/postgres/implementation.rs`.
+        // Primary keys and unique indexes share the same conflict contract.
         rusqlite::Error::SqliteFailure(ffi_err, _)
-            if ffi_err.extended_code == SQLITE_CONSTRAINT_UNIQUE =>
+            if matches!(
+                ffi_err.extended_code,
+                SQLITE_CONSTRAINT_PRIMARYKEY | SQLITE_CONSTRAINT_UNIQUE
+            ) =>
         {
             DbError::SchemaRefused {
                 code: "unique_violation",

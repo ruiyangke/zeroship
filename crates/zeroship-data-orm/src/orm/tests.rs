@@ -6,6 +6,7 @@ schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
 use test_schema::posts;
 
 mod bulk;
+mod conflicts;
 mod calendar_date;
 mod dynamic_reads;
 mod encrypted_upsert;
