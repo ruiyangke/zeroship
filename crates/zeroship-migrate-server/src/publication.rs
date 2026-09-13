@@ -127,7 +127,6 @@ async fn reconcile_in_transaction(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use compio_postgres::NoTls;
     use uuid::Uuid;
 
     #[test]
@@ -162,14 +161,7 @@ mod tests {
 
     #[compio::test]
     async fn reconciliation_publishes_prefixed_tables_but_not_partition_children() {
-        let (client, connection) =
-            compio_postgres::connect(&zeroship_core::config::test_database_url(), NoTls)
-                .await
-                .expect("connect to the migrate-server test database");
-        compio::runtime::spawn(async move {
-            let _ = connection.run().await;
-        })
-        .detach();
+        let client = crate::test_database::connect().await;
 
         let app = AppId::mint();
         let schema = app_derivation::schema_name(&app);

@@ -5,9 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::app_derivation;
-use zeroship_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_core::schema_name::SchemaName;
+use zeroship_id::AppId;
 use zeroship_id::UserId;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
@@ -1749,27 +1749,10 @@ fn scratch_app_id(schema: &str) -> AppId {
 #[cfg(test)]
 mod live_audit_unmask_provisioning {
     use super::*;
-    use compio_postgres::NoTls;
     use zeroship_migrate_postgres::role::migrator_role_name;
 
-    /// The database these cases dial. The DSN is typed config
-    /// (`zeroship_core::config::test_database_url`, backed by the overlay at
-    /// `deploy/ops/zeroship.test.toml` or the pre-existing `PG_TEST_URL`
-    /// override) - this module introduces no environment variable of its own
-    /// and sets none.
-    fn test_dsn() -> String {
-        zeroship_core::config::test_database_url()
-    }
-
     async fn admin_client() -> compio_postgres::Client {
-        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
-            .await
-            .expect("connect to the migrate-server test database");
-        compio::runtime::spawn(async move {
-            let _ = conn.run().await;
-        })
-        .detach();
-        client
+        crate::test_database::connect().await
     }
 
     /// A scratch app schema derived from a real minted [`AppId`], because
@@ -2123,22 +2106,14 @@ mod live_audit_unmask_provisioning {
 #[cfg(test)]
 mod live_creator_schema_table_privileges {
     use super::*;
-    use compio_postgres::NoTls;
     use zeroship_migrate_postgres::role::migrator_role_name;
 
     fn test_dsn() -> String {
-        zeroship_core::config::test_database_url()
+        crate::test_database::url().to_owned()
     }
 
     async fn admin_client() -> compio_postgres::Client {
-        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
-            .await
-            .expect("connect to the migrate-server test database");
-        compio::runtime::spawn(async move {
-            let _ = conn.run().await;
-        })
-        .detach();
-        client
+        crate::test_database::connect().await
     }
 
     /// Drop everything a case created, by name. Roles are CLUSTER-wide, so a
@@ -2519,25 +2494,9 @@ mod live_creator_schema_table_privileges {
 #[cfg(test)]
 mod live_worker_role_fence {
     use super::*;
-    use compio_postgres::NoTls;
-
-    /// The database these cases dial. Typed config
-    /// (`zeroship_core::config::test_database_url`, backed by the overlay at
-    /// `deploy/ops/zeroship.test.toml` or the pre-existing `PG_TEST_URL`
-    /// override) - this module introduces no environment variable and sets none.
-    fn test_dsn() -> String {
-        zeroship_core::config::test_database_url()
-    }
 
     async fn admin_client() -> compio_postgres::Client {
-        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
-            .await
-            .expect("connect to the migrate-server test database");
-        compio::runtime::spawn(async move {
-            let _ = conn.run().await;
-        })
-        .detach();
-        client
+        crate::test_database::connect().await
     }
 
     /// Every object a case creates carries this prefix, so teardown can name
