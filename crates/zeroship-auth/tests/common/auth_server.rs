@@ -40,7 +40,23 @@ impl AuthServer {
         database: &Database,
         mailer: Arc<dyn zeroship_mailer::Mailer>,
     ) -> Self {
-        Self::build(database, None, &[], Some(mailer), None).await
+        Self::build(database, None, &[], Some(mailer), None, None).await
+    }
+
+    pub async fn with_relay_mailer(
+        database: &Database,
+        mailer: Arc<dyn zeroship_mailer::Mailer>,
+        extra: &[&str],
+    ) -> Self {
+        Self::build(
+            database,
+            None,
+            extra,
+            None,
+            Some(zeroship_mailer::RelayForwardMailer(mailer)),
+            None,
+        )
+        .await
     }
 
     pub async fn configured(
@@ -48,11 +64,11 @@ impl AuthServer {
         issuer: Option<Arc<Issuer>>,
         extra: &[&str],
     ) -> Self {
-        Self::build(database, issuer, extra, None, None).await
+        Self::build(database, issuer, extra, None, None, None).await
     }
 
     pub async fn with_listener(database: &Database, listener: TcpListener, extra: &[&str]) -> Self {
-        Self::build(database, None, extra, None, Some(listener)).await
+        Self::build(database, None, extra, None, None, Some(listener)).await
     }
 
     async fn build(
@@ -60,6 +76,7 @@ impl AuthServer {
         issuer: Option<Arc<Issuer>>,
         extra: &[&str],
         mailer: Option<Arc<dyn zeroship_mailer::Mailer>>,
+        relay_mailer: Option<zeroship_mailer::RelayForwardMailer>,
         listener: Option<TcpListener>,
     ) -> Self {
         let database_url = database.auth_url().to_string();
@@ -89,6 +106,7 @@ impl AuthServer {
             let refresh_pool = pool_state.clone();
             let issuer = issuer.clone();
             let mailer = mailer.clone();
+            let relay_mailer = relay_mailer.clone();
             let google_jwks = google_jwks.clone();
             let frame_ancestor_origins = frame_ancestor_origins.clone();
             async move {
@@ -108,8 +126,13 @@ impl AuthServer {
                 } else {
                     app
                 };
-                if let Some(mailer) = mailer {
+                let app = if let Some(mailer) = mailer {
                     app.state(mailer)
+                } else {
+                    app
+                };
+                if let Some(relay_mailer) = relay_mailer {
+                    app.state(relay_mailer)
                 } else {
                     app
                 }
