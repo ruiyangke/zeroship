@@ -1,15 +1,15 @@
 //! `zeroship secret` / `zeroship var` subcommands.
 //!
 //! Shape:
-//!   zeroship secret set  KEY=value   --app=<uuid> [--expose] [--control=URL] [--token=TOKEN]
-//!   zeroship secret list             --app=<uuid> [...]
-//!   zeroship secret rm   KEY         --app=<uuid> [...]
-//!   zeroship secret expose      KEY  --app=<uuid> [...]
-//!   zeroship secret unexpose    KEY  --app=<uuid> [...]
-//!   zeroship secret expose-list      --app=<uuid> [...]
-//!   zeroship var    set  KEY=value   --app=<uuid> [...]
-//!   zeroship var    list             --app=<uuid>
-//!   zeroship var    rm   KEY         --app=<uuid>
+//!   zeroship secret set  KEY=value   --app=<id> [--expose] [--control=URL] [--token=TOKEN]
+//!   zeroship secret list             --app=<id> [...]
+//!   zeroship secret rm   KEY         --app=<id> [...]
+//!   zeroship secret expose      KEY  --app=<id> [...]
+//!   zeroship secret unexpose    KEY  --app=<id> [...]
+//!   zeroship secret expose-list      --app=<id> [...]
+//!   zeroship var    set  KEY=value   --app=<id> [...]
+//!   zeroship var    list             --app=<id>
+//!   zeroship var    rm   KEY         --app=<id>
 //!
 //! The expose list is the per-app opt-in that decides which *secrets*
 //! also appear in `process.env` (and `globalThis.__env__`). The zeroship
@@ -25,9 +25,10 @@
 use std::process::{Command, Stdio};
 
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use zeroship_core::AppId;
 
 use crate::project_config;
-use crate::{flag_str, resolve_bearer_token};
+use crate::{app_id_or_refuse, flag_str, resolve_bearer_token};
 
 const KEY_RULE: &str = "KEY must be 1-64 bytes, start with an ASCII uppercase letter, and contain only ASCII uppercase letters, digits, or underscores";
 
@@ -94,12 +95,12 @@ fn usage(resource: &str) {
         eprintln!(
             concat!(
                 "Usage:\n",
-                "  zeroship secret set  KEY=value --app=<uuid> [--expose] [--control=URL] [--token=TOKEN]\n",
-                "  zeroship secret list           --app=<uuid> [--control=URL] [--token=TOKEN]\n",
-                "  zeroship secret rm   KEY       --app=<uuid> [--control=URL] [--token=TOKEN]\n",
-                "  zeroship secret expose      KEY --app=<uuid> [--control=URL] [--token=TOKEN]\n",
-                "  zeroship secret unexpose    KEY --app=<uuid> [--control=URL] [--token=TOKEN]\n",
-                "  zeroship secret expose-list     --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret set  KEY=value --app=<id> [--expose] [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret list           --app=<id> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret rm   KEY       --app=<id> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret expose      KEY --app=<id> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret unexpose    KEY --app=<id> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship secret expose-list     --app=<id> [--control=URL] [--token=TOKEN]\n",
                 "\n",
                 "Secrets are encrypted at rest and always readable from the zeroship `env`\n",
                 "object. They reach `process.env` (where any npm dependency can read them)\n",
@@ -110,9 +111,9 @@ fn usage(resource: &str) {
         eprintln!(
             concat!(
                 "Usage:\n",
-                "  zeroship var set  KEY=value --app=<uuid> [--control=URL] [--token=TOKEN]\n",
-                "  zeroship var list           --app=<uuid> [--control=URL] [--token=TOKEN]\n",
-                "  zeroship var rm   KEY       --app=<uuid> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship var set  KEY=value --app=<id> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship var list           --app=<id> [--control=URL] [--token=TOKEN]\n",
+                "  zeroship var rm   KEY       --app=<id> [--control=URL] [--token=TOKEN]\n",
                 "\n",
                 "Vars are stored in PLAINTEXT and are always visible in both `env` and\n",
                 "`process.env`. For credentials use `zeroship secret set` instead.",
@@ -171,7 +172,7 @@ fn check_unknown_flags(resource: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn common(resource: &str, args: &[String]) -> (String, String, String) {
+fn common(resource: &str, args: &[String]) -> (AppId, String, String) {
     let label = if resource == "secrets" { "secret" } else { "var" };
     let die = |e: String| -> ! {
         eprintln!("zeroship {label}: {e}");
@@ -204,7 +205,8 @@ fn common(resource: &str, args: &[String]) -> (String, String, String) {
     let token = resolve_bearer_token(args).unwrap_or_else(|e| die(e));
 
     project_config::print_provenance(label, &[("app", &app), ("control", &control_url)]);
-    (app.value, control_url.value, token)
+    let app_id = app_id_or_refuse(&app.value).unwrap_or_else(|e| die(e));
+    (app_id, control_url.value, token)
 }
 
 fn cmd_set(resource: &str, args: &[String]) {
@@ -237,7 +239,7 @@ fn cmd_set(resource: &str, args: &[String]) {
         eprintln!("{resource}: set failed ({status}): {body_out}");
         std::process::exit(1);
     }
-    eprintln!("{resource}: set {key} on {app}");
+    eprintln!("{resource}: set {key} on {}", app.as_str());
 
     // Say, at the point of use, which surface the value landed on. A
     // creator who reads nothing else reads this line.
@@ -277,7 +279,7 @@ fn cmd_rm(resource: &str, args: &[String]) {
     let key = positional(args);
     if key.is_empty() {
         eprintln!(
-            "error: missing KEY (e.g. `zeroship {} rm FOO --app=<uuid>`)",
+            "error: missing KEY (e.g. `zeroship {} rm FOO --app=<id>`)",
             if resource == "secrets" { "secret" } else { "var" }
         );
         std::process::exit(1);
@@ -287,9 +289,9 @@ fn cmd_rm(resource: &str, args: &[String]) {
     let url = resource_url(&control_url, &app, resource, Some(&key));
     let (status, body) = curl_json("DELETE", &url, &token, None);
     match status {
-        204 => eprintln!("{resource}: removed {key} from {app}"),
+        204 => eprintln!("{resource}: removed {key} from {}", app.as_str()),
         404 => {
-            eprintln!("{resource}: {key} not found on {app}");
+            eprintln!("{resource}: {key} not found on {}", app.as_str());
             std::process::exit(1);
         }
         _ => {
@@ -333,7 +335,7 @@ fn cmd_expose(resource: &str, args: &[String], change: ExposeChange) {
     let key = positional(args);
     if key.is_empty() {
         eprintln!(
-            "error: missing KEY (e.g. `zeroship secret {} OPENAI_API_KEY --app=<uuid>`)",
+            "error: missing KEY (e.g. `zeroship secret {} OPENAI_API_KEY --app=<id>`)",
             change.verb()
         );
         std::process::exit(1);
@@ -348,7 +350,7 @@ fn cmd_expose_list(resource: &str, args: &[String]) {
     let (app, control_url, token) = common(resource, args);
     let names = fetch_expose(&control_url, &app, &token);
     if names.is_empty() {
-        eprintln!("secrets: no secrets are exposed to process.env on {app}");
+        eprintln!("secrets: no secrets are exposed to process.env on {}", app.as_str());
     } else {
         for name in names {
             println!("{name}");
@@ -360,15 +362,15 @@ fn cmd_expose_list(resource: &str, args: &[String]) {
 /// whole list, so we must GET the current names first and PUT the union
 /// (or the remainder). PUTting a bare single name would silently
 /// un-expose every other secret on the app.
-fn apply_expose(app: &str, control_url: &str, token: &str, key: &str, change: ExposeChange) {
+fn apply_expose(app: &AppId, control_url: &str, token: &str, key: &str, change: ExposeChange) {
     let current = fetch_expose(control_url, app, token);
     let Some(next) = merge_expose(&current, key, change) else {
         match change {
             ExposeChange::Add => {
-                eprintln!("secrets: {key} is already exposed to process.env on {app}")
+                eprintln!("secrets: {key} is already exposed to process.env on {}", app.as_str())
             }
             ExposeChange::Remove => {
-                eprintln!("secrets: {key} is not exposed to process.env on {app}")
+                eprintln!("secrets: {key} is not exposed to process.env on {}", app.as_str())
             }
         }
         return;
@@ -387,13 +389,13 @@ fn apply_expose(app: &str, control_url: &str, token: &str, key: &str, change: Ex
     match change {
         ExposeChange::Add => eprintln!(
             "secrets: {key} is now readable as process.env.{key} (and stays in env.{key}); \
-             {} secret(s) exposed on {app}",
-            next.len()
+             {} secret(s) exposed on {}",
+            next.len(), app.as_str()
         ),
         ExposeChange::Remove => eprintln!(
             "secrets: {key} no longer reaches process.env (still readable as env.{key}); \
-             {} secret(s) exposed on {app}",
-            next.len()
+             {} secret(s) exposed on {}",
+            next.len(), app.as_str()
         ),
     }
 }
@@ -414,10 +416,10 @@ fn merge_expose(current: &[String], key: &str, change: ExposeChange) -> Option<V
     Some(next)
 }
 
-fn expose_url(control_url: &str, app: &str) -> String {
+fn expose_url(control_url: &str, app: &AppId) -> String {
     format!(
         "{control_url}/api/apps/{}/env/expose",
-        encode_path_segment(app)
+        encode_path_segment(app.as_str())
     )
 }
 
@@ -425,7 +427,7 @@ fn expose_url(control_url: &str, app: &str) -> String {
 /// response we can't parse) exits. Falling back to "assume empty" here
 /// would turn a read error into a silent wipe of the whole list on the
 /// PUT that follows.
-fn fetch_expose(control_url: &str, app: &str, token: &str) -> Vec<String> {
+fn fetch_expose(control_url: &str, app: &AppId, token: &str) -> Vec<String> {
     let url = expose_url(control_url, app);
     let (status, body) = curl_json("GET", &url, token, None);
     if !(200..300).contains(&status) {
@@ -466,8 +468,8 @@ fn valid_key(key: &str) -> bool {
             .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'_')
 }
 
-fn resource_url(control_url: &str, app: &str, resource: &str, key: Option<&str>) -> String {
-    let app = encode_path_segment(app);
+fn resource_url(control_url: &str, app: &AppId, resource: &str, key: Option<&str>) -> String {
+    let app = encode_path_segment(app.as_str());
     let resource = encode_path_segment(resource);
     let mut url = format!("{control_url}/api/apps/{app}/{resource}");
     if let Some(key) = key {
@@ -561,6 +563,11 @@ const SECRET_VERB_SCOPES: &[(&str, &str)] = &[
 mod tests {
     use super::*;
     use zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES;
+
+    fn app_id() -> AppId {
+        AppId::parse("app_034klb07lrb9jgma6imvmx000")
+            .expect("test app id must be canonical")
+    }
 
     /// The peer of `every_shipped_verb_names_a_scope_the_cli_can_be_issued` in
     /// `crate::organizations`, for the tool next door.
@@ -704,10 +711,10 @@ mod tests {
     }
 
     #[test]
-    fn expose_url_percent_encodes_the_app_segment() {
+    fn expose_url_uses_the_typed_app_id() {
         assert_eq!(
-            expose_url("https://control.example.test", "app/other?x#y"),
-            "https://control.example.test/api/apps/app%2Fother%3Fx%23y/env/expose"
+            expose_url("https://control.example.test", &app_id()),
+            "https://control.example.test/api/apps/app_034klb07lrb9jgma6imvmx000/env/expose"
         );
     }
 
@@ -727,20 +734,15 @@ mod tests {
         assert_eq!(
             resource_url(
                 "https://control.example.test",
-                "app/other?x#y",
+                &app_id(),
                 "secrets",
                 Some("FOO?x#y/%2F")
             ),
-            "https://control.example.test/api/apps/app%2Fother%3Fx%23y/secrets/FOO%3Fx%23y%2F%252F"
+            "https://control.example.test/api/apps/app_034klb07lrb9jgma6imvmx000/secrets/FOO%3Fx%23y%2F%252F"
         );
         assert_eq!(
-            resource_url(
-                "https://control.example.test",
-                "..",
-                "secrets",
-                Some("FOO")
-            ),
-            "https://control.example.test/api/apps/%2E%2E/secrets/FOO"
+            encode_path_segment(".."),
+            "%2E%2E"
         );
     }
 }

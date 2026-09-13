@@ -12,6 +12,10 @@
 
 use super::*;
 
+fn app_id(raw: &str) -> AppId {
+    AppId::parse(raw).expect("test app id must be canonical")
+}
+
 fn cfg(text: &str) -> ProjectConfig {
     ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text.to_string())
         .expect("fixture must parse")
@@ -21,7 +25,7 @@ const FULL: &str = r#"{
   // A comment, which is the whole reason the format is JSONC.
   "$schema": "https://zeroship.ai/schema/project-v1.json",
   "name": "demo-app",
-  "app": "11111111-1111-4111-8111-111111111111",
+  "app": "app_034klb07lrb9jgma6imvmx000",
   "control": "https://control.zeroship.ai",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
@@ -29,7 +33,7 @@ const FULL: &str = r#"{
   "secrets": ["STRIPE_SECRET_KEY"],
   "environments": {
     "staging": {
-      "app": "22222222-2222-4222-8222-222222222222",
+      "app": "app_034klb07lrb9jgma6imvmx001",
       "control": "https://control.staging.zeroship.ai",
       "protected": true,
       "migrations": { "out": "generated/staging" }
@@ -41,7 +45,7 @@ const FULL: &str = r#"{
 #[test]
 fn root_resolution_drops_the_environments_block() {
     let r = cfg(FULL).resolve(None).expect("resolve root");
-    assert_eq!(r.str("app"), Some("11111111-1111-4111-8111-111111111111"));
+    assert_eq!(r.str("app"), Some("app_034klb07lrb9jgma6imvmx000"));
     assert_eq!(r.str("control"), Some("https://control.zeroship.ai"));
     assert_eq!(r.str("migrations.out"), Some("generated/zeroship"));
     assert!(r.get("environments").is_none(), "environments must not survive resolution");
@@ -54,7 +58,7 @@ fn root_resolution_drops_the_environments_block() {
 #[test]
 fn environment_overlay_replaces_target_and_merges_the_rest() {
     let r = cfg(FULL).resolve(Some("staging")).expect("resolve staging");
-    assert_eq!(r.str("app"), Some("22222222-2222-4222-8222-222222222222"));
+    assert_eq!(r.str("app"), Some("app_034klb07lrb9jgma6imvmx001"));
     assert_eq!(r.str("control"), Some("https://control.staging.zeroship.ai"));
     assert_eq!(r.str("migrations.out"), Some("generated/staging"));
     // NOT stated by the environment, so inherited.
@@ -69,7 +73,7 @@ fn environment_overlay_replaces_target_and_merges_the_rest() {
 #[test]
 fn an_environment_without_both_app_and_control_is_refused() {
     let text = FULL.replace(
-        "\"app\": \"22222222-2222-4222-8222-222222222222\",\n      ",
+        "\"app\": \"app_034klb07lrb9jgma6imvmx001\",\n      ",
         "",
     );
     let err = ProjectConfig::parse(PathBuf::from("zeroship.jsonc"), text)
@@ -398,7 +402,7 @@ fn the_compiled_fallback_survives_only_when_there_is_no_file() {
     // `app`, the one CLI-read key the schema deliberately leaves optional
     // (a fresh project has no app id yet).
     let silent_file = cfg(&FULL.replace(
-        "\"app\": \"11111111-1111-4111-8111-111111111111\",",
+        "\"app\": \"app_034klb07lrb9jgma6imvmx000\",",
         "",
     ));
     let r = silent_file.resolve(None).expect("parses without app");
@@ -600,13 +604,13 @@ fn write_app_splices_the_value_and_leaves_every_other_byte() {
     std::fs::write(&path, FULL).unwrap();
 
     let c = ProjectConfig::load(&path).unwrap();
-    c.write_app("33333333-3333-4333-8333-333333333333")
+    c.write_app(&app_id("app_034klb07lrb9jgma6imvmx002"))
         .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
     let expected = FULL.replace(
-        "\"11111111-1111-4111-8111-111111111111\"",
-        "\"33333333-3333-4333-8333-333333333333\"",
+        "\"app_034klb07lrb9jgma6imvmx000\"",
+        "\"app_034klb07lrb9jgma6imvmx002\"",
     );
     assert_eq!(after, expected, "the splice touched something other than the app value");
     assert!(after.contains("// A comment"), "the comment must survive");
@@ -635,7 +639,7 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
     );
     let expected = text.replacen(
         "\r\n}\r\n",
-        "\r\n  \"app\": \"44444444-4444-4444-8444-444444444444\",\r\n}\r\n",
+        "\r\n  \"app\": \"app_034klb07lrb9jgma6imvmx003\",\r\n}\r\n",
         1,
     );
     let dir = tempfile::tempdir().unwrap();
@@ -644,7 +648,7 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
 
     let config = ProjectConfig::load(&path).unwrap();
     config
-        .write_app("44444444-4444-4444-8444-444444444444")
+        .write_app(&app_id("app_034klb07lrb9jgma6imvmx003"))
         .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
@@ -658,7 +662,7 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
             .resolve(None)
             .unwrap()
             .str("app"),
-        Some("44444444-4444-4444-8444-444444444444"),
+        Some("app_034klb07lrb9jgma6imvmx003"),
         "the Rust reader must accept the written file"
     );
 }
@@ -666,7 +670,7 @@ fn write_app_appends_a_missing_member_without_reformatting_the_file() {
 #[test]
 fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
     let original = FULL.replace(
-        "  \"app\": \"11111111-1111-4111-8111-111111111111\",\n",
+        "  \"app\": \"app_034klb07lrb9jgma6imvmx000\",\n",
         "",
     );
     let creator_edit = original.replace(
@@ -680,7 +684,7 @@ fn write_app_refuses_to_overwrite_a_file_changed_since_load() {
     let config = ProjectConfig::load(&path).unwrap();
     std::fs::write(&path, &creator_edit).unwrap();
     let error = config
-        .write_app("99999999-9999-4999-8999-999999999999")
+        .write_app(&app_id("app_034klb07lrb9jgma6imvmx008"))
         .expect_err("writeback must refuse a file edited after load");
 
     assert!(error.contains("changed since it was loaded"), "{error}");
@@ -720,7 +724,7 @@ fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },
   "migrations": { "dir": "migrations", "out": "generated/zeroship" },
   "secrets": [],
-  "app": "66666666-6666-4666-8666-666666666666"
+  "app": "app_034klb07lrb9jgma6imvmx005"
 }
 "#;
     let dir = tempfile::tempdir().unwrap();
@@ -729,7 +733,7 @@ fn write_app_only_normalizes_blank_lines_touching_the_root_braces() {
 
     ProjectConfig::load(&path)
         .unwrap()
-        .write_app("66666666-6666-4666-8666-666666666666")
+        .write_app(&app_id("app_034klb07lrb9jgma6imvmx005"))
         .unwrap();
 
     assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
@@ -752,7 +756,7 @@ fn write_app_reparses_before_writing() {
     };
 
     let error = config
-        .write_app("77777777-7777-4777-8777-777777777777")
+        .write_app(&app_id("app_034klb07lrb9jgma6imvmx006"))
         .expect_err("the generated text is valid JSONC but not a valid project config");
 
     assert!(error.contains("refusing to write a file that would not parse"), "{error}");
@@ -781,13 +785,13 @@ fn write_app_uses_original_byte_span_with_crlf_unicode_and_escaped_key() {
 
     let config = ProjectConfig::load(&path).unwrap();
     config
-        .write_app("55555555-5555-4555-8555-555555555555")
+        .write_app(&app_id("app_034klb07lrb9jgma6imvmx004"))
         .unwrap();
 
     let after = std::fs::read_to_string(&path).unwrap();
     let expected = text.replace(
-        "\"11111111-1111-4111-8111-111111111111\"",
-        "\"55555555-5555-4555-8555-555555555555\"",
+        "\"app_034klb07lrb9jgma6imvmx000\"",
+        "\"app_034klb07lrb9jgma6imvmx004\"",
     );
     assert_eq!(after, expected, "only the original app value span may change");
     std::fs::remove_file(&path).ok();

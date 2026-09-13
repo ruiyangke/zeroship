@@ -67,7 +67,7 @@ const _procedures = { bulk };
 
 #[test]
 fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"7".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"7".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -121,7 +121,7 @@ const _procedures = { seed, updateByEmail };
             .query_typed(
                 &format!(
                     r#"SELECT id, "{raw_ssn}", ssn
-                   FROM "default"."users"
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE email = 'alice@example.com'"#
                 ),
                 &[],
@@ -152,11 +152,11 @@ const _procedures = { seed, updateByEmail };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve("default").await.expect("resolve key");
+        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
         let plaintext = zeroship_data_orm::encryption::aead::decrypt(
             &key,
             &stored_blob,
-            &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
+            &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", row_id.as_bytes()),
         )
         .expect("decrypt updated ciphertext");
         assert_eq!(
@@ -169,7 +169,7 @@ const _procedures = { seed, updateByEmail };
 
 #[test]
 fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"8".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"8".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -260,7 +260,7 @@ const _procedures = { seed, updateManyByName };
             .query_typed(
                 &format!(
                     r#"SELECT id, name, "{raw_ssn}", ssn
-                   FROM "default"."users"
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE name = 'Red Team'
                    ORDER BY id"#
                 ),
@@ -272,7 +272,7 @@ const _procedures = { seed, updateManyByName };
 
         let keys =
             zeroship_data_orm::encryption::KeyStore::new(crate::tests::fixtures::key_source());
-        let key = keys.resolve("default").await.expect("resolve key");
+        let key = keys.resolve(LOCAL_DEV_APP_ID).await.expect("resolve key");
         for row in &typed.rows {
             let row_id = match &row[0] {
                 TypedCell::Text(id) => id.clone(),
@@ -299,7 +299,7 @@ const _procedures = { seed, updateManyByName };
             let plaintext = zeroship_data_orm::encryption::aead::decrypt(
                 &key,
                 &stored_blob,
-                &encryption::canonical_aad("default", "users", "ssn", row_id.as_bytes()),
+                &encryption::canonical_aad(LOCAL_DEV_APP_ID, "users", "ssn", row_id.as_bytes()),
             )
             .expect("decrypt updated ciphertext");
             assert_eq!(
@@ -313,7 +313,7 @@ const _procedures = { seed, updateManyByName };
 
 #[test]
 fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"c".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"c".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -327,7 +327,7 @@ fn update_many_randomised_target_cap_rejects_without_writes_sqlite_runtime() {
         assert!(!values.is_empty(), "overflow fixture must seed target rows");
         let mut ddl = users_encrypted_ssn_ddl();
         ddl.push_str(&format!(
-            "INSERT INTO \"default\".\"users\" (id, email, name) VALUES {};",
+            "INSERT INTO \"{LOCAL_DEV_APP_ID}\".\"users\" (id, email, name) VALUES {};",
             values.join(",")
         ));
         apply_schema_ahead_of_runtime(&dir, &ddl);
@@ -385,9 +385,11 @@ const _procedures = { overflow };
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let state = client
             .query_typed(
-                r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
-                   FROM "default"."users"
-                   WHERE name = 'Red Team'"#,
+                &format!(
+                    r#"SELECT COUNT(*), SUM(version), COUNT(ssn)
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
+                   WHERE name = 'Red Team'"#
+                ),
                 &[],
             )
             .await
@@ -416,7 +418,7 @@ const _procedures = { overflow };
 
 #[test]
 fn update_many_randomised_failure_rolls_back_committed_prefix_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"a".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"a".repeat(64));
 
     run(async {
         use rusqlite::types::Value as TypedCell;
@@ -546,10 +548,12 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let typed = client
             .query_typed(
-                r#"SELECT email, version
-                   FROM "default"."users"
+                &format!(
+                    r#"SELECT email, version
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE name = 'Red Team'
-                   ORDER BY id"#,
+                   ORDER BY id"#
+                ),
                 &[],
             )
             .await
@@ -599,10 +603,12 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         );
         let after_nested = client
             .query_typed(
-                r#"SELECT email, version
-                   FROM "default"."users"
+                &format!(
+                    r#"SELECT email, version
+                   FROM "{LOCAL_DEV_APP_ID}"."users"
                    WHERE name = 'Red Team'
-                   ORDER BY id"#,
+                   ORDER BY id"#
+                ),
                 &[],
             )
             .await
@@ -625,7 +631,9 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
         let control = client
             .query_typed(
                 // Find the control insert by its unique fixture email.
-                r#"SELECT COUNT(*) FROM "default"."users" WHERE email = 'control@example.com'"#,
+                &format!(
+                    r#"SELECT COUNT(*) FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'control@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -646,7 +654,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
 
 #[test]
 fn plain_updates_on_encrypted_collection_stay_on_fast_path_sqlite_runtime() {
-    let _keys = with_project_key(&["default"], &"9".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"9".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -723,7 +731,7 @@ const _procedures = { seed, updatePlain, updateManyPlain };
 
 #[test]
 fn update_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let _keys = with_project_key(&["default"], &"1".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"1".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -791,7 +799,9 @@ const _procedures = { seed, nestedCasUpdate };
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
-                r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
+                &format!(
+                    r#"SELECT name, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'alice@example.com'"#
+                ),
                 &[],
             )
             .await
@@ -812,7 +822,7 @@ const _procedures = { seed, nestedCasUpdate };
 
 #[test]
 fn update_many_rejects_nested_version_filter_without_mutating_sqlite_row() {
-    let _keys = with_project_key(&["default"], &"2".repeat(64));
+    let _keys = with_project_key(&[LOCAL_DEV_APP_ID], &"2".repeat(64));
 
     run(async {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -874,7 +884,9 @@ const _procedures = { seed, nestedCasUpdateMany };
         let client = crate::tests::fixtures::sqlite::Inspector::open(dir.path());
         let rows = client
             .query(
-                r#"SELECT name, version FROM "default"."users" WHERE email = 'alice@example.com'"#,
+                &format!(
+                    r#"SELECT name, version FROM "{LOCAL_DEV_APP_ID}"."users" WHERE email = 'alice@example.com'"#
+                ),
                 &[],
             )
             .await

@@ -15,10 +15,10 @@
  *   SqliteBackend::open    a FILE arg ⇒ session = that file,
  *                          `db_dir = path.parent()`        (backend/sqlite/mod.rs)
  *   per-app file           `<db_dir>/zs-<app_id>.sqlite`   (backend/sqlite/mod.rs)
- *   app_id in dev          `env_vars["APP_ID"]`, else the literal `"default"`
- *                          (crates/zeroship-runtime/src/core/plugin.rs)
+ *   app_id in dev          `env_vars["APP_ID"]`, else the shared local AppId
+ *                          (crates/zeroship-id/local-dev-app-id.json)
  *
- * so `.zeroship/zs-default.sqlite` + `.zeroship/zs-default.migrations.sqlite`.
+ * Both the migration apply and runtime use that identity in their file names.
  * Getting `app_id` wrong is the failure worth guarding against: `applyIrSqlite`
  * would report `applied: [...]` against a file nobody opens, and the app would
  * still be broken with a success line in the log.
@@ -31,8 +31,8 @@ import { loadMigrateAddon, type ApplyReply } from "./addon.js";
 import { CONFINED_SYSTEM_SHAPE_INJECT_TOML } from "./confined-system-shape.generated.js";
 import { recordMigrationsDir } from "./recorder.js";
 
-/** The dev app_id, mirroring `crates/zeroship-runtime/src/core/plugin.rs`'s fallback. */
-export const DEV_APP_ID = "default";
+/** The fixed AppId shared by local development hosts. */
+export const DEV_APP_ID = "app_0000000002e4nenowz3qmamtd";
 
 /** `.zeroship`, the directory the dev DATABASE_URL's parent resolves to. */
 export const DEV_STATE_DIR = ".zeroship";
@@ -150,7 +150,7 @@ export async function applyMigrationsToDevSqlite(opts: {
   // file inside it. Measured, not hypothesised:
   //
   //   dev migration apply FAILED: open main (app file):
-  //   unable to open database file: …/.zeroship/zs-default.sqlite
+  //   unable to open database file: …/.zeroship/zs-<app-id>.sqlite
   //
   // Owning the directory here keeps the ordering one-way: the apply depends on
   // nothing the runtime has done, which is the whole point of applying ahead.
