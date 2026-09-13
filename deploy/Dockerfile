@@ -17,32 +17,14 @@
 # now lives in the standalone `zeroship-sandbox` project and is built/shipped
 # there. The control plane talks to it over HTTP (SANDBOX_URL / SANDBOX_TOKEN).
 #
-# Two-stage native build with a Node pre-stage:
-#   1. `sdks` (node:22) runs `pnpm build` to emit the bootstrap dist files
-#      (`sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`). The runtime
-#      crate `include_str!`s those at compile time
-#      (crates/runtime/src/core/init.rs -> "../../../../sdks/bootstrap/dist/..."),
-#      so they MUST exist before cargo touches zeroship-runtime.
-#   2. `builder` (rust) copies crates/, the freshly-built sdks/, and the
-#      deploy/policies/ tree (crates/authz/build.rs parses
-#      ../../deploy/policies/*.cedar at build time) and compiles the seven
-#      binaries below plus two the control crate carries and we do not ship
-#      (zeroship-mock-stripe, dev-provision) - see the `--bin` note at the
-#      cargo line for why they come along.
-#   3. `runtime` (ubuntu) ships SIX binaries: zeroship-control, zeroship-gate,
-#      zeroship-worker, zeroship-auth, zeroship, zeroship-migrate-server.
-#      It ships NO console - see the apps/ note in stage 1.
-#   3b. `migrate` (node:22-bookworm-slim) carries the `zero-migrate` CLI, the
-#      napi addon the node stage already built, the migration corpus and the
-#      platform charter. It is the compose `migrate` one-shot's image and
-#      nothing else uses it.
-#
-# This header said "all seven binaries" until 2026-08-11, which was wrong in
-# both directions: the count was never seven, and the cargo line was building
-# exactly ONE.
+# Native services are built after the Node workspace. The Node stage emits the
+# database SDK facade embedded by `zeroship-data-v8` and builds the migration
+# add-on and CLI. The Rust builder copies those SDK outputs with the native
+# sources and policies. The final runtime image contains the service binaries;
+# the Node-based migration command has its own image stage.
 
 # ---------------------------------------------------------------------------
-# Stage 1 - build the SDK dist (bootstrap runtime-entry + dispatcher).
+# Stage 1 - build the JavaScript workspace and embedded database facade.
 # ---------------------------------------------------------------------------
 FROM node:22-bookworm AS sdks
 WORKDIR /build
@@ -137,9 +119,8 @@ COPY db/migrations-ts/ db/migrations-ts/
 RUN pnpm install --frozen-lockfile
 # The root build compiles the native addon before the JavaScript packages.
 RUN pnpm build
-# Sanity: the two files the runtime crate include_str!s MUST exist.
-RUN test -f sdks/bootstrap/dist/runtime-entry.js \
- && test -f sdks/bootstrap/dist/dispatcher.js
+# Sanity: the database adapter embeds this facade during native compilation.
+RUN test -f sdks/db/dist/internal.js
 
 # ---------------------------------------------------------------------------
 # Stage 2 - native (Rust) build of all seven binaries.
@@ -198,9 +179,7 @@ COPY crates/ crates/
 #   Caused by: No such file or directory (os error 2)
 COPY libs/ libs/
 COPY deploy/policies/ deploy/policies/
-# sdks/ WITH the dist emitted by the node stage, so the runtime crate's
-# include_str!("../../../../sdks/bootstrap/dist/{runtime-entry,dispatcher}.js")
-# resolves against /build/sdks/bootstrap/dist/.
+# Carry the database facade emitted by the Node stage into native compilation.
 COPY --from=sdks /build/sdks/ sdks/
 # NO `--bin` HERE, and that is the whole point of this comment.
 #

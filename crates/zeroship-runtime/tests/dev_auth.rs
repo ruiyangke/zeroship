@@ -11,9 +11,8 @@
 //! the ones `run_single_worker` resolves once at startup and hands down.
 //!
 //! The `__zeroship_dev_session` cookie is signed with `dev_auth::sign_dev_session`,
-//! which is byte-compatible with the JS `signDevSession` in
-//! `@zeroship/bootstrap`'s `dev-auth.ts` (same `base64url(json).hex-hmac`
-//! envelope) — so a cookie the JS dev-auth provider mints in the browser
+//! which is byte-compatible with `signDevSession` in the Vite development auth
+//! provider (the same `base64url(json).hex-hmac` envelope), so its browser cookie
 //! verifies here. We assert BOTH server-side identity surfaces resolve the dev
 //! user:
 //!   1. `env.auth.getUser()`  — the kernel `AuthPlugin` per-request state.

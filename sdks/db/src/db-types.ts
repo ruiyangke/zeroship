@@ -3,8 +3,8 @@
  * to annotate handlers (`env.db.users` is a `Collection<...>`, the
  * transaction callback receives a `TxCollection`, etc).
  *
- * Runtime installation belongs to `@zeroship/bootstrap`; this package
- * exposes the creator-facing database API and types.
+ * This package owns both its private runtime installer and the creator-facing
+ * database API and types.
  *
  * Usage in user code (typical):
  *   import { t, schema } from "@zeroship/db";

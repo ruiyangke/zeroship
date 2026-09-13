@@ -289,11 +289,8 @@ fn is_public_error_code(code: &str) -> bool {
 /// `scrub_constraint_detail`, so this is a contract-stability rule, not a
 /// containment one.
 ///
-/// Deliberately NOT "any string code". The TS rail in
-/// `sdks/bootstrap/src/fetch-handler.ts` does preserve any string `.code` at
-/// 5xx, which is a live divergence between the two rails; widening this one to
-/// match is a contract decision, not a bug fix, and is left open rather than
-/// taken here.
+/// Deliberately not "any string code". Widening this allowlist changes which
+/// backend details become public and must be treated as a contract decision.
 /// Both spellings of each code are listed, and the pairing is NOT mechanical:
 /// `fk_violation` canonicalises to `FOREIGN_KEY_VIOLATION`, not
 /// `FK_VIOLATION`. See [`is_public_error_code`] for why the canonical form is
