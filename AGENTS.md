@@ -180,10 +180,11 @@ crates/
 +-- zeroship-cli/     Creator CLI; run `zeroship --help` for available commands
 ```
 
-**Database verification is required.** Control, migration-service and worker
-tests run in ordinary `cargo test` and require a migrated PostgreSQL database.
-Use `tests/run_billing_suite.sh` and `tests/run_worker_suite.sh` to prepare it
-and run the suites. Database verification must never be an opt-in feature.
+**Database verification is required.** Worker tests own PostgreSQL containers
+and run in ordinary `cargo test`. `cargo xtask test worker` builds the migration
+host and runs the package. Control and migration-service tests still use
+`tests/run_billing_suite.sh` to provision their databases and run the suites.
+Database verification must never be an opt-in feature.
 `zeroship-data-orm` and
 `zeroship-data-v8` include PostgreSQL tests in ordinary `cargo test`. Do not
 put required database cases behind opt-in features, ignore them, or report success
