@@ -4,6 +4,11 @@ The deploy contract is centered on the app entry module's default export. The
 runtime bootstrap code is in `sdks/bootstrap/src/runtime-entry.ts`, and the
 runtime-side loader lives in `crates/zeroship-runtime/src/core/init.rs`.
 
+Module specifiers `zeroship`, `zeroship.js` and the `zeroship:` prefix are
+reserved for host-provided modules, including plugin adapters. Creator artifacts
+must not supply entries under these names, including their `./` spellings.
+Import `zeroship` to access the runtime's exports.
+
 ## Default export
 
 The creator-facing shape is:

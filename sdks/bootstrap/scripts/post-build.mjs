@@ -13,14 +13,6 @@
 // exports (so TS treats them as modules). We strip that line — the
 // file is "module-like" from TS's POV but the emitted JS is consumed
 // as inline script by the runtime crate.
-//
-// This script also rewrites the `await import("./install-schema.js")`
-// inside `runtime-entry.js` to `await import("@zeroship/bootstrap/install-schema")`
-// so the bundle resolver picks up the package's exports map at
-// install time. (Relative imports work for a tsc-emitted ES module but
-// the bootstrap module the runtime synthesizes uses bare-specifier
-// resolution against the bundle's import map; bootstrap-package
-// subpath imports go through the same path.)
 
 import { readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";

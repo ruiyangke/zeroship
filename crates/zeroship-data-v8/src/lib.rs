@@ -13,7 +13,7 @@
 
 use zeroship_data_orm::connection::ConnectionFactory;
 
-use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
+use zeroship_runtime::plugin::{JavaScriptModule, NativePlugin, NativeRegistrar};
 
 use crate::context::with_mut as ctx_mut;
 use zeroship_data_orm::error::DbError;
@@ -78,6 +78,13 @@ impl NativePlugin for DbPlugin {
 
     fn name(&self) -> &str {
         "database"
+    }
+
+    fn javascript_modules(&self) -> &'static [JavaScriptModule] {
+        &[JavaScriptModule {
+            specifier: "zeroship:db/internal",
+            source: include_str!("../../../sdks/db/dist/internal.js"),
+        }]
     }
 
     /// Mint a `Db` v8_class instance as the namespace value for

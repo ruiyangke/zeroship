@@ -1,18 +1,6 @@
 /**
- * Framework-internal subpath for `@zeroship/db`.
- *
- * Re-exports the SDK innards needed by `@zeroship/bootstrap` (the
- * coordination package the runtime crate + Vite plugin consume). User
- * code must not import from this subpath; it is not public API.
- *
- * The dependency direction is bootstrap → db: bootstrap owns
- * `installSchema`, the `__zsDispatch` dispatcher, and dev/runtime
- * entries, and needs read-only access to a handful of db internals
- * (Collection class, Query class, the live-query factory, naming
- * helpers, the type-builder classes used for `instanceof` checks, the
- * NormalizedSchema type). Splitting these behind `./internal` keeps the
- * main `@zeroship/db` entry user-facing while making the coupling
- * explicit at the import site.
+ * Internal DB SDK adapter used by runtime initialization and framework tests.
+ * Creator code imports the public package and uses the installed env.db facade.
  */
 export { Collection } from "./collection";
 export { TRANSACTION_READ } from "./collection/crud";
@@ -88,3 +76,11 @@ export { translateAggregatePipeline } from "./utils";
 // Mask-policy startup handoff consumed by the bootstrap package.
 export { _flushPendingMaskPolicy, _peekPendingMaskPolicy } from "./policy";
 export type { MaskPolicy } from "./policy";
+
+export {
+  installSchema, model, normalizeSchema, expandUnionToFlatColumns, validateRefTargets,
+} from "./install-schema";
+export type {
+  RuntimeSchemaDescriptor, InstallSchemaOptions, SchemaInput, ValidateSchemaShape,
+  Collections, DbExtensions, Db,
+} from "./install-schema";
