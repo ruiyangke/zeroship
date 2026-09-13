@@ -1,13 +1,13 @@
-//! Generate Rust ORM contracts from migration artifacts and native Rust structs.
+//! Generate Rust ORM contracts from native schema declarations and Rust structs.
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as Tokens};
-use syn::{DeriveInput, parse_macro_input};
+use syn::{parse_macro_input, DeriveInput};
 
 mod derive;
 mod schema;
 
 fn engine() -> syn::Result<syn::Path> {
-    use proc_macro_crate::{FoundCrate, crate_name};
+    use proc_macro_crate::{crate_name, FoundCrate};
     let name = match crate_name("zeroship-data-orm") {
         Ok(FoundCrate::Name(name)) => name,
         Ok(FoundCrate::Itself) => "zeroship_data_orm".into(),
@@ -20,9 +20,9 @@ fn finish(result: syn::Result<Tokens>) -> TokenStream {
     result.unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// Read a migration-generated runtime descriptor relative to the Rust source file.
+/// Declare native collection metadata and typed query columns.
 ///
-/// `schema!(pub app_schema = "../generated/zeroship/schema.runtime.json");`
+/// `schema! { pub models { users { #[orm(primary_key)] id: Text, name: Text } } }`
 #[proc_macro]
 pub fn schema(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as schema::Input);
