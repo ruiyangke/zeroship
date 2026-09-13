@@ -94,7 +94,6 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     // revokes ONLY the target app's session — never the other app's (RLS
     // tenant scope; the former cross-tenant `revoke_all_for_user` was removed).
     let target_user_id = insert_user(&client, "gateway-bcl-target").await;
-    let target_user = target_user_id.as_str().to_string();
     let app_a = AppId::mint();
     let app_b = AppId::mint();
     seed_app(&client, &app_a, &format!("bcl-a-{}", Uuid::new_v4().simple())).await;
@@ -103,7 +102,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     let s_a = create(
         &mut client,
         &NewSession {
-            user_id: &target_user,
+            user_id: &target_user_id,
             sid: None,
             app_id: &app_a,
             email: Some("alice@zeroship.test"),
@@ -121,7 +120,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     let s_b = create(
         &mut client,
         &NewSession {
-            user_id: &target_user,
+            user_id: &target_user_id,
             sid: None,
             app_id: &app_b,
             email: Some("alice@zeroship.test"),
@@ -138,11 +137,10 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
 
     // One session for an unrelated user at app_a — must NOT be touched.
     let other_user_id = insert_user(&client, "gateway-bcl-other").await;
-    let other_user = other_user_id.as_str().to_string();
     let s_other = create(
         &mut client,
         &NewSession {
-            user_id: &other_user,
+            user_id: &other_user_id,
             sid: None,
             app_id: &app_a,
             email: Some("bob@zeroship.test"),
@@ -163,7 +161,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     assert!(is_live(&client, s_other.id, &app_a).await);
 
     // Revoke the target user's sessions AT app_a only.
-    let count = revoke_app_sessions_for_user(&mut client, &app_a, &target_user)
+    let count = revoke_app_sessions_for_user(&mut client, &app_a, &target_user_id)
         .await
         .expect("revoke_app_sessions_for_user");
     assert_eq!(count, 1, "expected exactly 1 session revoked (target user @ app_a), got {count}");
@@ -187,7 +185,7 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     );
 
     // Idempotent — running it again touches no rows.
-    let again = revoke_app_sessions_for_user(&mut client, &app_a, &target_user)
+    let again = revoke_app_sessions_for_user(&mut client, &app_a, &target_user_id)
         .await
         .expect("revoke_app_sessions_for_user idempotent");
     assert_eq!(again, 0, "second revoke must touch 0 rows (filter on revoked_at IS NULL)");
@@ -268,7 +266,12 @@ async fn seed_oauth_client(client: &Client, client_id: &str) {
 /// machinery — the ciphertext is opaque here; the OP revoke fan-out the BCL
 /// performs is best-effort and may fail harmlessly in the test). Returns the
 /// new anchor id.
-async fn seed_anchor(client: &Client, app_id: &AppId, client_id: &str, global_user_id: &str) -> Uuid {
+async fn seed_anchor(
+    client: &Client,
+    app_id: &AppId,
+    client_id: &str,
+    global_user_id: &UserId,
+) -> Uuid {
     let scopes: Vec<String> = vec!["openid".into()];
     let refresh_enc: Vec<u8> = vec![1, 2, 3, 4];
     let rows = client
@@ -281,7 +284,7 @@ async fn seed_anchor(client: &Client, app_id: &AppId, client_id: &str, global_us
             &[
                 &app_id.as_str(),
                 &client_id,
-                &global_user_id,
+                &global_user_id.as_str(),
                 &refresh_enc,
                 &format!("fam-{}", Uuid::new_v4().simple()),
                 &scopes,
@@ -572,7 +575,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -709,7 +712,7 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -850,7 +853,7 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1032,7 +1035,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let target_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&sid),
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1049,7 +1052,7 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let other_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&other_sid),
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1174,7 +1177,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let target_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&stored_sid),
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1191,7 +1194,7 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let other_app_session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&stored_sid),
             app_id: &other_app_id,
             email: Some("alice@zeroship.test"),
@@ -1376,7 +1379,7 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: Some(&sid),
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1478,7 +1481,7 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
     let session = create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1532,11 +1535,20 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
         None,
         false,
     );
+    let wrong_entity = AppId::mint();
+    let wrong_entity_prefix = sign_logout_token_with_aud(
+        &key,
+        &issuer,
+        &oauth_client_id,
+        wrong_entity.as_str(),
+        &format!("jti-{}", Uuid::new_v4().simple()),
+    );
 
     for (label, token) in [
         ("wrong audience", wrong_aud),
         ("bad signature", bad_signature),
         ("missing events", missing_events),
+        ("wrong subject entity prefix", wrong_entity_prefix),
     ] {
         let req = test::TestRequest::post()
             .uri("/oidc/backchannel-logout")
@@ -1712,7 +1724,7 @@ async fn per_app_bcl_writes_token_family_marker() {
     create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1875,7 +1887,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     create(
         &mut db,
         &NewSession {
-            user_id: &target_user_string,
+            user_id: &target_user,
             sid: None,
             app_id: &app_id,
             email: Some("alice@zeroship.test"),
@@ -1891,7 +1903,7 @@ async fn per_app_bcl_deletes_reload_recovery_anchor() {
     .expect("create session");
 
     // The 30-day reload-recovery anchor that `?mint=1` would resurrect from.
-    let anchor_id = seed_anchor(&db, &app_id, &oauth_client_id, target_user.as_str()).await;
+    let anchor_id = seed_anchor(&db, &app_id, &oauth_client_id, &target_user).await;
 
     // Pre: the anchor reads LIVE (this is exactly what `?mint=1` reads).
     assert!(

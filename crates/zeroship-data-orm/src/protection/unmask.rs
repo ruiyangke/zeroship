@@ -278,6 +278,7 @@ pub async fn dispatch_unmask(
     binding: &DbBinding,
     mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
+    route.validate_binding(binding)?;
     let app_id = binding.app_id();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
     // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
@@ -323,7 +324,7 @@ pub async fn dispatch_unmask(
         .await?;
         // The REFUSED unmask still wrote an audit row, and that row cost a
         // statement. Metering counts work performed, not permission granted.
-        meter_audit_write(app_id);
+        meter_audit_write(route.meter());
         return Err(DbError::Coded {
             code: "unmask_not_permitted".into(),
             message: format!(
@@ -348,7 +349,7 @@ pub async fn dispatch_unmask(
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
     // before 2026-09-01.
-    crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
+    crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
 
     // Step 4 — audit the granted unmask. We do this AFTER the plaintext
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
@@ -363,7 +364,7 @@ pub async fn dispatch_unmask(
         "granted",
     )
     .await?;
-    meter_audit_write(app_id);
+    meter_audit_write(route.meter());
 
     Ok(UnmaskFieldResult { plaintext })
 }
@@ -374,9 +375,9 @@ pub async fn dispatch_unmask(
 /// through `exec::exec_mutation`, so none was billed before 2026-09-01. Call
 /// this only after the write's `?` has succeeded - metering is a success-arm
 /// signal, and an audit row that failed to land must not be charged for.
-fn meter_audit_write(app_id: &str) {
-    crate::metrics::emit_db_metric(app_id, crate::metrics::DB_WRITES, 1);
-    crate::metrics::emit_db_metric(app_id, crate::metrics::DB_ROWS_WRITTEN, 1);
+fn meter_audit_write(meter: Option<&zeroship_metering::MeterHandle>) {
+    crate::metrics::emit_db_metric(meter, crate::metrics::DB_WRITES, 1);
+    crate::metrics::emit_db_metric(meter, crate::metrics::DB_ROWS_WRITTEN, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +636,7 @@ pub async fn dispatch_bulk_unmask(
     binding: &DbBinding,
     args: BulkUnmaskArgs,
 ) -> Result<BulkUnmaskResult, DbError> {
+    route.validate_binding(binding)?;
     if args.items.is_empty() {
         return Ok(BulkUnmaskResult::default());
     }
@@ -732,7 +734,7 @@ pub async fn dispatch_bulk_unmask(
             Some(&unauthorized),
         )
         .await?;
-        meter_audit_write(app_id);
+        meter_audit_write(route.meter());
         return Err(DbError::Coded {
             code: "bulk_unmask_partial_unauthorized".into(),
             message: format!(
@@ -778,7 +780,7 @@ pub async fn dispatch_bulk_unmask(
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
             // the read cost is what this counts.
-            crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
+            crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
             row_map.insert(requested_col.clone(), plaintext);
         }
     }
@@ -794,7 +796,7 @@ pub async fn dispatch_bulk_unmask(
         None,
     )
     .await?;
-    meter_audit_write(app_id);
+    meter_audit_write(route.meter());
 
     Ok(out)
 }
@@ -896,13 +898,10 @@ async fn write_audit_bulk_row(
 /// denied path writes one `denied` audit row covering the whole
 /// query.
 ///
-/// `backend` comes off the find's own [`crate::tx_route::TxRoute`] rather than
-/// being resolved here: `run_find` already holds the handle its SELECT will run
-/// on, and the fence, the SELECT and the audit row all have to be the same
-/// backend. Resolving a second one here would also put this ENGINE file's hands
-/// on ADAPTER state - see `prepare_unmask_backend`.
+/// Uses the query route's backend and metering identity. Denied attempts
+/// write their audit record through an independent connection.
 pub async fn authorize_query_hint(
-    backend: &BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
@@ -913,10 +912,12 @@ pub async fn authorize_query_hint(
     rejected_claim: Option<&Value>,
     reason: &Option<String>,
 ) -> Result<(), DbError> {
+    route.validate_binding(binding)?;
     if unmask_columns.is_empty() {
         return Ok(());
     }
     let app_id = binding.app_id();
+    let backend = route.backend();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
     // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
     let db_schema = binding.schema();
@@ -962,7 +963,7 @@ pub async fn authorize_query_hint(
             Some(&unauthorized),
         )
         .await?;
-        meter_audit_write(app_id);
+        meter_audit_write(route.meter());
         return Err(DbError::Coded {
             code: "unmask_not_permitted".into(),
             message: format!(
@@ -987,11 +988,10 @@ pub async fn authorize_query_hint(
 /// Single row per query (NOT per row), so the audit-log volume scales
 /// with query count not row count.
 ///
-/// Takes the same `backend` its `authorize_query_hint` half took, for the same
-/// reason: the granted row must land on the connection the find ran on, and
-/// `run_find` is the frame that holds it.
+/// Uses the query route's backend and metering identity. The audit write still
+/// opens an independent connection so transaction rollback cannot erase it.
 pub async fn audit_query_hint_granted(
-    backend: &BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
@@ -1001,10 +1001,12 @@ pub async fn audit_query_hint_granted(
     rejected_claim: Option<&Value>,
     reason: &Option<String>,
 ) -> Result<(), DbError> {
+    route.validate_binding(binding)?;
     if unmask_columns.is_empty() {
         return Ok(());
     }
     let app_id = binding.app_id();
+    let backend = route.backend();
     // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
     // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
     let db_schema = binding.schema();
@@ -1033,7 +1035,7 @@ pub async fn audit_query_hint_granted(
         None,
     )
     .await?;
-    meter_audit_write(app_id);
+    meter_audit_write(route.meter());
     Ok(())
 }
 
@@ -1047,6 +1049,7 @@ pub async fn dispatch_unmask_for_query(
     unmask_columns: &[String],
     rows: &mut [Value],
 ) -> Result<(), DbError> {
+    route.validate_binding(binding)?;
     if unmask_columns.is_empty() {
         return Ok(());
     }
@@ -1122,7 +1125,7 @@ pub async fn dispatch_unmask_for_query(
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
             // the read cost is what this counts.
-            crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
+            crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
             if let Some(obj) = row.as_object_mut() {
                 // Under the DECLARED name, because that is the key the row
                 // already carries: the SELECT projects descriptor keys, so
@@ -1823,6 +1826,44 @@ mod tests {
     }
 
     #[test]
+    fn bulk_unmask_refuses_a_route_for_another_target_before_io() {
+        let runtime = compio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let route_app = "bulk_route_target";
+            let (route, _dir) = unit_route(route_app);
+            let cases = [
+                DbBinding::new(
+                    "bulk_other_app",
+                    crate::binding::COLD_START_DEPLOY_TOKEN,
+                    crate::sql::SchemaName::new(route_app).unwrap(),
+                ),
+                DbBinding::new(
+                    route_app,
+                    crate::binding::COLD_START_DEPLOY_TOKEN,
+                    crate::sql::SchemaName::new("bulk_other_schema").unwrap(),
+                ),
+            ];
+
+            for binding in cases {
+                let error = dispatch_bulk_unmask(
+                    &route,
+                    &binding,
+                    BulkUnmaskArgs {
+                        collection: "users".into(),
+                        items: vec![],
+                        actor: None,
+                        reason: None,
+                        rejected_claim: None,
+                    },
+                )
+                .await
+                .expect_err("a route and binding must identify the same target");
+                assert!(matches!(error, DbError::Internal { .. }));
+            }
+        });
+    }
+
+    #[test]
     fn bulk_unmask_unknown_column_returns_typed_error() {
         // The collection IS declared; the requested column is not one of its
         // fields. That is the `unmask_column_not_masked` case, and it must stay
@@ -1906,7 +1947,7 @@ mod tests {
         let ok = runtime.block_on(async {
             let (backend, _dir) = unit_backend();
             authorize_query_hint(
-                &backend,
+                &crate::exec::ambient_route_for_tests(binding.app_id(), backend.clone()),
                 &binding,
                 "users",
                 &[],
@@ -1936,7 +1977,7 @@ mod tests {
             .block_on(async {
                 let (backend, _dir) = unit_backend();
                 authorize_query_hint(
-                    &backend,
+                    &crate::exec::ambient_route_for_tests(binding.app_id(), backend.clone()),
                     &binding,
                     "users",
                     &["nonexistent".to_string()],

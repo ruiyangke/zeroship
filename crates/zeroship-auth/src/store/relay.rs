@@ -248,7 +248,7 @@ pub async fn resolve_active_alias(conn: &Client, alias: &str) -> Result<Option<A
             Ok(AliasTarget {
                 real_inbox: row.get("real_inbox"),
                 app_client_id: row.get("app_client_id"),
-                global_user_id: crate::user_id::from_row(
+                global_user_id: crate::entity_ids::user_id_with_context(
                     row,
                     "global_user_id",
                     "relay alias resolve",

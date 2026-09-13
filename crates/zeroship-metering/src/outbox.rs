@@ -1149,9 +1149,9 @@ mod tests {
             let meter = Meter::with_source("worker-test");
             let app_a = AppId::mint();
             let app_b = AppId::mint();
-            meter.increment(app_a.as_str(), "requests", 2);
-            meter.increment(app_a.as_str(), "db_reads", 5);
-            meter.increment(app_b.as_str(), "kv_writes", 3);
+            meter.increment(&app_a, "requests", 2);
+            meter.increment(&app_a, "db_reads", 5);
+            meter.increment(&app_b, "kv_writes", 3);
 
             let events = meter.drain();
             assert_eq!(events.len(), 3);
@@ -1206,7 +1206,7 @@ mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let meter = Meter::with_source("worker-test");
             let app = AppId::mint();
-            meter.increment(app.as_str(), "requests", 2);
+            meter.increment(&app, "requests", 2);
             let events = meter.drain();
             assert_eq!(events.len(), 1);
 
@@ -1271,8 +1271,8 @@ mod tests {
         compio::runtime::Runtime::new().unwrap().block_on(async {
             let meter = Meter::with_source("worker-test");
             let app = AppId::mint();
-            meter.increment(app.as_str(), "requests", 7);
-            meter.increment(app.as_str(), "db_reads", 3);
+            meter.increment(&app, "requests", 7);
+            meter.increment(&app, "db_reads", 3);
 
             let events = meter.drain();
             assert_eq!(events.len(), 2);
@@ -1359,7 +1359,7 @@ mod tests {
             let mut drained = Vec::new();
             for value in 1..=3u64 {
                 let meter = Meter::with_source("worker-test");
-                meter.increment(AppId::mint().as_str(), "requests", value);
+                meter.increment(&AppId::mint(), "requests", value);
                 let events = meter.drain();
                 assert_eq!(events.len(), 1);
                 let result = outbox.publish_events(&events).await;

@@ -170,7 +170,7 @@ async fn producer_to_redpanda_to_recompute_to_spend_block_end_to_end() {
 
     // ── 1. REAL producer: worker Meter accrues usage, drains to UsageEvents ──
     let meter = Meter::with_source("worker-e2e");
-    meter.increment(app.as_str(), "requests", 100);
+    meter.increment(&app, "requests", 100);
     let events = meter.drain();
     assert_eq!(events.len(), 1, "one drained requests event");
     assert_eq!(events[0].subject.app, Some(app.clone()));

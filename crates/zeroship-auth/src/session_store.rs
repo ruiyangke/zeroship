@@ -772,7 +772,11 @@ pub async fn peek(
             };
             return Ok(Some(PeekedSession {
                 session_id: row.get("id"),
-                person_id: crate::user_id::from_row(row, "person_id", "session peek")?,
+                person_id: crate::entity_ids::user_id_with_context(
+                    row,
+                    "person_id",
+                    "session peek",
+                )?,
                 client_id: row.try_get("client_id").ok().flatten(),
                 slot,
                 hash: hash.hash,
@@ -1129,7 +1133,7 @@ fn row_to_session_with_grant(
 ) -> Result<SessionRow> {
     Ok(SessionRow {
         id: row.get("id"),
-        person_id: crate::user_id::from_row(row, "person_id", "session row")?,
+        person_id: crate::entity_ids::user_id_with_context(row, "person_id", "session row")?,
         audience_kind: row.get("audience_kind"),
         client_id: row.try_get("client_id").ok().flatten(),
         grant_id: row.get("grant_id"),

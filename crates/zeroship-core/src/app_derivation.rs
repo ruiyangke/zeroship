@@ -1,50 +1,8 @@
-//! The ONE place an app id turns into something else.
+//! Physical names and routing keys derived from a canonical AppId.
 //!
-//! # Why this module exists
-//!
-//! App identity seeds database names, roles, routing keys, and other scopes.
-//! Keeping those derivations together makes each use of its spelling explicit.
-//!
-//! Every function here takes an [`AppId`] and returns one derived identifier.
-//! That makes the derivations enumerable, gives each one a name a reviewer can
-//! grep for, and - most importantly - makes them all change together.
-//!
-//! # Every one of these is the printed id, and the spelling is pinned
-//!
-//! There is one rendering of an app id, so most of these functions are the
-//! identity on [`AppId::as_str`] and the rest wrap it in a brace, a slash or a
-//! prefix. That is not redundancy: a bare `app_id.as_str()` says nothing about
-//! which of the ten meanings was wanted, and the whole point is that the day
-//! they diverge the compiler visits each one.
-//!
-//! `tests::golden_vectors` pins each function against a frozen literal AND,
-//! where a pre-seam `&str` composer still exists, against that composer, so a
-//! change of spelling fails here rather than in production. Some of those bytes
-//! name objects `PostgreSQL` will not reclaim - see [`publication_name`] - and
-//! one of them is an encryption salt whose silent half is worse than its loud
-//! half - see [`encryption_salt`].
-//!
-//! [`ring_key`] carried the embedded hundred and twenty eight bits until the id
-//! became text, so that a change of printed form could not rehash the ring and
-//! evict every warm isolate at once. Nothing persists a ring position: the
-//! gateway rebuilds its `BTreeMap` from the roster on every sync, so the only
-//! cost of a re-key is the eviction itself, taken once, when the ids change.
-//! It stays a named derivation because `worker_ring` takes bytes and a caller
-//! must say which bytes those are.
-//!
-//! # What is NOT here yet
-//!
-//! The seam is typed on [`AppId`], and much of the tree still carries an app id
-//! as `&str` - `zeroship_data_orm::encryption::keys::resolve`,
-//! `zeroship_data_v8::replication`, `zeroship_kv::backend::scope`,
-//! `zeroship_storage::backend`. Those sites cannot construct an
-//! [`AppId`] without a fallible parse that would refuse the non-uuid app ids
-//! their own tests pass, so they keep their present composers until the string
-//! is typed out of them. [`crate::database_role::per_app_role_name`] and
-//! [`crate::replication_names::publication_name`] survive for exactly that
-//! reason, and for one more: they are the second oracle the golden vectors here
-//! are compared against, so this module and the untyped composers cannot drift
-//! apart while both exist. They go when the last `&str` caller does.
+//! Hosts use these derivations when provisioning app resources. Database role
+//! composition also accepts a physical schema name, which may differ from the
+//! app identity. Golden vectors protect the derived names shared by services.
 
 use sha2::{Digest, Sha256};
 
@@ -172,19 +130,6 @@ pub fn encryption_salt(app: &AppId) -> &[u8] {
 /// publisher routes changes by it: it is a routing key as much as a handle.
 #[must_use]
 pub fn attach_alias(app: &AppId) -> String {
-    app.as_str().to_owned()
-}
-
-/// The key this app's usage counters are held under in the worker's meter.
-///
-/// **Breakage class one lives on the other side of this key.**
-/// `zeroship_metering::meter::Meter::drain` parses it back with
-/// `Uuid::parse_str` and, on failure, SKIPS AND EVICTS the counters behind a
-/// `tracing::warn!`. An app whose key stops parsing therefore serves traffic
-/// and is never billed, and the log noise decays by design because the counters
-/// are dropped rather than retried.
-#[must_use]
-pub fn meter_key(app: &AppId) -> String {
     app.as_str().to_owned()
 }
 
@@ -342,10 +287,8 @@ mod tests {
         // The HKDF salt `derive_key` expands both per-app column keys from.
         assert_eq!(encryption_salt(&app), FIXTURE.as_bytes());
 
-        // The ATTACH alias, the meter key and the blob path segment are all the
-        // bare tenant string at their sites.
+        // App resources use the canonical tenant spelling.
         assert_eq!(attach_alias(&app), FIXTURE);
-        assert_eq!(meter_key(&app), FIXTURE);
         assert_eq!(bundle_path_segment(&app), FIXTURE);
 
         // `backend::scope` wraps the id in Redis hash-tag braces.
@@ -395,7 +338,6 @@ mod tests {
         );
         assert_ne!(encryption_salt(&first), encryption_salt(&second));
         assert_ne!(attach_alias(&first), attach_alias(&second));
-        assert_ne!(meter_key(&first), meter_key(&second));
         assert_ne!(kv_scope(&first), kv_scope(&second));
         assert_ne!(storage_prefix(&first), storage_prefix(&second));
         assert_ne!(lifecycle_lock_seed(&first), lifecycle_lock_seed(&second));

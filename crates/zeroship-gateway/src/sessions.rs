@@ -28,7 +28,7 @@ use crate::rls;
 #[derive(Debug, Clone)]
 pub struct AppSession {
     pub id: Uuid,
-    pub user_id: String,
+    pub user_id: UserId,
     /// OIDC OP session id (`sid`) from the ID token, used to correlate
     /// Back-Channel Logout tokens to the local RP session.
     pub sid: Option<String>,
@@ -59,7 +59,7 @@ pub struct AppSession {
 
 #[derive(Debug)]
 pub struct NewSession<'a> {
-    pub user_id: &'a str,
+    pub user_id: &'a UserId,
     /// OIDC OP session id (`sid`) from the validated ID token, if present.
     pub sid: Option<&'a str>,
     /// The app's stable typed id (`apps.id`), bound into the `text` `app_id`
@@ -101,8 +101,6 @@ pub const ABSOLUTE_HOURS: i64 = 12;
 ///
 /// [`GatewayError::Db`] on PG failure or empty return.
 pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSession> {
-    let user_id = UserId::parse(params.user_id)
-        .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid user_id: {e}")))?;
     let amr: Vec<String> = params.amr.to_vec();
     let tx = conn
         .transaction()
@@ -124,7 +122,7 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
                        email_verified, granted_scopes, auth_time, amr, sid, \
                        idle_expires_at, abs_expires_at",
             &[
-                &user_id.as_str(),
+                &params.user_id.as_str(),
                 &params.app_id.as_str(),
                 &params.email,
                 &params.name,
@@ -205,17 +203,12 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
 /// filter.
 ///
 /// # Errors
-/// [`GatewayError::Db`] on PG failure (including an unparseable `user_id`).
+/// [`GatewayError::Db`] on PG failure.
 pub async fn revoke_app_sessions_for_user(
     conn: &mut Client,
     app_id: &AppId,
-    user_id: &str,
+    user_id: &UserId,
 ) -> Result<u64> {
-    let user_id = UserId::parse(user_id).map_err(|e| {
-        GatewayError::Db(format!(
-            "gateway_sessions revoke_app_sessions_for_user: invalid user_id: {e}"
-        ))
-    })?;
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions revoke_app_sessions_for_user begin: {e}"
@@ -250,13 +243,8 @@ pub async fn revoke_app_sessions_for_user(
 pub async fn latest_sid_for_user(
     conn: &mut Client,
     app_id: &AppId,
-    user_id: &str,
+    user_id: &UserId,
 ) -> Result<Option<String>> {
-    let user_id = UserId::parse(user_id).map_err(|e| {
-        GatewayError::Db(format!(
-            "gateway_sessions latest_sid_for_user: invalid user_id: {e}"
-        ))
-    })?;
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!("gateway_sessions latest_sid_for_user begin: {e}"))
     })?;
@@ -289,23 +277,15 @@ pub async fn revoke_app_sessions_for_sid(
     conn: &mut Client,
     app_id: &AppId,
     sid: &str,
-    sub: Option<&str>,
+    sub: Option<&UserId>,
 ) -> Result<Vec<UserId>> {
-    let parsed_sub = match sub {
-        Some(sub) => Some(UserId::parse(sub).map_err(|e| {
-            GatewayError::Db(format!(
-                "gateway_sessions revoke_app_sessions_for_sid: invalid user_id: {e}"
-            ))
-        })?),
-        None => None,
-    };
     let tx = conn.transaction().await.map_err(|e| {
         GatewayError::Db(format!(
             "gateway_sessions revoke_app_sessions_for_sid begin: {e}"
         ))
     })?;
     rls::set_tenant_app(&tx, app_id).await?;
-    let rows = if let Some(user_id) = parsed_sub {
+    let rows = if let Some(user_id) = sub {
         tx.query(
             "WITH targets AS ( \
                  SELECT DISTINCT user_id \
@@ -375,7 +355,7 @@ fn row_to_session(row: &compio_postgres::Row) -> Result<AppSession> {
         .map_err(|e| GatewayError::Db(format!("gateway_sessions create: invalid app_id: {e}")))?;
     Ok(AppSession {
         id: row.get("id"),
-        user_id: user_id.as_str().to_string(),
+        user_id,
         sid: row.try_get("sid").ok().flatten(),
         app_id,
         email: row.try_get("email").ok(),

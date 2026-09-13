@@ -180,7 +180,11 @@ pub async fn redeem(
     rows.first()
         .map(|row| {
             Ok(CancelledDeletion {
-                user_id: crate::user_id::from_row(row, "id", "deletion cancel redeem")?,
+                user_id: crate::entity_ids::user_id_with_context(
+                    row,
+                    "id",
+                    "deletion cancel redeem",
+                )?,
                 email: row.get("email"),
             })
         })

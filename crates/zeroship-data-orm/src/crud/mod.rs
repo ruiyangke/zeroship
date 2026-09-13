@@ -324,7 +324,7 @@ pub async fn run_find(
     // an attempt's audit record.
     if !plan.unmask_columns.is_empty() {
         crate::protection::unmask::authorize_query_hint(
-            route.backend(),
+            &route,
             &binding,
             &coll,
             &plan.unmask_columns,
@@ -389,7 +389,7 @@ pub async fn run_find(
     // return the plaintext anyway.
     if !plan.unmask_columns.is_empty() {
         crate::protection::unmask::audit_query_hint_granted(
-            route.backend(),
+            &route,
             &binding,
             &coll,
             &plan.unmask_columns,
@@ -1423,7 +1423,7 @@ pub async fn run_search(
     let rows = crate::backend_handle::routed_vector_search(route, &binding, plan.query).await?;
 
     // Count the successful database read even if later result decoding fails.
-    crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
+    crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
         route,
@@ -1556,7 +1556,7 @@ pub async fn run_near(
     .await?;
 
     // Count the successful database read even if later result decoding fails.
-    crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
+    crate::metrics::emit_db_metric(route.meter(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
         route,

@@ -1628,7 +1628,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             let both = ["email".to_string(), "ssn".to_string()];
 
             let err = authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
                 &DbBinding::cold_start(app),
                 "people",
                 &both,
@@ -1704,7 +1704,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             // `audit_query_hint_granted` so a failing SELECT leaves no ghost, which is
             // why the count staying at 1 is the assertion here.
             authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
                 &DbBinding::cold_start(app),
                 "people",
                 &["email".to_string()],
@@ -1730,7 +1730,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             install_mask_policy(&redeployed, value!({ "support": ["pii", "pci"] }))
                 .expect("install the new deployment's policy");
             authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
                 &redeployed,
                 "people",
                 &both,
@@ -1758,7 +1758,7 @@ fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
             );
             assert_eq!(rows[0]["email"], value!(email));
             audit_query_hint_granted(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
                 &redeployed,
                 "people",
                 &both,
@@ -1837,7 +1837,7 @@ fn a_query_hint_reads_the_column_its_alias_resolved_to() {
             let hinted = ["contactEmail".to_string()];
 
             authorize_query_hint(
-                &unmask_backend(host).await,
+                &crate::exec::ambient_route_for_tests(app, unmask_backend(host).await),
                 &DbBinding::cold_start(app),
                 "people",
                 &hinted,
