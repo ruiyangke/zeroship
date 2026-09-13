@@ -492,6 +492,8 @@ pub struct RuntimeState {
     /// re-arming the read loop. This is what keeps a large streaming upload
     /// bounded by the buffer cap instead of overflowing it.
     pub forwarder_resumes: VecDeque<u32>,
+    /// Host-controlled development output checking.
+    pub(crate) validate_rpc_output: bool,
 
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
@@ -774,6 +776,7 @@ impl RuntimeState {
             next_stream_id: 1,
             response_forwarders: HashMap::new(),
             forwarder_resumes: VecDeque::new(),
+            validate_rpc_output: false,
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),

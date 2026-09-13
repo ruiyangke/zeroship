@@ -639,6 +639,7 @@ pub struct RuntimeBuilder {
     /// entry sources the schema from the migration fold. `None` means the app
     /// is schema-less.
     runtime_descriptor: Option<String>,
+    validate_rpc_output: bool,
 }
 
 impl RuntimeBuilder {
@@ -770,6 +771,12 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Enable output validator checks independently of creator globals.
+    pub fn validate_rpc_output(mut self, enabled: bool) -> Self {
+        self.validate_rpc_output = enabled;
+        self
+    }
+
     /// Build the runtime. Panics on V8 init failure (same as the underlying
     /// `v8::Isolate::new` call — not newly fallible here).
     pub fn build(self) -> Runtime {
@@ -794,6 +801,7 @@ impl RuntimeBuilder {
             idle_gc_after,
             self.runtime_descriptor,
         );
+        inner.state.borrow_mut().validate_rpc_output = self.validate_rpc_output;
         Runtime {
             inner: Rc::new(RefCell::new(inner)),
             limits,
@@ -814,9 +822,7 @@ enum PendingOrigin {
     /// Promise came from `default.fetch` — resolved value is a Response,
     /// inspected via `http::inspect_response`.
     Fetch,
-    /// Promise came from `default.rpc` — resolved value is the user's
-    /// return, classified via `classify_rpc_return` (envelope-wrapped,
-    /// inspected if Response, fall-through if AsyncIterator).
+    /// A native procedure call is waiting for its loader or handler promise.
     Rpc,
     /// Promise came from `default.workflow` — resolved value is the
     /// StepResult object the workflow replay bootstrap returns.
@@ -840,6 +846,7 @@ struct PendingRequest {
     wall_start: Instant,
     cancel: CancelFlag,
     origin: PendingOrigin,
+    rpc_call: Option<crate::rpc::dispatch::RpcCall>,
     /// Keeps the per-request `AbortController` registered with
     /// `crate::rpc::abort` until the promise settles. Drop unregisters
     /// (covers normal settle, cancellation sweep, and pump-side
@@ -887,10 +894,7 @@ pub(crate) struct RuntimeInner {
     pub(crate) context: v8::Global<v8::Context>,
     /// Cached reference to `module.default.fetch`, resolved once at module
     /// init. None if the module doesn't export a default.fetch handler.
-    /// Slow path — runs when the request isn't claimed by `rpc_fn` (the
-    /// RPC fast path) or `fetch_fast_fn` (the non-WinterCG HTTP fast
-    /// path), or when those return a fall-through marker (null /
-    /// AsyncIterator / Response).
+    /// Used when native RPC does not claim the request and fetchFast falls through.
     pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
     /// Cached reference to `module.default.fetchFast` — the zeroship
     /// extension for bypassing the WinterCG Request/Response contract.
@@ -899,16 +903,8 @@ pub(crate) struct RuntimeInner {
     /// a string body (200 OK). When null: kernel falls through to the
     /// full `default.fetch(request, env, ctx)` path.
     pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `module.default.rpc` — the RPC dispatcher.
-    /// Signature: `rpc(name, input, ctx) → any | Promise<any> | AsyncIterator<any>`.
-    /// When set AND the incoming URL matches `/__zeroship/v1/<id>` (POST or GET),
-    /// the kernel slices the id, parses the body's superjson `{ json }`
-    /// envelope in V8, and calls `rpc(id, input, ctx)` directly —
-    /// bypassing Request construction, URL parsing, async body read,
-    /// and Response wrap. Sync/async return values are envelope-wrapped
-    /// (`{"json":<result>}`); AsyncIterator returns and Response objects
-    /// fall through to the slow path which encodes them.
-    pub(crate) rpc_fn: Option<v8::Global<v8::Function>>,
+    /// Procedure targets and shared lazy loading state for the published entry.
+    pub(crate) rpc_registry: Option<crate::rpc::dispatch::ProcedureRegistry>,
     /// Cached reference to `module.default.workflow` — the durable workflow
     /// replay entry the worker invokes with a StepRequest envelope.
     pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
@@ -1229,7 +1225,7 @@ impl RuntimeInner {
             context,
             fetch_handler_fn: None,
             fetch_fast_fn: None,
-            rpc_fn: None,
+            rpc_registry: None,
             workflow_fn: None,
             startup: StartupState::Uninitialized,
             startup_cpu: Duration::ZERO,
@@ -2008,15 +2004,6 @@ impl RuntimeInner {
             }
             Ok(true) => {}
         }
-        if self.fetch_handler_fn.is_none() {
-            return crate::FetchOutcome::Response {
-                status: 404,
-                headers: vec![("content-type".into(), "application/json".into())],
-                body: br#"{"message":"No default.fetch handler exported","name":"Error"}"#.to_vec(),
-                logs: vec![],
-            };
-        }
-
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
         let invocation_context = crate::core::invocation::InvocationContext::request(
@@ -2038,28 +2025,13 @@ impl RuntimeInner {
             s.executing_request_cancel = Some(ctx.cancel.clone());
         }
 
-        // Kernel dispatch — three tiers, in order of preference:
-        //   1. RPC fast path: URL matches /__zeroship/v1/<id> AND `default.rpc`
-        //      is exported. Slice id in Rust, parse body envelope in V8,
-        //      call rpc(id, input, ctx). No Request construction. Sync
-        //      and Promise returns are envelope-wrapped; AsyncIterator
-        //      and Response returns fall through to (3).
-        //   2. fetchFast: when user code opts in via default.fetchFast
-        //      (raw HTTP fast path, e.g., the bench fixture's /ping).
-        //      Existing zeroship extension. Independent of RPC.
-        //   3. Slow path: full default.fetch(request, env, ctx). WinterCG.
-        //
-        // Compute the wireId only when the cache says rpc is wired up
-        // AND the request isn't a WebSocket upgrade (those route through
-        // default.fetch → fallbackFetch → dispatchSubscription, which
-        // owns the WS handshake). Stored as `Option<&str>` so the borrow
-        // on `self.rpc_fn` is released before the mutable
-        // `self.arm_cpu_timer()` below; the dispatch block re-borrows
-        // inside `enter_v8!`.
+        // Native RPC resolves a retained procedure and owns its eventual result.
+        // Other requests try fetchFast before the ordinary fetch handler.
+        // Subscription upgrades still use the existing WebSocket transport.
         let is_ws_upgrade = headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
         });
-        let rpc_id_str: Option<&str> = if self.rpc_fn.is_some() && !is_ws_upgrade {
+        let rpc_id_str: Option<&str> = if self.rpc_registry.is_some() && !is_ws_upgrade {
             extract_zs_v1_id(method, url)
         } else {
             None
@@ -2078,6 +2050,7 @@ impl RuntimeInner {
         // inspect_response for Fetch). Default Fetch — only flipped
         // inside the RPC fast-path block.
         let mut pending_origin = PendingOrigin::Fetch;
+        let mut pending_rpc_call = None;
         // When the RPC fast path returns a pending Promise, this
         // carries the per-request `AbortGuard` from inside the
         // V8 scope out to `store_fetch_pending`. Otherwise the guard
@@ -2090,44 +2063,17 @@ impl RuntimeInner {
                 let undefined = v8::undefined(scope).into();
 
                 // ---- Tier 1: RPC fast path ----
-                // `rpc_id_str.is_some()` implies `self.rpc_fn.is_some()`
-                // by construction above, so we can unwrap the Global.
+                // `rpc_id_str.is_some()` implies `self.rpc_registry.is_some()`
+                // by construction above, so the published registry is available.
                 if let Some(rpc_id) = rpc_id_str {
-                    let rpc_fn = v8::Local::new(scope, self.rpc_fn.as_ref().unwrap());
-                    let id_arg: v8::Local<v8::Value> = v8::String::new(scope, rpc_id).unwrap().into();
+                    let registry = self.rpc_registry.as_ref().unwrap().clone();
                     let input_arg: v8::Local<v8::Value> = match parse_rpc_input(scope, method, url, body) {
                         InputParse::Ok(v) => v,
                         InputParse::Reject400(msg) => {
                             break 'dispatch Ok(rpc_invalid_argument_response(msg));
                         }
                     };
-                    let ctx_arg: v8::Local<v8::Value> = {
-                        let maybe = self.state.borrow().ctx_obj.clone();
-                        match maybe {
-                            Some(g) => v8::Local::new(scope, g).into(),
-                            None => v8::Object::new(scope).into(),
-                        }
-                    };
-
-                    // Build the per-request RpcCtx holder (Rust state +
-                    // V8 wrapper), and let `call_rpc_inner` install it in
-                    // the ALS slot. On any build failure we drop ALS
-                    // support and fall through to a no-ALS call (degrades
-                    // to undefined for `__zeroshipGetRpcCtx`, never breaks
-                    // the dispatch).
-                    //
-                    // The AbortController is minted EAGERLY inside
-                    // `mint_rpc_ctx` so the abort registry can register it
-                    // before user code runs. Headers / URL / signal V8
-                    // wrappers are deferred to first accessor read.
-                    //
-                    // When `app_id` is configured (multi-tenant worker),
-                    // register the controller with `crate::rpc::abort` so
-                    // the LRU eviction sweep can fire `ctx.signal` for
-                    // every in-flight procedure before the isolate is
-                    // disposed. The guard drops on sync return / throw;
-                    // on a pending promise we hand it off to
-                    // `store_fetch_pending` via `pending_abort_guard`.
+                    // The native RpcCtx is the handler argument and its ambient context.
                     let user_json = {
                         let s = self.state.borrow();
                         if s.per_request_user.is_empty() {
@@ -2170,32 +2116,21 @@ impl RuntimeInner {
                                 )),
                                 _ => None,
                             };
-                            (Some(ctx_obj), guard)
+                            (ctx_obj, guard)
                         }
-                        Err(_) => (None, None),
+                        Err(error) => break 'dispatch Ok(DispatchResult::Error(error.to_string())),
                     };
-                    match call_rpc_inner(scope, rpc_fn, id_arg, input_arg, ctx_arg, rpc_ctx_object) {
-                        RpcCallResult::Handled(res) => {
-                            // If the call returned a pending promise,
-                            // the pump must settle it as RPC (envelope-
-                            // wrap the value, not inspect as Response).
-                            // Hand the AbortGuard off to the pump so the
-                            // registry entry survives across `await`s.
-                            if res.is_err() {
-                                pending_origin = PendingOrigin::Rpc;
-                                pending_abort_guard = local_abort_guard.take();
-                            }
-                            break 'dispatch res;
-                        }
-                        // AsyncIterator return → falls through to the
-                        // slow path (default.fetch / synthetic entry),
-                        // which wraps it in an SSE Response.
-                        RpcCallResult::FallThrough => {}
+                    let (result, call) = call_rpc_inner(scope, registry, rpc_id, input_arg, rpc_ctx_object);
+                    if result.is_err() {
+                        pending_origin = PendingOrigin::Rpc;
+                        pending_rpc_call = call;
+                        pending_abort_guard = local_abort_guard.take();
+                    } else if let Ok(DispatchResult::HttpResponse(ResponseInfo::Stream {stream_id, ..})) = &result {
+                        crate::streams::response_forwarder::retain_abort_guard(
+                            &self.state, *stream_id, local_abort_guard.take(),
+                        );
                     }
-                    // Sync return / FallThrough: drop the guard at the
-                    // end of the V8 turn (the unused `_` binding here is
-                    // explicit — we want the Drop to run).
-                    drop(local_abort_guard);
+                    break 'dispatch result;
                 }
 
                 let fetch_fast_result = if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
@@ -2222,6 +2157,13 @@ impl RuntimeInner {
                     // Request/Response object construction needed.
                     res
                 } else {
+                    if self.fetch_handler_fn.is_none() {
+                        break 'dispatch Ok(DispatchResult::HttpResponse(ResponseInfo::Complete {
+                            status: 404,
+                            headers: vec![("content-type".into(), "application/json".into())],
+                            body: br#"{"message":"No default.fetch handler exported","name":"Error"}"#.to_vec(),
+                        }));
+                    }
                     // ---- Slow path: full default.fetch(request, env, ctx) ----
                     //
                     // Build the Request from the parsed HTTP data using the
@@ -2381,7 +2323,7 @@ impl RuntimeInner {
                 self.clear_executing_request();
                 self.store_fetch_pending(
                     request_id, promise, ctx, cpu_elapsed, wall_start, pending_origin,
-                    pending_abort_guard,
+                    pending_rpc_call, pending_abort_guard,
                 )
             }
         }
@@ -2401,6 +2343,7 @@ impl RuntimeInner {
         cpu_accumulated: Duration,
         wall_start: Instant,
         origin: PendingOrigin,
+        rpc_call: Option<crate::rpc::dispatch::RpcCall>,
         abort_guard: Option<crate::rpc::abort::AbortGuard>,
     ) -> crate::FetchOutcome {
         let (tx, rx) = channel::result_slot();
@@ -2413,6 +2356,7 @@ impl RuntimeInner {
             wall_start,
             cancel: ctx.cancel.clone(),
             origin,
+            rpc_call,
             abort_guard,
         });
         self.notify_pump();
@@ -2441,6 +2385,7 @@ impl RuntimeInner {
             wall_start,
             cancel: ctx.cancel.clone(),
             origin: PendingOrigin::Workflow,
+            rpc_call: None,
             abort_guard: None,
         });
         self.notify_pump();
@@ -2547,6 +2492,16 @@ impl RuntimeInner {
                 crate::streams::response_forwarder::resume_read(scope, &state, stream_id);
             }
         });
+        // Resumed reads and cancellation can issue native work after this
+        // pump pass has drained the task queues. Arrange another drain before
+        // parking so an awaited iterator return does not strand its timer.
+        let issued_work = {
+            let state = self.state.borrow();
+            !state.spawned_ops.is_empty()
+                || !state.spawned_timers.is_empty()
+                || !state.ready_timers.is_empty()
+        };
+        if issued_work { self.notify_pump(); }
     }
 
     /// Resolve parked Trusted JS-driver command promises from the Rust mailbox.
@@ -3556,7 +3511,7 @@ fn collect_settled_promises(
     settled_ids
         .into_iter()
         .filter_map(|id| {
-            let req = pending_requests.remove(&id)?;
+            let mut req = pending_requests.remove(&id)?;
             let invocation_context =
                 crate::core::invocation::InvocationContext::from_request_id(state, Some(id));
             let result = crate::core::invocation::with_context(
@@ -3564,104 +3519,31 @@ fn collect_settled_promises(
                 &invocation_context,
                 |scope| match req.origin {
                     PendingOrigin::Fetch => {
-                        http::extract_settled_result(scope, &req.promise, id)
+                        Ok(http::extract_settled_result(scope, &req.promise, id))
                     }
-                    PendingOrigin::Rpc => settle_rpc_promise(scope, &req.promise, id),
-                    PendingOrigin::Workflow => settle_workflow_promise(scope, &req.promise),
+                    PendingOrigin::Rpc => advance_rpc_call(scope, req.rpc_call.as_mut().expect("pending RPC owns a call"))
+                        .map(|result| {
+                            let response = crate::rpc::dispatch::response::into_http(result, id);
+                            if let Ok(ResponseInfo::Stream {stream_id, ..}) = &response {
+                                crate::streams::response_forwarder::retain_abort_guard(
+                                    state, *stream_id, req.abort_guard.take(),
+                                );
+                            }
+                            SettledResult::Http(response)
+                        }),
+                    PendingOrigin::Workflow => Ok(settle_workflow_promise(scope, &req.promise)),
                 },
             );
-            Some((id, req, result))
+            match result {
+                Ok(result) => Some((id, req, result)),
+                Err(promise) => {
+                    req.promise = promise;
+                    pending_requests.insert(id, req);
+                    None
+                }
+            }
         })
         .collect()
-}
-
-/// Settle a pending RPC promise into a `SettledResult`. The resolved
-/// value goes through `classify_rpc_return` so we get the same wire
-/// shape (envelope-wrapped value, inspected Response, fall-through for
-/// AsyncIterator) as the synchronous fast path.
-fn settle_rpc_promise(
-    scope: &mut v8::PinScope,
-    promise: &v8::Global<v8::Promise>,
-    request_id: u64,
-) -> SettledResult {
-    let local = v8::Local::new(scope, promise);
-    match local.state() {
-        v8::PromiseState::Fulfilled => {
-            let val = local.result(scope);
-            match classify_rpc_return(scope, val) {
-                RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(info))) => {
-                    SettledResult::Http(Ok(info))
-                }
-                RpcCallResult::Handled(Ok(DispatchResult::ErrorValue {
-                    message, name: _, stack: _, status: _, code: _, details_json: _, retryable: _
-                })) => {
-                    // Promote to Http(Err) — caller renders a 500 with this
-                    // message. Structured-error fields are dropped here; the
-                    // settle path's wire only carries a string. (Procedures
-                    // returning a thrown Error object as a value rather than
-                    // throwing is an unusual shape — most error paths land
-                    // via Promise rejection below.)
-                    SettledResult::Http(Err(message))
-                }
-                RpcCallResult::Handled(Ok(DispatchResult::Error(msg))) => {
-                    SettledResult::Http(Err(msg))
-                }
-                RpcCallResult::Handled(Err(_)) => {
-                    // Re-pending after settle is a no-op shape — unreachable
-                    // from `classify_rpc_return` which only inspects sync
-                    // values.
-                    SettledResult::Http(Err("rpc re-pending after settle".to_string()))
-                }
-                RpcCallResult::FallThrough => {
-                    // AsyncIterator returned from a Promise: the procedure
-                    // already ran and we hold the iterator, but we have no
-                    // native SSE encoder here. Surface an explicit error so
-                    // the failure mode is visible rather than silent garbage.
-                    // (Procedures that stream should use sync `async function*`
-                    // returns, which the kernel's sync-tier fall-through
-                    // routes through the JS encoder.)
-                    SettledResult::Http(Err(
-                        "rpc returned AsyncIterator from a Promise — unsupported; use `async function*` for streams".to_string()
-                    ))
-                }
-            }
-        }
-        v8::PromiseState::Rejected => {
-            let exc = local.result(scope);
-            match crate::dispatch::v8_exception_to_error_value(scope, exc) {
-                DispatchResult::ErrorValue {
-                    message,
-                    name,
-                    stack,
-                    status,
-                    code,
-                    details_json,
-                    retryable,
-                } => {
-                    let extras = crate::dispatch::ErrorExtras {
-                        stack: stack.as_deref(),
-                        code: code.as_deref(),
-                        details_json: details_json.as_deref(),
-                        retryable,
-                    };
-                    SettledResult::Http(Ok(http::ResponseInfo::Complete {
-                        status,
-                        headers: vec![("content-type".into(), "application/json".into())],
-                        body: crate::dispatch::build_error_body(
-                            status, request_id, &message, &name, extras,
-                        )
-                        .into_bytes(),
-                    }))
-                }
-                _ => SettledResult::Http(Err("rpc rejected".to_string())),
-            }
-        }
-        v8::PromiseState::Pending => {
-            // collect_settled_promises only invokes us for non-pending
-            // promises, so this branch is unreachable in practice.
-            SettledResult::Http(Err("rpc settle on pending promise".to_string()))
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3917,45 +3799,6 @@ fn classify_fetch_fast_return(
             body,
         },
     )))
-}
-
-// ─── RPC fast path ─────────────────────────────────────────────────────────
-//
-// Standalone kernel entry point for `default.rpc(name, input, ctx)`.
-// Activates when:
-//   - `default.rpc` is exported by the user module (cached as `rpc_fn`)
-//   - The incoming URL contains `/__zeroship/v1/<id>` (POST or GET)
-//
-// The kernel slices the id in Rust (no URL-object construction), parses
-// the body's superjson `{ json, meta? }` envelope in V8, and calls
-// `rpc(id, input, ctx)`. Resolved values are encoded inline:
-//   - Plain / superjson-serializable → `{ "json": ..., "meta"? }`, 200 OK
-//   - Response object → inspect_response (status, headers, body)
-//   - AsyncIterator → fall through to default.fetch (whose synthetic
-//     entry wraps it in an SSE Response)
-//
-// Synchronous handlers complete entirely in this block; async handlers
-// (Promise) hand off to the existing pump path on pending; the resolved
-// fast path applies to fulfilled-on-checkpoint promises too.
-
-/// Outcome of the RPC fast-path attempt.
-enum RpcCallResult {
-    /// rpc(...) returned a serializable value, a Response, or threw
-    /// — we have a concrete DispatchResult (or pending Promise) to
-    /// return.
-    Handled(Result<DispatchResult, v8::Global<v8::Promise>>),
-    /// rpc(...) returned an AsyncIterator — the kernel can't encode
-    /// it inline (no native SSE encoder; the synthetic SSR entry's
-    /// JS-side encoder owns that), so we fall through to the slow
-    /// `default.fetch` path, which re-invokes the procedure to wrap
-    /// it in a Response.
-    ///
-    /// Re-invocation is benign for `async function*` (the body only
-    /// runs when iterated, and the discarded generator is GC'd). For
-    /// hand-rolled AsyncIterators that do work in the synchronous
-    /// constructor, the work runs twice. Procedures should use
-    /// `async function*` (the kind=stream convention) for this lane.
-    FallThrough,
 }
 
 /// Byte offset of the path component of `url` — the index of the `/` that
@@ -4256,125 +4099,48 @@ fn format_trace_id_hex(id: u64) -> String {
     s
 }
 
-/// Invoke `default.rpc(id, input, ctx)` and classify the return value.
-///
-/// `als_ctx_object`, when `Some`, is installed into V8's
-/// `ContinuationPreservedEmbedderData` slot under the platform's
-/// RPC-ctx Symbol for the duration of the call. The slot is
-/// restored on every exit path (sync return, JS throw, panic). When
-/// `None`, the call runs without an ALS frame — used by paths that
-/// don't have a populated `RpcContext` yet (synthetic-entry tests
-/// using the older wire shape).
+/// Invoke the retained procedure target under the native request context.
 fn call_rpc_inner<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    rpc_fn: v8::Local<'s, v8::Function>,
-    id_arg: v8::Local<'s, v8::Value>,
-    input_arg: v8::Local<'s, v8::Value>,
-    ctx_arg: v8::Local<'s, v8::Value>,
-    als_ctx_object: Option<v8::Local<'s, v8::Object>>,
-) -> RpcCallResult {
-    let undefined: v8::Local<v8::Value> = v8::undefined(scope).into();
-    let invoke = |scope: &mut v8::PinScope<'s, '_>| {
-        v8::tc_scope!(let tc, scope);
-        let r = rpc_fn.call(tc, undefined, &[id_arg, input_arg, ctx_arg]);
-        if tc.has_caught() {
-            let exc = tc.exception();
-            let exc_global = exc.map(|e| v8::Global::new(tc, e));
-            (None, exc_global)
-        } else {
-            (r.map(|v| v8::Global::new(tc, v)), None)
-        }
-    };
-    let (result_val, caught_exception) = match als_ctx_object {
-        Some(ctx_object) => crate::rpc::with_rpc_context(scope, ctx_object, invoke),
-        None => invoke(scope),
-    };
-
-    crate::core::init::perform_microtask_checkpoint(scope);
-
-    if let Some(exc_global) = caught_exception {
-        let exc_local = v8::Local::new(scope, &exc_global);
-        return RpcCallResult::Handled(Ok(
-            crate::dispatch::v8_exception_to_error_value(scope, exc_local),
-        ));
-    }
-
-    let Some(result_global) = result_val else {
-        return RpcCallResult::Handled(Ok(DispatchResult::Error(
-            "rpc returned no value".to_string(),
-        )));
-    };
-    let result: v8::Local<v8::Value> = v8::Local::new(scope, &result_global);
-
-    if result.is_promise() {
-        let promise = v8::Local::<v8::Promise>::try_from(result).unwrap();
-        return match promise.state() {
-            v8::PromiseState::Fulfilled => {
-                let resolved = promise.result(scope);
-                classify_rpc_return(scope, resolved)
-            }
-            v8::PromiseState::Rejected => {
-                let exc = promise.result(scope);
-                RpcCallResult::Handled(Ok(
-                    crate::dispatch::v8_exception_to_error_value(scope, exc),
-                ))
-            }
-            v8::PromiseState::Pending => {
-                RpcCallResult::Handled(Err(v8::Global::new(scope, promise)))
-            }
-        };
-    }
-
-    classify_rpc_return(scope, result)
+    registry: crate::rpc::dispatch::ProcedureRegistry,
+    name: &str,
+    input: v8::Local<'s, v8::Value>,
+    context: v8::Local<'s, v8::Object>,
+) -> (Result<DispatchResult, v8::Global<v8::Promise>>, Option<crate::rpc::dispatch::RpcCall>) {
+    let mut call = crate::rpc::with_rpc_context(scope, context, |scope| {
+        crate::rpc::dispatch::RpcCall::new(scope, registry, name.into(), input, context.into())
+    });
+    let result = advance_rpc_call(scope, &mut call);
+    let retained = if result.is_err() { Some(call) } else { None };
+    (result, retained)
 }
 
-/// Materialize a resolved RPC return value into a DispatchResult.
-///
-/// Object-shape probes (skipped for primitives):
-///   - Response (branded via `__zsResponse` on Response.prototype) →
-///     inspect inline and return its ResponseInfo. No fall-through —
-///     the user procedure is NOT re-invoked.
-///   - AsyncIterator → fall through. The kernel has no native SSE
-///     encoder; the synthetic SSR entry's JS encoder takes over via
-///     re-invocation (see RpcCallResult::FallThrough).
-///
-/// Everything else: superjson encode and wrap in `{ json, meta? }`.
-fn classify_rpc_return<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    val: v8::Local<'s, v8::Value>,
-) -> RpcCallResult {
-    if val.is_object() {
-        // Response: branded via `__zsResponse = 1` on the prototype by
-        // the fetch polyfill. One property get (cached IC after
-        // warmup) — much cheaper than constructor.name probing.
-        if http::looks_like_response(scope, val) {
-            return match http::inspect_response(scope, val) {
-                Ok(info) => RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(info))),
-                Err(e) => RpcCallResult::Handled(Ok(DispatchResult::Error(e))),
-            };
-        }
-        // AsyncIterator detection: cheap, single-symbol probe.
-        let obj: v8::Local<v8::Object> = val.try_into().unwrap();
-        let async_iter_sym = v8::Symbol::get_async_iterator(scope);
-        if obj.has(scope, async_iter_sym.into()).unwrap_or(false) {
-            return RpcCallResult::FallThrough;
+/// Loading and handler promises use the same pump-owned call. A checkpoint
+/// can finish either phase without needing another external wakeup.
+fn advance_rpc_call(
+    scope: &mut v8::PinScope,
+    call: &mut crate::rpc::dispatch::RpcCall,
+) -> Result<DispatchResult, v8::Global<v8::Promise>> {
+    use crate::rpc::dispatch::{CallProgress, response};
+    loop {
+        match call.poll(scope) {
+            Ok(CallProgress::Pending(promise)) => {
+                crate::core::init::perform_microtask_checkpoint(scope);
+                if v8::Local::new(scope, &promise).state() == v8::PromiseState::Pending {
+                    return Err(promise);
+                }
+            }
+            Ok(CallProgress::Complete { invocation, value }) => {
+                let validate_output = scope.get_slot::<SharedState>()
+                    .is_some_and(|state| state.borrow().validate_rpc_output);
+                return Ok(response::classify(scope, invocation, &value, validate_output));
+            }
+            Ok(CallProgress::Missing(name)) => return Ok(response::error_value(
+                format!("Method not found: {name}"), 404, "NOT_FOUND",
+            )),
+            Err(error) => return Ok(response::failure(scope, error)),
         }
     }
-
-    // Plain value → superjson encode and wrap in `{ json, meta? }`.
-    let body = match crate::rpc::encode_to_bytes(scope, val) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return RpcCallResult::Handled(Ok(DispatchResult::Error(e.message)));
-        }
-    };
-    RpcCallResult::Handled(Ok(DispatchResult::HttpResponse(
-        http::ResponseInfo::Complete {
-            status: 200,
-            headers: vec![("content-type".into(), "application/json".into())],
-            body,
-        },
-    )))
 }
 
 /// Extract headers from a plain `{ k: v }` object. For the fetchFast

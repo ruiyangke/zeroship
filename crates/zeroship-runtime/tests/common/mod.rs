@@ -26,115 +26,12 @@ pub fn m(source: &str) -> Vec<ModuleEntry> {
     }]
 }
 
-/// Wrap a user-supplied JS source (with bare `export function name(...)`
-/// declarations) in a tiny synthetic-entry shim that exposes
-/// `default.{fetch, rpc}` per the WinterCG-symmetric contract.
-///
-/// The shim:
-///   - Rebuilds a name → fn lookup at module top by walking `globalThis`-
-///     stashed bindings — since we control the harness we just inline a
-///     literal `_procedures` map after the user code (see usage below).
-///   - Implements `_zsFetch(request)` for `/__zeroship/v1/<id>` URLs (POST body is
-///     `{"json": <input>}`).
-///   - Implements `_zsRpc(name, input, ctx)` that throws 404 NOT_FOUND on
-///     missing keys.
-///
-/// `procs_block` must be a JS expression like `{ ping, count }` that
-/// references the user's named exports. The shim exports
-/// `default = { fetch: _zsFetch, rpc: _zsRpc }`.
+/// Expose the explicitly supplied procedure dictionary through native RPC.
+/// `procs_block` is an expression referencing the creator's named exports.
 pub fn wrap_with_synthetic_entry(user_source: &str, procs_block: &str) -> Vec<ModuleEntry> {
-    let src = format!(
-        r#"
-{user}
-const _procedures = {procs};
-async function _zsRpc(name, input, _ctx) {{
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {{
-        throw Object.assign(new Error("Method not found: " + name), {{ status: 404, code: "NOT_FOUND" }});
-    }}
-    return await fn(input);
-}}
-async function _zsRpcAndRespond(name, input) {{
-    try {{
-        const result = await _zsRpc(name, input);
-        if (result != null && typeof result === "object"
-            && typeof result[Symbol.asyncIterator] === "function"
-            && typeof result.next === "function") {{
-            const enc = new TextEncoder();
-            const body = new ReadableStream({{
-                async start(controller) {{
-                    try {{
-                        while (true) {{
-                            const step = await result.next();
-                            if (step.done) {{ controller.enqueue(enc.encode("d:{{}}\n")); break; }}
-                            const v = step.value;
-                            if (typeof v === "string") {{
-                                controller.enqueue(enc.encode("0:" + JSON.stringify(v) + "\n"));
-                            }} else {{
-                                controller.enqueue(enc.encode("2:[" + JSON.stringify(v) + "]\n"));
-                            }}
-                        }}
-                    }} catch (e) {{
-                        const env = {{ message: e?.message ?? String(e), name: e?.name ?? "Error" }};
-                        if (e && typeof e.code === "string") env.code = e.code;
-                        if (e && e.details !== undefined) env.details = e.details;
-                        if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
-                        controller.enqueue(enc.encode("e:" + JSON.stringify(env) + "\n"));
-                        controller.enqueue(enc.encode("d:{{}}\n"));
-                    }} finally {{ controller.close(); }}
-                }},
-            }});
-            return new Response(body, {{
-                status: 200,
-                headers: {{ "content-type": "text/event-stream", "cache-control": "no-cache" }},
-            }});
-        }}
-        if (result instanceof Response) return result;
-        return new Response(JSON.stringify({{ json: result === undefined ? null : result }}), {{
-            status: 200, headers: {{ "content-type": "application/json" }},
-        }});
-    }} catch (err) {{
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = {{ message: err?.message ?? String(err), name: err?.name ?? "Error" }};
-        if (err && typeof err.code === "string") body.code = err.code;
-        if (err && err.details !== undefined) body.details = err.details;
-        if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
-        return new Response(JSON.stringify(body), {{
-            status, headers: {{ "content-type": "application/json" }},
-        }});
-    }}
-}}
-async function _zsFetch(request) {{
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
-        return new Response("Not Found", {{ status: 404 }});
-    }}
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    let input = undefined;
-    if (request.method === "POST") {{
-        const text = await request.text();
-        if (text) {{
-            try {{
-                const env = JSON.parse(text);
-                input = env && typeof env === "object" && "json" in env ? env.json : env;
-            }} catch (e) {{
-                return new Response(JSON.stringify({{
-                    message: "invalid JSON body: " + (e?.message ?? e),
-                    name: "Error", code: "INVALID_ARGUMENT",
-                }}), {{ status: 400, headers: {{ "content-type": "application/json" }} }});
-            }}
-        }}
-    }}
-    return await _zsRpcAndRespond(id, input);
-}}
-export default {{ fetch: _zsFetch, rpc: _zsRpc }};
-"#,
-        user = user_source,
-        procs = procs_block,
-    );
     vec![ModuleEntry {
         specifier: "index.js".into(),
-        source: src,
+        source: format!("{user_source}\nexport default {{ rpc: {procs_block} }};"),
     }]
 }
 
@@ -274,20 +171,14 @@ fn unwrap_json_envelope(body: &str) -> String {
 /// dispatch contract: `dispatch(m, "add", "[3,4]")` → `add(3, 4)`.
 pub fn dispatch(modules: Vec<ModuleEntry>, method: &str, args_json: &str) -> Result<RequestResult, String> {
     init_v8();
-    let wrapped = wrap_user_modules_for_legacy_dispatch(modules);
+    let wrapped = wrap_positional_exports(modules);
     let runtime = Runtime::builder().modules(wrapped).build();
     run_dispatch_on_runtime(&runtime, method, args_json)
 }
 
-/// Detect every named export in a JS source string and wrap the modules
-/// in a synthetic-entry shim that exposes `default.{fetch, rpc}` per
-/// the WinterCG-symmetric contract.
-///
-/// The shim's `_zsRpc(name, input, ctx)` looks up the procedure by name
-/// and spreads `input` (a JS array, per the legacy dispatch convention)
-/// over the handler's arguments — so user code can keep writing
-/// `function add(a, b) { ... }` without rewriting their signatures.
-fn wrap_user_modules_for_legacy_dispatch(modules: Vec<ModuleEntry>) -> Vec<ModuleEntry> {
+/// Adapt positional fixture functions to the native procedure dictionary.
+/// Each entry spreads its input array over the original handler arguments.
+fn wrap_positional_exports(modules: Vec<ModuleEntry>) -> Vec<ModuleEntry> {
     if modules.is_empty() { return modules; }
     let entry = &modules[0];
     let names = extract_exported_names(&entry.source);
@@ -299,88 +190,11 @@ fn wrap_user_modules_for_legacy_dispatch(modules: Vec<ModuleEntry>) -> Vec<Modul
     let shim = format!(
         r#"
 {user}
-const _procedures = {procs};
-async function _zsRpc(name, input, _ctx) {{
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {{
-        throw Object.assign(new Error("Method not found: " + name), {{ status: 404, code: "NOT_FOUND" }});
-    }}
-    const args = Array.isArray(input) ? input : [];
-    return await fn.apply(null, args);
-}}
-async function _zsRpcAndRespond(name, input) {{
-    try {{
-        const result = await _zsRpc(name, input);
-        if (result != null && typeof result === "object"
-            && typeof result[Symbol.asyncIterator] === "function"
-            && typeof result.next === "function") {{
-            const enc = new TextEncoder();
-            const body = new ReadableStream({{
-                async start(controller) {{
-                    try {{
-                        while (true) {{
-                            const step = await result.next();
-                            if (step.done) {{ controller.enqueue(enc.encode("d:{{}}\n")); break; }}
-                            const v = step.value;
-                            if (typeof v === "string") {{
-                                controller.enqueue(enc.encode("0:" + JSON.stringify(v) + "\n"));
-                            }} else {{
-                                controller.enqueue(enc.encode("2:[" + JSON.stringify(v) + "]\n"));
-                            }}
-                        }}
-                    }} catch (e) {{
-                        const env = {{ message: e?.message ?? String(e), name: e?.name ?? "Error" }};
-                        if (e && typeof e.code === "string") env.code = e.code;
-                        if (e && e.details !== undefined) env.details = e.details;
-                        if (e && typeof e.retryable === "boolean") env.retryable = e.retryable;
-                        controller.enqueue(enc.encode("e:" + JSON.stringify(env) + "\n"));
-                        controller.enqueue(enc.encode("d:{{}}\n"));
-                    }} finally {{ controller.close(); }}
-                }},
-            }});
-            return new Response(body, {{
-                status: 200,
-                headers: {{ "content-type": "text/event-stream", "cache-control": "no-cache" }},
-            }});
-        }}
-        if (result instanceof Response) return result;
-        return new Response(JSON.stringify({{ json: result === undefined ? null : result }}), {{
-            status: 200, headers: {{ "content-type": "application/json" }},
-        }});
-    }} catch (err) {{
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = {{ message: err?.message ?? String(err), name: err?.name ?? "Error" }};
-        if (err && typeof err.code === "string") body.code = err.code;
-        if (err && err.details !== undefined) body.details = err.details;
-        if (err && typeof err.retryable === "boolean") body.retryable = err.retryable;
-        return new Response(JSON.stringify(body), {{
-            status, headers: {{ "content-type": "application/json" }},
-        }});
-    }}
-}}
-async function _zsFetch(request) {{
-    const url = new URL(request.url);
-    if (!url.pathname.startsWith("/__zeroship/v1/")) {{
-        return new Response("Not Found", {{ status: 404 }});
-    }}
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    let input = undefined;
-    if (request.method === "POST") {{
-        const text = await request.text();
-        if (text) {{
-            try {{
-                const env = JSON.parse(text);
-                input = env && typeof env === "object" && "json" in env ? env.json : env;
-            }} catch (_e) {{
-                return new Response(JSON.stringify({{ message: "invalid JSON body", name: "Error", code: "INVALID_ARGUMENT" }}), {{
-                    status: 400, headers: {{ "content-type": "application/json" }},
-                }});
-            }}
-        }}
-    }}
-    return await _zsRpcAndRespond(id, input);
-}}
-export default {{ fetch: _zsFetch, rpc: _zsRpc }};
+const procedures = {procs};
+const rpc = Object.fromEntries(Object.entries(procedures).map(([name, handler]) => [
+    name, (input) => Reflect.apply(handler, null, Array.isArray(input) ? input : []),
+]));
+export default {{ rpc }};
 "#,
         user = entry.source,
         procs = procs_block,
@@ -516,7 +330,7 @@ pub fn dispatch_with_env(
     args_json: &str,
 ) -> Result<RequestResult, String> {
     init_v8();
-    let wrapped = wrap_user_modules_for_legacy_dispatch(modules);
+    let wrapped = wrap_positional_exports(modules);
     let runtime = Runtime::builder().modules(wrapped).build();
     let vars: std::collections::BTreeMap<String, String> = env_vars.into_iter().collect();
     let env = EnvSnapshot::new(vars, std::collections::BTreeMap::new(), Vec::new());
