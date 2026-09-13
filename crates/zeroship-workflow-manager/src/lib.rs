@@ -8,6 +8,7 @@ mod error;
 mod models;
 mod queue;
 pub mod recovery;
+pub mod scheduling;
 
 pub use error::Error;
 pub use models::collections;

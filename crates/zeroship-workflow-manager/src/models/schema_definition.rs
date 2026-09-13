@@ -80,6 +80,57 @@ zeroship_data_orm::orm::schema! {
             pending_job_id: Nullable<Text>,
         }
 
+        schedule_activations {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            deployment_id: Text,
+            revision: BigInt,
+            activated_at: BigInt,
+        }
+
+        schedule_deployments {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            definition: Text,
+            interpretation: Text,
+            created_at: BigInt,
+        }
+
+        schedule_occurrences {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            schedule_id: Text,
+            revision: BigInt,
+            scheduled_at: BigInt,
+            run_id: Text,
+            job_id: Text,
+            activation_id: Text,
+        }
+
+        schedule_scopes {
+            #[orm(primary_key)]
+            id: Text,
+            revision: BigInt,
+            activation_id: Text,
+        }
+
+        schedules {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            name: Text,
+            activation_id: Text,
+            revision: BigInt,
+            definition: Text,
+            next_at: Nullable<BigInt>,
+            anchor_at: BigInt,
+            catch_up_until: Nullable<BigInt>,
+            catch_up_remaining: Nullable<BigInt>,
+        }
+
         schema_version {
             #[orm(primary_key)]
             id: Text,
@@ -103,8 +154,8 @@ zeroship_data_orm::orm::schema! {
 mod tests {
     use super::schema;
     use zeroship_data_orm::{
-        Value,
         schema::{CollectionSchema, Schema},
+        Value,
     };
 
     #[test]

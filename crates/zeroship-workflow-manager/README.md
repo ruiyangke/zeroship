@@ -1,7 +1,7 @@
 # zeroship-workflow-manager
 
 Native platform workflow coordination. This crate owns worker registration,
-placement, management commands, the durable metadata queue and the deployment
+placement, calendar scheduling, management commands, the durable metadata queue and the deployment
 retention ledger through the shared Rust ORM. It has no customer journal,
 payload storage or V8 dependency.
 
@@ -21,7 +21,19 @@ Timeout during an in-flight commit leaves an uncertain outcome; retries recover
 its durable receipt without adding successor jobs again.
 Claim and heartbeat return `DeliveryGrant`; converting it to a wire lease after
 commit charges elapsed time against the originally observed assignment authority.
-Worker publication cannot mint manager-owned cron or management commands.
+Worker publication cannot mint manager-owned activation, cron or management commands.
+
+`scheduling::Scheduler` prepares immutable schedule metadata from normal app
+deployments. Activation selects future scheduling and commits its job and recovery
+responsibility together. Due dispatch persists occurrence identities, queue jobs
+and the catch-up cursor in one transaction. Page limits preserve the original
+catch-up boundary and remaining allowance. Occurrences wait for their own
+activation job to complete; replacement stops future generation without changing
+already queued jobs. Claims and receipt replay verify stored job linkage, and
+frontier extension checks the immutable descriptor and calendar interpretation.
+The manager host loop, creator activation/cron handlers and queue-owned deployment
+holds still need composition before production scheduling can be enabled.
+
 `recovery::Recovery` stores persistent scope responsibility and publishes due
 reconciliation into this queue. Repeated activation registration preserves its
 deadline; newer activation affects future jobs while a pending job keeps its pin.
@@ -37,13 +49,14 @@ queue ownership and customer journal ownership require separate host authority;
 the journal hold API does not grant manager access.
 
 `schema/` and `schema/deployments/` record definitions through the migration DSL
-and generate native ORM descriptors and dialect DDL. Runtime queue and retention
-operations use collections and models. Database clock queries and local catalog
+and generate migration metadata and dialect DDL. Rust ORM models use native
+`schema!` declarations, checked against that metadata in tests. Runtime queue and
+retention operations use collections and models. Database clock queries and local catalog
 provisioning remain explicit host operations.
 
 The native library is composed by the workflow server under
 the [workflow proposal](../../docs/proposals/2026-09-11-workflow-worker.md).
-The worker consumer, manager scheduling and CLI composition still require cutover.
+The worker consumer, manager scheduling loop and CLI composition still require cutover.
 
 Run `cargo test -p zeroship-workflow-manager` for PostgreSQL Testcontainers and
-SQLite queue and retention contracts.
+SQLite queue, scheduling and retention contracts.

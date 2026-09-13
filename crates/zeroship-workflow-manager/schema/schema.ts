@@ -11,6 +11,11 @@ export const managerIdentityColumns = {
   management: ["id", "app_id", "request_id", "run_id", "ack_worker_id"],
   jobs: ["id", "app_id", "deployment_id", "worker_id"],
   recovery_scopes: ["id", "deployment_id", "pending_job_id"],
+  schedule_deployments: ["id", "app_id"],
+  schedule_activations: ["id", "app_id", "deployment_id"],
+  schedule_scopes: ["id", "activation_id"],
+  schedules: ["id", "app_id", "name", "activation_id"],
+  schedule_occurrences: ["id", "app_id", "schedule_id", "run_id", "job_id", "activation_id"],
 };
 
 // Queue records carry closed job metadata; customer history and payloads stay
@@ -94,6 +99,42 @@ export function workflowManagerSchema(namespace) {
   });
   jobs.index("jobs_available_idx").add({ on: ["app_id", "state", "available_at", "id"] });
   jobs.index("jobs_lease_idx").add({ on: ["app_id", "state", "lease_deadline", "id"] });
+  jobs.index("jobs_scope_key").add({ on: ["app_id", "id"], unique: true });
+
+  create("schedule_deployments", {
+    app_id: text(), definition: text(), interpretation: text(), created_at: integer(),
+  }, ["app_id", "id"], [fk("schedule_deployment_scope", ["app_id"], "queue_scopes", ["id"])]);
+  create("schedule_activations", {
+    app_id: text(), deployment_id: text(), revision: integer(), activated_at: integer(),
+  }, ["app_id", "revision"], [
+    fk("schedule_activation_job", ["app_id", "id"], "jobs", ["app_id", "id"]),
+    fk("schedule_activation_deploy", ["app_id", "deployment_id"], "schedule_deployments", ["app_id", "id"]),
+  ]);
+  table("schedule_activations", { schema: namespace }).index("schedule_activations_identity_key").add({ on: ["app_id", "id"], unique: true });
+  create("schedule_scopes", {
+    revision: integer(), activation_id: text(),
+  }, ["id"], [
+    fk("schedule_scope_app", ["id"], "queue_scopes", ["id"]),
+    fk("schedule_scope_activation", ["id", "activation_id"], "schedule_activations", ["app_id", "id"]),
+  ]);
+  create("schedules", {
+    app_id: text(), name: text(), activation_id: text(), revision: integer(),
+    definition: text(), next_at: t.bigInt(), anchor_at: integer(),
+    catch_up_until: t.bigInt(), catch_up_remaining: t.bigInt(),
+  }, ["app_id", "name"], [
+    fk("schedule_activation", ["app_id", "activation_id"], "schedule_activations", ["app_id", "id"]),
+  ]);
+  table("schedules", { schema: namespace }).index("schedules_identity_key").add({ on: ["app_id", "id"], unique: true });
+  index("schedules", "due", ["next_at", "id"]);
+  create("schedule_occurrences", {
+    app_id: text(), schedule_id: text(), revision: integer(), scheduled_at: integer(),
+    run_id: text(), job_id: text(), activation_id: text(),
+  }, ["app_id", "schedule_id", "revision", "scheduled_at"], [
+    fk("occurrence_schedule", ["app_id", "schedule_id"], "schedules", ["app_id", "id"]),
+    fk("occurrence_job", ["app_id", "job_id"], "jobs", ["app_id", "id"]),
+    fk("occurrence_activation", ["app_id", "activation_id"], "schedule_activations", ["app_id", "id"]),
+  ]);
+  table("schedule_occurrences", { schema: namespace }).index("schedule_occurrences_job_key").add({ on: ["app_id", "job_id"], unique: true });
 
   create("recovery_scopes", {
     deployment_id: text(), activation_revision: integer(), next_due_at: integer(),

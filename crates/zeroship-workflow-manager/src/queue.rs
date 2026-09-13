@@ -268,22 +268,15 @@ impl Queue {
             budget.cap(sample, authority.expires_at.get())?;
             let now = sample.millis;
             let assignment_expires = local_deadline(sample, authority.expires_at.get())?;
-            let due = value!({"app_id":assignment.app_id.as_str(), "$or":[
-                {"state":"ready", "available_at":{"$lte":now}},
-                {"state":"leased", "lease_deadline":{"$lte":now}}
-            ]});
-            let Output::Rows { rows, .. } = tx.collection(jobs::Entity::COLLECTION)?.find(
-                due, value!({"limit":1,"select":["id"],"orderBy":{"available_at":1,"id":1}})
-            ).await? else { return Err(Error::Storage); };
-            let Some(row) = rows.first() else {
+            let Some(id) = crate::scheduling::candidate(&tx, &assignment.app_id, now).await? else {
                 let observed = authorize(tx.clone()).await?;
                 let sample = self.clock.sample().await?;
                 let authority = current(assignment, observed, sample.millis)?;
                 budget.cap(sample, authority.expires_at.get())?;
                 return Ok(None);
             };
-            let id = row["id"].as_str().ok_or(Error::Storage)?;
-            let job = load(&tx, &assignment.app_id, id).await?.ok_or(Error::Storage)?;
+            let job = load(&tx, &assignment.app_id, &id).await?.ok_or(Error::Storage)?;
+            crate::scheduling::validate_delivery(&tx, &job).await?;
             let attempt = job.attempt.checked_add(1).filter(|value| *value > 0)
                 .ok_or(Error::Capacity)?;
             let sample = self.clock.sample().await?;
@@ -542,7 +535,7 @@ impl Queue {
         Ok(deadline)
     }
 
-    fn encode(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
+    pub(crate) fn encode(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
         let mut output = Metadata {
             bytes: Vec::new(),
             bound: self.options.max_metadata_bytes,

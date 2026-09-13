@@ -39,6 +39,50 @@ CREATE INDEX IF NOT EXISTS "jobs_available_idx" ON "jobs" ("app_id", "state", "a
 
 CREATE INDEX IF NOT EXISTS "jobs_lease_idx" ON "jobs" ("app_id", "state", "lease_deadline", "id");
 
+CREATE UNIQUE INDEX IF NOT EXISTS "jobs_scope_key" ON "jobs" ("app_id", "id");
+
+CREATE TABLE "schedule_deployments" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "definition" TEXT NOT NULL, "interpretation" TEXT NOT NULL, "created_at" INTEGER NOT NULL, CONSTRAINT "schedule_deployment_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "schedule_deployment_scope_idx" ON "schedule_deployments" ("app_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_deployments_scope_key" ON "schedule_deployments" ("app_id", "id");
+
+CREATE TABLE "schedule_activations" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "deployment_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "activated_at" INTEGER NOT NULL, CONSTRAINT "schedule_activation_deploy" FOREIGN KEY (app_id, deployment_id) REFERENCES schedule_deployments(app_id, id) ON DELETE RESTRICT, CONSTRAINT "schedule_activation_job" FOREIGN KEY (app_id, id) REFERENCES jobs(app_id, id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "schedule_activation_deploy_idx" ON "schedule_activations" ("app_id", "deployment_id");
+
+CREATE INDEX IF NOT EXISTS "schedule_activation_job_idx" ON "schedule_activations" ("app_id", "id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_activations_scope_key" ON "schedule_activations" ("app_id", "revision");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_activations_identity_key" ON "schedule_activations" ("app_id", "id");
+
+CREATE TABLE "schedule_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "activation_id" TEXT NOT NULL, CONSTRAINT "schedule_scope_activation" FOREIGN KEY (id, activation_id) REFERENCES schedule_activations(app_id, id) ON DELETE RESTRICT, CONSTRAINT "schedule_scope_app" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "schedule_scope_activation_idx" ON "schedule_scopes" ("id", "activation_id");
+
+CREATE TABLE "schedules" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "name" TEXT NOT NULL, "activation_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "definition" TEXT NOT NULL, "next_at" INTEGER, "anchor_at" INTEGER NOT NULL, "catch_up_until" INTEGER, "catch_up_remaining" INTEGER, CONSTRAINT "schedule_activation" FOREIGN KEY (app_id, activation_id) REFERENCES schedule_activations(app_id, id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "schedule_activation_idx" ON "schedules" ("app_id", "activation_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedules_scope_key" ON "schedules" ("app_id", "name");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedules_identity_key" ON "schedules" ("app_id", "id");
+
+CREATE INDEX IF NOT EXISTS "schedules_due_idx" ON "schedules" ("next_at", "id");
+
+CREATE TABLE "schedule_occurrences" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "schedule_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "scheduled_at" INTEGER NOT NULL, "run_id" TEXT NOT NULL, "job_id" TEXT NOT NULL, "activation_id" TEXT NOT NULL, CONSTRAINT "occurrence_activation" FOREIGN KEY (app_id, activation_id) REFERENCES schedule_activations(app_id, id) ON DELETE RESTRICT, CONSTRAINT "occurrence_job" FOREIGN KEY (app_id, job_id) REFERENCES jobs(app_id, id) ON DELETE RESTRICT, CONSTRAINT "occurrence_schedule" FOREIGN KEY (app_id, schedule_id) REFERENCES schedules(app_id, id) ON DELETE RESTRICT);
+
+CREATE INDEX IF NOT EXISTS "occurrence_activation_idx" ON "schedule_occurrences" ("app_id", "activation_id");
+
+CREATE INDEX IF NOT EXISTS "occurrence_job_idx" ON "schedule_occurrences" ("app_id", "job_id");
+
+CREATE INDEX IF NOT EXISTS "occurrence_schedule_idx" ON "schedule_occurrences" ("app_id", "schedule_id");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_scope_key" ON "schedule_occurrences" ("app_id", "schedule_id", "revision", "scheduled_at");
+
+CREATE UNIQUE INDEX IF NOT EXISTS "schedule_occurrences_job_key" ON "schedule_occurrences" ("app_id", "job_id");
+
 CREATE TABLE "recovery_scopes" ("id" TEXT PRIMARY KEY NOT NULL, "deployment_id" TEXT NOT NULL, "activation_revision" INTEGER NOT NULL, "next_due_at" INTEGER NOT NULL, "pending_job_id" TEXT, CONSTRAINT "recovery_job" FOREIGN KEY (pending_job_id) REFERENCES jobs(id) ON DELETE RESTRICT, CONSTRAINT "recovery_scope" FOREIGN KEY (id) REFERENCES queue_scopes(id) ON DELETE RESTRICT);
 
 CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "recovery_scopes" ("pending_job_id");
@@ -46,4 +90,4 @@ CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "recovery_scopes" ("pending_job
 CREATE INDEX IF NOT EXISTS "recovery_scopes_due_idx" ON "recovery_scopes" ("next_due_at", "id");
 
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '8cd3dcb758d30bcb6ae0220eef7d8994a82ae10cb6275aac2c2d7e7a0ad37c12');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', 'b9d82e738dc693a84e45062da0102640f9b2beeb0e5b43e45067ce364137f33e');
