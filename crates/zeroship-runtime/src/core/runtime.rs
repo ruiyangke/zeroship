@@ -2106,13 +2106,12 @@ impl RuntimeInner {
                         self.app_id.is_some(),
                     );
                     let (rpc_ctx_object, mut local_abort_guard) = match mint_result {
-                        Ok((ctx_obj, controller)) => {
-                            let guard = match (self.app_id.as_ref(), controller) {
-                                (Some(aid), Some(c)) => Some(crate::rpc::abort::register_in_flight(
-                                    scope,
+                        Ok((ctx_obj, signal)) => {
+                            let guard = match (self.app_id.as_ref(), signal) {
+                                (Some(aid), Some(signal)) => Some(crate::rpc::abort::register_in_flight(
                                     aid,
                                     request_id,
-                                    c,
+                                    signal,
                                 )),
                                 _ => None,
                             };

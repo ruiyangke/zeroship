@@ -462,11 +462,14 @@ async fn slow_stream_consumer_bounds_pulls_and_disconnect_returns_in_context() {
 }
 
 #[compio::test]
-async fn response_stream_retains_the_rpc_eviction_controller_after_headers() {
+async fn response_stream_retains_the_native_rpc_signal_after_headers() {
     use zeroship_runtime::rpc::abort;
     for promised in [false, true] {
         let app_id = zeroship_core::app_id::AppId::mint();
         let source = format!(r#"
+            AbortController.prototype.abort = () => {{
+                throw new Error('creator replaced controller.abort');
+            }};
             let aborted = false;
             const make = (_, ctx) => {{
                 ctx.signal.addEventListener('abort', () => {{ aborted = true; }});
@@ -503,5 +506,51 @@ async fn response_stream_retains_the_rpc_eviction_controller_after_headers() {
         assert_eq!(unwrap_json_envelope(&body), "true");
         drop(reader);
         assert_eq!(abort::entries_for_app(&app_id), 0);
+    }
+}
+
+#[test]
+fn rpc_signals_ignore_replaced_javascript_constructors() {
+    for eager in [false, true] {
+        let source = r#"
+            import { currentSignal } from 'zeroship';
+            const NativeAbortSignal = AbortSignal;
+            for (const name of ['AbortController', 'AbortSignal']) {
+                Object.defineProperty(globalThis, name, {
+                    configurable: true,
+                    get() { throw new Error(`creator replaced ${name}`); },
+                });
+            }
+            let previous;
+            export default {rpc: {inspect: (_, ctx) => {
+                const current = ctx.signal;
+                const result = {
+                    native: current instanceof NativeAbortSignal,
+                    same: current === ctx.signal && current === currentSignal(),
+                    fresh: current !== previous,
+                    aborted: current.aborted,
+                    noReason: current.reason === undefined,
+                };
+                current.throwIfAborted();
+                previous = current;
+                return result;
+            }}};
+        "#;
+        let mut builder = Runtime::builder().modules(vec![ModuleEntry {
+            specifier: "index.js".into(), source: source.into(),
+        }]);
+        if eager {
+            builder = builder.app_id(zeroship_core::app_id::AppId::mint());
+        }
+        let runtime = builder.build();
+        for _ in 0..2 {
+            let (status, body) = dispatch(&runtime, "inspect", "{}");
+            assert_eq!(status, 200, "{body}");
+            let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(value["json"], serde_json::json!({
+                "native": true, "same": true, "fresh": true,
+                "aborted": false, "noReason": true,
+            }));
+        }
     }
 }
