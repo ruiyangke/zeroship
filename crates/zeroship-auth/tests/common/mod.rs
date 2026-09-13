@@ -5,7 +5,6 @@
 pub mod auth_server;
 pub mod database;
 pub mod mock_control;
-pub mod mock_provider;
 
 use uuid::Uuid;
 
@@ -31,18 +30,10 @@ pub fn test_database_url() -> String {
 
 // ─── AuthConfig test fixture ─────────────────────────────────────────────
 //
-// Every test that boots an in-process auth server needs an `AuthConfig`.
-// Building one as a struct literal means re-listing 30+ fields verbatim,
-// and every new field added in a future phase forces a fixture-sync
-// commit across every test file. Driving the same `clap::Parser::parse_from`
-// path the CLI uses lets unset fields take their declared defaults
-// automatically — new fields land with their defaults, no fixture churn.
-//
-// `test_auth_config` bakes in the overrides every fixture needs:
-// random bind port and explicit test-only secret inputs. Federation-specific
-// tests build on the returned config by
-// mutating the OAuth fields directly (cheaper than parsing again with
-// 8 more CLI args).
+// Build AuthConfig through the CLI resolver so unset fields retain their
+// declared defaults. Fixtures provide an ephemeral bind address and explicit
+// secret inputs. Federation scenarios pass provider settings as CLI flags and
+// resolve provider credentials from a file owned during server construction.
 /// The console origin the test fixture admits via `frame-ancestors` on the
 /// framed login routes (immersive iframe login, design §4.3). The rewritten
 /// clickjacking test reads this from the booted config rather than hard-coding
