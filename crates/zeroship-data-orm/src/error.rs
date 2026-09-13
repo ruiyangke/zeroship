@@ -755,6 +755,12 @@ impl From<crate::sql::codecs::CodecError> for DbError {
     }
 }
 
+impl From<zeroship_core::schema_name::SchemaNameError> for DbError {
+    fn from(error: zeroship_core::schema_name::SchemaNameError) -> Self {
+        crate::sql::mapping::QueryError::InvalidCollection(error.to_string()).into()
+    }
+}
+
 #[cfg(test)]
 mod isolation_level_tests {
     use super::{DbError, IsolationLevel};
@@ -806,11 +812,5 @@ mod isolation_level_tests {
         ] {
             assert_eq!(IsolationLevel::parse(level.ansi_name()).unwrap(), level);
         }
-    }
-}
-
-impl From<zeroship_core::schema_name::SchemaNameError> for DbError {
-    fn from(error: zeroship_core::schema_name::SchemaNameError) -> Self {
-        crate::sql::mapping::QueryError::InvalidCollection(error.to_string()).into()
     }
 }

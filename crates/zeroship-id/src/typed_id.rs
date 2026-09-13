@@ -41,10 +41,7 @@ const BASE36: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Body width of an encoded 128-bit id.
 ///
-/// Twenty-five is the MINIMUM width that holds 128 bits - `36^24 < 2^128 <= 36^25`
-/// - and the width is fixed rather than minimal-per-value because that is what
-/// makes the encoding order-preserving: a shorter body would sort before a
-/// longer one whatever their numeric values.
+/// Padding to a fixed width preserves numeric order under bytewise collation.
 pub const BODY_LEN: usize = 25;
 /// Reverse lookup table: ASCII byte → base36 digit (255 = invalid)
 const fn build_decode_table() -> [u8; 128] {

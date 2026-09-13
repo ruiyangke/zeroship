@@ -1009,7 +1009,8 @@ mod tests {
         use std::sync::Arc;
         reset_world("app_metering_db_exec_emits_reads_writes_rows_and_skips_failures");
         run(async {
-            let app_id = "00000000-0000-7000-8000-0000000000e5";
+            let identity = zeroship_core::AppId::mint();
+            let app_id = identity.as_str();
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
                 crate::backend_selection::new_sqlite_backend(
@@ -1121,12 +1122,12 @@ mod tests {
             let events = meter.drain();
             let id = zeroship_core::app_id::AppId::parse(app_id).unwrap();
             assert_eq!(
-                usage_value(&events, id, "db_writes"),
+                usage_value(&events, &id, "db_writes"),
                 Some(3),
                 "successful mutation statements are metered: {events:?}"
             );
             assert_eq!(
-                usage_value(&events, id, "db_rows_written"),
+                usage_value(&events, &id, "db_rows_written"),
                 Some(2),
                 "returned and affected rows are metered: {events:?}"
             );
