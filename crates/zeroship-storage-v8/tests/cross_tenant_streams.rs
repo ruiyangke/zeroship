@@ -400,7 +400,44 @@ fn storage_requires_a_host_identity() {
             .plugins(vec![Arc::new(StorageBinding::new(store, None))])
             .build();
         let error = runtime.initialize(&EnvSnapshot::empty()).unwrap_err();
-        assert!(error.contains("host must supply APP_ID"), "{error}");
+        assert!(error.contains("host must supply an app identity"), "{error}");
+    });
+}
+
+#[test]
+fn typed_runtime_identity_scopes_storage_without_environment_duplication() {
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        let app = zeroship_core::AppId::mint();
+        let root = tempfile::tempdir().unwrap();
+        let store = StorageStore::from_backend(Arc::new(LocalFs::new(root.path())));
+        let meter = Arc::new(zeroship_metering::Meter::new());
+        let runtime = Runtime::builder()
+            .app_id(app.clone())
+            .meter(Arc::clone(&meter))
+            .modules(module(
+                r#"export default { async fetch(request, env) {
+                await env.storage.put("uploads", "identity", "c2VjcmV0");
+                return new Response(process.env.APP_ID);
+            } };"#,
+            ))
+            .plugin(StorageBinding::new(store.clone(), Some(Arc::clone(&meter))))
+            .build();
+        runtime.initialize(&EnvSnapshot::empty()).unwrap();
+        runtime.start_pump();
+        runtime.exit_isolate();
+        assert_eq!(fetch(&runtime, &[]).await, (200, app.as_str().into()));
+        let object = store
+            .namespace(zeroship_storage::Namespace::app(app.as_str()).unwrap())
+            .get("uploads", "identity")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(object.0, b"secret");
+        let events = meter.drain();
+        assert!(events.iter().any(|event| event.meter == "storage_ops"));
+        assert!(events
+            .iter()
+            .all(|event| event.subject.app.as_ref() == Some(&app)));
     });
 }
 

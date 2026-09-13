@@ -85,6 +85,6 @@ zeroship deploy --token=<token>
 
 The archive path, the app and the control plane come from `zeroship.jsonc`
 (see [`docs/reference/project-config.md`](../../docs/reference/project-config.md));
-`--app=<uuid>` and `--control=<url>` still override it.
+`--app=<app-id>` and `--control=<url>` still override it.
 
 Cold start: instant. Per-request work: one blob fetch from the gateway's content-addressed cache. No V8.

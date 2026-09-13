@@ -524,7 +524,7 @@ echo
 echo "== 3b. first deploy appends an app both readers accept =="
 WRITEBACK_PROJECT="$WORK/writeback-project"
 WRITEBACK_BIN="$WORK/writeback-bin"
-WRITEBACK_ID="88888888-8888-4888-8888-888888888888"
+WRITEBACK_ID="app_034klb07lrb9jgma6imvmx020"
 mkdir -p "$WRITEBACK_PROJECT/dist" "$WRITEBACK_BIN"
 cp "$MINIMAL_FIXTURE" "$WRITEBACK_PROJECT/zeroship.jsonc"
 printf 'focused writeback probe\n' > "$WRITEBACK_PROJECT/dist/app.zship"
@@ -545,9 +545,9 @@ case "$method $url" in
     printf '%s\n200\n' '[]'
     ;;
   "POST https://control.zeroship.ai/api/apps")
-    printf '%s\n201\n' '{"id":"88888888-8888-4888-8888-888888888888","name":"minimal-config-fixture"}'
+    printf '%s\n201\n' '{"id":"app_034klb07lrb9jgma6imvmx020","name":"minimal-config-fixture"}'
     ;;
-  "POST https://control.zeroship.ai/api/apps/88888888-8888-4888-8888-888888888888/deploy")
+  "POST https://control.zeroship.ai/api/apps/app_034klb07lrb9jgma6imvmx020/deploy")
     printf '%s\n200\n' '{"deploy_hash":"sha256:writeback-probe"}'
     ;;
   *)
@@ -620,7 +620,7 @@ printf '{"source":"config"}\n' > "$EXTERNAL_APP/generated/zeroship/migrations.ir
 cat > "$EXTERNAL_APP/zeroship.jsonc" <<'JSONC'
 {
   "name": "external-config-probe",
-  "app": "77777777-7777-4777-8777-777777777777",
+  "app": "app_034klb07lrb9jgma6imvmx021",
   "control": "https://external-config.invalid",
   "runtime_date": "2026-08-14",
   "build": { "mode": "full", "dist": "dist", "output": "dist/app.zship" },

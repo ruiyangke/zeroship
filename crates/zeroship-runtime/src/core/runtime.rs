@@ -759,10 +759,8 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Multi-tenant identity. The worker passes the same `Uuid` it uses
-    /// to key the per-thread isolate cache, so eviction can fire all
-    /// in-flight `AbortController`s for a single app via
-    /// `crate::rpc::abort::entered_for_eviction`.
+    /// Bind lifecycle, native namespaces and metering to this app.
+    /// Overrides `APP_ID` supplied through [`Self::env_vars`].
     pub fn app_id(mut self, id: AppId) -> Self {
         self.app_id = Some(id);
         self
@@ -1268,7 +1266,7 @@ impl RuntimeInner {
             .map(|(id, meter)| zeroship_metering::MeterHandle::new(meter, id.clone()));
         let state: SharedState = Rc::new(RefCell::new(RuntimeState::new(
             env_vars,
-            None,
+            app_id.clone(),
             meter_handle,
         )));
         state.borrow_mut().set_net_policy(net_policy);

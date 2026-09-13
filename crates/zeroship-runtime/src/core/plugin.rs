@@ -112,7 +112,7 @@ pub trait NativePlugin: Send + Sync + 'static {
 pub(crate) fn runtime_app_id(scope: &mut v8::PinScope<'_, '_>) -> String {
     scope
         .get_slot::<crate::state::SharedState>()
-        .and_then(|state| state.borrow().env_vars.get("APP_ID").cloned())
+        .and_then(|state| state.borrow().app_id().map(str::to_owned))
         .unwrap_or_else(|| zeroship_core::app_id::LOCAL_DEV_APP_ID.to_string())
 }
 
@@ -278,11 +278,7 @@ pub(crate) fn build_env_object(
         // surfaces (`env.db.find`, `env.kv.get`, …) keep working
         // whether or not the plugin migrated to v8_class.
         //
-        // `build_instance` reads the app_id from the runtime's
-        // `SharedState` slot so plugins can stamp it onto the boxed
-        // state at construction time (avoiding the per-callback
-        // `env_vars.get("APP_ID")` lookup the legacy flat callbacks
-        // do).
+        // Native namespaces use the identity captured when the runtime was built.
         let app_id_for_instance = runtime_app_id(scope);
         let ns_obj = plugin
             .build_instance(scope, &app_id_for_instance)
@@ -311,4 +307,108 @@ pub(crate) fn build_env_object(
     }
 
     v8::Global::new(scope, env_obj)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, Runtime, RuntimeBuilder};
+    use std::collections::HashMap;
+    use zeroship_core::AppId;
+
+    struct IdentityPlugin;
+
+    impl NativePlugin for IdentityPlugin {
+        fn namespace(&self) -> &str {
+            "identity"
+        }
+
+        fn register(&self, _: &mut NativeRegistrar) {}
+
+        fn build_instance<'s>(
+            &self,
+            scope: &mut v8::PinScope<'s, '_>,
+            app_id: &str,
+        ) -> Option<v8::Local<'s, v8::Object>> {
+            let object = v8::Object::new(scope);
+            let key = v8::String::new(scope, "appId")?;
+            let value = v8::String::new(scope, app_id)?;
+            object.set(scope, key.into(), value.into());
+            Some(object)
+        }
+    }
+
+    fn build(builder: RuntimeBuilder) -> Runtime {
+        builder
+            .plugin(IdentityPlugin)
+            .modules(vec![ModuleEntry {
+                specifier: "identity.js".into(),
+                source: "export default { fetch(request, env) { return Response.json({ app: env.identity.appId, exposed: process.env.APP_ID ?? null }); } };".into(),
+            }])
+            .build()
+    }
+
+    fn observed(runtime: &Runtime) -> serde_json::Value {
+        let outcome = runtime.call_fetch_handler(
+            "GET",
+            "http://localhost/",
+            &[],
+            "",
+            &EnvSnapshot::empty(),
+            RequestCtx::new(crate::channel::CancelFlag::new()),
+        );
+        let FetchOutcome::Response { status, body, .. } = outcome else {
+            panic!("expected immediate identity response");
+        };
+        assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[compio::test]
+    async fn typed_identity_controls_plugin_namespace_environment_and_meter() {
+        let app = AppId::mint();
+        let other = AppId::mint();
+        for order in 0..3 {
+            let env = HashMap::from([("APP_ID".into(), other.as_str().into())]);
+            let builder = match order {
+                0 => Runtime::builder().app_id(app.clone()).env_vars(env),
+                1 => Runtime::builder().env_vars(env).app_id(app.clone()),
+                _ => Runtime::builder().app_id(app.clone()),
+            };
+            let meter = Arc::new(zeroship_metering::Meter::new());
+            let runtime = build(builder.meter(meter));
+            assert_eq!(runtime.app_id(), Some(&app));
+            assert_eq!(
+                observed(&runtime),
+                serde_json::json!({ "app": app.as_str(), "exposed": app.as_str() }),
+            );
+            assert_eq!(
+                runtime.state().borrow().meter.as_ref().unwrap().app_id(),
+                &app
+            );
+        }
+    }
+
+    #[compio::test]
+    async fn environment_identity_and_local_default_remain_available() {
+        let app = AppId::mint();
+        let runtime = build(
+            Runtime::builder()
+                .env_vars(HashMap::from([("APP_ID".into(), app.as_str().into())])),
+        );
+        assert_eq!(
+            observed(&runtime),
+            serde_json::json!({ "app": app.as_str(), "exposed": app.as_str() }),
+        );
+        drop(runtime);
+
+        let runtime = build(Runtime::builder());
+        assert_eq!(
+            observed(&runtime),
+            serde_json::json!({
+                "app": zeroship_core::app_id::LOCAL_DEV_APP_ID,
+                "exposed": null,
+            }),
+        );
+    }
 }
