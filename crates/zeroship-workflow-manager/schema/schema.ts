@@ -55,7 +55,9 @@ export function workflowManagerSchema(namespace) {
   ]);
   index("deployment_holds", "pending", ["state", "app_id", "deployment_id"]);
   create("workers", {
-    capacity: integer(), state: text(), expires_at: integer(),
+    // Identity-only upserts lock existing registrations without resetting their
+    // state. A new row remains ineligible until registration sets its liveness.
+    capacity: integer().default(1), state: text().default("ready"), expires_at: integer().default(0),
     lock_version: integer().default(0),
   }, ["id"]);
   create("assignments", {

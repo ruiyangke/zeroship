@@ -11,7 +11,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "deployment_holds_scope_key" ON "deployment_ho
 
 CREATE INDEX IF NOT EXISTS "deployment_holds_pending_idx" ON "deployment_holds" ("state", "app_id", "deployment_id");
 
-CREATE TABLE "workers" ("id" TEXT PRIMARY KEY NOT NULL, "capacity" INTEGER NOT NULL, "state" TEXT NOT NULL, "expires_at" INTEGER NOT NULL, "lock_version" INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE "workers" ("id" TEXT PRIMARY KEY NOT NULL, "capacity" INTEGER NOT NULL DEFAULT 1, "state" TEXT NOT NULL DEFAULT 'ready', "expires_at" INTEGER NOT NULL DEFAULT 0, "lock_version" INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE "assignments" ("id" TEXT PRIMARY KEY NOT NULL, "app_id" TEXT NOT NULL, "worker_id" TEXT NOT NULL, "revision" INTEGER NOT NULL, "expires_at" INTEGER NOT NULL, "released" INTEGER NOT NULL, "wake_revision" INTEGER, "next_due_at" INTEGER, CONSTRAINT "assignment_scope" FOREIGN KEY (app_id) REFERENCES queue_scopes(id) ON DELETE RESTRICT, CONSTRAINT "assignment_worker" FOREIGN KEY (worker_id) REFERENCES workers(id) ON DELETE RESTRICT);
 
@@ -110,4 +110,4 @@ CREATE INDEX IF NOT EXISTS "recovery_job_idx" ON "recovery_scopes" ("pending_job
 CREATE INDEX IF NOT EXISTS "recovery_scopes_due_idx" ON "recovery_scopes" ("next_due_at", "id");
 
 SELECT 1;
-INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '97a8d8bda8a01cdef6527b18319298b96b4a2fb411e64cc05e3783597ae8a919');
+INSERT INTO main.schema_version (id, fingerprint) VALUES ('manager', '2f428124a965d02dc8592969949c32fbe88a3227fcc424f87053560c836f489c');

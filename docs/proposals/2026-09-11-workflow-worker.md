@@ -186,6 +186,10 @@ and released rows are retained so delayed renewals cannot recreate old authority
 Capacity admission is serialized across apps assigned to the same worker.
 Ready workers may receive new placements; draining workers may finish authorized
 work and reconcile committed outcomes without being selected for new placement.
+Draining is terminal for an enrolled worker instance. Registration serializes
+against the stored worker row and rejects any later ready heartbeat, including a
+request delayed past shutdown or liveness expiry. Restarted processes use a new
+enrolled instance identity; registration never resets the old process's drain.
 
 Freshness checks belong around the work they authorize. Authenticate at ingress,
 then recheck enrollment and stored placement after waiting for locks and before

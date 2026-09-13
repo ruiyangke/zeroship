@@ -20,6 +20,8 @@ test("compiles both manager backends with matching typed collection metadata", (
   assert.deepEqual(collections.jobs.indexes.map(index => index.fields), [
     ["app_id", "state", "available_at", "id"],
     ["app_id", "state", "lease_deadline", "id"],
+    ["app_id", "id"],
+    ["app_id", "deployment_id", "state"],
   ]);
   for (const [name, duplicateIdentity] of [["queue_scopes", "app_id"], ["workers", "worker_id"]]) {
     assert.equal(collections[name].fields[duplicateIdentity], undefined);
@@ -27,6 +29,9 @@ test("compiles both manager backends with matching typed collection metadata", (
   }
   assert.deepEqual(Object.keys(collections).sort(), Object.keys(managerIdentityColumns).sort());
   assert.equal(collections.workers.fields.lock_version.default, 0);
+  assert.equal(collections.workers.fields.capacity.default, 1);
+  assert.equal(collections.workers.fields.state.default, "ready");
+  assert.equal(collections.workers.fields.expires_at.default, 0);
   for (const collection of Object.values(collections)) {
     assert.deepEqual(Object.keys(collection.fields).filter(name => collection.fields[name].primaryKey), ["id"]);
   }

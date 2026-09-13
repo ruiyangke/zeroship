@@ -25,8 +25,11 @@ use zeroship_core::{
     },
 };
 use zeroship_data_orm::{
-    orm::{Database, Entity, FieldOrder, Filter, FromRow, Operation, Output},
-    value, Value,
+    orm::{
+        ConflictTarget, Database, Entity, FieldOrder, Filter, FromRow, Insertable, Operation,
+        Output,
+    },
+    Value,
 };
 
 /// Native placement policy; connection and authentication configuration belongs to the host.
@@ -73,6 +76,12 @@ pub struct Coordinator {
     options: Options,
 }
 
+#[derive(Insertable)]
+#[orm(entity = workers)]
+struct WorkerIdentity {
+    id: String,
+}
+
 impl Coordinator {
     /// Use an already provisioned native queue; construction grants no database authority.
     ///
@@ -87,32 +96,51 @@ impl Coordinator {
         Ok(Self { queue, options })
     }
 
-    /// Soft liveness never revives an expired placement.
+    /// Soft liveness never revives an expired placement or a draining instance.
     ///
     /// # Errors
-    /// Rejects storage failures and invalid registration metadata.
+    /// Rejects storage failures and attempts to make a draining instance ready.
     pub async fn register(
         &self,
         worker: &WorkerId,
         request: &RegisterWorker,
     ) -> Result<RegisteredWorker, Error> {
-        self.queue.transact(|tx| async move {
-            // Upsert preserves the existing id, including concurrent first registration.
-            tx.collection(workers::Entity::COLLECTION)?.execute(Operation::Upsert {
-                document: value!({
-                    "id": worker.as_str(),
-                    "capacity": i64::from(request.capacity.get()),
-                    "state": match request.state { WorkerState::Ready => "ready", WorkerState::Draining => "draining" },
-                    "expires_at": 0
-                }),
-                conflict_fields: value!(["id"]),
-            }).await?;
-            // The upsert holds the worker row. Sample after that wait.
-            let expires = deadline(self.queue.clock.now().await?, self.options.worker_ttl)?;
-            update::<workers::Entity>(&tx, value!({"id":worker.as_str()}), value!({"expires_at":expires})).await?;
-            let stored = one::<workers::Entity, Worker>(&tx, workers::id.eq(worker.as_str())?).await?.ok_or(Error::Storage)?;
-            registered(&stored)
-        }).await
+        self.queue
+            .transact(|tx| async move {
+                // Preserve existing metadata while serializing first registration
+                // and renewal. A new identity starts expired until this transaction
+                // accepts its heartbeat; schema defaults never grant liveness.
+                let workers = tx.entity::<workers::Entity>()?;
+                let previous: Worker = workers
+                    .upsert(
+                        WorkerIdentity {
+                            id: worker.as_str().into(),
+                        },
+                        ConflictTarget::new(workers::id),
+                    )
+                    .await?;
+                if registered(&previous)?.state == WorkerState::Draining
+                    && request.state == WorkerState::Ready
+                {
+                    return Err(Error::Conflict);
+                }
+                // Draining is terminal for this enrolled process. A delayed ready
+                // request cannot restore it, even after its heartbeat expires.
+                let expires = deadline(self.queue.clock.now().await?, self.options.worker_ttl)?;
+                let changes = workers::capacity
+                    .set(i64::from(request.capacity.get()))?
+                    .and(workers::state.set(match request.state {
+                        WorkerState::Ready => "ready",
+                        WorkerState::Draining => "draining",
+                    })?)?
+                    .and(workers::expires_at.set(expires)?)?;
+                let stored: Worker = workers
+                    .update(workers::id.eq(worker.as_str())?, changes)
+                    .await?
+                    .ok_or(Error::Storage)?;
+                registered(&stored)
+            })
+            .await
     }
 
     /// # Errors

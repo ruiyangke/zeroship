@@ -1422,6 +1422,7 @@
         "capacity": {
           "type": "bigInt",
           "required": true,
+          "default": 1,
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -1433,6 +1434,7 @@
         "state": {
           "type": "string",
           "required": true,
+          "default": "ready",
           "readable": true,
           "filterable": true,
           "sortable": true,
@@ -1444,6 +1446,7 @@
         "expires_at": {
           "type": "bigInt",
           "required": true,
+          "default": 0,
           "readable": true,
           "filterable": true,
           "sortable": true,

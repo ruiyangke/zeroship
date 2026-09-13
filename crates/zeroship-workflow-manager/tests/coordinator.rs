@@ -17,8 +17,8 @@ use zeroship_core::{
     service_peers::{service_issuer, CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME},
     workflow_coordination::{
         AcknowledgeManagement, AssignScope, AssignedScope, Assignment, ManageRun,
-        ManagementOperation, ManagementOutcome, RegisterWorker, RequestId, RunId, RunOperation,
-        RunState, WorkerId, WorkerState,
+        ManagementOperation, ManagementOutcome, RegisterWorker, RegisteredWorker, RequestId, RunId,
+        RunOperation, RunState, WorkerId, WorkerState,
     },
     workflow_jobs::{
         DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
@@ -49,6 +49,9 @@ macro_rules! case {
         }
     };
 }
+
+#[path = "coordinator/draining.rs"]
+mod draining;
 
 case!(
     sqlite_recovery_pages_skip_owned_scopes_without_losing_work,
@@ -293,9 +296,34 @@ async fn register_workers_together(
         capacity: NonZeroU32::new(1).unwrap(),
         state: WorkerState::Ready,
     };
-    let registrations =
-        futures::future::join_all(hosts.iter().map(|host| host.register(worker, &request)));
-    let results = if let Admin::Postgres(admin) = &fixture.admin {
+    let requests = vec![request.clone(); hosts.len()];
+    let results = registration_race(fixture, hosts, worker, &requests).await;
+    for (host, result) in results.into_iter().enumerate() {
+        let registered = result.unwrap_or_else(|error| {
+            panic!("worker registration round {round}, host {host}: {error:?}")
+        });
+        assert_eq!(&registered.worker_id, worker);
+        assert_eq!(registered.capacity, request.capacity);
+        assert_eq!(registered.state, request.state);
+        assert!(registered.expires_at.get() > 0);
+    }
+}
+
+async fn registration_race(
+    fixture: &Fixture,
+    hosts: &[Coordinator],
+    worker: &WorkerId,
+    requests: &[RegisterWorker],
+) -> Vec<Result<RegisteredWorker, Error>> {
+    assert!(!hosts.is_empty());
+    assert_eq!(hosts.len(), requests.len());
+    let registrations = futures::future::join_all(
+        hosts
+            .iter()
+            .zip(requests)
+            .map(|(host, request)| host.register(worker, request)),
+    );
+    if let Admin::Postgres(admin) = &fixture.admin {
         admin
             .batch_execute("BEGIN; LOCK TABLE workflow_manager.workers IN SHARE MODE")
             .await
@@ -322,15 +350,6 @@ async fn register_workers_together(
         results
     } else {
         registrations.await
-    };
-    for (host, result) in results.into_iter().enumerate() {
-        let registered = result.unwrap_or_else(|error| {
-            panic!("worker registration round {round}, host {host}: {error:?}")
-        });
-        assert_eq!(&registered.worker_id, worker);
-        assert_eq!(registered.capacity, request.capacity);
-        assert_eq!(registered.state, request.state);
-        assert!(registered.expires_at.get() > 0);
     }
 }
 
