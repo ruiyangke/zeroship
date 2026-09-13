@@ -1,4 +1,4 @@
-//! Native synthetic ES modules — `node:*` resolved by the runtime.
+//! Native synthetic ES modules — `zeroship` and `node:*` resolved by the runtime.
 //!
 //! V8's `Module::create_synthetic_module` lets us mint an ESM record
 //! whose exports are populated at evaluation time by a Rust callback,
@@ -16,7 +16,7 @@
 
 #![allow(unsafe_code)]
 
-/// Resolve a bare `node:*` specifier to a synthetic module, or `None`
+/// Resolve a native specifier to a synthetic module, or `None`
 /// if it's not one we own. Called from both the eager import-graph
 /// walker and the V8 resolve callback.
 pub fn resolve_native<'s>(
@@ -24,6 +24,7 @@ pub fn resolve_native<'s>(
     specifier: &str,
 ) -> Option<v8::Local<'s, v8::Module>> {
     match specifier {
+        "zeroship" => Some(super::zeroship_module::synthetic_module(scope)),
         "node:async_hooks" => Some(crate::node::async_hooks::synthetic_module(scope)),
         "node:buffer" => Some(crate::node::buffer::synthetic_module(scope)),
         "node:crypto" => Some(crate::node::crypto::synthetic_module(scope)),
@@ -48,7 +49,8 @@ pub fn is_native(scope: &mut v8::PinScope<'_, '_>, specifier: &str) -> bool {
         "node:tls" => net_module_allowed(scope),
         _ => matches!(
             specifier,
-            "node:async_hooks"
+            "zeroship"
+                | "node:async_hooks"
                 | "node:buffer"
                 | "node:crypto"
                 | "node:events"

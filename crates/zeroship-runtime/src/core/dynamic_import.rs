@@ -1,7 +1,7 @@
 //! V8 host callback for dynamic imports.
 //!
 //! Imports resolve against the compiled module registry, then native module
-//! factories and the core `zeroship` facade. Resolved modules are cached so
+//! factories. Resolved modules are cached so
 //! static and dynamic imports share identity. Arbitrary missing creator modules
 //! are rejected; this callback does not fetch source code.
 //!
@@ -151,15 +151,6 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
     }
 
     if let Some(module) = native_modules::resolve_native(scope, &spec) {
-        cache_into_registry(scope, &spec, module);
-        return import_registered(scope, resolver, specifier);
-    }
-
-    if spec == "zeroship" {
-        // The core facade has no imports. Plugin adapters are already in the
-        // registry and own their source delivery independently of this module.
-        let module = modules::compile_module(scope, &spec, crate::init::ZEROSHIP_MODULE_JS).ok()?;
-        let module = v8::Local::new(scope, module);
         cache_into_registry(scope, &spec, module);
         return import_registered(scope, resolver, specifier);
     }
