@@ -574,6 +574,7 @@ the named edge exposes the referenced row separately.
 ```ts
 // Manual schema declaration; generated builders carry the same metadata.
 const todos = {
+  id: t.string().required().primaryKey(),
   userId: t.ref("users", { column: "id", relation: "user" }),
   title: t.string().required(),
 };
