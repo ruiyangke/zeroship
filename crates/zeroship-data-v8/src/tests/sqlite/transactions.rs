@@ -64,7 +64,7 @@ fn native_transaction_collections_expire_with_their_own_frame() {
             "notes",
             &value!({"title":{"type":"string", "required":true}}),
             r#"
-const nativeTransaction = env.db.transaction.bind(env.db);
+const nativeTransaction = Object.getPrototypeOf(env.db).transaction.bind(env.db);
 
 async function expectExpired(operation) {
   try {
