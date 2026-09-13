@@ -1,5 +1,8 @@
 //! Magic-login HTTP handoffs through the production router in an owned database.
 
+mod fixtures;
+mod native;
+
 use crate::common::{self, auth_server::AuthServer, database::Database};
 use zeroship_auth::identity::magic_link;
 
@@ -20,6 +23,7 @@ async fn cookie_less_get_preserves_the_link_until_explicit_redemption() {
         let response = server.http.get(format!("{}/magic/verify?{query}", server.auth_base))
             .unwrap().send().await.unwrap();
         assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
         let csrf = common::read_set_cookie(&response, "__Host-zsidp_magic_csrf")
             .expect("interstitial supplies its CSRF cookie");
         assert_ne!(csrf, issued.csrf_nonce, "this browser did not request the link");
