@@ -68,12 +68,12 @@ test("binding modules initialize in deterministic file order", async (t) => {
   }
 });
 
-test("empty bindings discover named exports", async (t) => {
+test("empty bindings preserve named exports without treating them as procedures", async (t) => {
   const fixture = await buildEntryFixture(t, {
     bindings: new Map(),
     files: { "user.mjs": "export const named = () => 'discovered';" },
   });
-  const entry = (await fixture.load()).default;
-  assert.deepEqual(Object.keys(entry.rpc), ["named"]);
-  assert.equal(entry.rpc.named(), "discovered");
+  const namespace = await fixture.load();
+  assert.deepEqual(Object.keys(namespace.default.rpc), []);
+  assert.equal(namespace.named(), "discovered");
 });
