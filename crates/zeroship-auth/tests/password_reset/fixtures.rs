@@ -9,12 +9,13 @@ use uuid::Uuid;
 use zeroship_auth::identity::password;
 use zeroship_auth::session_store::{self, Audience, NewSession, SessionKind, SessionSecretKeys};
 use zeroship_auth::store::{sessions, users};
+use zeroship_core::AppId;
 
 pub(super) const OLD_PASSWORD: &str = "old reset password phrase";
 pub(super) const NEW_PASSWORD: &str = "new reset password phrase";
 
 pub(super) struct App {
-    pub id: Uuid,
+    pub id: AppId,
     pub client_id: String,
 }
 
@@ -28,9 +29,9 @@ pub(super) async fn user(pg: &Client, email: &str) -> users::UserRow {
 /// Control-plane rows belong to fixture setup; reset requests use the auth role.
 pub(super) async fn app(database: &Database) -> App {
     let pg = database.connect().await;
-    let id = Uuid::new_v4();
-    let client_id = format!("oac_reset_{}", id.simple());
-    let plan_id = format!("reset-plan-{id}");
+    let id = AppId::mint();
+    let client_id = format!("oac_reset_{}", id.as_str());
+    let plan_id = format!("reset-plan-{}", id.as_str());
     pg.execute(
         "INSERT INTO zeroship.plans \
          (id, name, base_fee_cents, included_units, spend_limit_default_cents, runtime_limits_json) \
@@ -42,7 +43,7 @@ pub(super) async fn app(database: &Database) -> App {
     pg.execute(
         "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
          SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
-        &[&id, &format!("reset-{id}"), &plan_id, &project_id],
+        &[&id.as_str(), &format!("reset-{}", id.as_str()), &plan_id, &project_id],
     )
     .await
     .unwrap();
@@ -83,7 +84,7 @@ pub(super) async fn gateway_session(database: &Database, user: &users::UserRow, 
          (user_id, app_id, email, name, email_verified, idle_expires_at, abs_expires_at) \
          VALUES ($1, $2, $3::citext, 'Reset', true, \
          NOW() + INTERVAL '30 minutes', NOW() + INTERVAL '12 hours') RETURNING id",
-            &[&user.id.as_str(), &app.id, &user.email],
+            &[&user.id.as_str(), &app.id.as_str(), &user.email],
         )
         .await
         .unwrap()
@@ -112,7 +113,7 @@ pub(super) async fn anchor(database: &Database, user: &users::UserRow, app: &App
         "INSERT INTO zeroship.app_session_anchors \
          (id, app_id, client_id, global_user_id, refresh_token_enc, refresh_family_id, abs_expires_at) \
          VALUES ($1, $2, $3, $4, $5, $6, NOW() + INTERVAL '30 days')",
-        &[&id, &app.id, &app.client_id, &user.id.as_str(), &b"opaque-gateway-ciphertext".to_vec(),
+        &[&id, &app.id.as_str(), &app.client_id, &user.id.as_str(), &b"opaque-gateway-ciphertext".to_vec(),
           &format!("rfam_{id}")],
     ).await.unwrap();
     id
