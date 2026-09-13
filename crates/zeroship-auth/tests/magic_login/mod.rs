@@ -2,6 +2,7 @@
 
 mod fixtures;
 mod native;
+mod recovery;
 
 use crate::common::{self, auth_server::AuthServer, database::Database};
 use zeroship_auth::identity::magic_link;
