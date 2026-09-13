@@ -5,5 +5,8 @@
     reason = "fixtures stay on their compio runtime"
 )]
 
+mod delivery;
 mod fixtures;
+mod http;
+mod rate_limit;
 mod store;
