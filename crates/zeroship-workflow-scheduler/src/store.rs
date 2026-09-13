@@ -261,7 +261,7 @@ impl WorkflowSchedulerStore {
             )
             .await?;
         tx.commit().await?;
-        Ok(rows
+        rows
             .iter()
             .map(|row| {
                 Ok::<_, WorkflowSchedulerStoreError>(FiredTimer {
@@ -273,7 +273,7 @@ impl WorkflowSchedulerStore {
                     deadline: row.get("deadline"),
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?)
+            .collect::<Result<Vec<_>, _>>()
     }
 
     #[allow(clippy::future_not_send)]
