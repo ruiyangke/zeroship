@@ -76,18 +76,14 @@
 #
 # Sets ZS_FIXTURE_ORGANIZATION_ID and ZS_FIXTURE_PROJECT_ID from <slug>.
 #
-# DETERMINISTIC, not random: a harness that reruns against a database it did not
-# drop must land on the same rows, or the second run collides on the slug's
-# unique index and the first run's fixture is still sitting there. The digest is
-# hex, which is inside the `^(org|prj)_[0-9A-Za-z]{22}$` grammar the CHECK
-# constraints enforce - a random id from `/dev/urandom` would need filtering to
-# stay inside it, and a filter that occasionally emits 21 characters fails in
-# one run out of many, which is the worst way for a fixture to fail.
+# Keep reruns on the same rows. Hex digits belong to the base36 alphabet;
+# leading zeros fill the canonical width and keep the body within the codec's
+# numeric range. Native identity tests validate the emitted values.
 organization_fixture_ids() {
   local slug="${1:?organization_fixture_ids needs a slug}" digest
   digest="$(printf '%s' "$slug" | md5sum | cut -c1-22)"
-  ZS_FIXTURE_ORGANIZATION_ID="org_${digest}"
-  ZS_FIXTURE_PROJECT_ID="prj_${digest}"
+  ZS_FIXTURE_ORGANIZATION_ID="org_000${digest}"
+  ZS_FIXTURE_PROJECT_ID="prj_000${digest}"
 }
 
 # organization_fixture_sql <slug> <billing-email>
@@ -125,7 +121,7 @@ INSERT INTO zeroship.projects (id, organization_id, slug, name)
 SQL
 }
 
-# seat_app_owner_sql <app-uuid> <user-uuid> [role]
+# seat_app_owner_sql <app-id> <user-id> [role]
 #
 # Seats <user> in the organization that owns <app>'s project, and refuses loudly
 # if there is no such organization. This is the direct replacement for the
@@ -162,7 +158,7 @@ END
 SQL
 }
 
-# seat_app_owner <app-uuid> <user-uuid> <role> <psql-command> [args...]
+# seat_app_owner <app-id> <user-id> <role> <psql-command> [args...]
 #
 # Runs the seat and REFUSES TO BE QUIET ABOUT IT. `<psql-command>` is whatever
 # the harness already uses to feed SQL to its database on stdin - the local
@@ -225,7 +221,7 @@ SELECT 'zs-seat-ok=' || count(*)::text
   exit 1
 }
 
-# app_organization <app-uuid> <psql-command> [args...]
+# app_organization <app-id> <psql-command> [args...]
 #
 # Echo the organization id the app bills, or EXIT.
 #
@@ -301,7 +297,7 @@ INSERT INTO zeroship.organization_billing (organization_id)
 SQL
 }
 
-# seat_organization_member_sql <organization-id> <user-uuid> [role]
+# seat_organization_member_sql <organization-id> <user-id> [role]
 #
 # Seats <user> directly in <organization>, for a fixture that has an
 # organization but NO app.
