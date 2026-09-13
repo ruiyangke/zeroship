@@ -14,6 +14,7 @@ pub use journal::{
     __zeroship_workflow_management_receipts as management_receipts,
     __zeroship_workflow_occurrences as occurrences, __zeroship_workflow_outbox as outbox,
     __zeroship_workflow_payload_refs as payload_refs, __zeroship_workflow_payloads as payloads,
+    __zeroship_workflow_publication_scans as publication_scans,
     __zeroship_workflow_requests as requests, __zeroship_workflow_runs as runs,
     __zeroship_workflow_schedules as schedules,
     __zeroship_workflow_schema_version as schema_version, __zeroship_workflow_signals as signals,

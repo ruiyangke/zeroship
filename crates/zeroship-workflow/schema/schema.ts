@@ -109,7 +109,8 @@ export function workflowSchema(namespace) {
     { name: "step_name_occurrence", columns: ["app_id", "run_id", "generation", "name", "occurrence"] },
   ]);
   create("job_receipts", {
-    ...runIdentity(), id: text(), specification: text(), outcome: t.text(),
+    ...identity(), run_id: t.text(), id: text(), specification: text(), outcome: t.text(),
+    reconciliation: t.text(), reconciliation_next: t.bigInt(),
     created_at: integer(), completed_at: t.bigInt(),
   }, ["app_id", "id"], [appFk("job_receipts")]);
   index("job_receipts", "run", ["app_id", "run_id"]);
@@ -203,6 +204,9 @@ export function workflowSchema(namespace) {
   ]);
   index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
   index("job_publications", "deployment", ["app_id", "deploy_id", "confirmed_at"]);
+  create("publication_scans", {
+    revision: integer(), after_job: t.text(), upper_job: t.text(),
+  }, ["id"], [fk("publication_scan_app", ["id"], "app_state", ["app_id"])]);
   // The migration DSL does not expose the column collation facet yet. Cursor
   // order and identity copies must use bytewise comparison; SQLite uses BINARY.
   dialect({
@@ -210,6 +214,7 @@ export function workflowSchema(namespace) {
       for (const [name, columns] of Object.entries({
         job_publications: ["id", "app_id", "run_id", "deploy_id"],
         job_receipts: ["id", "app_id", "run_id"],
+        publication_scans: ["id", "after_job", "upper_job"],
         tasks: ["job_id"],
       })) {
         raw({

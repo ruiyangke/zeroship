@@ -55,6 +55,13 @@ struct Metadata {
 }
 impl JobTransport for Metadata {
     type Lease = Lease;
+    async fn submit(
+        &self,
+        _: &AssignedScope,
+        _: &JobSpec,
+    ) -> Result<JobSpec, WorkflowServiceError> {
+        panic!("advance fixture must not publish independently")
+    }
     async fn claim(&self, _: &AssignedScope) -> Result<Option<Lease>, WorkflowServiceError> {
         panic!("a delivered slot must not claim or discover work")
     }
@@ -317,6 +324,7 @@ impl Fixture {
                 execution_timeout,
                 operation_timeout: Duration::from_secs(5),
                 retry_delay: Duration::from_millis(5),
+                reconciliation: ReconciliationOptions::default(),
             },
         )
         .unwrap()
@@ -353,6 +361,7 @@ async fn unrepresentable_retry_delay_is_rejected_before_execution() {
             execution_timeout: Duration::from_secs(5),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::MAX,
+            reconciliation: ReconciliationOptions::default(),
         },
     );
     assert!(matches!(

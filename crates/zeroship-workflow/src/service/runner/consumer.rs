@@ -283,7 +283,7 @@ impl<T: JobTransport> JobConsumer<T> {
         self.bindings.clone()
     }
 
-    /// Consume authorized advance jobs until shutdown, then join all execution.
+    /// Consume authorized advance and reconciliation jobs, then join on shutdown.
     /// Dropping this future cancels work but retains occupied slots. Call `drain`
     /// before discarding the consumer; calling this again also drains first.
     pub async fn run_until(&mut self, shutdown: impl Future<Output = ()>) {

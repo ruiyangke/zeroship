@@ -48,6 +48,13 @@ impl Queue {
 }
 impl JobTransport for Queue {
     type Lease = Lease;
+    async fn submit(
+        &self,
+        _: &AssignedScope,
+        _: &JobSpec,
+    ) -> Result<JobSpec, WorkflowServiceError> {
+        panic!("advance fixture must not publish independently")
+    }
     async fn claim(&self, scope: &AssignedScope) -> Result<Option<Lease>, WorkflowServiceError> {
         self.claims.borrow_mut().push(scope.clone());
         self.events.send(Event::Claimed).unwrap();
@@ -87,6 +94,7 @@ fn options(slots: usize) -> ConsumerOptions {
             execution_timeout: Duration::from_secs(10),
             operation_timeout: Duration::from_secs(1),
             retry_delay: Duration::from_millis(5),
+            reconciliation: ReconciliationOptions::default(),
         },
     }
 }
@@ -467,7 +475,7 @@ async fn abandoned_host_retains_active_execution_until_drain_finishes() {
 }
 
 struct NativeManager {
-    _database: crate::service::tests::publication::Manager,
+    database: crate::service::tests::publication::Manager,
     coordinator: zeroship_workflow_manager::coordinator::Coordinator,
     worker: WorkerId,
     scope: AssignedScope,
@@ -508,7 +516,7 @@ impl NativeManager {
             .unwrap();
         let (settled, completion) = flume::bounded(1);
         Rc::new(Self {
-            _database: database,
+            database,
             coordinator,
             worker,
             scope: AssignedScope {
@@ -529,6 +537,23 @@ fn manager_error(error: zeroship_workflow_manager::Error) -> WorkflowServiceErro
 
 impl JobTransport for NativeManager {
     type Lease = zeroship_workflow_manager::DeliveryGrant;
+    async fn submit(
+        &self,
+        scope: &AssignedScope,
+        job: &JobSpec,
+    ) -> Result<JobSpec, WorkflowServiceError> {
+        self.coordinator
+            .submit_job(
+                &self.worker,
+                &SubmitJob {
+                    scope: scope.clone(),
+                    job: job.clone(),
+                },
+                || async { Ok(self.worker.clone()) },
+            )
+            .await
+            .map_err(manager_error)
+    }
     async fn claim(
         &self,
         scope: &AssignedScope,
@@ -625,4 +650,65 @@ async fn native_manager_delivery_and_lost_ack_finish_through_separate_orm_databa
     }
     assert!(manager.claim(&manager.scope).await.unwrap().is_none());
     assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
+}
+
+#[compio::test]
+async fn manager_reconciliation_publishes_creator_work_before_the_consumer_executes_it() {
+    let fixture = Fixture::new(AppPolicy::default()).await;
+    let manager = NativeManager::new(&fixture).await;
+    let recovery = zeroship_workflow_manager::recovery::Recovery::new(
+        manager.database.queue.clone(),
+        zeroship_workflow_manager::recovery::Options::default(),
+    )
+    .unwrap();
+    recovery
+        .ensure(
+            fixture.app.app_id(),
+            &fixture.job.deployment_id,
+            1.try_into().unwrap(),
+        )
+        .await
+        .unwrap();
+    let reconciliation = recovery
+        .dispatch(fixture.app.app_id())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut consumer =
+        JobConsumer::new(manager.clone(), manager.worker.clone(), options(1)).unwrap();
+    consumer
+        .bindings()
+        .replace(vec![scope(
+            &fixture,
+            manager.scope.assignment_revision.get(),
+        )])
+        .unwrap();
+    finished(consumer.run_until(async {
+        manager.completion.recv_async().await.unwrap();
+        manager.completion.recv_async().await.unwrap();
+    }))
+    .await;
+    assert_eq!(
+        fixture.probe.starts.get(),
+        1,
+        "reconciliation must not load or execute app code"
+    );
+    assert_eq!(fixture.task_state().await, "completed");
+    assert_eq!(
+        fixture
+            .app
+            .job_receipt(&reconciliation)
+            .await
+            .unwrap()
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed
+    );
+    assert!(fixture.app.pending_jobs(None, 1).await.unwrap().is_empty());
+    assert!(manager.claim(&manager.scope).await.unwrap().is_none());
+    let requests = manager.requests.borrow();
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0], requests[1]);
+    assert_eq!(requests[0].delivery.job.id, reconciliation.id);
+    assert_eq!(requests[2].delivery.job.id, fixture.job.id);
 }

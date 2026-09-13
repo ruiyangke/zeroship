@@ -265,7 +265,8 @@ table has the `__zeroship_workflow_` prefix; none belongs in Control's schema.
 | `payloads`, `payload_refs` | Prepared upload metadata, ownership, integrity and committed references. |
 | `outbox` | Customer events and their payloads; distinct from manager queue metadata. |
 | `job_publications` | Immutable advance job specifications, generation/frontier/due-time identity and manager confirmation time. Pending records retain deployment dependencies and survive history removal. |
-| `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. |
+| `job_receipts` | Immutable logical job specification and committed semantic outcome, retained independently of run history and delivery attempts. App-wide reconciliation records a selected page and its durable attempt offset; its run identity is absent. |
+| `publication_scans` | App-owned publication scan revision, ordering cursor and captured upper boundary. It schedules no work and grants no ingress authority. |
 
 Publication intents now use dedicated journal records. The scoped unique index
 binds run, generation, frontier revision and due time; `id` remains the sole
@@ -548,8 +549,9 @@ The current creator delivery API settles the semantic outcome with an empty
 successor list. Its committed successor intents use the independent publication
 path above. Passing those same persisted specifications in ACKs remains a
 consumer integration option; this implementation does not yet capture or confirm
-successors through settlement. Manager-dispatched reconciliation is still needed
-to make eventual publication a production guarantee.
+successors through settlement. Delivered reconciliation publishes those records;
+production manager dispatch and scope-duty admission are still required to make
+eventual publication a production guarantee.
 
 Creator state commits before its ACK. If the manager is unavailable or full,
 intents remain pending. Marking publication confirmed happens only after a
@@ -562,8 +564,9 @@ host-bound `JobPublisher`, validates the entire immutable specification, then
 confirms it under the app lock in a new creator transaction. Concurrent
 publishers may submit the same job; a confirmed intent remains as a durable
 receipt. `AssignedPublisher` uses the authenticated worker client and its
-current app assignment. These methods do not discover apps or schedule work;
-the future consumer invokes them for its delivered reconciliation scope.
+current app assignment. These methods do not discover apps or schedule work.
+Delivered reconciliation uses the same confirmation path with additional captured
+delivery and policy checks around publication, lock waits and commit.
 
 Starts, child/continuation creation, task checkpoints, restart and runnable
 lifecycle/signal/dependency wake-ups record their advance intent in the creator
@@ -946,8 +949,10 @@ The native `recovery::Recovery` ledger supplies the deadline and pending job.
 activation changes only the deployment selected for future jobs. `dispatch`
 serializes with queue operations under the app lock and commits the job identity
 with the next deadline. A pending job is returned unchanged across retries and
-replicas until it settles. Settlement does not reset the deadline, so overdue
-responsibility immediately becomes eligible again. The pending-job foreign key
+replicas until it settles. A fresh `Waiting` reconciliation settlement advances
+the matching obligation's deadline to manager time without postponing an earlier
+deadline. A completed scan preserves the periodic deadline. Receipt replay and
+unrelated jobs cannot modify the current obligation. The pending-job foreign key
 prevents deleting the job that still carries this obligation.
 
 `due` pages by app identity using manager database time and includes healthy
@@ -958,11 +963,29 @@ These native operations do not yet establish the authenticated activation-to-
 ingress handshake, run a host scheduler or provision missing worker capacity.
 The ingress epoch and drain evidence remain required before enabling that path.
 
-A reconciliation job processes an app-scoped page. It confirms manager receipts
-before advancing publication state and yields continuation metadata when needed.
-A scan of newly inserted intents must not permanently skip work behind its cursor;
-use stable ordering and a captured boundary, then schedule another pass. Manager
-recovery pagination also must reach missing owners beyond fully owned pages.
+A reconciliation job processes an app-scoped page without loading app code. Its
+immutable job receipt captures selected publication IDs, the current scan revision
+and a stable upper boundary before external I/O. These cursors stay in creator
+storage; the manager receives only a closed outcome. Selection reads IDs rather
+than decoding the whole page's specifications, so a malformed intent does not
+prevent attempts on later IDs.
+
+The receipt stores a durable offset. Reserving an item advances that offset under
+the app lock before attempting publication; cancellation may leave the item
+unpublished, but redelivery proceeds to its suffix. Each attempt is bounded and
+only an exact manager receipt can confirm publication. Failed or interrupted
+items remain pending for a later sweep. This separation prevents a repeatedly
+timing-out prefix from trapping all later intents in an immutable page.
+
+Finishing the page commits its semantic receipt and scan cursor together. The
+scan revision changes even for an empty pass or wrap. A competing page whose
+revision was already advanced records its stable receipt without regressing the
+cursor. `Waiting` requests the next page through the manager's recovery deadline;
+`Completed` closes the captured scan and retains periodic responsibility. Neither
+means every intent was confirmed or the app drained. New intents behind the
+cursor or above the captured upper boundary join a subsequent scan. Fresh reads
+and writes remain bounded by the original manager grant and host policy; this
+native metadata turn does not renew itself or run an independent timer.
 
 Retiring a responsibility requires closing ingress for its scope epoch, fencing
 new acceptance and proving the creator drain/publication state. Failed closure
@@ -1540,11 +1563,18 @@ establish V8, authenticated network or production host composition.
 
 Manager cron/timer discovery, scope deadline orchestration, capacity activation,
 and ordinary worker/CLI consumer composition still require implementation and integration.
-The consumer currently accepts advance jobs; the queue claim is not filtered by
-operation. Other delivered operation handlers must land before switching a host
-that receives cron, management, reconciliation or collection jobs to this loop.
+The consumer accepts advance and reconciliation jobs; the queue claim is not
+filtered by operation. Other delivered operation handlers must land before
+switching a host that receives cron, management or collection jobs to this loop.
 Publication intents and advance-job receipts exist in the journal; their
-manager-dispatched reconciliation and settlement integration remain unwired. Existing customer
+delivered reconciliation and queue settlement are integrated natively. Creator
+reconciliation tests exercise persisted progress, failed publication, policy
+replacement, concurrent scans and receipt rollback on PostgreSQL and SQLite.
+Manager contracts cover continuation deadlines, periodic responsibility, old ACK
+replay and atomic rollback. Consumer tests connect manager-issued reconciliation
+to outbox publication and subsequent execution in separate ORM databases. The
+production dispatch/activation host and ingress responsibility handshake remain
+unwired. Existing customer
 scheduler/task polling and maintenance code remains a foundation to replace.
 Its existence does not satisfy manager-owned scheduling.
 

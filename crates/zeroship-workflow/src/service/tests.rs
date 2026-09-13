@@ -39,6 +39,7 @@ mod payload_models;
 mod payloads;
 mod policy;
 pub(super) mod publication;
+mod reconciliation;
 mod requests;
 mod restart_models;
 mod runner;
