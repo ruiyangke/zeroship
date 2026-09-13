@@ -248,6 +248,7 @@ pub(crate) enum Resolution {
 #[derive(Clone)]
 pub(crate) struct ProcedureRegistry {
     entries: HashMap<String, Rc<RefCell<Entry>>>,
+    frame: v8::Global<v8::Value>,
 }
 
 impl ProcedureRegistry {
@@ -297,7 +298,10 @@ impl ProcedureRegistry {
             };
             entries.insert(name, Rc::new(RefCell::new(entry)));
         }
-        Ok(Self { entries })
+        Ok(Self {
+            entries,
+            frame: crate::core::invocation::capture_context(scope),
+        })
     }
 
     pub(crate) fn resolve(
@@ -314,34 +318,36 @@ impl ProcedureRegistry {
             Entry::Failed(error) => Err(error),
             Entry::Resolving(promise) => Ok(Resolution::Pending(promise)),
             Entry::Unloaded { receiver, load } => {
-                let resolver = v8::PromiseResolver::new(scope).ok_or(InvocationError::Engine(
-                    "could not allocate lazy procedure promise",
-                ))?;
-                let promise = resolver.get_promise(scope);
-                promise.mark_as_handled();
-                let retained = v8::Global::new(scope, promise);
-                // Publish pending state before invoking creator code. Re-entry
-                // shares this load and never holds a RefCell borrow into V8.
-                *slot.borrow_mut() = Entry::Loading(retained.clone());
-                let loaded = attempt(scope, |scope| {
-                    let load = v8::Local::new(scope, load);
-                    let receiver = v8::Local::new(scope, receiver);
-                    load.call(scope, receiver.into(), &[])
-                });
-                match loaded {
-                    Ok(value) => {
-                        resolver.resolve(scope, value);
-                    }
-                    Err(error) => {
-                        *slot.borrow_mut() = Entry::Failed(error.clone());
-                        if let InvocationError::JavaScript(reason) = &error {
-                            let reason = v8::Local::new(scope, reason);
-                            resolver.reject(scope, reason);
+                crate::core::invocation::with_captured_context(scope, &self.frame, |scope| {
+                    let resolver = v8::PromiseResolver::new(scope).ok_or(
+                        InvocationError::Engine("could not allocate lazy procedure promise"),
+                    )?;
+                    let promise = resolver.get_promise(scope);
+                    promise.mark_as_handled();
+                    let retained = v8::Global::new(scope, promise);
+                    // Publish pending state before invoking creator code. Re-entry
+                    // shares this load and never holds a RefCell borrow into V8.
+                    *slot.borrow_mut() = Entry::Loading(retained.clone());
+                    let loaded = attempt(scope, |scope| {
+                        let load = v8::Local::new(scope, load);
+                        let receiver = v8::Local::new(scope, receiver);
+                        load.call(scope, receiver.into(), &[])
+                    });
+                    match loaded {
+                        Ok(value) => {
+                            resolver.resolve(scope, value);
                         }
-                        return Err(error);
+                        Err(error) => {
+                            *slot.borrow_mut() = Entry::Failed(error.clone());
+                            if let InvocationError::JavaScript(reason) = &error {
+                                let reason = v8::Local::new(scope, reason);
+                                resolver.reject(scope, reason);
+                            }
+                            return Err(error);
+                        }
                     }
-                }
-                Ok(Resolution::Pending(retained))
+                    Ok(Resolution::Pending(retained))
+                })
             }
             Entry::Loading(promise) => {
                 let local = v8::Local::new(scope, &promise);
@@ -354,7 +360,11 @@ impl ProcedureRegistry {
                         *slot.borrow_mut() = Entry::Resolving(promise.clone());
                         let value = local.result(scope);
                         match v8::Local::<v8::Function>::try_from(value) {
-                            Ok(function) => Procedure::from_function(scope, function),
+                            Ok(function) => crate::core::invocation::with_captured_context(
+                                scope,
+                                &self.frame,
+                                |scope| Procedure::from_function(scope, function),
+                            ),
                             Err(_) => Err(InvocationError::InvalidTarget(format!(
                                 "loader for {name:?} did not return a procedure function"
                             ))),

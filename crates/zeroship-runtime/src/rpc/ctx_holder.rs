@@ -228,8 +228,8 @@ fn get_or_init_template_slot<'s>(
     (inst_tmpl, proto_v)
 }
 
-/// Create the native request holder. An eager signal can be registered for
-/// eviction before creator code runs; other callers materialize it on demand.
+/// Create the request holder and its host-owned cancellation signal before
+/// creator code runs. The returned handle follows pending calls and streams.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_rpc_ctx<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -240,15 +240,14 @@ pub fn mint_rpc_ctx<'s>(
     headers: Arc<Vec<(String, String)>>,
     user_json: Option<String>,
     idempotency_key: Option<String>,
-    eager_signal: bool,
-) -> Result<(v8::Local<'s, v8::Object>, Option<RequestSignal>), OpError> {
+) -> Result<(v8::Local<'s, v8::Object>, RequestSignal), OpError> {
     let (inst_tmpl, proto_v) = get_or_init_template_slot(scope);
     let obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| OpError::type_error("RpcCtx instance allocation failed"))?;
     obj.set_prototype(scope, proto_v);
 
-    let signal = eager_signal.then(|| RequestSignal::new(scope));
+    let signal = RequestSignal::new(scope);
 
     let state = RpcCtx {
         request_id,
@@ -260,7 +259,7 @@ pub fn mint_rpc_ctx<'s>(
         idempotency_key,
         cached_headers: RefCell::new(None),
         cached_url: RefCell::new(None),
-        cached_signal: RefCell::new(signal.clone()),
+        cached_signal: RefCell::new(Some(signal.clone())),
         cached_user: RefCell::new(None),
     };
     let boxed: Box<RpcCtx> = Box::new(state);

@@ -53,6 +53,18 @@ impl RpcCall {
         }
     }
 
+    pub(crate) fn with_frame<'s, T>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        body: impl FnOnce(&mut v8::PinScope<'s, '_>) -> T,
+    ) -> T {
+        let frame = match &self.phase {
+            Phase::Running(invocation) => &invocation.frame,
+            _ => &self.frame,
+        };
+        with_captured_context(scope, frame, body)
+    }
+
     pub(crate) fn poll(&mut self, scope: &mut v8::PinScope) -> Result<CallProgress, InvokeFailure> {
         let frame = self.frame.clone();
         with_captured_context(scope, &frame, |scope| {

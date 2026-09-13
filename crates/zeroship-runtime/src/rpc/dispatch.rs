@@ -128,6 +128,6 @@ pub fn install_globals<'s>(
 mod procedure;
 mod call;
 pub(crate) mod response;
-mod stream;
+pub(crate) mod stream;
 pub(crate) use call::{CallProgress, RpcCall};
 pub(crate) use procedure::ProcedureRegistry;
