@@ -4,6 +4,7 @@
 //! plumbing). Everything in this module is internal scaffolding that
 //! wires V8 to the compio event loop.
 
+pub(crate) mod application_entry;
 pub mod channel;
 pub mod dev_auth;
 pub mod dispatch;

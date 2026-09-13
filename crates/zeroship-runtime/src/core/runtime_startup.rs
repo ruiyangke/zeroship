@@ -186,9 +186,7 @@ impl RuntimeInner {
     pub(super) fn fail_startup(&mut self, error: String) {
         self.state.borrow_mut().startup_declarations_open = false;
         self.startup = StartupState::Failed(error);
-        self.fetch_handler_fn = None;
-        self.fetch_fast_fn = None;
-        self.rpc_registry = None;
+        self.application = None;
         self.workflow_fn = None;
     }
 
@@ -200,62 +198,26 @@ impl RuntimeInner {
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
-        let (entries, rpc_registry) =
+        let (application, workflow) =
             with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
-                v8::tc_scope!(let tc, scope);
-                let ns = v8::Local::new(tc, namespace)
-                    .to_object(tc)
+                let ns = v8::Local::new(scope, namespace).to_object(scope)
                     .ok_or("invalid module namespace")?;
-                let key = v8::String::new(tc, "default").unwrap();
-                let default = ns
-                    .get(tc, key.into())
-                    .ok_or("could not read module default export")?;
-                let mut entries = Vec::new();
-                for name in ["fetch", "fetchFast", "workflow"] {
-                    let entry = if default.is_null_or_undefined() {
-                        None
-                    } else {
-                        let object = default
-                            .to_object(tc)
-                            .ok_or("invalid module default export")?;
-                        let key = v8::String::new(tc, name).unwrap();
-                        let value = object.get(tc, key.into()).ok_or_else(|| {
-                            tc.exception().map_or_else(
-                                || format!("could not read default.{name}"),
-                                |error| crate::core::modules::error_detail(tc, error),
-                            )
-                        })?;
-                        v8::Local::<v8::Function>::try_from(value)
-                            .ok()
-                            .map(|function| v8::Global::new(tc, function))
-                    };
-                    entries.push(entry);
-                }
-                let rpc_registry = if default.is_null_or_undefined() {
-                    None
-                } else {
-                    let object = default.to_object(tc).ok_or("invalid module default export")?;
-                    let key = v8::String::new(tc, "rpc").unwrap();
-                    let value = object.get(tc, key.into()).ok_or("could not read default.rpc")?;
-                    if value.is_null_or_undefined() {
-                        None
-                    } else {
-                        Some(crate::rpc::dispatch::ProcedureRegistry::snapshot(tc, value)
-                            .map_err(|error| error.describe(tc))?)
-                    }
+                let default = crate::core::application_entry::read_field(scope, ns, "default")?;
+                let application = crate::core::application_entry::ApplicationEntry::capture(scope, default, None)?;
+                let workflow = if default.is_null_or_undefined() { None } else {
+                    let object = default.to_object(scope).ok_or("invalid module default export")?;
+                    let value = crate::core::application_entry::read_field(scope, object, "workflow")?;
+                    v8::Local::<v8::Function>::try_from(value).ok()
+                        .map(|function| v8::Global::new(scope, function))
                 };
                 for plugin in &self.plugins {
-                    let namespace =
-                        crate::plugin::runtime_plugin_namespace(tc, plugin.namespace())?;
-                    plugin.finalize_runtime(tc, namespace, descriptor)?;
+                    let namespace = crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
+                    plugin.finalize_runtime(scope, namespace, descriptor)?;
                 }
-                Ok::<_, String>((entries, rpc_registry))
+                Ok::<_, String>((application, workflow))
             })?;
-        let mut entries = entries.into_iter();
-        self.fetch_handler_fn = entries.next().unwrap();
-        self.fetch_fast_fn = entries.next().unwrap();
-        self.rpc_registry = rpc_registry;
-        self.workflow_fn = entries.next().unwrap();
+        self.application = Some(std::rc::Rc::new(application));
+        self.workflow_fn = workflow;
         Ok(())
     }
 

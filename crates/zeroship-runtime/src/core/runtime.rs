@@ -888,21 +888,10 @@ macro_rules! enter_v8 {
 pub(crate) struct RuntimeInner {
     pub(crate) isolate: v8::OwnedIsolate,
     pub(crate) context: v8::Global<v8::Context>,
-    /// Cached reference to `module.default.fetch`, resolved once at module
-    /// init. None if the module doesn't export a default.fetch handler.
-    /// Used when native RPC does not claim the request and fetchFast falls through.
-    pub(crate) fetch_handler_fn: Option<v8::Global<v8::Function>>,
-    /// Cached reference to `module.default.fetchFast` — the zeroship
-    /// extension for bypassing the WinterCG Request/Response contract.
-    /// Signature: `fetchFast(method, url, bodyBytes, env) → object | string | null`.
-    /// When non-null result: `{ status, headers, body }` plain object OR
-    /// a string body (200 OK). When null: kernel falls through to the
-    /// full `default.fetch(request, env, ctx)` path.
-    pub(crate) fetch_fast_fn: Option<v8::Global<v8::Function>>,
-    /// Procedure targets and shared lazy loading state for the published entry.
-    pub(crate) rpc_registry: Option<crate::rpc::dispatch::ProcedureRegistry>,
-    /// Cached reference to `module.default.workflow` — the durable workflow
-    /// replay entry the worker invokes with a StepRequest envelope.
+    /// Published HTTP and RPC targets, captured together after validation.
+    /// A dispatch holds this snapshot while later loading can replace it.
+    pub(crate) application: Option<Rc<super::application_entry::ApplicationEntry>>,
+
     pub(crate) workflow_fn: Option<v8::Global<v8::Function>>,
     startup: StartupState,
     startup_cpu: Duration,
@@ -1219,9 +1208,7 @@ impl RuntimeInner {
         Self {
             isolate,
             context,
-            fetch_handler_fn: None,
-            fetch_fast_fn: None,
-            rpc_registry: None,
+            application: None,
             workflow_fn: None,
             startup: StartupState::Uninitialized,
             startup_cpu: Duration::ZERO,
@@ -2019,6 +2006,7 @@ impl RuntimeInner {
             }
             Ok(true) => {}
         }
+        let application = self.application.as_ref().expect("ready application entry").clone();
         let request_id = self.next_direct_request_id;
         self.next_direct_request_id += 1;
         let invocation_context = crate::core::invocation::InvocationContext::request(
@@ -2046,7 +2034,7 @@ impl RuntimeInner {
         let is_ws_upgrade = headers.iter().any(|(k, v)| {
             k.eq_ignore_ascii_case("upgrade") && v.eq_ignore_ascii_case("websocket")
         });
-        let rpc_id_str: Option<&str> = if self.rpc_registry.is_some() && !is_ws_upgrade {
+        let rpc_id_str: Option<&str> = if application.rpc.is_some() && !is_ws_upgrade {
             extract_zs_v1_id(method, url)
         } else {
             None
@@ -2071,13 +2059,12 @@ impl RuntimeInner {
         let dispatch_result: Result<DispatchResult, v8::Global<v8::Promise>> =
             enter_v8!(self, |scope| {
                 crate::core::invocation::with_context(scope, &invocation_context, |scope| 'dispatch: {
-                let undefined = v8::undefined(scope).into();
 
                 // ---- Tier 1: RPC fast path ----
-                // `rpc_id_str.is_some()` implies `self.rpc_registry.is_some()`
+                // `rpc_id_str.is_some()` implies `application.rpc.is_some()`
                 // by construction above, so the published registry is available.
                 if let Some(rpc_id) = rpc_id_str {
-                    let registry = self.rpc_registry.as_ref().unwrap().clone();
+                    let registry = application.rpc.as_ref().unwrap().clone();
                     let input_arg: v8::Local<v8::Value> = match parse_rpc_input(scope, method, url, body) {
                         InputParse::Ok(v) => v,
                         InputParse::Reject400(msg) => {
@@ -2142,8 +2129,8 @@ impl RuntimeInner {
                     break 'dispatch result;
                 }
 
-                let fetch_fast_result = if let Some(ff_fn_global) = self.fetch_fast_fn.as_ref() {
-                    let ff_fn = v8::Local::new(scope, ff_fn_global);
+                let fetch_fast_result = if let Some(handler) = application.fetch_fast.as_ref() {
+                    let (ff_fn, receiver) = handler.locals(scope);
                     let method_arg = v8::String::new(scope, method).unwrap().into();
                     let url_arg = v8::String::new(scope, url).unwrap().into();
                     let body_arg = uint8_array_from_bytes(scope, body)
@@ -2155,7 +2142,7 @@ impl RuntimeInner {
                             None => v8::Object::new(scope).into(),
                         }
                     };
-                    call_fetch_fast_inner(scope, ff_fn, method_arg, url_arg, body_arg, env_arg)
+                    call_fetch_fast_inner(scope, ff_fn, receiver, method_arg, url_arg, body_arg, env_arg)
                 } else {
                     FetchFastResult::FallThrough
                 };
@@ -2166,7 +2153,7 @@ impl RuntimeInner {
                     // Request/Response object construction needed.
                     res
                 } else {
-                    if self.fetch_handler_fn.is_none() {
+                    if application.fetch.is_none() {
                         break 'dispatch Ok(DispatchResult::HttpResponse(ResponseInfo::Complete {
                             status: 404,
                             headers: vec![("content-type".into(), "application/json".into())],
@@ -2215,8 +2202,8 @@ impl RuntimeInner {
                             }
                         };
 
-                        let handler = v8::Local::new(scope, self.fetch_handler_fn.as_ref().unwrap());
-                        call_fetch_inner(scope, handler, undefined, request.into(), env_val, ctx_val)
+                        let (handler, receiver) = application.fetch.as_ref().unwrap().locals(scope);
+                        call_fetch_inner(scope, handler, receiver, request.into(), env_val, ctx_val)
                     } else {
                         Ok(DispatchResult::Error("Failed to construct Request object".to_string()))
                     }
@@ -3677,15 +3664,15 @@ enum FetchFastResult {
 fn call_fetch_fast_inner(
     scope: &mut v8::PinScope,
     ff_fn: v8::Local<v8::Function>,
+    receiver: v8::Local<v8::Value>,
     method_arg: v8::Local<v8::Value>,
     url_arg: v8::Local<v8::Value>,
     body_arg: v8::Local<v8::Value>,
     env_arg: v8::Local<v8::Value>,
 ) -> FetchFastResult {
-    let undefined = v8::undefined(scope).into();
     let (result_val, caught_exception) = {
         v8::tc_scope!(let tc, scope);
-        let r = ff_fn.call(tc, undefined, &[method_arg, url_arg, body_arg, env_arg]);
+        let r = ff_fn.call(tc, receiver, &[method_arg, url_arg, body_arg, env_arg]);
         if tc.has_caught() {
             let exc = tc.exception();
             let exc_global = exc.map(|e| v8::Global::new(tc, e));
@@ -4182,7 +4169,7 @@ fn extract_plain_headers(
 fn call_fetch_inner(
     scope: &mut v8::PinScope,
     handler: v8::Local<v8::Function>,
-    undefined: v8::Local<v8::Value>,
+    receiver: v8::Local<v8::Value>,
     request: v8::Local<v8::Value>,
     env: v8::Local<v8::Value>,
     ctx: v8::Local<v8::Value>,
@@ -4192,7 +4179,7 @@ fn call_fetch_inner(
     // `None` return that drops all of it.
     let (result_val, caught_exception) = {
         v8::tc_scope!(let tc, scope);
-        let r = handler.call(tc, undefined, &[request, env, ctx]);
+        let r = handler.call(tc, receiver, &[request, env, ctx]);
         if tc.has_caught() {
             let exc = tc.exception();
             let exc_global = exc.map(|e| v8::Global::new(tc, e));
