@@ -288,7 +288,7 @@ impl Collection {
     }
 }
 
-/// A collection checked against migration-derived Rust metadata.
+/// A collection checked against its native Rust metadata.
 #[derive(Debug)]
 pub struct EntityCollection<E: Entity> {
     collection: Collection,
@@ -308,6 +308,21 @@ impl<E: Entity> EntityCollection<E> {
     fn validate(&self) -> Result<(), DbError> {
         read_builder::validate_bound_schema(&self.collection.database, E::COLLECTION, &self.schema)
     }
+
+    fn dispatch<F>(
+        &self,
+        prepared: Result<F, DbError>,
+    ) -> impl Future<Output = Result<Output, DbError>> + use<E, F>
+    where
+        F: Future<Output = Result<Output, DbError>>,
+    {
+        let database = self.collection.database.clone();
+        let schema = self.schema.clone();
+        async move {
+            read_builder::validate_bound_schema(&database, E::COLLECTION, &schema)?;
+            prepared?.await
+        }
+    }
     pub fn find<R: FromRow<E>>(
         &self,
         filter: Filter<E>,
@@ -323,8 +338,9 @@ impl<E: Entity> EntityCollection<E> {
             .validate()
             .and_then(|()| document.into_record())
             .map(|record| self.collection.insert(Value::Object(record)));
+        let future = self.dispatch(future);
         async move {
-            decode_rows::<E, R>(future?.await?)?
+            decode_rows::<E, R>(future.await?)?
                 .pop()
                 .ok_or_else(|| DbError::internal("insert returned no row"))
         }
@@ -344,20 +360,14 @@ impl<E: Entity> EntityCollection<E> {
                     false,
                 )
             });
-        async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
+        let future = self.dispatch(future);
+        async move { Ok(decode_rows::<E, R>(future.await?)?.pop()) }
     }
     pub fn delete<R: FromRow<E>>(
         &self,
         filter: Filter<E>,
     ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, R> {
-        let future = self.validate().map(|()| {
-            self.collection.mutate_model(
-                filter.into_predicate(),
-                mutations::Mutation::Delete,
-                false,
-            )
-        });
-        async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
+        self.mutate_one(filter, mutations::Mutation::Delete)
     }
 }
 
