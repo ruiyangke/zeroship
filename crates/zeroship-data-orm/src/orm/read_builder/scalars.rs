@@ -11,6 +11,9 @@ pub struct ScalarSelection<S, R> {
 }
 
 impl<S, R> ScalarSelection<S, R> {
+    fn predicate(&self, expression: Predicate) -> ReadPredicate {
+        ReadPredicate::new(expression, self.origin.iter().cloned().collect())
+    }
     fn new(
         expression: Operand,
         decode: fn(Value) -> Result<R, DbError>,
@@ -24,61 +27,85 @@ impl<S, R> ScalarSelection<S, R> {
         }
     }
 
-    fn compare<T: EncodeValue<S>>(&self, op: CompareOp, value: T) -> Result<Predicate, DbError> {
-        let literal = crate::sql::Literal::try_from_value(value.encode_value()?)
-            .map_err(|error| read::invalid(error.to_string()))?;
-        match literal {
-            Some(literal) => Ok(Predicate::compare(
-                self.expression.clone(),
-                op,
-                Operand::Lit(literal),
-            )),
-            None if matches!(op, CompareOp::Eq | CompareOp::Ne) => Ok(Predicate::IsNull {
-                operand: self.expression.clone(),
-                negated: op == CompareOp::Ne,
-            }),
-            None => Err(read::invalid("null supports only equality comparisons")),
-        }
+    fn compare<T: IntoReadOperand<S, K>, K>(
+        &self,
+        op: CompareOp,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
+        value.into_read_operand()?.compare(
+            self.expression.clone(),
+            op,
+            self.origin.iter().cloned().collect(),
+            |value| {
+                crate::sql::Literal::try_from_value(value)
+                    .map_err(|error| read::invalid(error.to_string()))
+            },
+        )
     }
 
-    pub fn eq<T: EncodeValue<S>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn eq<T: IntoReadOperand<S, K>, K>(&self, value: T) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Eq, value)
     }
 
-    pub fn ne<T: EncodeValue<S>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn ne<T: IntoReadOperand<S, K>, K>(&self, value: T) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Ne, value)
     }
 
-    pub fn is_null(&self) -> Predicate {
-        Predicate::IsNull {
+    pub fn is_null(&self) -> ReadPredicate {
+        self.predicate(Predicate::IsNull {
             operand: self.expression.clone(),
             negated: false,
-        }
+        })
     }
 
-    pub fn is_not_null(&self) -> Predicate {
-        Predicate::IsNull {
+    pub fn is_not_null(&self) -> ReadPredicate {
+        self.predicate(Predicate::IsNull {
             operand: self.expression.clone(),
             negated: true,
-        }
+        })
     }
 }
 
 impl<S: OrderedSqlType, R> ScalarSelection<S, R> {
-    pub fn lt<T: EncodeValue<S>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn lt<T: IntoReadOperand<S, K>, K>(&self, value: T) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Lt, value)
     }
 
-    pub fn lte<T: EncodeValue<S>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn lte<T: IntoReadOperand<S, K>, K>(&self, value: T) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Lte, value)
     }
 
-    pub fn gt<T: EncodeValue<S>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn gt<T: IntoReadOperand<S, K>, K>(&self, value: T) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Gt, value)
     }
 
-    pub fn gte<T: EncodeValue<S>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn gte<T: IntoReadOperand<S, K>, K>(&self, value: T) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Gte, value)
+    }
+}
+
+impl<S, T, R> IntoReadOperand<S, ExpressionOperand> for ScalarSelection<T, R>
+where
+    S: ComparableSqlType,
+    T: ComparableSqlType<Base = S::Base>,
+{
+    fn into_read_operand(self) -> Result<ReadOperand, DbError> {
+        Ok(ReadOperand::expression(
+            self.expression,
+            self.origin.into_iter().collect(),
+        ))
+    }
+}
+impl<S, T, R> IntoReadOperand<S, ExpressionOperand> for &ScalarSelection<T, R>
+where
+    S: ComparableSqlType,
+    T: ComparableSqlType<Base = S::Base>,
+{
+    fn into_read_operand(self) -> Result<ReadOperand, DbError> {
+        Ok(ReadOperand::expression(
+            self.expression.clone(),
+            self.origin.iter().cloned().collect(),
+        ))
     }
 }
 
@@ -210,21 +237,29 @@ where
 
 impl<C: ReadableColumn> SourceColumn<C>
 where
-    C::SqlType: OrderedSqlType + JoinType,
+    C::SqlType: OrderedSqlType + ComparableSqlType,
 {
-    pub fn min<R: DecodeValue<<C::SqlType as JoinType>::Base>>(
+    pub fn min<R: DecodeValue<<C::SqlType as ComparableSqlType>::Base>>(
         &self,
-    ) -> ScalarSelection<<C::SqlType as JoinType>::Base, Option<R>> {
-        ScalarSelection::new(self.aggregate(AggregateFunc::Min, false),
-            <Option<R> as DecodeValue<sql_types::Nullable<<C::SqlType as JoinType>::Base>>>::decode_value,
-            Some(self.origin.clone()))
+    ) -> ScalarSelection<<C::SqlType as ComparableSqlType>::Base, Option<R>> {
+        ScalarSelection::new(
+            self.aggregate(AggregateFunc::Min, false),
+            <Option<R> as DecodeValue<
+                sql_types::Nullable<<C::SqlType as ComparableSqlType>::Base>,
+            >>::decode_value,
+            Some(self.origin.clone()),
+        )
     }
 
-    pub fn max<R: DecodeValue<<C::SqlType as JoinType>::Base>>(
+    pub fn max<R: DecodeValue<<C::SqlType as ComparableSqlType>::Base>>(
         &self,
-    ) -> ScalarSelection<<C::SqlType as JoinType>::Base, Option<R>> {
-        ScalarSelection::new(self.aggregate(AggregateFunc::Max, false),
-            <Option<R> as DecodeValue<sql_types::Nullable<<C::SqlType as JoinType>::Base>>>::decode_value,
-            Some(self.origin.clone()))
+    ) -> ScalarSelection<<C::SqlType as ComparableSqlType>::Base, Option<R>> {
+        ScalarSelection::new(
+            self.aggregate(AggregateFunc::Max, false),
+            <Option<R> as DecodeValue<
+                sql_types::Nullable<<C::SqlType as ComparableSqlType>::Base>,
+            >>::decode_value,
+            Some(self.origin.clone()),
+        )
     }
 }

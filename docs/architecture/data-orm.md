@@ -304,12 +304,20 @@ let c = db.entity::<schema::customers::Entity>()?.alias("c")?;
 let rows: Vec<(OrderSummary, Option<CustomerSummary>)> = db
     .from(&o)
     .left_join(&c, o.column(schema::orders::customerId)
-        .eq_column(c.column(schema::customers::id))?)?
+        .eq(c.column(schema::customers::id))?)?
     .select((o.row::<OrderSummary>(), c.optional_row::<CustomerSummary>()))?
     .order_by(o.column(schema::orders::id).asc())
     .limit(page_size)?
     .all().await?;
 ```
+
+Comparisons accept native values or compatible expressions through the same
+methods: `field.eq(value)`, `field.eq(other_field)`, and
+`column.gte(other_column)`. Unqualified fields must belong to the same entity;
+aliased expressions must belong to registered sources on the same database.
+`and`, `or`, and `negate` compose predicates without exposing SQL nodes.
+The builder retains expression origins for schema and transaction validation.
+This follows [Diesel's operand conversion approach](https://diesel.rs/guides/extending-diesel.html).
 
 `orm::ReadQuery` is the structured operation beneath the Rust builder and the
 TypeScript adapter. It supports explicit inner and left joins, named scalar
