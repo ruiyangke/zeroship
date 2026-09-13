@@ -570,9 +570,7 @@ pub struct RuntimeState {
     /// Per-request Request JS object, keyed by request_id. Stored by the
     /// kernel when `call_fetch_handler` builds the Request; read by the
     /// native `zeroship` module export so user code can do
-    /// `import { getRequest } from 'zeroship'; getRequest()` without the
-    /// bootstrap having to call `__bindRequest(ctx, request)` on every
-    /// request.
+    /// `import { getRequest } from 'zeroship'; getRequest()`.
     ///
     /// Empty when the request is served through the RPC fast-path (no
     /// Request is constructed). Callers of `getRequest()` inside a

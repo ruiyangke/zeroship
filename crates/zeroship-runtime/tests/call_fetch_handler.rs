@@ -720,7 +720,7 @@ fn streaming_async_closes_cleanly() {
 //
 // These lock in the three exports of the user-facing `zeroship` module:
 // `env`, `waitUntil`, `getRequest`. The module is injected by the runtime
-// alongside the bootstrap (see crates/zeroship-runtime/src/core/zeroship_module.rs).
+// directly by the runtime (see crates/zeroship-runtime/src/core/zeroship_module.rs).
 
 #[test]
 fn zeroship_module_env_import() {
@@ -858,7 +858,7 @@ fn synthetic_entry(procs: &str) -> Vec<zeroship_runtime::ModuleEntry> {
 }
 
 #[test]
-fn bootstrap_routes_rpc_to_named_export() {
+fn native_rpc_routes_to_named_export() {
     let modules = synthetic_entry(r#"
         function greet(name) { return { hello: name }; }
         function _makeProcedures() { return { greet }; }
@@ -885,7 +885,7 @@ fn bootstrap_routes_rpc_to_named_export() {
 }
 
 #[test]
-fn bootstrap_rpc_method_not_found_returns_404() {
+fn native_rpc_method_not_found_returns_404() {
     let modules = synthetic_entry(r#"
         function greet() { return "hi"; }
         function _makeProcedures() { return { greet }; }
@@ -911,7 +911,7 @@ fn bootstrap_rpc_method_not_found_returns_404() {
 }
 
 #[test]
-fn bootstrap_rpc_malformed_json_returns_400() {
+fn native_rpc_malformed_json_returns_400() {
     let modules = synthetic_entry(r#"
         function greet(x) { return x; }
         function _makeProcedures() { return { greet }; }
@@ -937,7 +937,7 @@ fn bootstrap_rpc_malformed_json_returns_400() {
 }
 
 #[test]
-fn bootstrap_rpc_input_extracted_from_json_envelope() {
+fn native_rpc_input_extracted_from_json_envelope() {
     // New wire: body is `{"json": <input>}`. The input is unwrapped before
     // being passed to the handler.
     let modules = synthetic_entry(r#"
@@ -968,8 +968,8 @@ fn bootstrap_rpc_input_extracted_from_json_envelope() {
 // Structured-error envelope (code / details / retryable)
 // ===========================================================================
 //
-// The bootstrap's `errorResponse` helper forwards optional fields from a
-// thrown error — `code` (gRPC-style string), `details` (any JSON), and
+// Native error serialization forwards optional fields from a thrown error —
+// `code` (gRPC-style string), `details` (any JSON), and
 // `retryable` (boolean) — alongside the existing `message` / `name` /
 // `status`. Lets RPC procedures throw structured errors that the wire
 // preserves, so callers (and the SSE path) can branch on `.code` or read
@@ -978,7 +978,7 @@ fn bootstrap_rpc_input_extracted_from_json_envelope() {
 #[test]
 fn rpc_error_envelope_carries_code_details_retryable() {
     // Procedure throws an Error with `code`, `details`, `retryable`, and
-    // `status`. The synthetic entry's error envelope must forward all
+    // `status`. The runtime's error envelope must forward all
     // four to the wire — regression guard for the structured-error path
     // the WebSocket subscription / fetch paths rely on.
     let modules = synthetic_entry(r#"

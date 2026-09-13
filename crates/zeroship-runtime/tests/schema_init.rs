@@ -206,11 +206,8 @@ fn dispatch_probe(user_src: &str, procs_block: &str, method: &str) -> Result<Str
 
 #[test]
 fn init_script_no_ops_without_db_plugin() {
-    // The init script guards on `__zs_env()?.db`. When the plugin isn't
-    // loaded — the configuration this test runs under — the script must
-    // NOT attempt to dynamically import `@zeroship/db` (which isn't in
-    // the test bundle) and the bootstrap must finish module evaluation
-    // cleanly.
+    // When the DB plugin isn't loaded, native startup must not request its SDK
+    // adapter module and host entry evaluation must finish cleanly.
     //
     // We assert the boot path made it through end-to-end: the worker
     // resolved `default.fetch`, served a request, and returned the
@@ -233,7 +230,7 @@ fn init_script_no_ops_when_runtime_descriptor_missing() {
     // Even with an `env.db` namespace present, absence of a runtime
     // descriptor short-circuits the init script before the dynamic import.
     // The test's synthetic-entry shim emits its own `default = { fetch, rpc }`,
-    // so bootstrap finishes evaluation cleanly without trying to import
+    // so host entry evaluation finishes cleanly without trying to import
     // `@zeroship/db`.
     init_v8();
     let user_src = r#"
@@ -462,7 +459,7 @@ export default defaultExport;
 fn init_script_does_not_fallback_to_default_schema_without_descriptor() {
     // **Migration-first cutover (P5 S3).** An app that ships no descriptor is
     // treated as schema-less by the runtime entry. Even if a stale
-    // `default.schema` exists, the bootstrap must not read it or import
+    // `default.schema` exists, the runtime host must not read it or import
     // `zeroship:db/internal`.
     init_v8();
 
@@ -583,12 +580,12 @@ fn non_v2_runtime_descriptor_fails_isolate_init() {
 }
 
 #[test]
-fn bootstrap_module_lacks_legacy_schema_init_symbols() {
+fn host_entry_lacks_legacy_schema_init_symbols() {
     // Stage 4 cleanup: the synthetic SSR entry no longer publishes
-    // `__zsSchemaInit`. The runtime bootstrap does not either: native plugins
+    // `__zsSchemaInit`. The runtime host does not either: native plugins
     // receive the descriptor before module evaluation and the JavaScript
     // installer plants wrappers directly. Verify the legacy global stays
-    // undefined throughout bootstrap evaluation.
+    // undefined throughout host entry evaluation.
     let body = dispatch_probe(
         r#"
         export function readInit() {

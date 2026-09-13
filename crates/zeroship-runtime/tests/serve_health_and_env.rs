@@ -39,7 +39,7 @@ fn free_port() -> u16 {
 ///   - 404s everything else.
 ///
 /// Written as a raw `export default { fetch }` so it flows through the same
-/// bootstrap the production runtime wraps user code with.
+/// host entry normalization used by the production runtime.
 const APP_SRC: &str = r#"
 import { env } from "zeroship";
 export default {

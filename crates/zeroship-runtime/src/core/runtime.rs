@@ -512,8 +512,8 @@ impl Runtime {
         )
     }
 
-    /// Durable-workflow replay dispatch. Invokes the bootstrap's
-    /// `default.workflow(envelope, ctx)` entry and returns the JSON
+    /// Durable-workflow replay dispatch. Invokes the embedded workflow
+    /// bridge's `default.workflow(envelope, ctx)` entry and returns the JSON
     /// StepResult object it produced.
     pub fn call_workflow_dispatch(
         &self,
@@ -838,7 +838,7 @@ enum PendingOrigin {
     /// A native procedure call is waiting for its loader or handler promise.
     Rpc,
     /// Promise came from `default.workflow` — resolved value is the
-    /// StepResult object the workflow replay bootstrap returns.
+    /// StepResult object the embedded workflow bridge returns.
     Workflow,
 }
 
@@ -1929,7 +1929,7 @@ impl RuntimeInner {
     // -----------------------------------------------------------------------
 
     /// Kernel durable-workflow replay primitive. The worker passes the
-    /// control-plane StepRequest as JSON; the bootstrap returns a StepResult
+    /// control-plane StepRequest as JSON; the workflow bridge returns a StepResult
     /// object, which this method serializes back to JSON for the worker.
     pub fn call_workflow_dispatch(
         &mut self,
@@ -2312,8 +2312,8 @@ impl RuntimeInner {
                     );
                     if let Some(request) = request_opt {
                         // Stash the Request so `getRequest()` can find it
-                        // without the bootstrap having to push `ctx.__zs_request`
-                        // through JS on every call. Cleared in drain_request_logs /
+                        // without forwarding it through a mutable JavaScript global.
+                        // Cleared in drain_request_logs /
                         // discard_request_state together with the other per-request
                         // state (user, ctx, logs).
                         let global = v8::Global::new(scope, request);

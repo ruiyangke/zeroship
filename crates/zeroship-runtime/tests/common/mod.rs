@@ -276,8 +276,7 @@ fn is_ident_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || c == b'_' || c == b'$'
 }
 
-/// URL-encode a single path segment. The bootstrap's JS side uses
-/// `decodeURIComponent`, so any `%xx` we emit here round-trips.
+/// URL-encode a single path segment for native RPC lookup.
 fn url_path_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
