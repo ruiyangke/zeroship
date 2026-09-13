@@ -1,4 +1,4 @@
-//! Mail delivery and suppression against owned SMTP and migrated PostgreSQL servers.
+//! Mail delivery and suppression against owned SMTP servers and migrated databases.
 
 #![recursion_limit = "256"]
 

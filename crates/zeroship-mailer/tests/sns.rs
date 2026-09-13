@@ -13,7 +13,7 @@
 //! base64 -w0 signature.bin
 //! ```
 //!
-//! For SignatureVersion 2, use `openssl dgst -sha256 -sign ...` with
+//! For `SignatureVersion` 2, use `openssl dgst -sha256 -sign ...` with
 //! the same `canonical.txt`.
 //!
 //! The exact `canonical.txt` shape MUST match what
