@@ -4,7 +4,9 @@ use std::time::Instant;
 
 use super::channel::ResultSender;
 use super::modules::ModuleEvaluation;
+use super::{application_entry::ApplicationEntry, dev_entry::DevEntryLoader};
 use crate::{EnvSnapshot, RequestCtx, SettledFetch};
+use std::rc::Rc;
 
 pub enum EvaluationPhase {
     Running,
@@ -13,6 +15,10 @@ pub enum EvaluationPhase {
         promises: Vec<v8::Global<v8::Promise>>,
     },
     Creator(ModuleEvaluation),
+    Dev {
+        loader: DevEntryLoader,
+        application: Option<Rc<ApplicationEntry>>,
+    },
 }
 
 pub enum StartupState {
@@ -41,6 +47,7 @@ impl StartupState {
 }
 
 pub struct WaitingRequest {
+    pub started: Instant,
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
