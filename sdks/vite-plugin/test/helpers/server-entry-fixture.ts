@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { TestContext } from "node:test";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { pathToFileURL } from "node:url";
 import { build } from "esbuild";
 import { buildServerEntrySource, type ServerBinding } from "../../src/rpc-registry.js";
 
@@ -47,12 +47,6 @@ export async function buildEntryFixture(
     platform: "neutral",
     target: "es2024",
     metafile: true,
-    // Use the workflow owner's actual collector while its cutover is pending.
-    alias: {
-      "@zeroship/bootstrap/normalize": fileURLToPath(
-        new URL("../../../bootstrap/src/normalize.ts", import.meta.url),
-      ),
-    },
     external: ["zeroship"],
   });
   assert.ok(result.metafile.outputs["dist/entry.mjs"], "build must produce the server entry");

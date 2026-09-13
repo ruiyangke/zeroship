@@ -27,7 +27,9 @@ describe("rpcRegistryPlugin", () => {
     assert.equal(typeof source, "string");
     const fixture = await buildEntryFixture(t, {
       source: source as string,
-      files: { "user.mjs": "export function ping() { return 'pong'; }" },
+      files: {
+        "user.mjs": "export function ping() { return 'pong'; } export default { rpc: { ping } };",
+      },
     });
     assert.equal((await fixture.load()).default.rpc.ping(), "pong");
   });
@@ -147,7 +149,7 @@ for (const { name, bindings } of variants) {
         },
       });
       const entry = (await fixture.load()).default;
-      assert.deepEqual(Object.keys(entry).sort(), ["fetch", "rpc", "workflows"]);
+      assert.deepEqual(Object.keys(entry).sort(), ["fetch", "rpc"]);
       const response = await entry.fetch.call(
         { label: "wrong receiver" },
         new Request("http://app/__zeroship/v1/ping"),
@@ -205,7 +207,7 @@ for (const { name, bindings } of variants) {
       });
     }
 
-    test("preserves the workflow owner's existing collection surface", async (t) => {
+    test("forwards creator exports without classifying workflows", async (t) => {
       const fixture = await buildEntryFixture(t, {
         bindings,
         files: {
@@ -217,17 +219,23 @@ for (const { name, bindings } of variants) {
           `,
         },
       });
-      const entry = (await fixture.load()).default;
-      assert.deepEqual(Object.keys(entry.workflows).sort(), ["Task", "declared"]);
-      assert.equal(entry.workflows.Task.name, "Task");
-      assert.equal(typeof entry.workflows.declared, "function");
-      assert.equal(Object.hasOwn(entry.rpc, "Task"), false);
+      const loaded = await fixture.load();
+      assert.equal(loaded.Task.name, "Task");
+      assert.equal(Object.hasOwn(loaded.default, "workflows"), false);
+      assert.equal(Object.hasOwn(loaded.default.rpc, "Task"), false);
     });
   });
 }
 
-test("named procedures retain identity and override declared RPC names", async (t) => {
+test("explicit procedure bindings retain identity and override declared RPC names", async (t) => {
   const fixture = await buildEntryFixture(t, {
+    bindings: bindingMap([
+      { sourceFile: "./user.mjs", exportName: "ping" },
+      { sourceFile: "./user.mjs", exportName: "proto", wireId: "__proto__" },
+      { sourceFile: "./user.mjs", exportName: "aliased", wireId: "todos.list" },
+      { sourceFile: "./user.mjs", exportName: "empty" },
+      { sourceFile: "./user.mjs", exportName: "notString" },
+    ]),
     files: {
       "user.mjs": `
         export const ping = Object.assign(() => 'named', { config: { kind: 'query' } });
@@ -259,10 +267,10 @@ function assertEntryImports(code: string, allowed: Set<string>): void {
   }
 }
 
-test("generated imports contain only normalization and application targets", () => {
+test("generated imports contain only application targets", () => {
   for (const { bindings } of variants) {
     const code = buildServerEntrySource({ userEntryRel: "./user.mjs", bindings });
-    const allowed = new Set(["./user.mjs", "./bound.mjs", "@zeroship/bootstrap/normalize"]);
+    const allowed = new Set(["./user.mjs", "./bound.mjs"]);
     assertEntryImports(code, allowed);
     for (const forbidden of ["@zeroship/db/internal", "@zeroship/bootstrap/fetch-handler"]) {
       assert.throws(

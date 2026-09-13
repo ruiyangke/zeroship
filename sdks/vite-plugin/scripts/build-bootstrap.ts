@@ -5,7 +5,6 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const src = resolve(__dirname, "../src/dev-bootstrap/index.ts");
 const out = resolve(__dirname, "../dist/dev-bootstrap.js");
-const bootstrapDevSrc = resolve(__dirname, "../../bootstrap/src/dev-entry.ts");
 
 await build({
   entryPoints: [src],
@@ -14,12 +13,6 @@ await build({
   platform: "neutral",
   target: "es2024",
   outfile: out,
-  // Bundle directly from workspace sources so this package can build in a
-  // fresh worktree without requiring prebuilt dist artifacts from sibling
-  // framework-internal packages.
-  alias: {
-    "@zeroship/bootstrap/dev": bootstrapDevSrc,
-  },
   // vite/module-runner MUST be bundled: the V8 runtime has no module resolver
   // for external npm packages. ModuleRunner is small and self-contained.
   //

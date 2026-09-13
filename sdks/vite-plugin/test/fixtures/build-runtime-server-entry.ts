@@ -29,7 +29,6 @@ const artifact = await build({
   logLevel: "silent",
   resolve: {
     alias: {
-      "@zeroship/bootstrap/normalize": fileURLToPath(new URL("../../../bootstrap/src/normalize.ts", import.meta.url)),
       "@zeroship/rpc/server": fileURLToPath(new URL("../../../rpc/src/server.ts", import.meta.url)),
     },
   },
