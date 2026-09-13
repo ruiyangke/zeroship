@@ -142,7 +142,7 @@ if (!deferredInstall && hasDescriptor && schema && typeof schema === "object") {
   const envDb = envObj && envObj.db;
 
   if (envDb != null) {
-    const sdk = await import("@zeroship/bootstrap/install-schema") as {
+    const sdk = await import("@zeroship/db/internal") as {
       installSchema?: (
         schema: unknown,
         env: unknown,

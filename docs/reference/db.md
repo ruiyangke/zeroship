@@ -1198,8 +1198,9 @@ code. Replication operations exist only in the relay service:
   `v8::Private` slot is not a JS property and cannot be keyed from JS.
 - Runtime boot validates the generated descriptor and asks the data adapter to publish
   its complete collection field-map set natively before creator modules run.
-  `installSchema` reads the same descriptor only to plant typed JavaScript
-  `Collection` wrappers.
+  The DB SDK internal entry supplies `installSchema`, which reads the same
+  descriptor to plant JavaScript collection and transaction wrappers. Vite
+  does not inject an installer import or call into the creator entry.
 
 Public type contracts live in `sdks/types/db.d.ts` (which no longer
 declares the platform-internal classes — those moved to

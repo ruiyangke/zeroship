@@ -9,7 +9,7 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { validateRefTargets } from "@zeroship/bootstrap/install-schema";
+import { validateRefTargets } from "@zeroship/db/internal";
 import { t } from "@zeroship/db";
 
 describe("R4 MINOR-3 — validateRefTargets recursion into t.object()", () => {

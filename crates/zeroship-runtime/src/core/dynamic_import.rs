@@ -11,7 +11,7 @@
 //!      via `native_modules::resolve_native`, instantiated, evaluated,
 //!      then cached into the registry so future dynamic OR static
 //!      imports of the same specifier hit path 1.
-//!      2.5. Runtime-provided module (`@zeroship/bootstrap/install-schema`,
+//!      2.5. Runtime-provided module (`@zeroship/db/internal`,
 //!      `@zeroship/db/internal`, `zeroship`) — see `bootstrap_modules`.
 //!      The runtime injects the code that imports these (the bootstrap
 //!      `runtime-entry.js`), so it owns their resolution even when the
@@ -96,7 +96,7 @@ fn instantiate_and_evaluate<'s>(
     Some(module.get_module_namespace())
 }
 
-/// Resolve a runtime-provided module (`@zeroship/bootstrap/install-schema`,
+/// Resolve a runtime-provided module (`@zeroship/db/internal`,
 /// `@zeroship/db/internal`, `zeroship`) — see [`bootstrap_modules`].
 ///
 /// The runtime, not the bundle, owns these: it injects the code that
@@ -246,7 +246,7 @@ pub(crate) fn host_import_module_dynamically_callback<'s>(
         }
     }
 
-    // Path 2.5: runtime-provided module (`@zeroship/bootstrap/install-schema`,
+    // Path 2.5: runtime-provided module (`@zeroship/db/internal`,
     // `@zeroship/db/internal`, `zeroship`). The runtime injects the code
     // that imports these (runtime-entry.js), so it owns their resolution
     // even when the tree-shaken bundle doesn't carry them (ISS-63). The

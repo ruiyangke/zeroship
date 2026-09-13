@@ -1,26 +1,5 @@
-//! ISS-63 — `@zeroship/bootstrap/install-schema` must resolve on the
-//! production/worker runtime.
-//!
-//! The runtime's embedded `runtime-entry.js` (spliced into the bootstrap
-//! `index.js` via `include_str!`) does, during module evaluation:
-//!
-//!     const sdk = await import("@zeroship/bootstrap/install-schema");
-//!
-//! whenever the bundle carries a runtime schema descriptor and `env.db` is
-//! present.
-//! On the production worker the user's `.zship` bundle is a single
-//! self-contained `index.js` that does NOT contain that module (vite
-//! tree-shakes the framework-internal installSchema out), and it is not a
-//! `node:*` native module — so the dynamic-import host callback used to
-//! reject with `TypeError: Cannot find module
-//! '@zeroship/bootstrap/install-schema'`, which aborted module evaluation
-//! and 500'd every env.db app.
-//!
-//! These tests drive the REAL runtime module loader + the REAL
-//! dynamic-import host callback (no shim) via the `dispatch` harness,
-//! which builds a `Runtime` exactly as the worker does (BOOTSTRAP_JS
-//! injection included). The user source below mirrors the runtime-entry's
-//! import so the assertion exercises the same resolution path.
+//! Exercise the embedded DB adapter through the real module loader, including
+//! top-level evaluation and reuse of the module namespace.
 
 use crate::common;
 use common::{dispatch, m};
@@ -28,13 +7,13 @@ use common::{dispatch, m};
 #[test]
 fn install_schema_module_resolves_and_is_callable() {
     // Faithful mirror of `runtime-entry.js`'s
-    // `await import("@zeroship/bootstrap/install-schema")`. Before the
+    // `await import("@zeroship/db/internal")`. Before the
     // ISS-63 fix this rejected with "Cannot find module"; after the fix
     // the runtime provides the module and `installSchema` is a function.
     let r = dispatch(
         m(r#"
         export async function test() {
-            const sdk = await import("@zeroship/bootstrap/install-schema");
+            const sdk = await import("@zeroship/db/internal");
             return {
                 hasInstallSchema: typeof sdk.installSchema === "function",
             };
@@ -52,12 +31,8 @@ fn install_schema_module_resolves_and_is_callable() {
 }
 
 #[test]
-fn install_schema_transitive_db_internal_resolves() {
-    // installSchema statically imports `@zeroship/db/internal`. The
-    // runtime must resolve that transitive dependency too (it in turn
-    // imports the runtime-provided `zeroship` facade). A direct import of
-    // `@zeroship/db/internal` exercises that leg — runtime-entry.js also
-    // imports it directly for `_flushPendingMaskPolicy`.
+fn install_schema_entry_includes_db_helpers() {
+    // The installer and its dependencies share the DB internal entry.
     let r = dispatch(
         m(r#"
         export async function test() {
@@ -88,7 +63,7 @@ fn install_schema_transitive_db_internal_resolves() {
 #[test]
 fn install_schema_resolves_during_module_evaluation() {
     // FAITHFUL to the production timing: `runtime-entry.js` issues
-    // `await import("@zeroship/bootstrap/install-schema")` at the
+    // `await import("@zeroship/db/internal")` at the
     // bootstrap module's TOP LEVEL — during `load_modules`' `evaluate` +
     // microtask checkpoint, NOT from a later request handler. The module
     // registry's `RefCell` is borrowed by `load_modules` across that
@@ -99,7 +74,7 @@ fn install_schema_resolves_during_module_evaluation() {
     let modules = m(r#"
         // Top-level await — runs during module evaluation, exactly like
         // the runtime-injected runtime-entry's install-schema import.
-        const _sdk = await import("@zeroship/bootstrap/install-schema");
+        const _sdk = await import("@zeroship/db/internal");
         globalThis.__zsEvalTimeInstallSchema = typeof _sdk.installSchema;
         export async function test() {
             return { evalTime: globalThis.__zsEvalTimeInstallSchema };
@@ -122,8 +97,8 @@ fn install_schema_shares_instance_across_imports() {
     let r = dispatch(
         m(r#"
         export async function test() {
-            const a = await import("@zeroship/bootstrap/install-schema");
-            const b = await import("@zeroship/bootstrap/install-schema");
+            const a = await import("@zeroship/db/internal");
+            const b = await import("@zeroship/db/internal");
             return { same: a === b };
         }
         "#),

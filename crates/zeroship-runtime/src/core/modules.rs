@@ -82,7 +82,7 @@ fn resolve_specifier(specifier: &str, sources: &HashMap<String, String>) -> Opti
 /// Compile a single module from source.
 ///
 /// `pub(crate)` so the dynamic-import host callback can compile
-/// runtime-provided JS modules (e.g. `@zeroship/bootstrap/install-schema`)
+/// runtime-provided JS modules (e.g. `@zeroship/db/internal`)
 /// on demand and feed them through the same registry the static
 /// `resolve_callback` reads.
 pub(crate) fn compile_module(
@@ -227,7 +227,7 @@ pub fn load_modules(
     //
     // The registry borrow is released BEFORE `module.evaluate()`: a
     // top-level `await import(...)` in the entry (e.g. the bootstrap
-    // `runtime-entry.js`'s `import("@zeroship/bootstrap/install-schema")`)
+    // `runtime-entry.js`'s `import("@zeroship/db/internal")`)
     // fires the dynamic-import host callback synchronously during evaluate
     // AND during the microtask checkpoint below. That callback may
     // `borrow_mut()` the registry to cache a freshly-resolved module — so
@@ -316,7 +316,7 @@ pub fn load_modules(
 /// All transitively imported modules are pre-compiled before
 /// `instantiate_module`. `pub(crate)` so the dynamic-import host callback
 /// can reuse the exact same lookup when instantiating a runtime-provided
-/// module (e.g. `@zeroship/bootstrap/install-schema`), whose own static
+/// module (e.g. `@zeroship/db/internal`), whose own static
 /// imports (`@zeroship/db/internal`, `zeroship`) must resolve against the
 /// registry the host callback pre-populated.
 pub(crate) fn resolve_callback<'a>(

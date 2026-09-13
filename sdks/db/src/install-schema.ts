@@ -1,69 +1,25 @@
 /**
- * `installSchema` — framework-internal helper behind the runtime schema
- * descriptor install path. Stage 7 of the refactor moved
- * this out of `@zeroship/db` into `@zeroship/bootstrap` so the same
- * implementation backs both the runtime crate's bootstrap and the Vite
- * plugin's dev path. User code MUST NOT call this.
- *
- * Behaviour:
- *   - Plants typed `Collection` wrappers PLUS the `transaction` / `live`
- *     extension methods as own properties on the supplied `env` (the
- *     native `ZeroshipDb` handle — `env.db` in production, a mock in
- *     tests). After this returns, `env.<collection>.find(...)` and
- *     `env.transaction(tx => ...)` are live.
- *   - Returns `{ collections }`. Runtime descriptor entries are planted
- *     natively before this JavaScript installer runs.
- *
- * Re-entrancy: a second call with overlapping names re-installs the
- * Collection wrappers (`configurable: true` on the descriptors). Collections
- * colliding with native method names remain available through
- * `env.db.collection(name)`.
+ * Internal DB SDK facade installation over descriptor-bound native collections.
+ * The host supplies the native handle and generated runtime descriptor.
+ * Collection, transaction, relation and live-query conveniences belong to this
+ * SDK; authoritative schema binding and database operations remain native.
  */
+import { Collection } from "./collection";
+import { TRANSACTION_READ } from "./collection/crud";
+import { captureNativeTransaction, type NativeDb, type NativeCollection, type NativeTransactionFn } from "./native";
+import { Query, type PaginationResult } from "./query";
+import { createLive, type LiveOptions, type LiveQuery } from "./live";
+import { drainCollectionLoaders } from "./tx-state";
+import { readFrom, scopeAliasedCollection, type ReadFrom, type AliasedCollection } from "./read";
+import type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
 import {
-  drainCollectionLoaders,
-  captureNativeTransaction,
-  Collection,
-  readFrom,
-  scopeAliasedCollection,
-  TRANSACTION_READ,
-  type ReadFrom,
-  type AliasedCollection,
-  type NativeDb,
-  type NativeCollection,
-  type NativeTransactionFn,
-  Query,
-  createLive,
-  type LiveOptions,
-  type LiveQuery,
-  naming,
-  SchemaBuilder,
-  TypeBuilder,
-  ok,
-  err,
-  type NamingStrategy,
-  type NamedIndexSpec,
-  type Result,
-  type Row,
-  type RowId,
-  type TransactionDb,
-  type TxCollection,
-  type TxQuery,
-  type TransactionOptions,
-  type PaginationResult,
-  type RowInput,
-  type UpsertOptions,
-  type UpdateExpression,
-  type Filter,
-  type DistinctField,
-  type SelectInput,
-  type SortInput,
-  type SortSpec,
-  type WithSpec,
-  type PlainObject,
-  type Actor,
-  type FieldDef,
-} from "@zeroship/db/internal";
-export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
+  naming, SchemaBuilder, TypeBuilder, ok, err,
+  type NamingStrategy, type NamedIndexSpec, type Result, type Row, type RowId,
+  type RowInput, type UpsertOptions, type UpdateExpression, type Filter,
+  type DistinctField, type SelectInput, type SortInput, type SortSpec,
+  type WithSpec, type PlainObject, type Actor, type FieldDef,
+} from "./types";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
 
 type AsyncLocalStorageLike<T> = {
   getStore(): T | undefined;
@@ -128,7 +84,7 @@ function assertRuntimeDescriptorV2(
   ) {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
+        "@zeroship/db: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
       ),
       { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
     );
@@ -197,7 +153,7 @@ function assertRuntimeDescriptorV2(
 
 function invalidRuntimeDescriptor(detail: string): Error & { code: "INVALID_RUNTIME_DESCRIPTOR" } {
   return Object.assign(
-    new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: ${detail}`),
+    new Error(`@zeroship/db: invalid RuntimeSchemaDescriptor: ${detail}`),
     { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
   );
 }
@@ -869,7 +825,7 @@ export function installSchema<const T extends Record<string, SchemaInput>>(
   if (_installInFlight) {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: installSchema called while a previous install is in flight — " +
+        "@zeroship/db: installSchema called while a previous install is in flight — " +
           "this helper must run from a single-threaded scope (the dev-bootstrap and " +
           "production synthetic SSR entry both serialize).",
       ),
@@ -892,7 +848,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   if (env == null || typeof env !== "object") {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: installSchema requires a native env.db handle as " +
+        "@zeroship/db: installSchema requires a native env.db handle as " +
           "the second argument — got " + (env === undefined ? "undefined" : env === null ? "null" : typeof env) + ".",
       ),
       { code: "NATIVE_DB_UNAVAILABLE" as const },
@@ -1000,7 +956,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return err(
         Object.assign(
           new Error(
-            "@zeroship/bootstrap: env.db.transaction not available — " +
+            "@zeroship/db: env.db.transaction not available — " +
               "runtime is missing the native Db.transaction(fn) orchestrator.",
           ),
           { code: "NATIVE_TRANSACTION_UNAVAILABLE" as const },

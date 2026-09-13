@@ -353,12 +353,15 @@ SDK packages call the `env.*` native primitives internally. Validation, query bu
 
 `@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
 
-- `installSchema(schema, env.db, { descriptor })` — framework-internal installer for the generated RuntimeSchemaDescriptor
 - `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
 - `normalizeUserModule` — namespace → `{ fetch, rpc, userDefault }` shape
 - `createFetchHandler` — WinterCG fetch wrapper routing `/__zeroship/v1/<id>` through the dispatcher
 - `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
 - `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
+
+The DB SDK internal entry owns `installSchema` and its collection, transaction,
+relation and live-query helpers. Runtime initialization supplies the native DB
+handle and generated descriptor; Vite emits no installer import or call.
 
 **User code MUST NOT import `@zeroship/bootstrap`.** It carries no back-compat guarantee; the runtime crate and Vite plugin are the only stable consumers. See `sdks/bootstrap/README.md`.
 
@@ -450,9 +453,7 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 
 ```bash
 # Build (workspace) — build the SDKs FIRST. The runtime crate
-# include_str!s `sdks/bootstrap/dist/{runtime-entry,install-schema}.js`
-# and `sdks/db/dist/internal.js` (NOT dispatcher.js -- checked
-# 2026-08-11; see the header of sdks/bootstrap/src/dispatcher.ts),
+# includes `sdks/bootstrap/dist/runtime-entry.js` and `sdks/db/dist/internal.js`,
 # so `pnpm build` must run before `cargo build -p zeroship-runtime`.
 # Root `pnpm build` respects the dependency graph (bootstrap → db);
 # cargo then sees the freshly emitted dist files.
