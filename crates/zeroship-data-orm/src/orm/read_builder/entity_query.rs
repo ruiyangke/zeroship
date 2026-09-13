@@ -4,10 +4,9 @@
 )]
 
 use super::{
-    count_rows, read, sql_types, take, Column, Database, DbError, DecodeValue, Direction, Entity,
-    EntityCollection, EntityProjection, Field, Filter, FindOptions, FromRow, Future, NullOrder,
-    OrderKey, PhantomData, ReadBuilder, ReadOrigin, ReadProjection, ReadQuery, ReadSelection,
-    ReadSource, Record, RelatedQuery, Relation, RowLimit, SchemaExpectation,
+    read, Column, DbError, Direction, Entity, EntityCollection, EntityProjection, Field, Filter,
+    FindOptions, FromRow, Future, NullOrder, OrderKey, PhantomData, ReadBuilder, ReadOrigin,
+    ReadQuery, ReadSource, RelatedQuery, Relation, RowLimit, SchemaExpectation,
 };
 
 /// An ordering key tied to its generated entity.
@@ -95,28 +94,6 @@ impl<E: Entity> EntityCollection<E> {
     }
 }
 
-#[derive(Debug)]
-struct Presence;
-
-impl ReadSelection for Presence {
-    type Output = bool;
-
-    fn validate(&self, database: &Database, _sources: &[ReadSource]) -> Result<(), DbError> {
-        database.check_scope()
-    }
-
-    fn projections(&self, next: &mut usize, output: &mut Vec<ReadProjection>) {
-        output.push(ReadProjection::Presence {
-            output: format!("p{next}"),
-        });
-        *next += 1;
-    }
-
-    fn decode(&self, next: &mut usize, row: &mut Record) -> Result<bool, DbError> {
-        <bool as DecodeValue<sql_types::Boolean>>::decode_value(take(next, row)?)
-    }
-}
-
 impl<E: Entity> EntityQuery<E> {
     #[must_use]
     pub fn with_related<R: Relation<Source = E>>(self, _: R) -> RelatedQuery<E, R> {
@@ -125,7 +102,7 @@ impl<E: Entity> EntityQuery<E> {
 
     #[must_use]
     pub fn filter(mut self, filter: Filter<E>) -> Self {
-        self.filter = filter;
+        self.filter = self.filter.and(filter);
         self
     }
 
@@ -197,6 +174,7 @@ impl<E: Entity> EntityQuery<E> {
             database: self.entity.collection.database,
             query,
             selection: (),
+            validate_selection: |_, database, _| database.check_scope(),
             error: None,
         })
     }
@@ -242,35 +220,17 @@ impl<E: Entity> EntityQuery<E> {
     ///
     /// # Errors
     /// Refuses invalid queries, changed metadata, expired transactions, or database failures.
-    pub fn count(mut self) -> impl Future<Output = Result<i64, DbError>> + use<E> {
-        self.options.limit = None;
-        self.options.offset = None;
-        self.order.clear();
-        let work = self
-            .into_builder()
-            .and_then(|builder| builder.select(count_rows()))
-            .map(ReadBuilder::all);
-        async move {
-            work?
-                .await?
-                .into_iter()
-                .next()
-                .ok_or_else(|| DbError::internal("count returned no row"))
-        }
+    pub fn count(self) -> impl Future<Output = Result<i64, DbError>> + use<E> {
+        let work = self.into_builder().map(ReadBuilder::count);
+        async move { work?.await }
     }
 
     /// Test matching visible rows independently of ordering and page bounds.
     ///
     /// # Errors
     /// Refuses invalid filters, changed metadata, expired transactions, or database failures.
-    pub fn exists(mut self) -> impl Future<Output = Result<bool, DbError>> + use<E> {
-        self.options.limit = Some(1);
-        self.options.offset = None;
-        self.order.clear();
-        let work = self
-            .into_builder()
-            .and_then(|builder| builder.select(Presence))
-            .map(ReadBuilder::all);
-        async move { Ok(!work?.await?.is_empty()) }
+    pub fn exists(self) -> impl Future<Output = Result<bool, DbError>> + use<E> {
+        let work = self.into_builder().map(ReadBuilder::exists);
+        async move { work?.await }
     }
 }
