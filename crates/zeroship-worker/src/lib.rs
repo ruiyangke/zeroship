@@ -49,3 +49,6 @@ pub struct WorkerConfig {
 mod identity_fixture;
 #[cfg(test)]
 mod test_database;
+
+#[cfg(test)]
+mod worker_fixture;
