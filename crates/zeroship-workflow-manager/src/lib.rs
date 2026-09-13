@@ -4,6 +4,7 @@
 mod clock;
 pub mod coordinator;
 pub mod deployments;
+pub mod driver;
 mod error;
 mod models;
 mod queue;
