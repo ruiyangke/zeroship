@@ -102,10 +102,7 @@ export function installSchemaForTest<
   schemas: T,
   opts: { native: NativeDb; naming?: InstallSchemaOptions["naming"] },
 ): Db<FixtureSchemas<T>> {
-  installSchema(schemas as never, opts.native, {
-    descriptor: descriptorFor(schemas),
-    ...(opts.naming ? { naming: opts.naming } : {}),
-  } as never);
+  installSchema(opts.native, descriptorFor(schemas), { naming: opts.naming });
   // The installer plants the per-collection wrappers and the `transaction` /
   // `live` extensions on the native handle as own properties, so the handle
   // itself is the `Db<T>` the call sites (`db.users.find(...)`) expect.

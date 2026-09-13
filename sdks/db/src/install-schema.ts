@@ -757,44 +757,8 @@ function createTxQuery<S>(
 // ---------------------------------------------------------------------------
 
 export interface InstallSchemaOptions {
-  /**
-   * Column naming strategy. Default: `naming.asIs` — the descriptor field name
-   * IS the column name.
-   *
-   * This used to default to `naming.snakeCase`, and that was the only renaming
-   * step in the entire migration-first pipeline. Nothing upstream produced the
-   * name it expected:
-   *
-   *   - the engine renders the authored migration field name VERBATIM as the
-   *     column (`userId: t.text()` creates a column spelled `"userId"`);
-   *   - gen-types folds that name into the descriptor verbatim;
-   *   - `render-env-db.ts` performs no case conversion, so the generated
-   *     `env.db` TypeScript field is that same name;
-   *   - and then this mapped it to `user_id` on the wire.
-   *
-   * A creator authoring any camelCase field therefore got an app that builds,
-   * boots, and fails every data call with `table <t> has no column named
-   * <snake_cased>`. It went unnoticed because all 40+ platform migrations
-   * author snake_case, on which the mapping is the identity: measured across
-   * the 17 committed `schema.runtime.json` descriptors, 169 fields, exactly
-   * ONE (`db-todos`'s `todos.userId`) is changed by `snakeCase` at all. So
-   * this change is inert for every other schema in the tree by measurement,
-   * not by argument.
-   *
-   * `collection.ts` already defaults the same construction to `naming.asIs`;
-   * this makes the two agree. Pass `naming: naming.snakeCase` explicitly to opt
-   * into camelCase-field/snake_case-column mapping.
-   */
+  /** Defaults to the descriptor's field spelling, without case conversion. */
   naming?: NamingStrategy;
-  /**
-   * **Migration-first cutover (P5 S3)** — the bundled
-   * {@link RuntimeSchemaDescriptor}, resolved from `manifest.runtime_descriptor`
-   * and injected by the runtime as `globalThis.__zsRuntimeDescriptor`. v2 carries
-   * `{ fields, options, indexes }` per collection and is the schema SOURCE OF
-   * TRUTH. The first `schemas` argument is no longer consulted for fields or
-   * collection options; absent descriptor means schema-less install.
-   */
-  descriptor?: RuntimeSchemaDescriptor;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -812,14 +776,15 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
 ]);
 
 let _installInFlight = false;
+const installedNames = new WeakMap<NativeDb, readonly string[]>();
 
 /**
  * Framework-internal helper that installs the runtime schema descriptor.
  * Returns the typed collection map after planting it on `env.db`.
  */
 export function installSchema<const T extends Record<string, SchemaInput>>(
-  schemas: ValidateSchemaShape<T>,
   env: NativeDb,
+  descriptor: RuntimeSchemaDescriptor | undefined,
   options?: InstallSchemaOptions,
 ): { collections: Collections<T> } {
   if (_installInFlight) {
@@ -834,22 +799,22 @@ export function installSchema<const T extends Record<string, SchemaInput>>(
   }
   _installInFlight = true;
   try {
-    return _installSchemaInner(schemas as unknown as T, env, options);
+    return _installSchemaInner<T>(env, descriptor, options);
   } finally {
     _installInFlight = false;
   }
 }
 
 function _installSchemaInner<const T extends Record<string, SchemaInput>>(
-  schemas: T,
   env: NativeDb,
+  descriptor: RuntimeSchemaDescriptor | undefined,
   options?: InstallSchemaOptions,
 ): { collections: Collections<T> } {
   if (env == null || typeof env !== "object") {
     throw Object.assign(
       new Error(
         "@zeroship/db: installSchema requires a native env.db handle as " +
-          "the second argument — got " + (env === undefined ? "undefined" : env === null ? "null" : typeof env) + ".",
+          "the first argument — got " + (env === undefined ? "undefined" : env === null ? "null" : typeof env) + ".",
       ),
       { code: "NATIVE_DB_UNAVAILABLE" as const },
     );
@@ -857,10 +822,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.asIs;
 
-  // **Migration-first cutover (P5 S6)** — descriptor v2 is the only runtime
-  // schema source. The declared first argument is ignored. An absent descriptor
-  // installs no collections; a present but non-v2 descriptor is a hard error.
-  const descriptor = options?.descriptor;
+  // The host descriptor supplies collection metadata.
   const descriptorV2 = assertRuntimeDescriptorV2(descriptor);
   const descriptorFields = runtimeDescriptorFields(descriptor);
   const source: T =
@@ -1033,14 +995,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   }
 
   {
-    const target = native as unknown as Record<string, unknown> & {
-      __zeroshipDbInstalledNames?: string[];
-    };
+    const target = native as unknown as Record<string, unknown>;
     const newNames = Object.keys(collections);
     const newNameSet = new Set(newNames);
-    const prevNames = Array.isArray(target.__zeroshipDbInstalledNames)
-      ? target.__zeroshipDbInstalledNames
-      : [];
+    const prevNames = installedNames.get(native) ?? [];
     for (const stale of prevNames) {
       if (newNameSet.has(stale)) continue;
       if (RESERVED_ENV_DB_NAMES.has(stale)) continue;
@@ -1082,12 +1040,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       enumerable: true,
       writable: false,
     });
-    Object.defineProperty(target, "__zeroshipDbInstalledNames", {
-      value: newNames,
-      configurable: true,
-      enumerable: false,
-      writable: true,
-    });
+    installedNames.set(native, newNames);
   }
 
   return { collections: collections as Collections<T> };
