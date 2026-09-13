@@ -304,12 +304,20 @@ let c = db.entity::<schema::customers::Entity>()?.alias("c")?;
 let rows: Vec<(OrderSummary, Option<CustomerSummary>)> = db
     .from(&o)
     .left_join(&c, o.column(schema::orders::customerId)
-        .eq_column(c.column(schema::customers::id))?)?
+        .eq(c.column(schema::customers::id))?)?
     .select((o.row::<OrderSummary>(), c.optional_row::<CustomerSummary>()))?
     .order_by(o.column(schema::orders::id).asc())
     .limit(page_size)?
     .all().await?;
 ```
+
+Comparisons accept native values or compatible expressions through the same
+methods: `field.eq(value)`, `field.eq(other_field)`, and
+`column.gte(other_column)`. Unqualified fields must belong to the same entity;
+aliased expressions must belong to registered sources on the same database.
+`and`, `or`, and `negate` compose predicates without exposing SQL nodes.
+The builder retains expression origins for schema and transaction validation.
+This follows [Diesel's operand conversion approach](https://diesel.rs/guides/extending-diesel.html).
 
 `orm::ReadQuery` is the structured operation beneath the Rust builder and the
 TypeScript adapter. It supports explicit inner and left joins, named scalar
@@ -324,6 +332,18 @@ protection and codec passes. An unmatched optional row becomes `None` in Rust
 and `null` in TypeScript, including when the selected fields are nullable.
 Explicit joins preserve row multiplication and paginate joined rows. Named
 relation loading preserves the parent query's rows and pagination.
+
+Entity, joined, and related queries expose `first`, `count`, and `exists`.
+`first` keeps ordering and offset. `count` and `exists` ignore ordering and
+page bounds, execute a scalar query in the database, and retain scope/schema
+validation. Joined counts include row multiplication; grouped counts count
+surviving groups after `HAVING`. A selected global aggregate is a result row,
+including for empty input. Related-query summaries count parents without
+loading relation projections.
+
+Repeated `filter` and `having` calls combine with AND. Ordering accepts
+`nulls_first` and `nulls_last`. An alias's `include_deleted()` applies only
+to that source, including a joined source's visibility condition.
 
 ## Named relations
 

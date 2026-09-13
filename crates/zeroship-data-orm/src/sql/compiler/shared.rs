@@ -1,11 +1,11 @@
 use super::{CompileError, CompiledQuery, SqlWriter};
 use crate::sql::{
-    CompareOp, MembershipOp, PatternOp,
     statement::{
         ArithmeticOperator, ArrayOperator, Column, Delete, Expression, Insert, MutationScope,
         ResolvedOperand, ResolvedPredicate, ResolvedPredicateValue, SelectStatement, Statement,
         StorageType, Table, Update, Upsert, VectorSearchStatement,
     },
+    CompareOp, MembershipOp, PatternOp,
 };
 use crate::value::Value;
 
@@ -48,9 +48,12 @@ impl Requirements {
                 let parts = select.parts();
                 Self {
                     relational_reads: !parts.joins.is_empty(),
-                    aggregate_reads: parts.projection.iter().any(|selected| {
-                        matches!(selected.expression, ResolvedOperand::Aggregate { .. })
-                    }) || !parts.group_by.is_empty()
+                    aggregate_reads: select.summary()
+                        == Some(crate::sql::statement::SelectSummary::Count)
+                        || parts.projection.iter().any(|selected| {
+                            matches!(selected.expression, ResolvedOperand::Aggregate { .. })
+                        })
+                        || !parts.group_by.is_empty()
                         || predicate_has_aggregate(&parts.having),
                     bind_parameters: parts
                         .joins
@@ -593,8 +596,15 @@ pub(crate) fn compile_select(
     select: SelectStatement,
 ) -> Result<CompiledQuery, CompileError> {
     select.validate()?;
+    let summary = select.summary();
     let parts = select.into_parts();
     let mut writer = SqlWriter::new(effective.max_bind_parameters);
+    use crate::sql::statement::SelectSummary;
+    match summary {
+        Some(SelectSummary::Count) => writer.sql.push_str("SELECT COUNT(*) AS \"count\" FROM ("),
+        Some(SelectSummary::Exists) => writer.sql.push_str("SELECT CASE WHEN EXISTS ("),
+        None => {}
+    }
     writer.sql.push_str("SELECT ");
     if parts.distinct {
         writer.sql.push_str("DISTINCT ");
@@ -658,6 +668,11 @@ pub(crate) fn compile_select(
     }
     if parts.lock == crate::sql::statement::RowLock::Update {
         writer.sql.push_str(syntax.first_row_lock);
+    }
+    match summary {
+        Some(SelectSummary::Count) => writer.sql.push_str(") AS \"summary\""),
+        Some(SelectSummary::Exists) => writer.sql.push_str(") THEN 1 ELSE 0 END AS \"count\""),
+        None => {}
     }
     Ok(writer.finish())
 }

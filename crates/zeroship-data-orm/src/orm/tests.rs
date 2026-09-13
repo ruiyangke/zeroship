@@ -35,6 +35,7 @@ mod sql_registration;
 mod timestamp;
 mod transaction_options;
 mod typed_arrays;
+mod typed_composition;
 mod typed_exists;
 mod typed_mutations;
 mod typed_predicates;
@@ -1292,3 +1293,5 @@ async fn cancelled_transaction_cleans_up_its_own_context() {
         "survives"
     );
 }
+
+mod typed_read_terminals;

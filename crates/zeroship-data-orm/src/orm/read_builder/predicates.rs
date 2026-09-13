@@ -1,47 +1,51 @@
 use super::*;
 
 impl<C: FilterableColumn> SourceColumn<C> {
-    pub fn eq<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+    fn predicate(&self, expression: Predicate) -> ReadPredicate {
+        ReadPredicate::new(expression, vec![self.origin.clone()])
+    }
+    pub fn eq<T: IntoReadOperand<C::SqlType, K>, K>(
+        &self,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Eq, value)
     }
-    pub fn ne<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn ne<T: IntoReadOperand<C::SqlType, K>, K>(
+        &self,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Ne, value)
     }
-    fn compare<T: EncodeValue<C::SqlType>>(
+    fn compare<T: IntoReadOperand<C::SqlType, K>, K>(
         &self,
         op: CompareOp,
         value: T,
-    ) -> Result<Predicate, DbError> {
-        Ok(match literal::<C>(value.encode_value()?)? {
-            Some(literal) => Predicate::Compare {
-                lhs: Operand::Path(self.path()),
-                op,
-                rhs: Operand::Lit(literal),
-            },
-            None if matches!(op, CompareOp::Eq | CompareOp::Ne) => Predicate::IsNull {
-                operand: Operand::Path(self.path()),
-                negated: op == CompareOp::Ne,
-            },
-            None => return Err(read::invalid("null supports only equality comparisons")),
-        })
+    ) -> Result<ReadPredicate, DbError> {
+        value.into_read_operand()?.compare(
+            Operand::Path(self.path()),
+            op,
+            vec![self.origin.clone()],
+            literal::<C>,
+        )
     }
+
     pub fn in_values<T: EncodeValue<C::SqlType>>(
         &self,
         values: impl IntoIterator<Item = T>,
-    ) -> Result<Predicate, DbError> {
+    ) -> Result<ReadPredicate, DbError> {
         self.membership(crate::sql::MembershipOp::In, values)
     }
     pub fn not_in_values<T: EncodeValue<C::SqlType>>(
         &self,
         values: impl IntoIterator<Item = T>,
-    ) -> Result<Predicate, DbError> {
+    ) -> Result<ReadPredicate, DbError> {
         self.membership(crate::sql::MembershipOp::NotIn, values)
     }
     fn membership<T: EncodeValue<C::SqlType>>(
         &self,
         op: crate::sql::MembershipOp,
         values: impl IntoIterator<Item = T>,
-    ) -> Result<Predicate, DbError> {
+    ) -> Result<ReadPredicate, DbError> {
         use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
         if !supports_predicate_operator(&C::Entity::schema()[C::NAME], PredicateOperator::Equality)
         {
@@ -53,80 +57,86 @@ impl<C: FilterableColumn> SourceColumn<C> {
         if values.is_empty() {
             // Keep the field available to the read's capability checks.
             return Ok(if op == crate::sql::MembershipOp::In {
-                Predicate::And(vec![self.is_null(), Predicate::Const(false)])
+                self.is_null().and(ReadPredicate::all().negate())
             } else {
-                Predicate::Or(vec![self.is_null(), Predicate::Const(true)])
+                self.is_null().or(ReadPredicate::all())
             });
         }
         let members = values
             .into_iter()
             .map(literal::<C>)
             .collect::<Result<_, _>>()?;
-        Predicate::membership(Operand::Path(self.path()), op, members)
-            .map_err(|error| read::invalid(error.to_string()))
+        let expression = Predicate::membership(Operand::Path(self.path()), op, members)
+            .map_err(|error| read::invalid(error.to_string()))?;
+        Ok(self.predicate(expression))
     }
-    pub fn is_null(&self) -> Predicate {
-        Predicate::IsNull {
+    pub fn is_null(&self) -> ReadPredicate {
+        self.predicate(Predicate::IsNull {
             operand: Operand::Path(self.path()),
             negated: false,
-        }
+        })
     }
-    pub fn is_not_null(&self) -> Predicate {
-        Predicate::IsNull {
+    pub fn is_not_null(&self) -> ReadPredicate {
+        self.predicate(Predicate::IsNull {
             operand: Operand::Path(self.path()),
             negated: true,
-        }
-    }
-    pub fn eq_column<D: FilterableColumn>(
-        &self,
-        other: SourceColumn<D>,
-    ) -> Result<Predicate, DbError>
-    where
-        C::SqlType: JoinType,
-        D::SqlType: JoinType<Base = <C::SqlType as JoinType>::Base>,
-    {
-        Ok(Predicate::compare(
-            Operand::Path(self.path()),
-            CompareOp::Eq,
-            Operand::Path(other.path()),
-        ))
+        })
     }
 }
 
-/// Comparable scalar types, independent of column nullability.
-pub trait JoinType {
-    type Base;
+impl<S, C> IntoReadOperand<S, ExpressionOperand> for SourceColumn<C>
+where
+    S: ComparableSqlType,
+    C: FilterableColumn,
+    C::SqlType: ComparableSqlType<Base = S::Base>,
+{
+    fn into_read_operand(self) -> Result<ReadOperand, DbError> {
+        Ok(ReadOperand::expression(
+            Operand::Path(self.path()),
+            vec![self.origin],
+        ))
+    }
 }
-macro_rules! join_types { ($($t:ident),* $(,)?) => { $(impl JoinType for sql_types::$t { type Base = sql_types::$t; })* }; }
-join_types!(
-    Text,
-    Integer,
-    BigInt,
-    Number,
-    Boolean,
-    Bytes,
-    Timestamp,
-    CalendarDate,
-    Time
-);
-impl<T: JoinType> JoinType for sql_types::Nullable<T> {
-    type Base = T::Base;
+impl<S, C> IntoReadOperand<S, ExpressionOperand> for &SourceColumn<C>
+where
+    S: ComparableSqlType,
+    C: FilterableColumn,
+    C::SqlType: ComparableSqlType<Base = S::Base>,
+{
+    fn into_read_operand(self) -> Result<ReadOperand, DbError> {
+        Ok(ReadOperand::expression(
+            Operand::Path(self.path()),
+            vec![self.origin.clone()],
+        ))
+    }
 }
 
 impl<C: FilterableColumn> SourceColumn<C>
 where
     C::SqlType: OrderedSqlType,
 {
-    pub fn lt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn lt<T: IntoReadOperand<C::SqlType, K>, K>(
+        &self,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Lt, value)
     }
-    pub fn lte<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn lte<T: IntoReadOperand<C::SqlType, K>, K>(
+        &self,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Lte, value)
     }
-    pub fn gt<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn gt<T: IntoReadOperand<C::SqlType, K>, K>(
+        &self,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Gt, value)
     }
-    pub fn gte<T: EncodeValue<C::SqlType>>(&self, value: T) -> Result<Predicate, DbError> {
+    pub fn gte<T: IntoReadOperand<C::SqlType, K>, K>(
+        &self,
+        value: T,
+    ) -> Result<ReadPredicate, DbError> {
         self.compare(CompareOp::Gte, value)
     }
 }

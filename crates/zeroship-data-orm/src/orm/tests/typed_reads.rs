@@ -248,7 +248,7 @@ async fn exercise(db: &Database) {
         .left_join(
             &child,
             r.column(readings::nickname)
-                .eq_column(child.column(readings::title))
+                .eq(child.column(readings::title))
                 .unwrap(),
         )
         .unwrap()
