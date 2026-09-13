@@ -44,7 +44,6 @@
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.2",
     "@types/node": "catalog:",
-    "@zeroship/bootstrap": "workspace:*",
     "fflate": "0.8.2",
     "publint": "^0.3.21",
     "tsup": "^8.5.1",

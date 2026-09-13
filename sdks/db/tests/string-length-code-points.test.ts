@@ -16,7 +16,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "@zeroship/db";
 import { validateDoc } from "../src/validate.js";
-import { normalizeSchema } from "@zeroship/bootstrap/install-schema";
+import { normalizeSchema } from "@zeroship/db/internal";
 
 describe("string length bounds count characters, not UTF-16 code units", () => {
   // Three characters, whatever plane they come from.
