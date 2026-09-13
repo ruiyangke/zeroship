@@ -88,6 +88,8 @@ describe("devEntry runtime descriptor install", () => {
     const out = await Promise.resolve(entry.rpc("ping", null, {}));
 
     assert.equal(out, "pong");
-    assert.deepEqual(envDb.__zeroshipDbInstalledNames, ["__proto__"]);
+    const collection = envDb.collection as (name: string) => { find(): Promise<unknown[]> };
+    assert.deepEqual(await collection("__proto__").find(), []);
+    assert.equal(Object.hasOwn(envDb, "__proto__"), false);
   });
 });

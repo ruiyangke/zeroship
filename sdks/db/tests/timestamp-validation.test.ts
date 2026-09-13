@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "@zeroship/db";
-import { normalizeSchema } from "@zeroship/bootstrap/install-schema";
+import { normalizeSchema } from "@zeroship/db/internal";
 import { validateDoc, isTimestampValue } from "../src/validate.js";
 import { ValidationError } from "../src/errors.js";
 import { validateArrayPushOps } from "../src/collection.js";

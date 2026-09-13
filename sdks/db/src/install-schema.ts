@@ -1,69 +1,25 @@
 /**
- * `installSchema` — framework-internal helper behind the runtime schema
- * descriptor install path. Stage 7 of the refactor moved
- * this out of `@zeroship/db` into `@zeroship/bootstrap` so the same
- * implementation backs both the runtime crate's bootstrap and the Vite
- * plugin's dev path. User code MUST NOT call this.
- *
- * Behaviour:
- *   - Plants typed `Collection` wrappers PLUS the `transaction` / `live`
- *     extension methods as own properties on the supplied `env` (the
- *     native `ZeroshipDb` handle — `env.db` in production, a mock in
- *     tests). After this returns, `env.<collection>.find(...)` and
- *     `env.transaction(tx => ...)` are live.
- *   - Returns `{ collections }`. Runtime descriptor entries are planted
- *     natively before this JavaScript installer runs.
- *
- * Re-entrancy: a second call with overlapping names re-installs the
- * Collection wrappers (`configurable: true` on the descriptors). Collections
- * colliding with native method names remain available through
- * `env.db.collection(name)`.
+ * Internal DB SDK facade installation over descriptor-bound native collections.
+ * The host supplies the native handle and generated runtime descriptor.
+ * Collection, transaction, relation and live-query conveniences belong to this
+ * SDK; authoritative schema binding and database operations remain native.
  */
+import { Collection } from "./collection";
+import { TRANSACTION_READ } from "./collection/crud";
+import { captureNativeTransaction, type NativeDb, type NativeCollection, type NativeTransactionFn } from "./native";
+import { Query, type PaginationResult } from "./query";
+import { createLive, type LiveOptions, type LiveQuery } from "./live";
+import { drainCollectionLoaders } from "./tx-state";
+import { readFrom, scopeAliasedCollection, type ReadFrom, type AliasedCollection } from "./read";
+import type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
 import {
-  drainCollectionLoaders,
-  captureNativeTransaction,
-  Collection,
-  readFrom,
-  scopeAliasedCollection,
-  TRANSACTION_READ,
-  type ReadFrom,
-  type AliasedCollection,
-  type NativeDb,
-  type NativeCollection,
-  type NativeTransactionFn,
-  Query,
-  createLive,
-  type LiveOptions,
-  type LiveQuery,
-  naming,
-  SchemaBuilder,
-  TypeBuilder,
-  ok,
-  err,
-  type NamingStrategy,
-  type NamedIndexSpec,
-  type Result,
-  type Row,
-  type RowId,
-  type TransactionDb,
-  type TxCollection,
-  type TxQuery,
-  type TransactionOptions,
-  type PaginationResult,
-  type RowInput,
-  type UpsertOptions,
-  type UpdateExpression,
-  type Filter,
-  type DistinctField,
-  type SelectInput,
-  type SortInput,
-  type SortSpec,
-  type WithSpec,
-  type PlainObject,
-  type Actor,
-  type FieldDef,
-} from "@zeroship/db/internal";
-export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "@zeroship/db/internal";
+  naming, SchemaBuilder, TypeBuilder, ok, err,
+  type NamingStrategy, type NamedIndexSpec, type Result, type Row, type RowId,
+  type RowInput, type UpsertOptions, type UpdateExpression, type Filter,
+  type DistinctField, type SelectInput, type SortInput, type SortSpec,
+  type WithSpec, type PlainObject, type Actor, type FieldDef,
+} from "./types";
+export type { TransactionDb, TxCollection, TxQuery, TransactionOptions } from "./db-types";
 
 type AsyncLocalStorageLike<T> = {
   getStore(): T | undefined;
@@ -128,7 +84,7 @@ function assertRuntimeDescriptorV2(
   ) {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
+        "@zeroship/db: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
       ),
       { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
     );
@@ -197,7 +153,7 @@ function assertRuntimeDescriptorV2(
 
 function invalidRuntimeDescriptor(detail: string): Error & { code: "INVALID_RUNTIME_DESCRIPTOR" } {
   return Object.assign(
-    new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: ${detail}`),
+    new Error(`@zeroship/db: invalid RuntimeSchemaDescriptor: ${detail}`),
     { code: "INVALID_RUNTIME_DESCRIPTOR" as const },
   );
 }
@@ -801,44 +757,8 @@ function createTxQuery<S>(
 // ---------------------------------------------------------------------------
 
 export interface InstallSchemaOptions {
-  /**
-   * Column naming strategy. Default: `naming.asIs` — the descriptor field name
-   * IS the column name.
-   *
-   * This used to default to `naming.snakeCase`, and that was the only renaming
-   * step in the entire migration-first pipeline. Nothing upstream produced the
-   * name it expected:
-   *
-   *   - the engine renders the authored migration field name VERBATIM as the
-   *     column (`userId: t.text()` creates a column spelled `"userId"`);
-   *   - gen-types folds that name into the descriptor verbatim;
-   *   - `render-env-db.ts` performs no case conversion, so the generated
-   *     `env.db` TypeScript field is that same name;
-   *   - and then this mapped it to `user_id` on the wire.
-   *
-   * A creator authoring any camelCase field therefore got an app that builds,
-   * boots, and fails every data call with `table <t> has no column named
-   * <snake_cased>`. It went unnoticed because all 40+ platform migrations
-   * author snake_case, on which the mapping is the identity: measured across
-   * the 17 committed `schema.runtime.json` descriptors, 169 fields, exactly
-   * ONE (`db-todos`'s `todos.userId`) is changed by `snakeCase` at all. So
-   * this change is inert for every other schema in the tree by measurement,
-   * not by argument.
-   *
-   * `collection.ts` already defaults the same construction to `naming.asIs`;
-   * this makes the two agree. Pass `naming: naming.snakeCase` explicitly to opt
-   * into camelCase-field/snake_case-column mapping.
-   */
+  /** Defaults to the descriptor's field spelling, without case conversion. */
   naming?: NamingStrategy;
-  /**
-   * **Migration-first cutover (P5 S3)** — the bundled
-   * {@link RuntimeSchemaDescriptor}, resolved from `manifest.runtime_descriptor`
-   * and injected by the runtime as `globalThis.__zsRuntimeDescriptor`. v2 carries
-   * `{ fields, options, indexes }` per collection and is the schema SOURCE OF
-   * TRUTH. The first `schemas` argument is no longer consulted for fields or
-   * collection options; absent descriptor means schema-less install.
-   */
-  descriptor?: RuntimeSchemaDescriptor;
 }
 
 const RESERVED_ENV_DB_NAMES = new Set<string>([
@@ -856,20 +776,21 @@ const RESERVED_ENV_DB_NAMES = new Set<string>([
 ]);
 
 let _installInFlight = false;
+const installedNames = new WeakMap<NativeDb, readonly string[]>();
 
 /**
  * Framework-internal helper that installs the runtime schema descriptor.
  * Returns the typed collection map after planting it on `env.db`.
  */
 export function installSchema<const T extends Record<string, SchemaInput>>(
-  schemas: ValidateSchemaShape<T>,
   env: NativeDb,
+  descriptor: RuntimeSchemaDescriptor | undefined,
   options?: InstallSchemaOptions,
 ): { collections: Collections<T> } {
   if (_installInFlight) {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: installSchema called while a previous install is in flight — " +
+        "@zeroship/db: installSchema called while a previous install is in flight — " +
           "this helper must run from a single-threaded scope (the dev-bootstrap and " +
           "production synthetic SSR entry both serialize).",
       ),
@@ -878,22 +799,22 @@ export function installSchema<const T extends Record<string, SchemaInput>>(
   }
   _installInFlight = true;
   try {
-    return _installSchemaInner(schemas as unknown as T, env, options);
+    return _installSchemaInner<T>(env, descriptor, options);
   } finally {
     _installInFlight = false;
   }
 }
 
 function _installSchemaInner<const T extends Record<string, SchemaInput>>(
-  schemas: T,
   env: NativeDb,
+  descriptor: RuntimeSchemaDescriptor | undefined,
   options?: InstallSchemaOptions,
 ): { collections: Collections<T> } {
   if (env == null || typeof env !== "object") {
     throw Object.assign(
       new Error(
-        "@zeroship/bootstrap: installSchema requires a native env.db handle as " +
-          "the second argument — got " + (env === undefined ? "undefined" : env === null ? "null" : typeof env) + ".",
+        "@zeroship/db: installSchema requires a native env.db handle as " +
+          "the first argument — got " + (env === undefined ? "undefined" : env === null ? "null" : typeof env) + ".",
       ),
       { code: "NATIVE_DB_UNAVAILABLE" as const },
     );
@@ -901,10 +822,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   const native = env;
   const namingStrategy = options?.naming ?? naming.asIs;
 
-  // **Migration-first cutover (P5 S6)** — descriptor v2 is the only runtime
-  // schema source. The declared first argument is ignored. An absent descriptor
-  // installs no collections; a present but non-v2 descriptor is a hard error.
-  const descriptor = options?.descriptor;
+  // The host descriptor supplies collection metadata.
   const descriptorV2 = assertRuntimeDescriptorV2(descriptor);
   const descriptorFields = runtimeDescriptorFields(descriptor);
   const source: T =
@@ -1000,7 +918,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       return err(
         Object.assign(
           new Error(
-            "@zeroship/bootstrap: env.db.transaction not available — " +
+            "@zeroship/db: env.db.transaction not available — " +
               "runtime is missing the native Db.transaction(fn) orchestrator.",
           ),
           { code: "NATIVE_TRANSACTION_UNAVAILABLE" as const },
@@ -1077,14 +995,10 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
   }
 
   {
-    const target = native as unknown as Record<string, unknown> & {
-      __zeroshipDbInstalledNames?: string[];
-    };
+    const target = native as unknown as Record<string, unknown>;
     const newNames = Object.keys(collections);
     const newNameSet = new Set(newNames);
-    const prevNames = Array.isArray(target.__zeroshipDbInstalledNames)
-      ? target.__zeroshipDbInstalledNames
-      : [];
+    const prevNames = installedNames.get(native) ?? [];
     for (const stale of prevNames) {
       if (newNameSet.has(stale)) continue;
       if (RESERVED_ENV_DB_NAMES.has(stale)) continue;
@@ -1126,12 +1040,7 @@ function _installSchemaInner<const T extends Record<string, SchemaInput>>(
       enumerable: true,
       writable: false,
     });
-    Object.defineProperty(target, "__zeroshipDbInstalledNames", {
-      value: newNames,
-      configurable: true,
-      enumerable: false,
-      writable: true,
-    });
+    installedNames.set(native, newNames);
   }
 
   return { collections: collections as Collections<T> };
