@@ -380,7 +380,7 @@ async fn workflow_advance_pinned_isolate_budget_lru_evicts_per_app() {
             .to_request();
         let resp_b = test::call_service(&app, req_b).await;
         assert_eq!(resp_b.status(), StatusCode::OK);
-        assert!(!crate::cache::get_workflow_runtime(&case.app_id, &deploy_a).is_some());
+        assert!(crate::cache::get_workflow_runtime(&case.app_id, &deploy_a).is_none());
         assert!(crate::cache::get_workflow_runtime(&case.app_id, &deploy_b).is_some());
     })
     .await;
