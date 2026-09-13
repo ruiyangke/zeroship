@@ -57,10 +57,11 @@ pub(crate) fn install_schema(
 ) {
     zeroship_data_orm::descriptor::install_collections(
         binding,
-        vec![(
+        zeroship_data_orm::schema::Schema::from_collections(vec![(
             collection.to_owned(),
             super::schema::generated_fields(schema),
-        )],
+        )])
+        .expect("decode fixture descriptor"),
     )
     .expect("install fixture descriptor");
 }

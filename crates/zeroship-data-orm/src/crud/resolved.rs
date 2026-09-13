@@ -1,13 +1,11 @@
-//! Descriptor resolution shared by collection statement builders.
+//! Resolve model columns into backend storage for collection statements.
 
-use crate::{
-    sql::{
-        mapping::{self, QueryError},
-        registration::SqlRegistration,
-        statement::{ReturnedColumn, StorageType, Table},
-        Ident, IdentRole, SchemaName,
-    },
-    value::Value,
+use crate::schema::{AssignmentEvent, FieldMap};
+use crate::sql::{
+    mapping::{self, QueryError},
+    registration::SqlRegistration,
+    statement::{ReturnedColumn, StorageType, Table},
+    Ident, IdentRole, SchemaName,
 };
 use std::collections::BTreeMap;
 
@@ -28,7 +26,7 @@ impl ResolvedTable {
     pub(crate) fn new(
         namespace: &SchemaName,
         collection: &str,
-        schema: &Value,
+        schema: &FieldMap,
         registration: &SqlRegistration,
     ) -> Result<Self, QueryError> {
         Self::build(namespace, collection, None, schema, registration)
@@ -38,7 +36,7 @@ impl ResolvedTable {
         namespace: &SchemaName,
         collection: &str,
         alias: &str,
-        schema: &Value,
+        schema: &FieldMap,
         registration: &SqlRegistration,
     ) -> Result<Self, QueryError> {
         Self::build(namespace, collection, Some(alias), schema, registration)
@@ -48,19 +46,14 @@ impl ResolvedTable {
         namespace: &SchemaName,
         collection: &str,
         alias: Option<&str>,
-        schema: &Value,
+        schema: &FieldMap,
         registration: &SqlRegistration,
     ) -> Result<Self, QueryError> {
         mapping::validate_collection(collection)?;
-        let fields = schema
-            .as_object()
-            .ok_or_else(|| invalid("statement requires a field-map schema"))?;
+        let fields = schema;
         let mut physical = Vec::new();
         let mut inputs = BTreeMap::new();
         for (name, definition) in fields {
-            if mapping::is_schema_metadata_key(name) {
-                continue;
-            }
             let stored = mapping::value_column_for_field(name, schema);
             let storage = if crate::sql::descriptors::effective_mask(definition).is_some() {
                 StorageType::Text
@@ -68,7 +61,11 @@ impl ResolvedTable {
                 registration.storage_type(definition)?
             };
             physical.push((stored_ident(&stored)?, storage));
-            let insert_only = name == "id" || definition["assign"]["on"].as_str() == Some("insert");
+            let insert_only = name == "id"
+                || definition
+                    .assignment
+                    .as_ref()
+                    .is_some_and(|assignment| assignment.on == AssignmentEvent::Insert);
             inputs.insert(
                 name.clone(),
                 PhysicalInput {
@@ -105,7 +102,7 @@ impl ResolvedTable {
         Ok(Self { table, inputs })
     }
 
-    pub(crate) fn returning(&self, schema: &Value) -> Result<Vec<ReturnedColumn>, QueryError> {
+    pub(crate) fn returning(&self, schema: &FieldMap) -> Result<Vec<ReturnedColumn>, QueryError> {
         mapping::implicit_read_fields(schema)?
             .into_iter()
             .map(|name| {
@@ -130,8 +127,4 @@ impl ResolvedTable {
 fn stored_ident(name: &str) -> Result<Ident, QueryError> {
     Ident::parse_as(name, IdentRole::StoredColumn)
         .map_err(|error| crate::sql::compiler::CompileError::from(error).into())
-}
-
-fn invalid(message: &str) -> QueryError {
-    QueryError::InvalidFilter(message.into())
 }

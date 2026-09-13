@@ -314,7 +314,7 @@ CREATE TABLE "{app}"."people" ({PG_COMMON_FIXTURE_COLUMNS},
             // Sanity: the resolution the CRUD passes will perform returns BOTH goodies.
             let resolved = zeroship_data_orm::crud::runtime_schema_for_tests(app, "people")
                 .expect("the descriptor entry this deploy installed must resolve");
-            assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
+            assert_eq!(resolved["phone"].mask.as_ref().unwrap().kind, "last4");
 
             // ----- WRITE (real pipeline, introspected metadata) -----
             // No `id`: the write pipeline refuses a creator-supplied one and mints a

@@ -1,7 +1,7 @@
 use super::fixtures::CollectionFixture;
 use super::*;
 
-schema!(pub read_schema = "../../../tests/fixtures/typed-reads.runtime.json");
+posts_schema!(pub read_schema, readings);
 use read_schema::readings;
 
 #[derive(Debug, FromRow)]
@@ -23,7 +23,7 @@ struct NewReading<'a> {
 #[compio::test]
 async fn typed_reads_keep_execution_state_off_the_callers_stack() {
     const CALLER_FUTURE_BUDGET: usize = 2048;
-    let owner = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
+    let owner = CollectionFixture::sqlite_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
     let db = &owner.database;
     let entity = db.entity::<readings::Entity>().unwrap();
     let _: Reading = entity
@@ -290,21 +290,21 @@ async fn exercise(db: &Database) {
 
 #[compio::test]
 async fn sqlite_typed_reads_cover_paging_grouping_and_native_scalars() {
-    let owner = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
+    let owner = CollectionFixture::sqlite_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
     exercise(&owner.database).await;
     owner.close().await;
 }
 
 #[compio::test]
 async fn postgres_typed_reads_cover_paging_grouping_and_native_scalars() {
-    let owner = CollectionFixture::postgres("readings", readings::Entity::schema().clone()).await;
+    let owner = CollectionFixture::postgres_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
     exercise(&owner.database).await;
     owner.close().await;
 }
 
 #[compio::test]
 async fn typed_read_aliases_refuse_replaced_generated_metadata() {
-    let owner = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
+    let owner = CollectionFixture::sqlite_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
     let db = &owner.database;
     let entity = db.entity::<readings::Entity>().unwrap();
     let alias = entity.alias("r").unwrap();
@@ -313,18 +313,11 @@ async fn typed_read_aliases_refuse_replaced_generated_metadata() {
         .from(&alias)
         .select(alias.column(readings::title).select::<String>())
         .unwrap();
-    let mut changed = readings::Entity::schema().clone();
-    changed
-        .as_object_mut()
-        .unwrap()
-        .get_mut("title")
-        .unwrap()
-        .as_object_mut()
-        .unwrap()
-        .insert("maxLength".into(), value!(64));
+    let mut changed = readings::Entity::schema().fields().clone();
+    changed["title"].max_length = Some(64);
     db.context
         .with(|| {
-            crate::descriptor::install_collections(db.binding(), vec![("readings".into(), changed)])
+            crate::descriptor::install_collections(db.binding(), Schema::new([("readings".into(), CollectionSchema::new(changed))]))
         })
         .unwrap();
     for result in [
@@ -348,8 +341,8 @@ async fn typed_read_aliases_refuse_replaced_generated_metadata() {
 
 #[compio::test]
 async fn typed_selections_reject_foreign_aliases_with_matching_names() {
-    let first = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
-    let second = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
+    let first = CollectionFixture::sqlite_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
+    let second = CollectionFixture::sqlite_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
     let a = first
         .database
         .entity::<readings::Entity>()
@@ -391,7 +384,7 @@ async fn typed_selections_reject_foreign_aliases_with_matching_names() {
 
 #[compio::test]
 async fn typed_sources_and_projections_keep_their_originating_transaction_scope() {
-    let owner = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
+    let owner = CollectionFixture::sqlite_native("readings", readings::Entity::schema().clone(), super::fixtures::post_migration_fields()).await;
     let db = &owner.database;
     let outside = db.clone();
     let (alias, row, scalar, built, prepared, grouped) = db

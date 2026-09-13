@@ -1,5 +1,12 @@
 use zeroship_data_orm::orm::schema;
 
-schema!(pub models = "../fixtures/renamed-primary-key.runtime.json");
+schema! {
+    pub models {
+        entries {
+            #[orm(primary_key)]
+            key: Text,
+        }
+    }
+}
 
 fn main() {}

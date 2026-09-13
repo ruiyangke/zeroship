@@ -36,11 +36,15 @@ async fn hidden_id(postgres: bool) {
                 .as_ref()
                 .clone()
         });
-        fields["id"][flag] = value!(false);
+        match flag {
+            "readable" => fields["id"].readable = false,
+            "projectable" => fields["id"].projectable = false,
+            _ => unreachable!(),
+        }
         let db = Database::from_schema(
             owner.database.binding.clone(),
             owner.database.backend.clone(),
-            vec![("records".into(), fields)],
+            Schema::new([("records".into(), CollectionSchema::new(fields))]),
         )
         .unwrap();
         db.install_mask_policy(value!({"support":["pii"]})).unwrap();

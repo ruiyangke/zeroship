@@ -2,7 +2,9 @@ use super::*;
 use crate::value;
 use zeroship_data_orm::encryption::ProjectKeySource;
 
-schema!(pub test_schema = "../../tests/fixtures/schema.runtime.json");
+include!("../../tests/fixtures/posts_schema.rs");
+posts_schema!(pub test_schema);
+use crate::schema::{CollectionSchema, ColumnSchema, LogicalType, Schema};
 use test_schema::posts;
 
 mod aggregate_protection;
@@ -113,6 +115,8 @@ fn metadata_fixture_is_the_migration_engines_output() {
         generated.runtime_json,
         include_str!("../../tests/fixtures/schema.runtime.json")
     );
+    let decoded = CollectionSchema::from_fields(&fixtures::post_migration_fields()).unwrap();
+    assert_eq!(posts::Entity::schema(), &decoded);
 }
 
 #[compio::test]
@@ -153,10 +157,10 @@ async fn sqlite_search_values_round_trip_through_the_rust_orm() {
     let db = Database::from_schema(
         db.binding.clone(),
         db.backend.clone(),
-        vec![(
+        Schema::from_collections(vec![(
             "places".into(),
             crate::tests::fixtures::schema::generated_fields(fields),
-        )],
+        )]).unwrap(),
     )
     .unwrap();
     let expected = value!({"embedding":[1.0, -0.5], "location":{"lat":37.0, "lng":-122.0}});
@@ -240,7 +244,7 @@ async fn postgres_native_models_round_trip() {
     let db = Database::connect(
         binding,
         crate::ConnectOptions::new(postgres.url(), ProjectKeySource::unavailable()),
-        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+        Schema::new(vec![("posts".into(), <posts::Entity as Entity>::schema().clone())]),
     )
     .await
     .unwrap();
@@ -333,7 +337,7 @@ async fn platform_service_credentials_drive_orm_authority() {
     let db = Database::connect(
         binding,
         options,
-        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+        Schema::new(vec![("posts".into(), <posts::Entity as Entity>::schema().clone())]),
     )
     .await
     .unwrap();
@@ -377,7 +381,7 @@ async fn platform_service_credentials_drive_orm_authority() {
         ),
         crate::ConnectOptions::new(service_url.as_str(), ProjectKeySource::unavailable())
             .connection_authority(),
-        vec![("posts".into(), <posts::Entity as Entity>::schema().clone())],
+        Schema::new(vec![("posts".into(), <posts::Entity as Entity>::schema().clone())]),
     )
     .await
     .unwrap();
@@ -614,8 +618,8 @@ fn native_codecs_check_ranges_and_protected_values() {
 async fn typed_handles_refuse_descriptor_drift() {
     let (db, _directory) = database().await;
     let records = db.entity::<posts::Entity>().unwrap();
-    let mut changed = <posts::Entity as Entity>::schema().clone();
-    changed["title"]["type"] = Value::from("boolean");
+    let mut changed = <posts::Entity as Entity>::schema().fields().clone();
+    changed["title"].logical_type = LogicalType::Boolean;
     db.context().with(|| {
         zeroship_data_orm::schema_cache::with_mut(|cache| {
             cache.insert_one(db.binding(), "posts", changed);
@@ -684,7 +688,7 @@ async fn database_with_binding(
             directory.path().join("control.sqlite").to_string_lossy(),
             key_source,
         ),
-        vec![("posts".into(), schema)],
+        Schema::new(vec![("posts".into(), schema)]),
     )
     .await
     .unwrap();
@@ -1159,7 +1163,7 @@ async fn independent_databases_keep_schema_policy_and_transactions_isolated() {
             cache.insert_one(
                 second.binding(),
                 "only_second",
-                value!({ "flag": { "type": "boolean" } }),
+                crate::tests::fixtures::native_fields(value!({ "flag": { "type": "boolean" } })),
             );
         })
     });
