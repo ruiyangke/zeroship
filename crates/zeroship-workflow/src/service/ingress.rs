@@ -77,122 +77,154 @@ pub struct RevokedSignals {
 }
 
 impl AppWorkflows {
+    /// Issue a signal capability under captured host policy.
+    /// Exact request retries return the original token without extending its lifetime.
+    ///
+    /// # Errors
+    /// Refuses invalid targets or lifetimes, unavailable authority, conflicting
+    /// requests and journal failures.
     pub async fn issue_signal_token(
         &self,
         request: &RequestId,
         options: SignalTokenRequest,
     ) -> Result<CapabilityToken, WorkflowServiceError> {
-        let authority = authority(&self.service)?;
-        let digest = digest(&options)?;
-        let mut tx = self.service.begin().await?;
-        let policy = lock_app(&mut tx, &self.app).await?;
-        let now = tx.now().await?;
-        if let Some(receipt) =
-            request_result(&tx, &self.app, request, "issue_signal_token", &digest).await?
-        {
-            return Ok(receipt);
-        }
-        policy.admit()?;
-        if options.lifetime_seconds <= 0
-            || options.lifetime_seconds > policy.max_signal_token_lifetime_seconds
-        {
-            return Err(WorkflowServiceError::InvalidRequest(
-                "signal token lifetime exceeds the app policy".into(),
-            ));
-        }
-        let app_epoch = app_epoch(&mut tx, &self.app).await?;
-        let epoch = target_epoch(&mut tx, &self.app, &options.target, true).await?;
-        let grant = SignalGrant {
-            app_id: self.app.clone(),
-            target: options.target,
-            types: options.types,
-            epoch,
-            app_epoch,
-        };
-        let token = mint_signal_capability(
-            &authority.key,
-            grant,
-            now.div_euclid(1000),
-            options.lifetime_seconds,
-        )?;
-        store_request(
-            &mut tx,
-            &self.app,
-            request,
-            "issue_signal_token",
-            &digest,
-            &token,
-            now,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(token)
+        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        captured
+            .run(async {
+                let authority = authority(&self.service)?;
+                let digest = digest(&options)?;
+                let mut tx = self.service.begin().await?;
+                let policy = lock_app(&mut tx, &self.app).await?;
+                let now = tx.now().await?;
+                if let Some(receipt) =
+                    request_result(&tx, &self.app, request, "issue_signal_token", &digest).await?
+                {
+                    return Ok(receipt);
+                }
+                captured.recheck(&self.service.policies, &self.app)?;
+                policy.admit()?;
+                captured.check(&self.service.policies, &self.app)?;
+                if options.lifetime_seconds <= 0
+                    || options.lifetime_seconds > policy.max_signal_token_lifetime_seconds
+                {
+                    return Err(WorkflowServiceError::InvalidRequest(
+                        "signal token lifetime exceeds the app policy".into(),
+                    ));
+                }
+                let app_epoch = app_epoch(&mut tx, &self.app).await?;
+                captured.check(&self.service.policies, &self.app)?;
+                let epoch = target_epoch(&mut tx, &self.app, &options.target, true).await?;
+                let grant = SignalGrant {
+                    app_id: self.app.clone(),
+                    target: options.target,
+                    types: options.types,
+                    epoch,
+                    app_epoch,
+                };
+                let token = mint_signal_capability(
+                    &authority.key,
+                    grant,
+                    now.div_euclid(1000),
+                    options.lifetime_seconds,
+                )?;
+                store_request(
+                    &mut tx,
+                    &self.app,
+                    request,
+                    "issue_signal_token",
+                    &digest,
+                    &token,
+                    now,
+                )
+                .await?;
+                captured.check(&self.service.policies, &self.app)?;
+                tx.commit().await?;
+                Ok(token)
+            })
+            .await
     }
 
+    /// Advance the selected signal epoch under live host authority.
+    /// Exact request retries return the recorded epoch without advancing it again.
+    /// A policy that disables admission can still authorize revocation.
+    ///
+    /// # Errors
+    /// Refuses unknown targets, unavailable authority, conflicting requests,
+    /// exhausted epochs and journal failures.
     pub async fn revoke_signal_tokens(
         &self,
         request: &RequestId,
         target: Option<SignalTarget>,
     ) -> Result<RevokedSignals, WorkflowServiceError> {
-        let digest = digest(&target)?;
-        let mut tx = self.service.begin().await?;
-        lock_app(&mut tx, &self.app).await?;
-        let now = tx.now().await?;
-        if let Some(receipt) =
-            request_result(&tx, &self.app, request, "revoke_signal_tokens", &digest).await?
-        {
-            return Ok(receipt);
-        }
-        let previous = if let Some(target) = &target {
-            target_epoch(&mut tx, &self.app, target, false).await?
-        } else {
-            app_epoch(&mut tx, &self.app).await?
-        };
-        let epoch = previous.checked_add(1).ok_or_else(|| {
-            WorkflowServiceError::ResourceExhausted("workflow signal epoch exhausted".into())
-        })?;
-        match target {
-            Some(SignalTarget::Run { run_id }) => {
-                tx.database()
-                    .collection(models::runs::Entity::COLLECTION)?
-                    .update(
-                        value!({"app_id":self.app.as_str(), "id":run_id}),
-                        value!({"signal_epoch":epoch}),
+        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        captured
+            .run(async {
+                let digest = digest(&target)?;
+                let mut tx = self.service.begin().await?;
+                lock_app(&mut tx, &self.app).await?;
+                let now = tx.now().await?;
+                if let Some(receipt) =
+                    request_result(&tx, &self.app, request, "revoke_signal_tokens", &digest).await?
+                {
+                    return Ok(receipt);
+                }
+                captured.check(&self.service.policies, &self.app)?;
+                let previous = if let Some(target) = &target {
+                    target_epoch(&mut tx, &self.app, target, false).await?
+                } else {
+                    app_epoch(&mut tx, &self.app).await?
+                };
+                let epoch = previous.checked_add(1).ok_or_else(|| {
+                    WorkflowServiceError::ResourceExhausted(
+                        "workflow signal epoch exhausted".into(),
                     )
-                    .await?;
-            }
-            Some(SignalTarget::Topic { topic }) => {
-                tx.database()
-                    .collection(models::topics::Entity::COLLECTION)?
-                    .update(
-                        value!({"app_id":self.app.as_str(), "topic":topic}),
-                        value!({"signal_epoch":epoch}),
-                    )
-                    .await?;
-            }
-            None => {
-                tx.database()
-                    .collection(models::app_state::Entity::COLLECTION)?
-                    .update(
-                        value!({"app_id":self.app.as_str()}),
-                        value!({"signal_epoch":epoch}),
-                    )
-                    .await?;
-            }
-        }
-        let result = RevokedSignals { epoch };
-        store_request(
-            &mut tx,
-            &self.app,
-            request,
-            "revoke_signal_tokens",
-            &digest,
-            &result,
-            now,
-        )
-        .await?;
-        tx.commit().await?;
-        Ok(result)
+                })?;
+                captured.check(&self.service.policies, &self.app)?;
+                match target {
+                    Some(SignalTarget::Run { run_id }) => {
+                        tx.database()
+                            .collection(models::runs::Entity::COLLECTION)?
+                            .update(
+                                value!({"app_id":self.app.as_str(), "id":run_id}),
+                                value!({"signal_epoch":epoch}),
+                            )
+                            .await?;
+                    }
+                    Some(SignalTarget::Topic { topic }) => {
+                        tx.database()
+                            .collection(models::topics::Entity::COLLECTION)?
+                            .update(
+                                value!({"app_id":self.app.as_str(), "topic":topic}),
+                                value!({"signal_epoch":epoch}),
+                            )
+                            .await?;
+                    }
+                    None => {
+                        tx.database()
+                            .collection(models::app_state::Entity::COLLECTION)?
+                            .update(
+                                value!({"app_id":self.app.as_str()}),
+                                value!({"signal_epoch":epoch}),
+                            )
+                            .await?;
+                    }
+                }
+                let result = RevokedSignals { epoch };
+                store_request(
+                    &mut tx,
+                    &self.app,
+                    request,
+                    "revoke_signal_tokens",
+                    &digest,
+                    &result,
+                    now,
+                )
+                .await?;
+                captured.check(&self.service.policies, &self.app)?;
+                tx.commit().await?;
+                Ok(result)
+            })
+            .await
     }
 }
 impl WorkflowService {
