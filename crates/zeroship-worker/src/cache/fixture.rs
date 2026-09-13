@@ -6,23 +6,27 @@ pub struct Kernel(std::marker::PhantomData<Rc<()>>);
 
 impl Kernel {
     pub(crate) fn new(max_pinned: usize, url: &str, meter: Arc<zeroship_metering::Meter>) -> Self {
-        assert!(
-            CACHE.with(|slot| slot.borrow().is_none()),
-            "a previous case retained its worker cache"
-        );
-        let kernel = Self(std::marker::PhantomData);
-        init_cache(
+        Self::install(
             10,
             max_pinned,
             KernelConfig {
                 control_url: "http://127.0.0.1:1".into(),
                 control_key: String::new(),
-                db_service: Some(test_db_service(url)),
+                db_service: Some(database_service(url)),
                 kv_store: None,
                 storage_backend: None,
                 meter,
             },
+        )
+    }
+
+    pub(crate) fn install(max_size: usize, max_pinned: usize, config: KernelConfig) -> Self {
+        assert!(
+            CACHE.with(|slot| slot.borrow().is_none()),
+            "a previous case retained its worker cache"
         );
+        let kernel = Self(std::marker::PhantomData);
+        init_cache(max_size, max_pinned, config);
         kernel
     }
 }
@@ -63,4 +67,15 @@ impl Drop for Kernel {
         METER.with(|slot| slot.borrow_mut().take());
         LOADED_META.with(|slot| slot.borrow_mut().clear());
     }
+}
+
+pub(crate) fn database_service(url: &str) -> Arc<zeroship_data_v8::service::DbService> {
+    zeroship_data_v8::service::DbService::new(zeroship_data_v8::service::DbServiceConfig {
+        project_keys: Default::default(),
+        connection: zeroship_data_orm::connection::ConnectionFactory::for_url(url)
+            .expect("valid database configuration"),
+        cdc_relay: None,
+        meter: None,
+    })
+    .expect("test db service")
 }
