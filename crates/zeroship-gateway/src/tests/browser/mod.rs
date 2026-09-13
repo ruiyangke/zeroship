@@ -90,7 +90,7 @@ pub fn build_state_with_route(
     );
 
     let state = Arc::new(GateState {
-        service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
+        service_auth: std::sync::Arc::new(crate::tests::gateway_service_auth()),
         config: GateConfig {
             control_url: String::new(),
             control_key: String::new(),

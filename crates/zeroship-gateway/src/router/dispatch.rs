@@ -3146,7 +3146,7 @@ mod tests {
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
         Arc::new(GateState {
-            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
+            service_auth: std::sync::Arc::new(crate::tests::gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),

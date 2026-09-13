@@ -2192,7 +2192,7 @@ lifecycle and family-marker checks, and emits that same value in
 The real-OP E2E now sends the access token through a local Worker boundary,
 verifies the request-bound `ZeroShip-User` header there, and asserts that its
 `id` equals Auth's one projection from the global `UserId` and sector
-(`crates/zeroship-gateway/tests/oidc_rp_e2e.rs`). The Gateway fixture deliberately uses
+(`crates/zeroship-gateway/src/oidc_rp/tests/platform/bearer.rs`). The Gateway fixture deliberately uses
 a different pairwise salt, so a second Gateway derivation cannot satisfy the
 assertion.
 
