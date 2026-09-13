@@ -2055,6 +2055,34 @@ Shutdown does not fabricate assignment-release or recovery-completion evidence.
 This native composition leaves the production creator resource provider with the
 host. It does not replace enrollment bootstrap, zone eligibility, normal
 deployment recovery handoff or the private-zone cutover.
+The worker's `WorkflowCreatorFactory` implements creator assembly over an injected
+`WorkflowResourceProvider`. The provider receives an `AssignedScope` so it can
+bind artifact retention to the current assignment revision, but database and
+storage capabilities must come from independent deployment-host authorization.
+Before journal I/O, the factory checks the resolved storage app, runtime app and
+physical schema and validates native peers and network policy. It opens and
+verifies the already provisioned ORM journal; it never applies creator DDL.
+
+`HostPolicies::run_bound` captures the factory registry's original policy authority
+before polling resource preparation. Foreign-registry bindings cannot start I/O;
+refreshes do not extend an existing preparation deadline. The registered
+`AppWorkflows` produces both its app-scoped `WorkerTasks` payload/artifact handle
+and its V8 backend. The runtime loader retains that backend instead of accepting
+one from refreshable metadata. Runtime contexts may update env, limits, network
+rules and ordinary peers, but must retain the original app and creator schema.
+Replacing a policy generation therefore cannot route an old executor through a
+newly authorized workflow backend. The injected provider and startup installation
+remain production integration work; this adapter creates no enrollment, placement
+eligibility or platform database capability.
+
+Native factory tests reject wrong app, registry and physical schema before
+creator I/O, verify missing journals remain unprovisioned, and cancel pending
+resource resolution when its policy generation retires. Delivered activation
+and bounded Advance tests execute a retained bundle in V8 and stage/read blob
+step output through the supplied creator object store. Loader tests rotate env
+metadata across policy replacement and verify retained workflow authority stays
+retired until the host explicitly constructs a replacement loader.
+
 Native HTTP tests verify signed endpoint assertions and replay rejection while
 creator fixtures open isolated SQLite journals. They cover failed and superseded
 scans, exact factory authority, replacement, cancellation, closure and independent

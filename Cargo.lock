@@ -8627,6 +8627,7 @@ dependencies = [
 name = "zeroship-worker"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "clap",
  "compio",
@@ -8659,6 +8660,7 @@ dependencies = [
  "zeroship-storage-v8",
  "zeroship-stream",
  "zeroship-workflow",
+ "zeroship-workflow-manager",
  "zeroship-workflow-v8",
  "zstd",
 ]
