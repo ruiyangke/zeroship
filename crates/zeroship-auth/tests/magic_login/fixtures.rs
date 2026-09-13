@@ -54,17 +54,16 @@ impl RequestedLogin {
                 .into_owned()
         };
         assert_eq!(parameter("return_to"), return_to);
+        assert_eq!(
+            link.origin(),
+            url::Url::parse(&server.auth_base).unwrap().origin()
+        );
         Self {
             csrf,
             nonce,
             token: parameter("token"),
             return_to,
-            landing_url: format!(
-                "{}{}?{}",
-                server.auth_base,
-                link.path(),
-                link.query().unwrap()
-            ),
+            landing_url: link.to_string(),
         }
     }
 
