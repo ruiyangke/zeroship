@@ -1,5 +1,4 @@
-//! Calendar scheduling shared by embedded and deployed workflow hosts.
-use crate::WorkflowServiceError;
+use crate::CalendarError;
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, LocalResult, NaiveDate, NaiveDateTime,
     TimeZone, Utc,
@@ -14,15 +13,20 @@ pub struct Calendar {
     cron: Box<ParsedCron>,
 }
 impl Calendar {
-    pub fn parse(expression: &str, timezone: &str) -> Result<Self, WorkflowServiceError> {
+    /// Parse a supported cron expression and an IANA timezone name.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown timezone, unsupported cron syntax or an
+    /// expression outside the accepted field bounds.
+    pub fn parse(expression: &str, timezone: &str) -> Result<Self, CalendarError> {
         if expression.len() > 256 {
-            return Err(WorkflowServiceError::InvalidRequest(
+            return Err(CalendarError::InvalidSchedule(
                 "workflow cron expression is too long".into(),
             ));
         }
         let expression = normalize_cron_expr(expression)?;
         let timezone = timezone.parse::<Tz>().map_err(|_| {
-            WorkflowServiceError::InvalidRequest("unknown workflow schedule timezone".into())
+            CalendarError::InvalidSchedule("unknown workflow schedule timezone".into())
         })?;
         let cron = Box::new(parse_cron_expr(&expression)?);
         Ok(Self {
@@ -39,7 +43,14 @@ impl Calendar {
     pub fn timezone(&self) -> &str {
         self.timezone.name()
     }
-    pub fn next_after(&self, after: DateTime<Utc>) -> Result<DateTime<Utc>, WorkflowServiceError> {
+    /// Resolve the first nominal cron occurrence strictly after `after`.
+    /// Gaps resolve to the next valid local instant; folds choose the earlier
+    /// instant and do not produce another occurrence for the repeated local time.
+    ///
+    /// # Errors
+    /// Returns an error when no representable occurrence is found within the
+    /// calendar search horizon.
+    pub fn next_after(&self, after: DateTime<Utc>) -> Result<DateTime<Utc>, CalendarError> {
         first_cron_fire_after(&self.cron, self.timezone, after)
     }
 }
@@ -62,7 +73,7 @@ fn first_cron_fire_after(
     cron: &ParsedCron,
     tz: Tz,
     after: DateTime<Utc>,
-) -> Result<DateTime<Utc>, WorkflowServiceError> {
+) -> Result<DateTime<Utc>, CalendarError> {
     let local_after = after.with_timezone(&tz);
     let start = local_after.date_naive();
     for day_offset in 0..=(366 * 8) {
@@ -86,7 +97,7 @@ fn first_cron_fire_after(
             }
         }
     }
-    Err(WorkflowServiceError::InvalidRequest(
+    Err(CalendarError::InvalidSchedule(
         "workflow schedule has no next cron fire within the search horizon".to_string(),
     ))
 }
@@ -118,10 +129,10 @@ fn resolve_local_nominal(tz: Tz, nominal: NaiveDateTime) -> Option<DateTime<Utc>
     }
 }
 
-fn normalize_cron_expr(expr: &str) -> Result<String, WorkflowServiceError> {
+fn normalize_cron_expr(expr: &str) -> Result<String, CalendarError> {
     let compact = expr.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.is_empty() {
-        return Err(WorkflowServiceError::InvalidRequest(
+        return Err(CalendarError::InvalidSchedule(
             "workflow schedule cron expression is empty".to_string(),
         ));
     }
@@ -132,7 +143,7 @@ fn normalize_cron_expr(expr: &str) -> Result<String, WorkflowServiceError> {
         "@monthly" => "0 0 1 * *".to_string(),
         "@yearly" => "0 0 1 1 *".to_string(),
         value if value.starts_with('@') => {
-            return Err(WorkflowServiceError::InvalidRequest(format!(
+            return Err(CalendarError::InvalidSchedule(format!(
                 "unsupported workflow schedule cron macro {value:?}"
             )))
         }
@@ -140,19 +151,19 @@ fn normalize_cron_expr(expr: &str) -> Result<String, WorkflowServiceError> {
     };
     let field_count = normalized.split_whitespace().count();
     if field_count == 6 {
-        return Err(WorkflowServiceError::InvalidRequest(
+        return Err(CalendarError::InvalidSchedule(
             "sub-minute workflow schedule cron expressions are unsupported".to_string(),
         ));
     }
     if field_count != 5 {
-        return Err(WorkflowServiceError::InvalidRequest(
+        return Err(CalendarError::InvalidSchedule(
             "workflow schedule cron expression must have exactly 5 fields".to_string(),
         ));
     }
     Ok(normalized)
 }
 
-fn parse_cron_expr(expr: &str) -> Result<ParsedCron, WorkflowServiceError> {
+fn parse_cron_expr(expr: &str) -> Result<ParsedCron, CalendarError> {
     let normalized = normalize_cron_expr(expr)?;
     let fields = normalized.split_whitespace().collect::<Vec<_>>();
     Ok(ParsedCron {
@@ -170,9 +181,9 @@ fn parse_cron_field(
     min: u32,
     max: u32,
     explicit_max: Option<u32>,
-) -> Result<CronField, WorkflowServiceError> {
+) -> Result<CronField, CalendarError> {
     if field.is_empty() {
-        return Err(WorkflowServiceError::InvalidRequest(format!(
+        return Err(CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field is empty"
         )));
     }
@@ -180,7 +191,7 @@ fn parse_cron_field(
         .chars()
         .any(|c| c.is_ascii_alphabetic() || matches!(c, '?' | '#' | 'L' | 'W'))
     {
-        return Err(WorkflowServiceError::InvalidRequest(format!(
+        return Err(CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field contains an unsupported token"
         )));
     }
@@ -202,22 +213,22 @@ fn parse_cron_part(
     max: u32,
     explicit_max: Option<u32>,
     values: &mut BTreeSet<u32>,
-) -> Result<(), WorkflowServiceError> {
+) -> Result<(), CalendarError> {
     if part.is_empty() {
-        return Err(WorkflowServiceError::InvalidRequest(format!(
+        return Err(CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field contains an empty list item"
         )));
     }
     let pieces = part.split('/').collect::<Vec<_>>();
     if pieces.len() > 2 || pieces[0].is_empty() || pieces.get(1).is_some_and(|s| s.is_empty()) {
-        return Err(WorkflowServiceError::InvalidRequest(format!(
+        return Err(CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field has a malformed step"
         )));
     }
     let step = if pieces.len() == 2 {
         let step = parse_u32(pieces[1], label)?;
         if step == 0 {
-            return Err(WorkflowServiceError::InvalidRequest(format!(
+            return Err(CalendarError::InvalidSchedule(format!(
                 "workflow schedule cron {label} step must be positive"
             )));
         }
@@ -227,7 +238,7 @@ fn parse_cron_part(
     };
     let base = pieces[0];
     if label == "day-of-month" && base == "*" && pieces.len() == 2 {
-        return Err(WorkflowServiceError::InvalidRequest(
+        return Err(CalendarError::InvalidSchedule(
             "day-of-month stepped wildcard is unsupported".to_string(),
         ));
     }
@@ -236,7 +247,7 @@ fn parse_cron_part(
     } else {
         let range = base.split('-').collect::<Vec<_>>();
         if range.len() > 2 || range[0].is_empty() || range.get(1).is_some_and(|s| s.is_empty()) {
-            return Err(WorkflowServiceError::InvalidRequest(format!(
+            return Err(CalendarError::InvalidSchedule(format!(
                 "workflow schedule cron {label} field has a malformed range"
             )));
         }
@@ -249,12 +260,12 @@ fn parse_cron_part(
         (start, end)
     };
     if start < min || start > max || end < min || end > max || start > end {
-        return Err(WorkflowServiceError::InvalidRequest(format!(
+        return Err(CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field is out of range"
         )));
     }
     if explicit_max.is_some_and(|limit| end > limit) && base != "*" {
-        return Err(WorkflowServiceError::InvalidRequest(
+        return Err(CalendarError::InvalidSchedule(
             "day-of-month values above 28 are unsupported".to_string(),
         ));
     }
@@ -269,14 +280,14 @@ fn parse_cron_part(
     Ok(())
 }
 
-fn parse_u32(value: &str, label: &str) -> Result<u32, WorkflowServiceError> {
+fn parse_u32(value: &str, label: &str) -> Result<u32, CalendarError> {
     if value.is_empty() || !value.chars().all(|c| c.is_ascii_digit()) {
-        return Err(WorkflowServiceError::InvalidRequest(format!(
+        return Err(CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field must use integers"
         )));
     }
     value.parse::<u32>().map_err(|e| {
-        WorkflowServiceError::InvalidRequest(format!(
+        CalendarError::InvalidSchedule(format!(
             "workflow schedule cron {label} field integer is invalid: {e}"
         ))
     })
@@ -342,5 +353,61 @@ mod tests {
             Calendar::parse("@hourly", "UTC").unwrap().expression(),
             "0 * * * *"
         );
+    }
+
+    #[test]
+    fn cron_fields_preserve_lists_ranges_steps_and_strict_frontiers() {
+        let calendar = Calendar::parse("  5,20-40/10\t9-10 * * 1-5  ", "UTC").unwrap();
+        assert_eq!(calendar.expression(), "5,20-40/10 9-10 * * 1-5");
+        assert_eq!(calendar.timezone(), "UTC");
+        let after = instant("2026-09-11T09:05:00Z");
+        let next = calendar.next_after(after).unwrap();
+        assert_eq!(next, instant("2026-09-11T09:20:00Z"));
+        assert_eq!(
+            calendar
+                .next_after(instant("2026-09-11T10:40:00Z"))
+                .unwrap(),
+            instant("2026-09-14T09:05:00Z")
+        );
+    }
+
+    #[test]
+    fn restricted_day_fields_match_either_date_or_weekday() {
+        let calendar = Calendar::parse("0 0 1 * 7", "UTC").unwrap();
+        let weekday = calendar
+            .next_after(instant("2026-09-02T00:00:00Z"))
+            .unwrap();
+        assert_eq!(weekday, instant("2026-09-06T00:00:00Z"));
+        assert_eq!(
+            calendar
+                .next_after(instant("2026-09-28T00:00:00Z"))
+                .unwrap(),
+            instant("2026-10-01T00:00:00Z")
+        );
+    }
+
+    #[test]
+    fn rejected_cron_syntax_never_produces_a_calendar() {
+        for expression in [
+            "",
+            "@every",
+            "0 0 * *",
+            "0 0 29 * *",
+            "0 0 */2 * *",
+            "0 0 * * MON",
+            "0 0 * * ?",
+            "0,,5 * * * *",
+            "0/ * * * *",
+            "0/1/2 * * * *",
+            "10-5 * * * *",
+            "0-60 * * * *",
+            "0 * * 13 *",
+        ] {
+            assert!(
+                Calendar::parse(expression, "UTC").is_err(),
+                "{expression:?}"
+            );
+        }
+        assert!(Calendar::parse(&" ".repeat(257), "UTC").is_err());
     }
 }

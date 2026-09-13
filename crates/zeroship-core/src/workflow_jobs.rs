@@ -8,6 +8,7 @@ pub use zeroship_id::workflow::{DeploymentId, JobId};
 use crate::{
     app_id::AppId,
     workflow_coordination::{AssignedScope, RequestId, Revision, RunId, UnixMillis, WorkerId},
+    workflow_schedules::ScheduleId,
 };
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
@@ -21,12 +22,17 @@ use std::time::Duration;
     deny_unknown_fields
 )]
 pub enum JobOperation {
+    Activate {
+        revision: Revision,
+    },
     Advance {
         run_id: RunId,
         generation: u32,
         revision: Revision,
     },
     Cron {
+        schedule_id: ScheduleId,
+        schedule_name: String,
         request_id: RequestId,
         run_id: RunId,
         revision: Revision,

@@ -4,8 +4,7 @@ use super::{
     store::Transaction,
     AppPolicy, DeployRegistration, WorkflowService,
 };
-use crate::{calendar::Calendar, operations::StartOptions, validation, WorkflowServiceError};
-use chrono::{DateTime, Utc};
+use crate::{operations::StartOptions, validation, WorkflowServiceError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use zeroship_core::{app_id::AppId, typed_id};
@@ -13,6 +12,9 @@ use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Output},
     sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
     value,
+};
+pub use zeroship_workflow_calendar::{
+    IntervalAnchor, ScheduleCatchUp, ScheduleOverlap, ScheduleTiming,
 };
 
 #[derive(FromRow)]
@@ -34,40 +36,6 @@ pub struct ScheduleRegistration {
     pub overlap: ScheduleOverlap,
     #[serde(default)]
     pub catch_up: ScheduleCatchUp,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
-pub enum ScheduleTiming {
-    Cron {
-        cron_expr: String,
-        tz: String,
-    },
-    Interval {
-        interval_ms: i64,
-        anchor: IntervalAnchor,
-    },
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum IntervalAnchor {
-    Epoch,
-    Deploy,
-}
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ScheduleOverlap {
-    #[default]
-    Allow,
-    SkipIfRunning,
-}
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "lowercase", deny_unknown_fields)]
-pub enum ScheduleCatchUp {
-    #[default]
-    Skip,
-    Backfill {
-        max: usize,
-    },
 }
 
 impl ScheduleRegistration {
@@ -103,45 +71,6 @@ impl ScheduleRegistration {
         }
         self.schedule.next_after(now, now)?;
         Ok(())
-    }
-}
-impl ScheduleTiming {
-    pub fn next_after(&self, after: i64, activated_at: i64) -> Result<i64, WorkflowServiceError> {
-        let overflow = || {
-            WorkflowServiceError::InvalidRequest(
-                "workflow schedule timestamp is out of range".into(),
-            )
-        };
-        match self {
-            Self::Cron { cron_expr, tz } => Calendar::parse(cron_expr, tz)?
-                .next_after(DateTime::<Utc>::from_timestamp_millis(after).ok_or_else(overflow)?)
-                .map(|time| time.timestamp_millis()),
-            Self::Interval {
-                interval_ms,
-                anchor,
-            } => {
-                if *interval_ms <= 0 {
-                    return Err(WorkflowServiceError::InvalidRequest(
-                        "workflow interval must be positive".into(),
-                    ));
-                }
-                let anchor = if *anchor == IntervalAnchor::Epoch {
-                    0
-                } else {
-                    activated_at
-                };
-                let elapsed = after.checked_sub(anchor).ok_or_else(overflow)?;
-                let periods = elapsed
-                    .div_euclid(*interval_ms)
-                    .checked_add(1)
-                    .ok_or_else(overflow)?;
-                let next = anchor
-                    .checked_add(periods.checked_mul(*interval_ms).ok_or_else(overflow)?)
-                    .ok_or_else(overflow)?;
-                DateTime::<Utc>::from_timestamp_millis(next).ok_or_else(overflow)?;
-                Ok(next)
-            }
-        }
     }
 }
 

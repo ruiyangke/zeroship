@@ -68,6 +68,7 @@ zeroship-workflow-client = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-workflow-scheduler = { workspace = true }
+zeroship-workflow-calendar = { workspace = true }
 zeroship-stream = { workspace = true }
 zeroship-metering = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }

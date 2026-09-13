@@ -24,6 +24,7 @@ use zeroship_core::{
         Delivery, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement,
         SettlementReceipt, SubmitJob,
     },
+    workflow_schedules::ScheduleId,
 };
 use zeroship_workflow_client::{Error, Options, WorkerCoordinator};
 
@@ -301,7 +302,12 @@ async fn job_methods_preserve_identity_and_use_remaining_authority() {
 #[compio::test]
 async fn manager_dispatched_jobs_can_be_claimed_and_settled() {
     for operation in [
+        JobOperation::Activate {
+            revision: 1.try_into().unwrap(),
+        },
         JobOperation::Cron {
+            schedule_id: ScheduleId::mint(),
+            schedule_name: "daily-report".into(),
             request_id: RequestId::mint(),
             run_id: RunId::mint(),
             revision: 1.try_into().unwrap(),
@@ -485,7 +491,12 @@ async fn forbidden_publication_is_rejected_without_http() {
         foreign.scope.app_id = AppId::mint();
         assert_eq!(client.submit_job(&foreign).await.unwrap_err(), denied);
         for operation in [
+            JobOperation::Activate {
+                revision: 1.try_into().unwrap(),
+            },
             JobOperation::Cron {
+                schedule_id: ScheduleId::mint(),
+                schedule_name: "daily-report".into(),
                 request_id: RequestId::mint(),
                 run_id: RunId::mint(),
                 revision: 1.try_into().unwrap(),

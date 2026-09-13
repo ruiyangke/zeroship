@@ -23,6 +23,7 @@ use zeroship_core::{
     workflow_jobs::{
         DeploymentId, JobId, JobOperation, JobOutcome, JobSpec, Settlement, SubmitJob,
     },
+    workflow_schedules::ScheduleId,
 };
 use zeroship_data_orm::{
     orm::{Database, Operation, Output},
@@ -694,9 +695,14 @@ fn publication(assignment: &Assignment, job: JobSpec) -> SubmitJob {
     }
 }
 
-fn manager_operations() -> [JobOperation; 2] {
+fn manager_operations() -> [JobOperation; 3] {
     [
+        JobOperation::Activate {
+            revision: 1.try_into().unwrap(),
+        },
         JobOperation::Cron {
+            schedule_id: ScheduleId::mint(),
+            schedule_name: "daily-report".into(),
             request_id: RequestId::mint(),
             run_id: RunId::mint(),
             revision: 1.try_into().unwrap(),

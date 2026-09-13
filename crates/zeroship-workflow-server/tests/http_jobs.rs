@@ -28,6 +28,7 @@ use zeroship_core::{
         Delivery, DeliveryLease, DeploymentId, JobId, JobOperation, JobOutcome, JobSpec,
         Settlement, SettlementReceipt, SubmitJob,
     },
+    workflow_schedules::ScheduleId,
 };
 
 struct Worker {
@@ -399,6 +400,8 @@ async fn queue_refuses_foreign_scope_and_platform_job_origins() {
     };
     let cron = JobSpec {
         operation: JobOperation::Cron {
+            schedule_id: ScheduleId::mint(),
+            schedule_name: "daily-report".into(),
             request_id: RequestId::mint(),
             run_id: RunId::mint(),
             revision: 1.try_into().unwrap(),
@@ -406,7 +409,13 @@ async fn queue_refuses_foreign_scope_and_platform_job_origins() {
         },
         ..fixture.job()
     };
-    for denied in [foreign, management, cron] {
+    let activation = JobSpec {
+        operation: JobOperation::Activate {
+            revision: 1.try_into().unwrap(),
+        },
+        ..fixture.job()
+    };
+    for denied in [foreign, management, cron, activation] {
         let submission = SubmitJob {
             scope: fixture.scope(),
             job: denied.clone(),

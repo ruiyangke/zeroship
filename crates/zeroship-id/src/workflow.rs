@@ -36,3 +36,10 @@ declare_entity_id! {
     typed_id::DEPLOYMENT_PREFIX,
     deployment_id_tests,
 }
+
+declare_entity_id! {
+    /// A logical workflow schedule, retained across deployment revisions.
+    ScheduleId,
+    typed_id::WORKFLOW_SCHEDULE_PREFIX,
+    schedule_id_tests,
+}

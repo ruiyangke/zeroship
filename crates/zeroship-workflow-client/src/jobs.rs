@@ -166,13 +166,13 @@ impl WorkerCoordinator {
 }
 
 const fn worker_publication(job: &JobSpec) -> Result<(), Error> {
-    if matches!(
-        job.operation,
-        JobOperation::Cron { .. } | JobOperation::Management { .. }
-    ) {
-        Err(denied())
-    } else {
-        Ok(())
+    match job.operation {
+        JobOperation::Activate { .. }
+        | JobOperation::Cron { .. }
+        | JobOperation::Management { .. } => Err(denied()),
+        JobOperation::Advance { .. } | JobOperation::Reconcile {} | JobOperation::Collect {} => {
+            Ok(())
+        }
     }
 }
 
