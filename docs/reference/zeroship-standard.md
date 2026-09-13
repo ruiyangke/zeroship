@@ -9,6 +9,18 @@ reserved for host-provided modules, including plugin adapters. Creator artifacts
 must not supply entries under these names, including their `./` spellings.
 Import `zeroship` to access the runtime's exports.
 
+The [native module](../../crates/zeroship-runtime/src/core/zeroship_module.rs)
+provides `env`, `waitUntil`, `getRequest`, request-context accessors and the
+`runQuery` / `runMutation` composition helpers. Static imports, dynamic imports
+and Vite's dev ModuleRunner use the same module instance in an isolate. These
+exports read host state directly; replacing JavaScript globals does not change
+their environment, request identity or capability checks.
+
+Composition helpers return a promise and call the supplied procedure with its
+input under the requested kind. Native awaits and thenable adoption retain the
+inner kind, while the caller's continuation and user `AsyncLocalStorage` stores
+are restored. The helpers preserve returned values and original thrown errors.
+
 ## Default export
 
 The creator-facing shape is:
