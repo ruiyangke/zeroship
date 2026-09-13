@@ -55,7 +55,7 @@ async fn revocation_contract(store: Rc<OrmStore>) {
     let topic = SignalTarget::Topic {
         topic: "updates".into(),
     };
-    let local_scope = service.for_app(local.clone());
+    let local_scope = service.fixture_app(local.clone());
     let message = SignalOptions {
         signal_type: "ready".into(),
         payload: json!("accepted"),
@@ -70,7 +70,7 @@ async fn revocation_contract(store: Rc<OrmStore>) {
                     lifetime_seconds: 60,
                 };
                 let token = service
-                    .for_app(app_id.clone())
+                    .fixture_app(app_id.clone())
                     .issue_signal_token(&RequestId::mint(), options.clone())
                     .await
                     .unwrap();
@@ -94,13 +94,8 @@ async fn revocation_contract(store: Rc<OrmStore>) {
             let other_app = if app_id == &local { &foreign } else { &local };
             assert!(matches!(
                 service
-                    .ingest_signal(
-                        &RequestId::mint(),
-                        token.as_str(),
-                        other_app,
-                        target,
-                        message.clone()
-                    )
+                    .fixture_app((other_app).clone())
+                    .ingest_signal(&RequestId::mint(), token.as_str(), target, message.clone())
                     .await,
                 Err(WorkflowServiceError::NotFound(_)),
             ));
@@ -109,13 +104,8 @@ async fn revocation_contract(store: Rc<OrmStore>) {
                     .as_ref()
                     .is_none_or(|revoked| revoked == target);
             let result = service
-                .ingest_signal(
-                    &RequestId::mint(),
-                    token.as_str(),
-                    app_id,
-                    target,
-                    message.clone(),
-                )
+                .fixture_app((app_id).clone())
+                .ingest_signal(&RequestId::mint(), token.as_str(), target, message.clone())
                 .await;
             if denied {
                 assert_eq!(result, Err(WorkflowServiceError::Unauthenticated));
@@ -124,10 +114,10 @@ async fn revocation_contract(store: Rc<OrmStore>) {
                     .await
                     .unwrap();
                 service
+                    .fixture_app((app_id).clone())
                     .ingest_signal(
                         &RequestId::mint(),
                         replacement.as_str(),
-                        app_id,
                         target,
                         message.clone(),
                     )
@@ -136,13 +126,8 @@ async fn revocation_contract(store: Rc<OrmStore>) {
                 // Issuing another token must not reset the persisted revocation epoch.
                 assert_eq!(
                     service
-                        .ingest_signal(
-                            &RequestId::mint(),
-                            token.as_str(),
-                            app_id,
-                            target,
-                            message.clone()
-                        )
+                        .fixture_app((app_id).clone())
+                        .ingest_signal(&RequestId::mint(), token.as_str(), target, message.clone())
                         .await,
                     Err(WorkflowServiceError::Unauthenticated)
                 );

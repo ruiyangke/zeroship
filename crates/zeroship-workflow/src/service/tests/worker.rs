@@ -135,7 +135,7 @@ async fn host(
         options(),
     )
     .unwrap();
-    let app = service.for_app(app);
+    let app = service.fixture_app(app);
     (service, app, probe, worker, deployments)
 }
 async fn wait_for(mut condition: impl FnMut() -> bool) {
@@ -402,12 +402,17 @@ async fn worker_refuses_missing_storage_and_invalid_capacity_before_claiming() {
         assert!(WorkflowWorker::new(tasks.clone(), executor.clone(), options).is_err());
     }
     let run = service
-        .for_app(app.clone())
+        .fixture_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
     assert_eq!(
-        service.for_app(app).status(&run.id).await.unwrap().state,
+        service
+            .fixture_app(app)
+            .status(&run.id)
+            .await
+            .unwrap()
+            .state,
         RunState::Queued
     );
 }

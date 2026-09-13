@@ -1,6 +1,6 @@
 //! App-scoped calls to the customer engine on its owning compio thread.
 
-use super::{AppWorkflows, RequestId};
+use super::{policy::PolicyAuthority, AppWorkflows, PolicyBinding, RequestId};
 use crate::{
     backend::WorkflowBackend,
     operations::{
@@ -21,6 +21,7 @@ type Request = Box<dyn FnOnce(AppWorkflows) -> LocalBoxFuture<'static, ()> + Sen
 #[derive(Clone)]
 pub struct AppBackend {
     app: AppId,
+    binding: PolicyBinding,
     requests: flume::Sender<Request>,
     max_output_bytes: usize,
 }
@@ -41,6 +42,7 @@ impl AppBackend {
         let (requests, receiver) = flume::bounded::<Request>(MAX_QUEUED_REQUESTS);
         let backend = Self {
             app: api.app_id().clone(),
+            binding: api.binding.clone(),
             requests,
             max_output_bytes,
         };
@@ -59,8 +61,25 @@ impl AppBackend {
         &self.app
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "caller cancellation is driven by its compio runtime"
+    )]
     async fn call<T: Send + 'static>(
         &self,
+        operation: impl FnOnce(AppWorkflows) -> LocalBoxFuture<'static, Result<T, WorkflowServiceError>>
+            + Send
+            + 'static,
+    ) -> Result<T, WorkflowServiceError> {
+        let authority = self.binding.authority()?;
+        authority
+            .run(self.dispatch(Some(authority.clone()), operation))
+            .await
+    }
+
+    async fn dispatch<T: Send + 'static>(
+        &self,
+        authority: Option<PolicyAuthority>,
         operation: impl FnOnce(AppWorkflows) -> LocalBoxFuture<'static, Result<T, WorkflowServiceError>>
             + Send
             + 'static,
@@ -73,7 +92,14 @@ impl AppBackend {
                 }
                 let result = {
                     let cancelled = reply.cancellation();
-                    let operation = operation(api);
+                    let operation = async move {
+                        if let Some(authority) = authority {
+                            let api = api.with_authority(authority.clone())?;
+                            authority.run(operation(api)).await
+                        } else {
+                            operation(api).await
+                        }
+                    };
                     futures::pin_mut!(cancelled, operation);
                     match futures::future::select(cancelled, operation).await {
                         futures::future::Either::Right((result, _)) => result,
@@ -121,8 +147,11 @@ impl WorkflowBackend for AppBackend {
         .await
     }
     async fn status(&self, run_id: String) -> Result<RunStatus, WorkflowServiceError> {
-        self.call(move |api| async move { api.status(&run_id).await }.boxed_local())
-            .await
+        // Status reads existing app history and cannot grant mutation authority.
+        self.dispatch(None, move |api| {
+            async move { api.status(&run_id).await }.boxed_local()
+        })
+        .await
     }
     async fn signal(
         &self,

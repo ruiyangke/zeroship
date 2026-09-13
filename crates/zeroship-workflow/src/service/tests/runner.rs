@@ -211,9 +211,9 @@ impl Harness {
     async fn new(store: Rc<OrmStore>) -> Self {
         let (service, app, _, _deployments) = registered_service(store).await;
         service
-            .register_app(
+            .fixture_register(
                 &app,
-                super::configured_policy(
+                super::leased_policy(
                     2,
                     AppPolicy {
                         lease_ms: 600,
@@ -223,7 +223,7 @@ impl Harness {
             )
             .await
             .unwrap();
-        let app = service.for_app(app);
+        let app = service.fixture_app(app);
         let run = app
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await
@@ -272,18 +272,16 @@ async fn completion_contract(harness: Harness) {
     harness
         .tasks
         .app
-        .service
-        .register_app(
-            harness.tasks.app.app_id(),
-            configured_policy(
-                3,
-                AppPolicy {
-                    lease_ms: 5_000,
-                    ..AppPolicy::default()
-                },
-            ),
-        )
-        .await
+        .binding
+        .begin_refresh()
+        .unwrap()
+        .install(leased_policy(
+            3,
+            AppPolicy {
+                lease_ms: 5_000,
+                ..AppPolicy::default()
+            },
+        ))
         .unwrap();
     harness.probe.mode.set(ExecutionMode::AfterRenewal);
     harness.tasks.lose_completion.set(true);

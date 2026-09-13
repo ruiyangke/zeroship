@@ -92,13 +92,16 @@ async fn compensation_contract(store: Rc<OrmStore>) {
         .await
         .unwrap();
     let status = service
-        .for_app(local.clone())
+        .fixture_app(local.clone())
         .status(&run_id)
         .await
         .unwrap();
     assert_eq!(status.state, crate::operations::RunState::Failed);
     assert!(matches!(
-        service.for_app(local.clone()).status(&foreign_run).await,
+        service
+            .fixture_app(local.clone())
+            .status(&foreign_run)
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     let error = status.error.unwrap();
@@ -113,7 +116,7 @@ async fn compensation_contract(store: Rc<OrmStore>) {
     }
     assert_eq!(
         service
-            .for_app(foreign)
+            .fixture_app(foreign)
             .status(&foreign_run)
             .await
             .unwrap()
@@ -191,9 +194,16 @@ async fn continuation_contract(store: Rc<OrmStore>) {
         )
         .await
         .unwrap();
-    let status = service.for_app(local.clone()).status(&child).await.unwrap();
+    let status = service
+        .fixture_app(local.clone())
+        .status(&child)
+        .await
+        .unwrap();
     assert!(matches!(
-        service.for_app(local.clone()).status(&foreign_child).await,
+        service
+            .fixture_app(local.clone())
+            .status(&foreign_child)
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     let successor = status.output.unwrap()["continuedAsNew"]

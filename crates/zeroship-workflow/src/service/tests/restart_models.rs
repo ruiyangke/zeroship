@@ -189,7 +189,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
     let request = RequestId::mint();
     assert!(matches!(
         service
-            .for_app(owner.clone())
+            .fixture_app(owner.clone())
             .restart(&RequestId::mint(), &foreign_run, RestartOptions::default())
             .await,
         Err(WorkflowServiceError::NotFound(_))
@@ -203,7 +203,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
     };
     fault.install(prefix - 1).await;
     let error = service
-        .for_app(owner.clone())
+        .fixture_app(owner.clone())
         .restart(&request, &run, options.clone())
         .await
         .unwrap_err();
@@ -244,12 +244,12 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
     fault.remove().await;
 
     let result = service
-        .for_app(owner.clone())
+        .fixture_app(owner.clone())
         .restart(&request, &run, options.clone())
         .await
         .unwrap();
     let retry = service
-        .for_app(owner.clone())
+        .fixture_app(owner.clone())
         .restart(&request, &run, options)
         .await
         .unwrap();
@@ -286,7 +286,7 @@ async fn contract(store: Rc<OrmStore>, fault: Fault) {
 
     // A full restart keeps the input reference while discarding replay results.
     service
-        .for_app(owner.clone())
+        .fixture_app(owner.clone())
         .restart(&RequestId::mint(), &run, RestartOptions::default())
         .await
         .unwrap();

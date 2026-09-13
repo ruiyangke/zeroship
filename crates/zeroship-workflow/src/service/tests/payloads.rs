@@ -69,14 +69,14 @@ async fn delayed_payload_write(operation: &str) {
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(local(dir.path())).unwrap();
     service
-        .for_app(app.clone())
+        .fixture_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
     service
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     lease_ms: 300,
@@ -149,8 +149,8 @@ async fn s3_payload_ownership_and_retention() {
 async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
     let (service, a, b, _deployments) = registered_service(store.clone()).await;
     let service = service.with_payload_storage(storage.clone()).unwrap();
-    let scope = service.for_app(a.clone());
-    let foreign = service.for_app(b);
+    let scope = service.fixture_app(a.clone());
+    let foreign = service.fixture_app(b);
     let worker = WorkerIdentity::new("payload-worker".into()).unwrap();
     let stranger = WorkerIdentity::new("stranger".into()).unwrap();
     let run = scope
@@ -500,7 +500,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         ..Default::default()
     };
     recovered
-        .register_app(&a, super::configured_policy(2, policy))
+        .fixture_register(&a, super::leased_policy(2, policy))
         .await
         .unwrap();
     assert!(matches!(
@@ -530,7 +530,7 @@ async fn payload_contract(store: Rc<OrmStore>, storage: StorageStore) {
         Err(WorkflowServiceError::ResourceExhausted(_))
     ));
     recovered
-        .register_app(&a, super::configured_policy(3, AppPolicy::default()))
+        .fixture_register(&a, super::leased_policy(3, AppPolicy::default()))
         .await
         .unwrap();
     recovered
@@ -563,7 +563,7 @@ async fn expire_uploads(store: &Rc<OrmStore>) {
 }
 
 async fn continuation_and_child(service: &WorkflowService, app: &AppId, worker: &WorkerIdentity) {
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -721,7 +721,7 @@ async fn deletion_failure_recovers_without_reopening_payload_authority() {
     });
     let storage = StorageStore::from_backend(backend);
     let service = service.with_payload_storage(storage.clone()).unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -815,7 +815,7 @@ async fn postgres_collection_rechecks_references_after_waiting_for_completion() 
     .with_deployments(service.deployments.clone().unwrap())
     .with_payload_storage(objects)
     .unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await

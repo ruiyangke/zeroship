@@ -20,7 +20,7 @@ async fn postgres_delivery_receipt_failure_rolls_back_checkpoint() {
     let fixture = PostgresFixture::start().await;
     let admin = connect(&fixture.admin_url).await;
     let (service, app, _, _deployments) = registered_service(Rc::new(fixture.store.clone())).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -109,7 +109,7 @@ case!(
 
 async fn competing(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -163,7 +163,7 @@ case!(
 
 async fn lock_waits(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -183,25 +183,26 @@ async fn lock_waits(store: Rc<OrmStore>) {
         };
         service
             .policies
-            .install(&app, configured_policy(revision, policy))
+            .fixture_install(&app, leased_policy(revision, policy))
             .unwrap();
         let mut accepting = Box::pin(scope.accept_job(&grant));
         assert!(futures::poll!(accepting.as_mut()).is_pending());
         if expiry {
             // The operation must cancel while the creator lock is still held.
-            assert!(matches!(
-                compio::time::timeout(Duration::from_secs(1), accepting)
-                    .await
-                    .unwrap(),
-                Err(WorkflowServiceError::Timeout)
-            ));
+            let result = compio::time::timeout(Duration::from_secs(1), accepting)
+                .await
+                .expect("delivery must cancel while the app lock is held");
+            assert!(
+                matches!(result, Err(WorkflowServiceError::Timeout)),
+                "{result:?}"
+            );
             held.commit().await.unwrap();
         } else {
             service
                 .policies
-                .install(
+                .fixture_install(
                     &app,
-                    configured_policy(
+                    leased_policy(
                         4,
                         AppPolicy {
                             dispatch: false,
@@ -211,10 +212,11 @@ async fn lock_waits(store: Rc<OrmStore>) {
                 )
                 .unwrap();
             held.commit().await.unwrap();
-            assert!(matches!(
-                accepting.await,
-                Err(WorkflowServiceError::Unavailable(_))
-            ));
+            let result = accepting.await;
+            assert!(
+                matches!(result, Err(WorkflowServiceError::Unavailable(_))),
+                "{result:?}"
+            );
         }
         let tx = service.begin().await.unwrap();
         for table in ["tasks", "job_receipts"] {
@@ -228,7 +230,7 @@ async fn lock_waits(store: Rc<OrmStore>) {
     assert!(grant.remaining().is_some());
     service
         .policies
-        .install(&app, configured_policy(5, AppPolicy::default()))
+        .fixture_install(&app, leased_policy(5, AppPolicy::default()))
         .unwrap();
     task(scope.accept_job(&grant).await.unwrap());
 }
@@ -291,7 +293,7 @@ impl JobLease for ProbeLease {
 
 async fn receipts(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = scope
         .start(
             &RequestId::mint(),
@@ -315,7 +317,7 @@ async fn receipts(store: Rc<OrmStore>) {
     let job = publish(&scope, &manager).await;
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     assert!(matches!(
-        service.for_app(other).accept_job(&grant).await,
+        service.fixture_app(other).accept_job(&grant).await,
         Err(WorkflowServiceError::PermissionDenied)
     ));
     let claimed = task(scope.accept_job(&grant).await.unwrap());
@@ -404,7 +406,7 @@ async fn retained_history(
     let reopened = WorkflowService::open(service.store.clone(), service.policies.clone())
         .await
         .unwrap()
-        .for_app(scope.app.clone());
+        .fixture_app(scope.app.clone());
     assert_eq!(
         reopened.job_receipt(job).await.unwrap(),
         Some(receipt.clone())
@@ -418,7 +420,7 @@ async fn retained_history(
 
 async fn attempts(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -503,7 +505,7 @@ async fn expire(grant: &impl JobLease) {
 
 async fn checkpoint(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -552,7 +554,7 @@ async fn checkpoint(store: Rc<OrmStore>) {
 
 async fn policy_bounds(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -563,9 +565,9 @@ async fn policy_bounds(store: Rc<OrmStore>) {
     let grant = manager.queue.claim(&owner).await.unwrap().unwrap();
     service
         .policies
-        .install(
+        .fixture_install(
             &app,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     dispatch: false,
@@ -585,9 +587,9 @@ async fn policy_bounds(store: Rc<OrmStore>) {
         .is_none());
     service
         .policies
-        .install(
+        .fixture_install(
             &app,
-            configured_policy(
+            leased_policy(
                 3,
                 AppPolicy {
                     lease_ms: 700,

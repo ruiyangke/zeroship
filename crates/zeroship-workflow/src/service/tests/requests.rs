@@ -55,12 +55,12 @@ async fn reopen(scope: &AppWorkflows) -> AppWorkflows {
         Some(authority) => service.with_signal_authority(authority.clone()),
         None => service,
     };
-    service.for_app(scope.app_id().clone())
+    service.fixture_app(scope.app_id().clone())
 }
 
 async fn lifecycle_receipts(store: Rc<OrmStore>) {
     let (service, local, foreign, _deployments) = registered_service(store).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = RequestId::mint();
     // No workflow key can hide an accidentally repeated acceptance.
     let options = StartOptions::default();
@@ -151,7 +151,7 @@ async fn lifecycle_receipts(store: Rc<OrmStore>) {
     ));
     assert_ne!(
         service
-            .for_app(foreign)
+            .fixture_app(foreign)
             .start(&request, "Example", options.clone())
             .await
             .unwrap()
@@ -160,9 +160,9 @@ async fn lifecycle_receipts(store: Rc<OrmStore>) {
     );
 
     service
-        .register_app(
+        .fixture_register(
             &local,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     admission: false,
@@ -222,7 +222,7 @@ async fn token_receipts(store: Rc<OrmStore>) {
         )
         .unwrap(),
     ));
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let target = SignalTarget::Topic {
         topic: "updates".into(),
     };
@@ -242,27 +242,15 @@ async fn token_receipts(store: Rc<OrmStore>) {
     };
     let ingress_request = RequestId::mint();
     let accepted = service
-        .ingest_signal(
-            &ingress_request,
-            issued.as_str(),
-            &local,
-            &target,
-            message.clone(),
-        )
+        .fixture_app(local.clone())
+        .ingest_signal(&ingress_request, issued.as_str(), &target, message.clone())
         .await
         .unwrap();
     age_receipts(&scope).await;
     let reopened = reopen(&scope).await;
     assert_eq!(
         reopened
-            .service
-            .ingest_signal(
-                &ingress_request,
-                issued.as_str(),
-                &local,
-                &target,
-                message.clone()
-            )
+            .ingest_signal(&ingress_request, issued.as_str(), &target, message.clone())
             .await
             .unwrap(),
         accepted
@@ -293,11 +281,9 @@ async fn token_receipts(store: Rc<OrmStore>) {
     );
     assert_eq!(
         reopened
-            .service
             .ingest_signal(
                 &ingress_request,
                 replayed.as_str(),
-                &local,
                 &target,
                 message.clone()
             )
@@ -312,8 +298,7 @@ async fn token_receipts(store: Rc<OrmStore>) {
     // A fresh valid capability recovers the same accepted ingress result.
     assert_eq!(
         reopened
-            .service
-            .ingest_signal(&ingress_request, fresh.as_str(), &local, &target, message)
+            .ingest_signal(&ingress_request, fresh.as_str(), &target, message)
             .await
             .unwrap(),
         accepted

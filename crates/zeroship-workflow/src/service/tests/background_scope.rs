@@ -4,10 +4,7 @@
 )]
 
 use super::*;
-use crate::{
-    engine::WorkflowOutputRef,
-    service::WorkerIdentity,
-};
+use crate::{engine::WorkflowOutputRef, service::WorkerIdentity};
 use std::time::Instant;
 use zeroship_storage::{backend::OnceChunk, LocalFs, StorageStore};
 
@@ -46,7 +43,7 @@ async fn seed_app(
         .await
         .unwrap();
     service
-        .for_app(app.clone())
+        .fixture_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
@@ -132,7 +129,7 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     let foreign_payload = seed_app(&deployments, &service, &foreign, &worker).await;
     seed_unassigned_backlog(&service, &foreign).await;
     let assigned_broadcast = service
-        .for_app(assigned.clone())
+        .fixture_app(assigned.clone())
         .broadcast(
             &RequestId::mint(),
             "updates",
@@ -169,7 +166,7 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     assert_eq!(reopened.tick_broadcasts().await.unwrap(), 0);
     assert_eq!(reopened.collect_payloads(1).await.unwrap(), 0);
     reopened
-        .register_app(&assigned, configured_policy(1, AppPolicy::default()))
+        .fixture_register(&assigned, leased_policy(1, AppPolicy::default()))
         .await
         .unwrap();
     let task = reopened.poll(&worker).await.unwrap().unwrap();
@@ -190,12 +187,12 @@ async fn background_contract(store: Rc<OrmStore>, path: &Path) {
     tx.commit().await.unwrap();
 
     reopened
-        .register_app(
+        .policies
+        .fixture_install(
             &assigned,
             PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), Instant::now())
                 .unwrap(),
         )
-        .await
         .unwrap();
     assert_eq!(reopened.collect_payloads(1).await.unwrap(), 1);
     let payloads = service.payload_storage.as_ref().unwrap();

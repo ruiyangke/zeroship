@@ -41,20 +41,22 @@ fn publish(path: &Path, version: &str) {
 }
 
 async fn client(root: &Path, app: &AppId) -> (WorkflowService, AppWorkflows) {
+    let policies = Arc::new(HostPolicies::default());
+    let binding = policies.bind(app.clone()).unwrap();
+    binding
+        .begin_refresh()
+        .unwrap()
+        .install(
+            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
+        )
+        .unwrap();
     let service = WorkflowService::open(
         Rc::new(test_storage(root, app).open().await.unwrap()),
-        Arc::new(HostPolicies::default()),
+        policies,
     )
     .await
     .unwrap();
-    service
-        .register_app(
-            app,
-            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
-        )
-        .await
-        .unwrap();
-    let api = service.for_app(app.clone());
+    let api = service.register_app(&binding).await.unwrap();
     (service, api)
 }
 

@@ -114,7 +114,7 @@ async fn output_contract(store: Rc<OrmStore>) {
             dir.path(),
         ))))
         .unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let tasks = service.tasks(WorkerIdentity::new("output-writer".into()).unwrap());
 
     // An inline value needs no payload object, including JSON null.
@@ -221,7 +221,7 @@ async fn output_contract(store: Rc<OrmStore>) {
     assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), value);
     assert!(matches!(
         service
-            .for_app(other)
+            .fixture_app(other)
             .read_payload(&receipt.run_id, 0, PayloadSlot::Output)
             .await,
         Err(WorkflowServiceError::NotFound(_))
@@ -257,9 +257,9 @@ async fn output_contract(store: Rc<OrmStore>) {
         (4, "auto", 64, 16),
     ] {
         service
-            .register_app(
+            .fixture_register(
                 &app,
-                super::configured_policy(
+                super::leased_policy(
                     revision,
                     AppPolicy {
                         max_payload_bytes: service_limit,

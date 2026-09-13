@@ -262,12 +262,12 @@ async fn reopen(scope: &AppWorkflows) -> AppWorkflows {
         .await
         .unwrap()
         .with_deployments(scope.service.deployments.clone().unwrap())
-        .for_app(scope.app.clone())
+        .fixture_app(scope.app.clone())
 }
 
 async fn recovery(store: Rc<OrmStore>, faults: &FaultDb) {
     let (service, app, other, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let request = RequestId::mint();
     let options = StartOptions {
         input: json!({"secret":"creator-private-input"}),
@@ -292,7 +292,7 @@ async fn recovery(store: Rc<OrmStore>, faults: &FaultDb) {
     );
     assert_eq!(scope.pending_jobs(None, 10).await.unwrap(), jobs);
     assert!(service
-        .for_app(other.clone())
+        .fixture_app(other.clone())
         .pending_jobs(None, 10)
         .await
         .unwrap()
@@ -313,7 +313,10 @@ async fn recovery(store: Rc<OrmStore>, faults: &FaultDb) {
         Err(WorkflowServiceError::PermissionDenied)
     );
     assert!(matches!(
-        service.for_app(other).publish_job(&job.id, &foreign).await,
+        service
+            .fixture_app(other)
+            .publish_job(&job.id, &foreign)
+            .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     assert_eq!(foreign.calls.get(), 0);
@@ -392,7 +395,7 @@ async fn race_confirmation(scope: &AppWorkflows, run: &str, job: &JobSpec, publi
 
 async fn rollback(store: Rc<OrmStore>, faults: &FaultDb) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let request = RequestId::mint();
     faults.inject("INSERT").await;
     assert!(scope
@@ -452,7 +455,7 @@ async fn rollback(store: Rc<OrmStore>, faults: &FaultDb) {
 
 async fn frontiers(store: Rc<OrmStore>, _faults: &FaultDb) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
@@ -533,7 +536,7 @@ async fn frontiers(store: Rc<OrmStore>, _faults: &FaultDb) {
 
 async fn retention(store: Rc<OrmStore>, _faults: &FaultDb) {
     let (service, app, other, platform) = registered_service(store).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await

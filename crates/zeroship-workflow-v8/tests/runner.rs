@@ -65,7 +65,7 @@ const BURN: &str = r"
 ";
 
 struct Loader {
-    service: WorkflowService,
+    app: AppWorkflows,
     probes: RefCell<Vec<InnerProbe>>,
     cpu_limit: Option<Duration>,
     markers: Markers,
@@ -80,6 +80,9 @@ impl WorkflowRuntimeLoader for Loader {
             .unwrap()
             .contains(assignment.token.as_str()));
         let app = AppId::parse(&assignment.invocation.app_id).unwrap();
+        if self.app.app_id() != &app {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
         zeroship_runtime::init_v8();
         let mut builder = Runtime::builder()
             .modules(
@@ -101,7 +104,7 @@ impl WorkflowRuntimeLoader for Loader {
                 Arc::new(self.markers.clone()),
                 Arc::new(WorkflowBinding::service(
                     // Replay reads must use task authority and its own read budget.
-                    self.service.for_app(app.clone()).into_backend(1).unwrap(),
+                    self.app.clone().into_backend(1).unwrap(),
                 )),
             ])
             .app_id(app);
@@ -133,9 +136,17 @@ impl Fixture {
     }
     async fn with_limits(source: &str, cpu_limit: Option<Duration>, policy: AppPolicy) -> Self {
         let dir = tempfile::tempdir().unwrap();
+        let app = AppId::mint();
+        let policies = Arc::new(HostPolicies::default());
+        let binding = policies.bind(app.clone()).unwrap();
+        binding
+            .begin_refresh()
+            .unwrap()
+            .install(PolicySnapshot::configuration(1.try_into().unwrap(), policy).unwrap())
+            .unwrap();
         let service = WorkflowService::open(
             std::rc::Rc::new(orm_fixture::store(dir.path()).await),
-            Arc::new(HostPolicies::default()),
+            policies,
         )
         .await
         .unwrap()
@@ -144,15 +155,8 @@ impl Fixture {
         )))
         .unwrap();
         let deployments = deployment_fixture::Deployments::new().await;
-        let app = AppId::mint();
         let service = service.with_deployments(deployments.binding(&[&app]));
-        service
-            .register_app(
-                &app,
-                PolicySnapshot::configuration(1.try_into().unwrap(), policy).unwrap(),
-            )
-            .await
-            .unwrap();
+        let api = service.register_app(&binding).await.unwrap();
         let declaration = deployments
             .publish(
                 &app,
@@ -170,10 +174,10 @@ impl Fixture {
         Self {
             directory: dir,
             deployments,
-            app: service.for_app(app),
+            app: api.clone(),
             service: service.clone(),
             loader: Rc::new(Loader {
-                service,
+                app: api,
                 probes: RefCell::new(Vec::new()),
                 cpu_limit,
                 markers: Markers::default(),
@@ -890,24 +894,26 @@ async fn replay_loads_retained_dependencies_after_redeploy_and_host_restart() {
     }
     fixture.assert_disposed().await;
     let old_run = old_run.unwrap();
+    let policies = Arc::new(HostPolicies::default());
+    let binding = policies.bind(app.clone()).unwrap();
+    binding
+        .begin_refresh()
+        .unwrap()
+        .install(
+            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
+        )
+        .unwrap();
     let service = WorkflowService::open(
         std::rc::Rc::new(orm_fixture::store(fixture.directory.path()).await),
-        Arc::new(HostPolicies::default()),
+        policies,
     )
     .await
     .unwrap()
     .with_deployments(fixture.deployments.binding(&[&app]));
-    service
-        .register_app(
-            &app,
-            PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
-        )
-        .await
-        .unwrap();
-    fixture.app = service.for_app(app);
-    fixture.service = service.clone();
+    fixture.app = service.register_app(&binding).await.unwrap();
+    fixture.service = service;
     fixture.loader = Rc::new(Loader {
-        service,
+        app: fixture.app.clone(),
         probes: RefCell::new(Vec::new()),
         cpu_limit: Some(Duration::from_millis(100)),
         markers: Markers::default(),

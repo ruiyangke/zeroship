@@ -6,7 +6,7 @@
 )]
 
 use super::{
-    app::{decode, encode, lock_app, lock_run, parse_state},
+    app::{decode, encode, lock_app_state, lock_run, parse_state},
     frontier,
     models::{self, job_receipts},
     policy::PolicyAuthority,
@@ -26,6 +26,31 @@ use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
     value,
 };
+
+/// Keep the original attempt bound while interrupting invalidated policy I/O.
+/// Missing initial authority permits only the caller's immutable receipt path.
+pub(super) fn run_attempt<'a, T: 'a>(
+    cancelled: Option<futures::future::Shared<futures::future::BoxFuture<'static, ()>>>,
+    budget: Duration,
+    operation: impl std::future::Future<Output = Result<T, WorkflowServiceError>> + 'a,
+) -> futures::future::LocalBoxFuture<'a, Result<T, WorkflowServiceError>> {
+    use futures::FutureExt;
+    Box::pin(async move {
+        let cancelled = async move {
+            match cancelled {
+                Some(cancelled) => cancelled.await,
+                None => futures::future::pending::<()>().await,
+            }
+        }
+        .fuse();
+        let operation = compio::time::timeout(budget, operation).fuse();
+        futures::pin_mut!(cancelled, operation);
+        futures::select_biased! {
+            () = cancelled => Err(WorkflowServiceError::Unavailable("workflow host policy unavailable".into())),
+            result = operation => result.map_err(|_| WorkflowServiceError::Timeout)?,
+        }
+    })
+}
 
 /// A semantic result belongs to the logical job, not its delivery attempt.
 /// Successor publication remains independently durable in the creator outbox.
@@ -99,7 +124,7 @@ impl CapturedLease {
     ) -> Result<Self, WorkflowServiceError> {
         let started = Instant::now();
         let duration = remaining(lease)?;
-        let policy = scope.service.policies.authority(&scope.app)?;
+        let policy = scope.capture_policy().authority()?.clone();
         let duration = duration.min(Duration::from_millis(
             u64::try_from(policy.policy.lease_ms).map_err(|_| WorkflowServiceError::Timeout)?,
         ));
@@ -117,7 +142,20 @@ impl CapturedLease {
     }
     pub(super) fn check(&self, scope: &AppWorkflows) -> Result<(), WorkflowServiceError> {
         remaining(self)?;
-        self.policy.check(&scope.service.policies, &scope.app)
+        if !self.policy.belongs_to(&scope.binding) {
+            return Err(WorkflowServiceError::PermissionDenied);
+        }
+        self.policy.check()
+    }
+}
+impl CapturedLease {
+    pub(super) fn cancelled(
+        &self,
+    ) -> futures::future::Shared<futures::future::BoxFuture<'static, ()>> {
+        self.policy.cancelled()
+    }
+    pub(super) const fn policy(&self) -> &super::AppPolicy {
+        &self.policy.policy
     }
 }
 impl JobLease for CapturedLease {
@@ -125,6 +163,7 @@ impl JobLease for CapturedLease {
         &self.delivery
     }
     fn remaining(&self) -> Option<Duration> {
+        self.policy.check().ok()?;
         self.expires
             .checked_duration_since(Instant::now())
             .filter(|duration| !duration.is_zero())
@@ -185,9 +224,14 @@ impl Record {
                         JobOutcome::Rejected => self.run_id.is_none(),
                         _ => false,
                     };
-                    if !valid { return Err(invalid()); }
+                    if !valid {
+                        return Err(invalid());
+                    }
                 }
-                Ok(Some(JobReceipt { job: job.clone(), outcome }))
+                Ok(Some(JobReceipt {
+                    job: job.clone(),
+                    outcome,
+                }))
             }
             (None, None) => Ok(None),
             _ => Err(invalid()),
@@ -212,9 +256,12 @@ impl AppWorkflows {
         check_scope(&self.app, job)?;
         let captured = CapturedLease::capture(self, lease);
         let budget = attempt_budget(captured.as_ref().ok(), None);
-        compio::time::timeout(budget, Box::pin(self.accept_captured(delivery, captured)))
-            .await
-            .map_err(|_| WorkflowServiceError::Timeout)?
+        run_attempt(
+            captured.as_ref().ok().map(CapturedLease::cancelled),
+            budget,
+            Box::pin(self.accept_captured(delivery, captured)),
+        )
+        .await
     }
 
     async fn accept_captured(
@@ -234,7 +281,7 @@ impl AppWorkflows {
             ));
         };
         let mut tx = self.service.begin().await?;
-        lock_app(&mut tx, &self.app).await?;
+        lock_app_state(&mut tx, &self.app).await?;
         let existing = read(&tx, job).await?;
         if let Some(existing) = &existing {
             if let Some(receipt) = existing.receipt(job)? {
@@ -338,7 +385,7 @@ impl AppWorkflows {
         task.remaining()?;
         let lease = CapturedLease::capture(self, grant)?;
         let budget = attempt_budget(Some(&lease), Some(task));
-        compio::time::timeout(budget, async {
+        run_attempt(Some(lease.cancelled()), budget, async {
             let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
             let mut tx = self.service.begin().await?;
             let claim = tasks::authorized_task(
@@ -386,7 +433,6 @@ impl AppWorkflows {
             Ok((renewed, control))
         })
         .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
     }
 
     /// Commit a stopped executor's checkpoint, semantic job receipt and intents.
@@ -404,13 +450,14 @@ impl AppWorkflows {
         let delivery = self.task_delivery(task, grant)?;
         let captured = CapturedLease::capture(self, grant);
         let budget = attempt_budget(captured.as_ref().ok(), Some(task));
-        compio::time::timeout(
+        run_attempt(
+            captured.as_ref().ok().map(CapturedLease::cancelled),
             budget,
             Box::pin(async {
                 let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
                 let digest = super::types::digest(&execution)?;
                 let mut tx = self.service.begin().await?;
-                let claim = tasks::authorized_task(
+                let claim = tasks::inspect_task(
                     &mut tx,
                     &worker,
                     &task.assignment.id,
@@ -434,6 +481,7 @@ impl AppWorkflows {
                 lease.check(self)?;
                 task.remaining()?;
                 claim.validate_live()?;
+                let claim = claim.authorize(&mut tx)?;
                 let completion = tasks::complete_in(&mut tx, &claim, execution, &digest).await?;
                 let outcome = if completion.state.is_terminal() {
                     JobOutcome::Completed
@@ -449,7 +497,6 @@ impl AppWorkflows {
             }),
         )
         .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
     }
 
     /// Release only after execution and its native operations have stopped.
@@ -465,36 +512,40 @@ impl AppWorkflows {
         let delivery = self.task_delivery(task, grant)?;
         let captured = CapturedLease::capture(self, grant);
         let budget = attempt_budget(captured.as_ref().ok(), Some(task));
-        compio::time::timeout(budget, async {
-            let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
-            let mut tx = self.service.begin().await?;
-            let claim = tasks::authorized_task(
-                &mut tx,
-                &worker,
-                &task.assignment.id,
-                &task.assignment.token,
-            )
-            .await?;
-            authorize_task(&claim, &delivery)?;
-            if claim.task.state == "released" {
-                tx.commit().await?;
-                return Ok(());
-            }
-            let lease = captured?;
-            lease.check(self)?;
-            task.remaining()?;
-            claim.validate_live()?;
-            claim
-                .update_task(&tx, value!({"state":"released", "finished_at":claim.now}))
+        run_attempt(
+            captured.as_ref().ok().map(CapturedLease::cancelled),
+            budget,
+            async {
+                let worker = WorkerIdentity::new(delivery.worker_id.as_str().into())?;
+                let mut tx = self.service.begin().await?;
+                let claim = tasks::inspect_task(
+                    &mut tx,
+                    &worker,
+                    &task.assignment.id,
+                    &task.assignment.token,
+                )
                 .await?;
-            claim.update_run(&tx, value!({"due_at":claim.now})).await?;
-            claim.validate_at(tx.now().await?)?;
-            lease.check(self)?;
-            task.remaining()?;
-            tx.commit().await
-        })
+                authorize_task(&claim, &delivery)?;
+                if claim.task.state == "released" {
+                    tx.commit().await?;
+                    return Ok(());
+                }
+                let lease = captured?;
+                lease.check(self)?;
+                task.remaining()?;
+                claim.validate_live()?;
+                let claim = claim.authorize(&mut tx)?;
+                claim
+                    .update_task(&tx, value!({"state":"released", "finished_at":claim.now}))
+                    .await?;
+                claim.update_run(&tx, value!({"due_at":claim.now})).await?;
+                claim.validate_at(tx.now().await?)?;
+                lease.check(self)?;
+                task.remaining()?;
+                tx.commit().await
+            },
+        )
         .await
-        .map_err(|_| WorkflowServiceError::Timeout)?
     }
 
     fn task_delivery(
@@ -524,8 +575,7 @@ impl AppWorkflows {
         job: &JobSpec,
     ) -> Result<Option<JobReceipt>, WorkflowServiceError> {
         check_scope(&self.app, job)?;
-        self.service.policies.resolve(&self.app)?;
-        let tx = self.service.begin().await?;
+        let tx = self.service.begin_history().await?;
         if matches!(job.operation, JobOperation::Cron { .. }) {
             let receipt = super::cron::receipt(&tx, job).await?;
             tx.commit().await?;
@@ -578,7 +628,7 @@ async fn reclaim(
 }
 
 fn authorize_task(
-    claim: &tasks::AuthorizedTask,
+    claim: &tasks::TaskInspection,
     delivery: &Delivery,
 ) -> Result<(), WorkflowServiceError> {
     let JobOperation::Advance {

@@ -198,7 +198,9 @@ mod tests {
     use zeroship_runtime::{
         plugin::NativeRegistrar, CancelFlag, FetchOutcome, RequestCtx, SettledFetch,
     };
-    use zeroship_workflow::service::{schema, store::OrmStore, HostPolicies, WorkflowService};
+    use zeroship_workflow::service::{
+        schema, store::OrmStore, AppPolicy, HostPolicies, PolicySnapshot, WorkflowService,
+    };
 
     struct Contexts(RefCell<WorkflowAppContext>);
     impl WorkflowContextProvider for Contexts {
@@ -230,6 +232,7 @@ mod tests {
         _directory: tempfile::TempDir,
         contexts: Rc<Contexts>,
         service: WorkflowService,
+        policies: Arc<HostPolicies>,
         blobs: LocalDiskBlobStore,
     }
 
@@ -251,12 +254,27 @@ mod tests {
             .await
             .unwrap();
             schema::initialize_local(&store).await.unwrap();
-            let service = WorkflowService::open(Rc::new(store), Arc::new(HostPolicies::default()))
+            let policies = Arc::new(HostPolicies::default());
+            let binding = policies.bind(app.clone()).unwrap();
+            binding
+                .begin_refresh()
+                .unwrap()
+                .install(
+                    PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default())
+                        .unwrap(),
+                )
+                .unwrap();
+            let service = WorkflowService::open(Rc::new(store), policies.clone())
                 .await
                 .unwrap();
             let context = WorkflowAppContext {
                 schema: SchemaName::new(&tenant).unwrap(),
-                backend: service.for_app(app.clone()).into_backend(1024).unwrap(),
+                backend: service
+                    .register_app(&binding)
+                    .await
+                    .unwrap()
+                    .into_backend(1024)
+                    .unwrap(),
                 app,
                 env_vars: HashMap::from([
                     ("APP_ID".into(), "forged-app".into()),
@@ -279,6 +297,7 @@ mod tests {
             Self {
                 contexts: Rc::new(Contexts(RefCell::new(context))),
                 service,
+                policies,
                 blobs: LocalDiskBlobStore::new(directory.path().join("bundles")).unwrap(),
                 _directory: directory,
             }
@@ -411,9 +430,18 @@ mod tests {
             Err(WorkflowServiceError::PermissionDenied)
         ));
         let assignment = fixture.assignment();
+        let foreign = fixture.policies.bind(AppId::mint()).unwrap();
+        foreign
+            .begin_refresh()
+            .unwrap()
+            .install(
+                PolicySnapshot::configuration(1.try_into().unwrap(), AppPolicy::default()).unwrap(),
+            )
+            .unwrap();
         fixture.contexts.0.borrow_mut().backend = fixture
             .service
-            .for_app(AppId::mint())
+            .bind_app(&foreign)
+            .unwrap()
             .into_backend(1024)
             .unwrap();
         assert!(matches!(

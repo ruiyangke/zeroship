@@ -4,9 +4,8 @@
 )]
 
 use super::{
-    app::{lock_app, lock_run, parse_state, request_result, store_request, validate_run},
+    app::{lock_app_state, lock_run, parse_state, request_result, store_request, validate_run},
     models,
-    policy::CapturedPolicy,
     store::Transaction,
     types::digest,
     AppPolicy, AppWorkflows, RequestId,
@@ -73,24 +72,25 @@ impl AppWorkflows {
         run_id: &str,
         operation: RunOperation,
     ) -> Result<TransitionedRun, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(async {
                 validate_run(run_id)?;
                 let digest = digest(&(run_id, operation))?;
                 let mut tx = self.service.begin().await?;
-                let policy = lock_app(&mut tx, &self.app).await?;
+                lock_app_state(&mut tx, &self.app).await?;
                 let now = tx.now().await?;
                 if let Some(receipt) =
                     request_result(&tx, &self.app, request, "transition", &digest).await?
                 {
                     return Ok(receipt);
                 }
-                captured.recheck(&self.service.policies, &self.app)?;
-                let plan = prepare_transition(&mut tx, &self.app, run_id, operation, &policy, now)
+                captured.recheck()?;
+                let policy = &captured.authority()?.policy;
+                let plan = prepare_transition(&mut tx, &self.app, run_id, operation, policy, now)
                     .await?
                     .accept()?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 let result = plan.apply(&tx, &self.app, run_id).await?;
                 store_request(
                     &mut tx,
@@ -102,7 +102,7 @@ impl AppWorkflows {
                     now,
                 )
                 .await?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 tx.commit().await?;
                 Ok(result)
             })
@@ -120,31 +120,32 @@ impl AppWorkflows {
         run_id: &str,
         options: RestartOptions,
     ) -> Result<RestartedRun, WorkflowServiceError> {
-        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        let captured = self.capture_policy();
         captured
             .run(async {
                 validate_run(run_id)?;
                 crate::lifecycle::restart_deploy_policy(&options)?;
                 let digest = digest(&(run_id, &options))?;
                 let mut tx = self.service.begin().await?;
-                let policy = lock_app(&mut tx, &self.app).await?;
+                lock_app_state(&mut tx, &self.app).await?;
                 let now = tx.now().await?;
                 if let Some(receipt) =
                     request_result(&tx, &self.app, request, "restart", &digest).await?
                 {
                     return Ok(receipt);
                 }
-                captured.recheck(&self.service.policies, &self.app)?;
-                let plan = restart::prepare(&mut tx, &self.app, run_id, &options, &policy, now)
+                captured.recheck()?;
+                let policy = &captured.authority()?.policy;
+                let plan = restart::prepare(&mut tx, &self.app, run_id, &options, policy, now)
                     .await?
                     .accept()?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 let result = plan.apply(&mut tx, &self.app, run_id, now).await?;
                 store_request(
                     &mut tx, &self.app, request, "restart", &digest, &result, now,
                 )
                 .await?;
-                captured.check(&self.service.policies, &self.app)?;
+                captured.check()?;
                 tx.commit().await?;
                 Ok(result)
             })

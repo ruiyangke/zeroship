@@ -25,7 +25,7 @@ mod policy;
 pub mod publication;
 pub mod reconciliation;
 pub use payloads::{PayloadRead, PayloadSlot, StagedPayload};
-pub use policy::{HostPolicies, PolicySnapshot};
+pub use policy::{HostPolicies, PolicyBinding, PolicyRefresh, PolicySnapshot};
 pub mod runner;
 mod schedules;
 mod signals;

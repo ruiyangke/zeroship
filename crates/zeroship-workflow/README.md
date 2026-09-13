@@ -172,16 +172,33 @@ including V8. The database stays on its owning compio thread. Queue overload
 rejects admission; dropping a waiting call cancels its operation and lets the ORM
 settle any open transaction. Callers only receive success after confirmed commit.
 
-`WorkflowService::open` requires `HostPolicies`. The trusted worker supplies
-validated `PolicySnapshot` values through `register_app`, then binds app code
-with `for_app`. Policy stays in host memory; journal rows cannot restore
-admission after a worker restart. Snapshots reject stale revisions and
-conflicting limits. Explicit host configuration has no metadata expiry;
-authenticated remote metadata uses a monotonic lease deadline. Expiry stops new
-admission and dispatch, and heartbeat responses request a pause without
-extending an existing task lease. History and completion under an already live
-claim remain available. Deploy selection also comes from the trusted host,
-through `activate_deploy`, without querying platform tables.
+`WorkflowService::open` requires `HostPolicies`. The trusted host creates a
+`PolicyBinding`, reserves a refresh ticket and installs a validated snapshot:
+
+```rust,ignore
+let binding = policies.bind(app_id)?;
+binding.begin_refresh()?.install(snapshot)?;
+let app = service.register_app(&binding).await?;
+```
+
+App handles and queued backend calls retain that exact binding. Replacing or
+revoking it invalidates old handles; neither a delayed refresh response nor
+customer journal rows can restore their authority. Source revision and content
+high water survive replacement. Configuration and leased snapshots use distinct
+binding modes; changing modes requires explicit replacement. A refresh can extend
+new operations, while each operation keeps its original deadline. Shortening a
+lease invalidates its earlier captures permanently, even if a later refresh
+extends the lease again.
+
+Policy stays in host memory. Missing or expired authority refuses fresh mutations;
+exact committed receipts and status remain scoped history reads. Explicit disabled
+policy remains distinct from unavailable authority. Execution retains the original
+policy capture through renewal and finalization; invalidation interrupts its
+watchdog and the runner joins native work before reusing capacity. Payload reads
+retain that capture through the returned body. Authenticated remote policy leases
+and their authoritative Control source remain separate integration work.
+Deploy selection also comes from the trusted host, through `activate_deploy`,
+without querying platform tables.
 
 Ordinary start, signal, broadcast, lifecycle, signal-token and signal-ingress
 operations capture the host policy revision and deadline before journal I/O.

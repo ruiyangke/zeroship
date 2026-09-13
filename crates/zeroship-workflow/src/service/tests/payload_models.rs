@@ -32,7 +32,7 @@ async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
     let mut local_task = None;
     for app_id in [&local, &foreign] {
         service
-            .for_app(app_id.clone())
+            .fixture_app(app_id.clone())
             .start(&RequestId::mint(), "Example", StartOptions::default())
             .await
             .unwrap();
@@ -54,9 +54,9 @@ async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
         }
     }
     service
-        .register_app(
+        .fixture_register(
             &local,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     max_payload_storage_bytes: large + 1,
@@ -111,9 +111,9 @@ async fn quota_contract(store: Rc<OrmStore>, directory: &Path) {
     }
     // A descriptor with the same bytes but another content type owns another object.
     service
-        .register_app(
+        .fixture_register(
             &local,
-            configured_policy(
+            leased_policy(
                 3,
                 AppPolicy {
                     max_payload_storage_bytes: large + 2,

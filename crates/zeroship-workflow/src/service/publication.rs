@@ -134,35 +134,41 @@ impl AppWorkflows {
                 "invalid workflow publication page size".into(),
             ));
         }
-        self.service.policies.resolve(&self.app)?;
-        let tx = self.service.begin().await?;
-        let source = tx.database().entity::<publications::Entity>()?.alias("p")?;
-        let mut predicates = vec![
-            source.column(publications::app_id).eq(self.app.as_str())?,
-            source.column(publications::confirmed_at).eq(None::<i64>)?,
-        ];
-        if let Some(after) = after {
-            predicates.push(Predicate::compare(
-                Operand::Path(source.column(publications::id).asc().path),
-                CompareOp::Gt,
-                Operand::Lit(Literal::Text(after.as_str().into())),
-            ));
-        }
-        let rows = tx
-            .database()
-            .from(&source)
-            .filter(Predicate::And(predicates))
-            .order_by(source.column(publications::id).asc())
-            .select(source.row::<Intent>())?
-            .limit(i64::from(limit))?
-            .all()
-            .await?;
-        let jobs = rows
-            .iter()
-            .map(|row| row.job(&self.app))
-            .collect::<Result<_, _>>()?;
-        tx.commit().await?;
-        Ok(jobs)
+        let captured = self.capture_policy();
+        captured
+            .run(async {
+                captured.check()?;
+                let tx = self.service.begin().await?;
+                let source = tx.database().entity::<publications::Entity>()?.alias("p")?;
+                let mut predicates = vec![
+                    source.column(publications::app_id).eq(self.app.as_str())?,
+                    source.column(publications::confirmed_at).eq(None::<i64>)?,
+                ];
+                if let Some(after) = after {
+                    predicates.push(Predicate::compare(
+                        Operand::Path(source.column(publications::id).asc().path),
+                        CompareOp::Gt,
+                        Operand::Lit(Literal::Text(after.as_str().into())),
+                    ));
+                }
+                let rows = tx
+                    .database()
+                    .from(&source)
+                    .filter(Predicate::And(predicates))
+                    .order_by(source.column(publications::id).asc())
+                    .select(source.row::<Intent>())?
+                    .limit(i64::from(limit))?
+                    .all()
+                    .await?;
+                let jobs = rows
+                    .iter()
+                    .map(|row| row.job(&self.app))
+                    .collect::<Result<_, _>>()?;
+                captured.check()?;
+                tx.commit().await?;
+                Ok(jobs)
+            })
+            .await
     }
 
     /// Publish a persisted intent and confirm only the matching receipt.
@@ -189,49 +195,62 @@ impl AppWorkflows {
         if publisher.app_id() != &self.app {
             return Err(WorkflowServiceError::PermissionDenied);
         }
-        self.service.policies.resolve(&self.app)?;
-        if let Some(authority) = authority {
-            authority.check(self)?;
-        }
-        let tx = self.service.begin().await?;
-        let intent = read(&tx, &self.app, id).await?;
-        let job = intent.job(&self.app)?;
-        tx.commit().await?;
-        if intent.confirmed_at.is_some() {
-            return Ok(job);
-        }
-        if let Some(authority) = authority {
-            authority.check(self)?;
-        }
-        if publisher.submit(&job).await? != job {
-            return Err(WorkflowServiceError::Conflict(
-                "workflow job acknowledgement does not match its intent".into(),
-            ));
-        }
-        let mut tx = self.service.begin().await?;
-        lock_app(&mut tx, &self.app).await?;
-        if let Some(authority) = authority {
-            authority.check(self)?;
-        }
-        let current = read(&tx, &self.app, id).await?;
-        if current.job(&self.app)? != job {
-            return Err(invalid());
-        }
-        if current.confirmed_at.is_none() {
-            let now = tx.now().await?;
-            tx.database()
-                .collection(publications::Entity::COLLECTION)?
-                .update(
-                    value!({"app_id":self.app.as_str(), "id":id.as_str()}),
-                    value!({"confirmed_at":now}),
-                )
-                .await?;
-        }
-        if let Some(authority) = authority {
-            authority.check(self)?;
-        }
-        tx.commit().await?;
-        Ok(job)
+        let captured = self.capture_policy();
+        captured
+            .run(async {
+                if let Some(authority) = authority {
+                    authority.check(self)?;
+                }
+                let tx = self.service.begin().await?;
+                let intent = read(&tx, &self.app, id).await?;
+                let job = intent.job(&self.app)?;
+                captured.recheck()?;
+                tx.commit().await?;
+                if intent.confirmed_at.is_some() {
+                    return Ok(job);
+                }
+                captured.check()?;
+                if let Some(authority) = authority {
+                    authority.check(self)?;
+                }
+                if publisher.submit(&job).await? != job {
+                    return Err(WorkflowServiceError::Conflict(
+                        "workflow job acknowledgement does not match its intent".into(),
+                    ));
+                }
+                captured.check()?;
+                let mut tx = self.service.begin().await?;
+                lock_app(&mut tx, &self.app).await?;
+                captured.check()?;
+                if let Some(authority) = authority {
+                    authority.check(self)?;
+                }
+                let current = read(&tx, &self.app, id).await?;
+                if current.job(&self.app)? != job {
+                    return Err(invalid());
+                }
+                if current.confirmed_at.is_none() {
+                    let now = tx.now().await?;
+                    captured.check()?;
+                    if let Some(authority) = authority {
+                        authority.check(self)?;
+                    }
+                    tx.database()
+                        .collection(publications::Entity::COLLECTION)?
+                        .update(
+                            value!({"app_id":self.app.as_str(), "id":id.as_str()}),
+                            value!({"confirmed_at":now}),
+                        )
+                        .await?;
+                }
+                captured.check()?;
+                if let Some(authority) = authority {
+                    authority.check(self)?;
+                }
+                tx.commit().await?;
+                Ok(job)
+            })
+            .await
     }
 }
 

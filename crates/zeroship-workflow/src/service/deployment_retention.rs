@@ -377,7 +377,7 @@ impl WorkflowService {
         }
         // Discovery is only a hint. Reconciliation locks and revalidates the
         // selected intent, so scanning need not lock execution's app row.
-        self.policies.resolve(app)?;
+        self.policy_for(app)?;
         let tx = self.begin().await?;
         let db = tx.database();
         let source = db.entity::<holds::Entity>()?.alias("h")?;

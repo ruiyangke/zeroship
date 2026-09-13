@@ -130,7 +130,7 @@ async fn fault_contract(store: Rc<OrmStore>) {
     });
     let deployments = Deployments::with_source(dir, faults.clone()).await;
     let (service, app, _, deployments) = registered_with_deployments(store, deployments).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let tasks = service.tasks(WorkerIdentity::new("artifact-worker".into()).unwrap());
     let old = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())

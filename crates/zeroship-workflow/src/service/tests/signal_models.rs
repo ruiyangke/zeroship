@@ -21,7 +21,7 @@ async fn postgres_signal_window_includes_its_edges_and_consumes_each_message_onc
 async fn window_contract(store: Rc<OrmStore>) {
     let (service, app_id, _, _deployments) = registered_service(store).await;
     let started = service
-        .for_app(app_id.clone())
+        .fixture_app(app_id.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();

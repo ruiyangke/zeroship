@@ -62,11 +62,11 @@ async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
     let (service, local, _, _deployments) =
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::Receipt).await;
     service
-        .register_app(
+        .fixture_register(
             &local,
             PolicySnapshot::lease(
                 2.try_into().unwrap(),
@@ -99,7 +99,7 @@ async fn postgres_management_receipt_wait_cannot_outlive_host_authority() {
     barrier.remove().await;
     assert_rolled_back(&service, &local, &run, &request).await;
     service
-        .register_app(&local, configured_policy(3, AppPolicy::default()))
+        .fixture_register(&local, leased_policy(3, AppPolicy::default()))
         .await
         .unwrap();
     assert_eq!(
@@ -128,7 +128,7 @@ async fn postgres_management_database_denial_remains_retryable() {
     let (service, local, _, _deployments) =
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let admin = connect(&fixture.admin_url).await;
     admin.batch_execute("REVOKE INSERT ON customer.__zeroship_workflow_management_receipts FROM app_customer_role")
@@ -180,7 +180,7 @@ fn transition(app: &AppId, run: &str, operation: RunOperation) -> ManageRun {
 
 async fn start(service: &WorkflowService, app: &AppId) -> String {
     service
-        .for_app(app.clone())
+        .fixture_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap()
@@ -216,7 +216,7 @@ async fn receipt_count(service: &WorkflowService, command: &ManageRun) -> i64 {
 async fn replay_contract(store: Rc<OrmStore>) {
     let (service, local, foreign, deployments) = registered_service(store.clone()).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let original = scope.apply_management(&request).await.unwrap();
     assert_eq!(
@@ -250,7 +250,7 @@ async fn replay_contract(store: Rc<OrmStore>) {
     );
     assert_eq!(
         service
-            .for_app(foreign.clone())
+            .fixture_app(foreign.clone())
             .apply_management(&request)
             .await,
         Err(WorkflowServiceError::PermissionDenied)
@@ -285,11 +285,11 @@ async fn replay_contract(store: Rc<OrmStore>) {
     unconfigured_replay(&service, &request, original).await;
     for app_id in [&local, &foreign] {
         service
-            .register_app(app_id, configured_policy(2, AppPolicy::default()))
+            .fixture_register(app_id, leased_policy(2, AppPolicy::default()))
             .await
             .unwrap();
     }
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     assert_eq!(scope.apply_management(&request).await.unwrap(), original);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
     scope
@@ -329,7 +329,7 @@ async fn unconfigured_replay(
     original: ManagementOutcome,
 ) {
     let local = &request.app_id;
-    let unconfigured = service.for_app(local.clone());
+    let unconfigured = service.fixture_app(local.clone());
     assert_eq!(
         unconfigured.apply_management(request).await.unwrap(),
         original
@@ -350,7 +350,7 @@ async fn unconfigured_replay(
     assert_eq!(receipt_count(service, &fresh).await, 0);
     service
         .policies
-        .install(
+        .fixture_install(
             local,
             PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), Instant::now())
                 .unwrap(),
@@ -369,7 +369,7 @@ async fn unconfigured_replay(
 
 async fn outcome_contract(store: Rc<OrmStore>) {
     let (service, local, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let absent = RunId::mint();
     let missing = restart(&local, absent.as_str());
     assert_eq!(
@@ -441,9 +441,9 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     assert_eq!(receipt_count(&service, &conflict).await, 1);
 
     service
-        .register_app(
+        .fixture_register(
             &local,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     admission: false,
@@ -459,7 +459,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
         ManagementOutcome::Denied {}
     );
     service
-        .register_app(&local, configured_policy(3, AppPolicy::default()))
+        .fixture_register(&local, leased_policy(3, AppPolicy::default()))
         .await
         .unwrap();
     assert_eq!(
@@ -479,9 +479,9 @@ async fn outcome_contract(store: Rc<OrmStore>) {
 
     finish(&service, &local, &run).await;
     service
-        .register_app(
+        .fixture_register(
             &local,
-            configured_policy(
+            leased_policy(
                 4,
                 AppPolicy {
                     max_live_runs: 0,
@@ -498,7 +498,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     ));
     assert_eq!(receipt_count(&service, &capacity).await, 0);
     service
-        .register_app(&local, configured_policy(5, AppPolicy::default()))
+        .fixture_register(&local, leased_policy(5, AppPolicy::default()))
         .await
         .unwrap();
     assert_eq!(
@@ -510,12 +510,12 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     assert_eq!(head(&service, &local, &run).await, (3, "queued".into()));
 
     service
-        .register_app(
+        .policies
+        .fixture_install(
             &local,
             PolicySnapshot::lease(6.try_into().unwrap(), AppPolicy::default(), Instant::now())
                 .unwrap(),
         )
-        .await
         .unwrap();
     // An acknowledged decision remains readable after authority expires. Only
     // previously unseen commands need renewed mutation authority.
@@ -533,7 +533,7 @@ async fn outcome_contract(store: Rc<OrmStore>) {
     assert_eq!(receipt_count(&service, &expired).await, 0);
     assert_eq!(head(&service, &local, &run).await, (3, "queued".into()));
     service
-        .register_app(&local, configured_policy(7, AppPolicy::default()))
+        .fixture_register(&local, leased_policy(7, AppPolicy::default()))
         .await
         .unwrap();
     assert_eq!(
@@ -559,7 +559,7 @@ async fn finish(service: &WorkflowService, app_id: &AppId, run_id: &str) {
 async fn atomicity_contract(store: Rc<OrmStore>, fault: ReceiptFault) {
     let (service, local, _, _deployments) = registered_service(store).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     fault.install().await;
     assert!(matches!(
@@ -779,7 +779,7 @@ async fn cancellation_contract(site: BarrierSite) {
     let (service, local, _, _deployments) =
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let barrier = PgBarrier::install(&fixture.admin_url, site).await;
     let (worker, pending) = match select(
@@ -815,7 +815,7 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
     let (service, local, _, _deployments) =
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::AppLock).await;
     let pending = match select(
@@ -829,9 +829,9 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
     };
     service
         .policies
-        .install(
+        .fixture_install(
             &local,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     admission: false,
@@ -854,7 +854,7 @@ async fn postgres_management_revocation_during_app_lock_is_retryable() {
     assert_eq!(receipt_count(&service, &request).await, 1);
     service
         .policies
-        .install(&local, configured_policy(3, AppPolicy::default()))
+        .fixture_install(&local, leased_policy(3, AppPolicy::default()))
         .unwrap();
     assert_eq!(
         scope.apply_management(&request).await.unwrap(),
@@ -877,13 +877,13 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
     let (service, local, _, _deployments) =
         registered_service(Rc::new(fixture.store.clone())).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::AppLock).await;
     let deadline = Instant::now() + Duration::from_secs(3);
     service
         .policies
-        .install(
+        .fixture_install(
             &local,
             PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
         )
@@ -899,7 +899,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
     };
     service
         .policies
-        .install(
+        .fixture_install(
             &local,
             PolicySnapshot::lease(
                 2.try_into().unwrap(),
@@ -918,7 +918,7 @@ async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
         matches!(result, Err(WorkflowServiceError::Unavailable(_))),
         "{result:?}"
     );
-    assert!(service.policies.authority(&local).is_ok());
+    assert!(service.policies.fixture_authority(&local).is_ok());
     barrier.wait_for_rollback(worker).await;
     barrier.remove().await;
     assert_rolled_back(&service, &local, &run, &request).await;
@@ -951,7 +951,7 @@ async fn postgres_management_captures_policy_before_waiting_for_journal() {
 async fn waiting_authority_contract(store: Rc<OrmStore>) {
     let (service, local, _, _deployments) = registered_service(store).await;
     let run = start(&service, &local).await;
-    let scope = service.for_app(local.clone());
+    let scope = service.fixture_app(local.clone());
     let request = restart(&local, &run);
     let mut blocker = service.begin().await.unwrap();
     app::lock_app(&mut blocker, &local).await.unwrap();
@@ -962,9 +962,9 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
     ));
     service
         .policies
-        .install(
+        .fixture_install(
             &local,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     admission: false,
@@ -982,14 +982,14 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
 
     service
         .policies
-        .install(&local, configured_policy(3, AppPolicy::default()))
+        .fixture_install(&local, leased_policy(3, AppPolicy::default()))
         .unwrap();
     let mut blocker = service.begin().await.unwrap();
     app::lock_app(&mut blocker, &local).await.unwrap();
     let deadline = Instant::now() + Duration::from_secs(1);
     service
         .policies
-        .install(
+        .fixture_install(
             &local,
             PolicySnapshot::lease(4.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
         )
@@ -1001,7 +1001,7 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
     ));
     service
         .policies
-        .install(
+        .fixture_install(
             &local,
             PolicySnapshot::lease(
                 4.try_into().unwrap(),
@@ -1020,7 +1020,7 @@ async fn waiting_authority_contract(store: Rc<OrmStore>) {
         matches!(result, Err(WorkflowServiceError::Unavailable(_))),
         "{result:?}"
     );
-    assert!(service.policies.authority(&local).is_ok());
+    assert!(service.policies.fixture_authority(&local).is_ok());
     blocker.commit().await.unwrap();
     assert_rolled_back(&service, &local, &run, &request).await;
     assert_eq!(

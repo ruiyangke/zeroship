@@ -17,8 +17,72 @@ use testcontainers::{
 };
 use zeroship_core::{app_id::AppId, typed_id};
 
-fn configured_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
-    PolicySnapshot::configuration(revision.try_into().unwrap(), policy).unwrap()
+fn leased_policy(revision: i64, policy: AppPolicy) -> PolicySnapshot {
+    PolicySnapshot::lease(
+        revision.try_into().unwrap(),
+        policy,
+        std::time::Instant::now() + std::time::Duration::from_secs(3600),
+    )
+    .unwrap()
+}
+
+impl HostPolicies {
+    pub(super) fn fixture_binding(
+        self: &Arc<Self>,
+        app: &AppId,
+    ) -> Result<super::PolicyBinding, WorkflowServiceError> {
+        self.current_binding(app)
+            .or_else(|_| self.bind(app.clone()))
+    }
+
+    pub(super) fn fixture_install(
+        self: &Arc<Self>,
+        app: &AppId,
+        snapshot: PolicySnapshot,
+    ) -> Result<(), WorkflowServiceError> {
+        self.fixture_binding(app)?
+            .begin_refresh()?
+            .install(snapshot)
+    }
+
+    pub(super) fn fixture_authority(
+        self: &Arc<Self>,
+        app: &AppId,
+    ) -> Result<super::policy::PolicyAuthority, WorkflowServiceError> {
+        self.current_binding(app)?.authority()
+    }
+
+    pub(super) fn fixture_resolve(
+        self: &Arc<Self>,
+        app: &AppId,
+    ) -> Result<AppPolicy, WorkflowServiceError> {
+        self.current_binding(app)?.resolve()
+    }
+}
+
+impl WorkflowService {
+    pub(super) fn fixture_app(&self, app: AppId) -> super::AppWorkflows {
+        let binding = self
+            .policies
+            .current_binding(&app)
+            .or_else(|_| self.policies.bind(app))
+            .unwrap();
+        self.bind_app(&binding).unwrap()
+    }
+
+    #[expect(
+        clippy::future_not_send,
+        reason = "fixture bindings own compio-local journals"
+    )]
+    pub(super) async fn fixture_register(
+        &self,
+        app: &AppId,
+        snapshot: PolicySnapshot,
+    ) -> Result<(), WorkflowServiceError> {
+        let binding = self.policies.fixture_binding(app)?;
+        binding.begin_refresh()?.install(snapshot)?;
+        self.register_app(&binding).await.map(|_| ())
+    }
 }
 
 mod activation;
@@ -186,11 +250,11 @@ async fn registered_with_deployments(
         .with_deployments(deployments.binding(&[&a, &b]));
     for app in [&a, &b] {
         service
-            .register_app(app, configured_policy(1, AppPolicy::default()))
+            .fixture_register(app, leased_policy(1, AppPolicy::default()))
             .await
             .unwrap();
         service
-            .register_app(app, configured_policy(1, AppPolicy::default()))
+            .fixture_register(app, leased_policy(1, AppPolicy::default()))
             .await
             .unwrap();
         deployments
@@ -212,8 +276,8 @@ async fn registered_with_deployments(
 
 async fn app_contract(store: Rc<OrmStore>) {
     let (service, a, b, _deployments) = registered_service(store).await;
-    let a = service.for_app(a);
-    let b = service.for_app(b);
+    let a = service.fixture_app(a);
+    let b = service.fixture_app(b);
     let request = RequestId::mint();
     let options = StartOptions {
         input: json!({"hello": "world"}),
@@ -269,7 +333,7 @@ async fn app_contract(store: Rc<OrmStore>) {
         ..AppPolicy::default()
     };
     service
-        .register_app(a.app_id(), configured_policy(2, policy))
+        .fixture_register(a.app_id(), leased_policy(2, policy))
         .await
         .unwrap();
     assert_eq!(
@@ -531,7 +595,7 @@ async fn task_contract(store: Rc<OrmStore>) {
     use super::{TaskToken, WorkerIdentity};
     use crate::operations::RunState;
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let worker = WorkerIdentity::new("worker-a".into()).unwrap();
     let other = WorkerIdentity::new("worker-b".into()).unwrap();
     let request = RequestId::mint();
@@ -703,7 +767,7 @@ async fn behavior_contract(store: Rc<OrmStore>) {
     use super::{ControlIntent, WorkerIdentity};
     use crate::operations::{RestartOptions, RestartTarget, RunOperation, RunState};
     let (service, app, _, deployments) = registered_service(store.clone()).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let worker = WorkerIdentity::new("worker".into()).unwrap();
     let start = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -1010,14 +1074,14 @@ async fn review_contract(store: Rc<OrmStore>) {
     use super::WorkerIdentity;
     use crate::operations::{RunOperation, RunState};
     let (service, app, other_app, _deployments) = registered_service(store.clone()).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let policy = AppPolicy {
         max_running: 1,
         compensation_retry_ms: 60_000,
         ..Default::default()
     };
     service
-        .register_app(&app, configured_policy(2, policy))
+        .fixture_register(&app, leased_policy(2, policy))
         .await
         .unwrap();
     let request = RequestId::mint();
@@ -1210,9 +1274,9 @@ async fn review_contract(store: Rc<OrmStore>) {
     // An app with a full execution allocation must not hide another app behind
     // its backlog in the candidate page.
     service
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 3,
                 AppPolicy {
                     max_running: 0,
@@ -1229,7 +1293,7 @@ async fn review_contract(store: Rc<OrmStore>) {
             .unwrap();
     }
     let other = service
-        .for_app(other_app)
+        .fixture_app(other_app)
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
@@ -1265,15 +1329,15 @@ async fn delayed_lease_write(table: &str, operation: &str, heartbeat: bool) {
     let fixture = PostgresFixture::start().await;
     let store: Rc<OrmStore> = Rc::new(fixture.store.clone());
     let (service, app, _, _deployments) = registered_service(store.clone()).await;
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
     service
-        .register_app(
+        .fixture_register(
             &app,
-            configured_policy(
+            leased_policy(
                 2,
                 AppPolicy {
                     lease_ms: 300,
@@ -1367,7 +1431,7 @@ async fn postgres_signal_completion_races_do_not_lose_wakeups() {
 }
 async fn signal_race_contract(store: Rc<OrmStore>) {
     let (service, app, _, _deployments) = registered_service(store).await;
-    let scope = service.for_app(app);
+    let scope = service.fixture_app(app);
     let worker = super::WorkerIdentity::new("worker".into()).unwrap();
     let run = scope
         .start(&RequestId::mint(), "Example", StartOptions::default())
@@ -1449,7 +1513,6 @@ async fn signal_race_contract(store: Rc<OrmStore>) {
         .unwrap();
 }
 
-
 #[compio::test]
 async fn sqlite_topic_fanout_preserves_recipient_scope_after_restart() {
     let dir = tempfile::tempdir().unwrap();
@@ -1478,8 +1541,8 @@ async fn wait_on_topic(
 }
 async fn broadcast_contract(store: Rc<OrmStore>) {
     let (service, app, other, _deployments) = registered_service(store.clone()).await;
-    let scope = service.for_app(app.clone());
-    let other_scope = service.for_app(other);
+    let scope = service.fixture_app(app.clone());
+    let other_scope = service.fixture_app(other);
     let worker = super::WorkerIdentity::new("fanout-worker".into()).unwrap();
     let mut expected = std::collections::BTreeSet::new();
     for _ in 0..129 {
@@ -1617,7 +1680,7 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     use zeroship_core::service_assertion::{ServiceSigningKey, ServiceTrustBundle};
     let (service, app, other, _deployments) = registered_service(store.clone()).await;
     let worker = super::WorkerIdentity::new("ingress-worker".into()).unwrap();
-    let scope = service.for_app(app.clone());
+    let scope = service.fixture_app(app.clone());
     let run = wait_on_topic(&service, &scope, &worker).await;
     let target = SignalTarget::Run {
         run_id: run.clone(),
@@ -1636,8 +1699,8 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     let key = Arc::new(ServiceSigningKey::generate());
     let authority = Arc::new(SignalAuthority::new(key.clone(), ServiceTrustBundle::new()).unwrap());
     let service = service.with_signal_authority(authority.clone());
-    let scope = service.for_app(app.clone());
-    let other_scope = service.for_app(other.clone());
+    let scope = service.fixture_app(app.clone());
+    let other_scope = service.fixture_app(other.clone());
     let foreign = wait_on_topic(&service, &other_scope, &worker).await;
     let issue = RequestId::mint();
     let token = scope
@@ -1658,22 +1721,17 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     };
     assert!(matches!(
         service
-            .ingest_signal(
-                &RequestId::mint(),
-                token.as_str(),
-                &other,
-                &target,
-                message.clone()
-            )
+            .fixture_app(other.clone())
+            .ingest_signal(&RequestId::mint(), token.as_str(), &target, message.clone())
             .await,
         Err(WorkflowServiceError::NotFound(_))
     ));
     assert!(matches!(
         service
+            .fixture_app(app.clone())
             .ingest_signal(
                 &RequestId::mint(),
                 token.as_str(),
-                &app,
                 &SignalTarget::Run { run_id: foreign },
                 message.clone()
             )
@@ -1682,10 +1740,10 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     ));
     assert_eq!(
         service
+            .fixture_app(app.clone())
             .ingest_signal(
                 &RequestId::mint(),
                 token.as_str(),
-                &app,
                 &target,
                 SignalOptions {
                     signal_type: "unlisted".into(),
@@ -1710,10 +1768,10 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     .unwrap();
     assert_eq!(
         service
+            .fixture_app(app.clone())
             .ingest_signal(
                 &RequestId::mint(),
                 expired.as_str(),
-                &app,
                 &target,
                 message.clone()
             )
@@ -1722,23 +1780,25 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     );
     let request = RequestId::mint();
     let receipt = service
-        .ingest_signal(&request, token.as_str(), &app, &target, message.clone())
+        .fixture_app(app.clone())
+        .ingest_signal(&request, token.as_str(), &target, message.clone())
         .await
         .unwrap();
     assert!(matches!(receipt, IngressReceipt::Direct { .. }));
     assert_eq!(
         receipt,
         service
-            .ingest_signal(&request, token.as_str(), &app, &target, message.clone())
+            .fixture_app(app.clone())
+            .ingest_signal(&request, token.as_str(), &target, message.clone())
             .await
             .unwrap()
     );
     assert!(matches!(
         service
+            .fixture_app(app.clone())
             .ingest_signal(
                 &request,
                 token.as_str(),
-                &app,
                 &target,
                 SignalOptions {
                     signal_type: "news".into(),
@@ -1762,7 +1822,8 @@ async fn ingress_contract(store: Rc<OrmStore>) {
     );
     assert_eq!(
         service
-            .ingest_signal(&request, token.as_str(), &app, &target, message.clone())
+            .fixture_app(app.clone())
+            .ingest_signal(&request, token.as_str(), &target, message.clone())
             .await,
         Err(WorkflowServiceError::Unauthenticated)
     );
@@ -1797,14 +1858,16 @@ async fn ingress_contract(store: Rc<OrmStore>) {
         .unwrap();
     let request = RequestId::mint();
     let receipt = service
-        .ingest_signal(&request, token.as_str(), &app, &topic, message.clone())
+        .fixture_app(app.clone())
+        .ingest_signal(&request, token.as_str(), &topic, message.clone())
         .await
         .unwrap();
     assert!(matches!(receipt, IngressReceipt::Topic { .. }));
     assert_eq!(
         receipt,
         service
-            .ingest_signal(&request, token.as_str(), &app, &topic, message.clone())
+            .fixture_app(app.clone())
+            .ingest_signal(&request, token.as_str(), &topic, message.clone())
             .await
             .unwrap()
     );
@@ -1814,13 +1877,8 @@ async fn ingress_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(
         service
-            .ingest_signal(
-                &RequestId::mint(),
-                token.as_str(),
-                &app,
-                &topic,
-                message.clone()
-            )
+            .fixture_app(app.clone())
+            .ingest_signal(&RequestId::mint(), token.as_str(), &topic, message.clone())
             .await,
         Err(WorkflowServiceError::Unauthenticated)
     );
@@ -1858,13 +1916,8 @@ async fn ingress_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(
         recovered
-            .ingest_signal(
-                &RequestId::mint(),
-                token.as_str(),
-                &app,
-                &topic,
-                message.clone()
-            )
+            .fixture_app(app.clone())
+            .ingest_signal(&RequestId::mint(), token.as_str(), &topic, message.clone())
             .await,
         Err(WorkflowServiceError::Unauthenticated)
     );
@@ -1893,7 +1946,8 @@ async fn ingress_contract(store: Rc<OrmStore>) {
         .unwrap();
     assert_eq!(
         service
-            .ingest_signal(&RequestId::mint(), token.as_str(), &app, &target, message)
+            .fixture_app(app.clone())
+            .ingest_signal(&RequestId::mint(), token.as_str(), &target, message)
             .await,
         Err(WorkflowServiceError::Unauthenticated)
     );

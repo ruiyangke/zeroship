@@ -43,12 +43,12 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
     );
     let (service, app, _, _deployments) = registered_service(store).await;
     let started = service
-        .for_app(app.clone())
+        .fixture_app(app.clone())
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
         .unwrap();
     let before = service
-        .for_app(app.clone())
+        .fixture_app(app.clone())
         .status(&started.id)
         .await
         .unwrap()
@@ -70,7 +70,7 @@ async fn workflow_tables_share_the_app_database_without_changing_business_data()
     );
     assert_eq!(
         service
-            .for_app(app)
+            .fixture_app(app)
             .status(&started.id)
             .await
             .unwrap()

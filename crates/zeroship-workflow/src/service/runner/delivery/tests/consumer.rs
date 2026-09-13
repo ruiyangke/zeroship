@@ -235,6 +235,78 @@ async fn replacing_scope_cancels_and_joins_before_reusing_its_slot() {
 }
 
 #[compio::test]
+async fn policy_revocation_keeps_consumer_scope_and_joins_before_reusing_capacity() {
+    let policy = AppPolicy {
+        lease_ms: 1000,
+        ..AppPolicy::default()
+    };
+    let mut first = Fixture::new(policy.clone()).await;
+    let mut second = Fixture::new(policy).await;
+    if first.app.app_id() > second.app.app_id() {
+        std::mem::swap(&mut first, &mut second);
+    }
+    second.lease.delivery.worker_id = first.lease.delivery.worker_id.clone();
+    first.probe.mode.set(Mode::Pending);
+    let (started, running) = oneshot::channel();
+    first.probe.started.replace(Some(started));
+    let (stopping, stopped) = oneshot::channel();
+    first.probe.stopping.replace(Some(stopping));
+    let (release, gate) = oneshot::channel();
+    first.probe.stop_gate.replace(Some(gate));
+    let policy_binding = first
+        .service
+        .policies
+        .current_binding(first.app.app_id())
+        .unwrap();
+    let queue = Queue::new([first.lease.clone(), second.lease.clone()]);
+    let unchanged = scope(&first, 1);
+    let (mut host, bindings) = consumer(
+        queue.clone(),
+        &first.lease.delivery.worker_id,
+        1,
+        vec![unchanged.clone(), scope(&second, 1)],
+    );
+    let (stop_host, shutdown) = oneshot::channel();
+    let update = async {
+        running.await.unwrap();
+        while queue.metadata.renewals.get() == 0 {
+            compio::time::sleep(Duration::from_millis(5)).await;
+        }
+        policy_binding.revoke().unwrap();
+        stopped.await.unwrap();
+        assert!(first.probe.cancels.get() > 0);
+        assert_eq!(first.probe.stops.get(), 0);
+        compio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(
+            queue.claims.borrow().len(),
+            1,
+            "native shutdown still owns execution capacity"
+        );
+        assert_eq!(second.probe.starts.get(), 0);
+        release.send(()).unwrap();
+        queue.settlements(1).await;
+        stop_host.send(()).unwrap();
+    };
+    finished(async {
+        futures::join!(
+            host.run_until(async {
+                let _ = shutdown.await;
+            }),
+            update
+        );
+    })
+    .await;
+    assert_eq!(first.probe.starts.get(), 1);
+    assert_eq!(first.probe.stops.get(), 1);
+    assert_eq!(second.probe.starts.get(), 1);
+    assert_eq!(second.task_state().await, "completed");
+    assert_ne!(first.task_state().await, "completed");
+    assert!(first.app.job_receipt(&first.job).await.unwrap().is_none());
+    drop(bindings);
+    drop(unchanged);
+}
+
+#[compio::test]
 async fn unchanged_snapshot_does_not_cancel_execution_and_invalid_snapshot_is_atomic() {
     let fixture = Fixture::new(AppPolicy {
         lease_ms: 1000,

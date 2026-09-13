@@ -216,7 +216,7 @@ async fn recovery_contract(store: Rc<OrmStore>, dir: &Path) {
         .await
         .unwrap();
     foreign_owner
-        .register_app(&foreign, configured_policy(1, AppPolicy::default()))
+        .fixture_register(&foreign, leased_policy(1, AppPolicy::default()))
         .await
         .unwrap();
     let foreign_deploy = deployments.deploy(&foreign).await;
@@ -235,11 +235,12 @@ async fn recovery_contract(store: Rc<OrmStore>, dir: &Path) {
                 .with_hold_client(foreign_client.clone()),
         );
     reopened
-        .register_app(&a, configured_policy(1, AppPolicy::default()))
+        .fixture_register(&a, leased_policy(1, AppPolicy::default()))
         .await
         .unwrap();
     reopened
-        .register_app(
+        .policies
+        .fixture_install(
             &b,
             PolicySnapshot::lease(
                 1_i64.try_into().unwrap(),
@@ -248,7 +249,6 @@ async fn recovery_contract(store: Rc<OrmStore>, dir: &Path) {
             )
             .unwrap(),
         )
-        .await
         .unwrap();
     let probe = Rc::new(Probe::default());
     let mut worker = worker(&reopened, dir, probe.clone(), 1_000);
@@ -338,7 +338,7 @@ async fn stalled_contract(store: Rc<OrmStore>, dir: &Path) {
             .with_hold_client(stalled.clone())
             .with_hold_client(healthy),
     );
-    let api = service.for_app(a.clone());
+    let api = service.fixture_app(a.clone());
     let run = api
         .start(&RequestId::mint(), "Example", StartOptions::default())
         .await
