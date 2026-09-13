@@ -235,15 +235,16 @@ type StringOps = {
  *
  * `$like` / `$ilike` are real backend operators: the ORM query builder
  * validates them and lowers them to SQL predicates.
+ * Keep kind checks non-distributive to bound generic operator intersections.
  */
 type PlainFilterValue<T, K extends FilterKind = InferredFilterKind<T>> =
-  K extends "search"
+  [K] extends ["search"]
     ? never
-    : (K extends "json" ? null : T | null) | (
+    : ([K] extends ["json"] ? null : T | null) | (
       EqualityOps<NonNullable<T>> &
-      (K extends "text"
+      ([K] extends ["text"]
         ? OrderingOps<NonNullable<T>> & StringOps
-        : K extends "ordered"
+        : [K] extends ["ordered"]
           ? OrderingOps<NonNullable<T>>
           : object)
     );
