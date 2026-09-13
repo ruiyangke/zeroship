@@ -371,6 +371,7 @@ export default {
         spend_limit_default_cents: t.bigInt().notNull().default(0),
         assignable_by_creator: t.boolean().notNull().default(false),
         workflows_allowed: t.boolean().notNull().default(false),
+        workflow_policy_json: t.json(),
         runtime_limits_json: t.json().notNull(),
         archived: t.boolean().notNull().default(false),
         created_at: t.timestamp().notNull().default(now()),

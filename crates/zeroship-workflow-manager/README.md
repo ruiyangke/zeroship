@@ -33,8 +33,17 @@ deadlines. The complete raw policy comes from `zeroship_core::workflow_policy`.
 Requesting a lease never renews placement or registration. `PolicyGrant` charges
 transaction settlement and revalidates the retained source observation when
 constructing the response. An unavailable or stale source is an infrastructure
-failure; valid disabled policy is returned unchanged. The provider contract
-exists, but the revisioned authoritative Control adapter remains unfinished.
+failure; valid disabled policy is returned unchanged.
+
+`policy::control` reads complete app/plan/operator authority from Control's own
+schema using native ORM. A durable per-app publication row serializes observers
+before their relational input read. Policy and source-validity changes advance its
+revision; unchanged input preserves it. The finite observation starts before
+database acquisition, and cache hits preserve that original deadline. Failed or
+cancelled refreshes cannot restore a retired cache entry. This provides bounded
+convergence across manager replicas, without claiming that an operator update
+immediately quiesces customer execution. The server uses this provider; ordinary
+worker assignment and policy refresh still need production composition.
 
 `scheduling::Scheduler` prepares immutable schedule metadata from normal app
 deployments. Activation selects future scheduling and commits its job and recovery

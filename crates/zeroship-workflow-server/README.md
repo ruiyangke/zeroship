@@ -64,9 +64,13 @@ The response binds complete policy to that app, worker, signing-key thumbprint
 and assignment revision. The native manager validates assignment before source
 I/O and rechecks authority after waits without renewing registration or placement.
 `WorkflowHttpState::policy_source` injects the trusted platform provider. The
-binary currently leaves it absent, so policy requests fail with an infrastructure
-error until an authoritative revisioned Control source is integrated. There is
-no default-allow policy or creator database lookup.
+binary installs native `ControlPolicies` against its existing platform database.
+The provider serializes revision publication before reading app, plan and
+operator inputs together. Cache hits preserve original source validity; expired,
+missing or malformed authority produces a retryable infrastructure failure.
+Operators provision complete plan policy and the rollout validity explicitly.
+The service can read those Control columns and update its policy ledger; it
+cannot update app or plan inputs or access creator storage.
 
 Assignments and mutation receipts survive restart. Wake revisions reject stale
 or conflicting publication. A worker cannot release the last active placement;
@@ -93,6 +97,7 @@ recovery instead of leaving a listener attached to a dead verifier connection.
 - `tests/http.rs`: real server processes, replicas, revocation and restart.
 - `tests/http_jobs.rs`: job delivery, scoped publication and enrollment changes during lock waits.
 - `tests/http_policy.rs`: assignment-scoped policy, source failures and enrolled-key replacement during issuance.
+- `tests/control_policy.rs`: canonical Control migrations, source-role isolation, publication ordering and bounded caching.
 - `tests/http_schedules.rs`: Control-only publication, immutable replies and schedule replacement without workers.
 - `tests/driver.rs`: process-owned scheduling and retention recovery without workers.
 - `tests/platform_schema.rs`: actual platform migrations and database authority.

@@ -210,15 +210,15 @@ finalized with the authentication owner; registration alone does not solve them.
 
 ## Policy bindings and authenticated leases
 
-**Native lifecycle and injectable lease transport implemented; production source
-and host integration remain open.**
+**Native lifecycle, lease transport and Control source implemented; production
+worker refresh integration remains open.**
 The creator engine accepts trusted `PolicySnapshot` values through immutable
 `PolicyBinding` capabilities and ordered `PolicyRefresh` tickets. App handles,
 queued backend calls and delivered execution retain the original authority across
 asynchronous work. The shared closed raw policy, authenticated lease client and
-server route exist. The server requires an injected trusted policy provider and
-returns an infrastructure failure when none is configured. The authoritative
-Control source and production host refresh remain required integration work.
+server route exist. The server installs the native Control-storage provider and
+refuses missing or invalid operator policy. Production worker assignment and
+policy refresh still require host composition.
 
 ### Native binding identity and policy revision
 
@@ -360,11 +360,49 @@ revalidation must reject that predecessor permanently across shortening,
 revocation and restoration. `PolicyGrant` retains the source through response
 construction and cannot serialize after source authority is lost.
 
-The exact Control source representation, contributing-writer coverage and revision
-publication mechanism remain unresolved prerequisites for production use.
-The existing app/plan/rollout reads do not supply this contract. Selecting a live
-platform provider avoids a policy outbox only if it establishes the required
-consistent revision and validity itself; it does not waive those requirements.
+`policy::control::ControlPolicyStore` implements the direct Control-storage
+provider through native ORM. The server binds its platform credential to the
+`zeroship` schema and verifies source columns before serving. It reads no creator
+database. Its durable inputs are:
+
+| Input | Authority and contributing writers |
+| --- | --- |
+| `apps.plan_id`, `workflows_enabled`, `archived_at` | Registry app lifecycle and plan changes, billing plan-change transactions, and operator enablement. The database constraint makes deletion imply archive. |
+| `plans.workflow_policy_json` | A complete canonical `AppPolicy`, written by the native operator `set_plan_policy` API or equivalent operator provisioning. Missing or malformed JSON is unavailable, including for a disabled plan. |
+| `plans.workflows_allowed`, `archived` | Operator entitlement and catalog archival. Pricing updates omit the workflow policy column; startup seeding preserves archival and workflow authority. |
+| `workflow_rollout_config` | The required global row contains dispatch/ingress switches and positive `source_validity_ms`. The native `set_rollout` operation writes these together. Missing settings never select defaults. |
+
+The publication transaction explicitly requests read-committed isolation. It
+first performs an ID-only upsert on `workflow_policy_ledger`, creating an
+unpublished row or locking the existing publication without resetting it. Only
+after that wait does a relational statement read the selected app, plan and global
+settings together. It validates the complete policy, masks enablement and operator
+switches, and publishes changed policy or source validity under an advanced
+revision. Unchanged values preserve the revision. The ledger retains its app ID
+as the sole primary key and has no cascading app deletion. Its unpublished state
+cannot issue authority. The host refuses unsupported isolation instead of silently
+substituting a different transaction contract.
+
+Source validity begins before acquisition and ends at that original instant plus
+the observed `source_validity_ms`; publication and commit waits consume it. Only
+successful settlement produces a `PolicyObservation`. A ledger row alone is not
+a renewable source: every refresh rereads the contributing authoritative inputs.
+The ledger orders observations, not every intermediate writer transition. An
+unobserved disable followed by restore need not change its revision. Writer
+acknowledgement therefore promises bounded convergence, never immediate
+revocation or execution quiescence. A stricter acknowledgement would require a
+separate writer barrier and worker evidence.
+
+`ControlPolicies` caches exact observations until their original expiry. A
+per-app refresh reservation prevents competing requests from independently
+refreshing the same entry; callers arriving during that read receive a retryable
+infrastructure failure. Cancellation, timeout, source failure, invalidation or
+capacity eviction removes the reservation. Opaque entry identity prevents a late
+completion or its cleanup from replacing a later entry. Revalidation accepts
+only the current exact observation and performs no I/O. Cache capacity is bounded
+by `workflow.policy_cache_entries`; evicting a captured observation refuses an
+unfinished grant, while already serialized worker leases retain their deadline.
+The production worker assignment and refresh loop still needs composition.
 
 The worker requests a lease using `AssignedScope`: app ID and assignment revision.
 The server authenticates the enrolled instance before buffering the body. Worker
@@ -476,6 +514,9 @@ with this queue namespace; it is not a second authoritative placement store.
 | `zeroship.worker_instances` | Control-owned enrollment, public key and revocation state; distinct from workflow registration. |
 | `zeroship.app_deploys` | Control-owned immutable deployment metadata and reclamation state. |
 | `zeroship.app_deploy_holds` | Control-owned app/deployment/holder generation and retention state. |
+| `zeroship.apps`, `zeroship.plans` | Control-owned lifecycle, entitlement and complete workflow policy inputs. The manager receives column-scoped read access. |
+| `zeroship.workflow_rollout_config` | Operator dispatch/ingress switches and the finite source-validity bound. |
+| `zeroship.workflow_policy_ledger` | Durable per-app ordered policy publication. The manager locks and updates this row, without writing its app or plan inputs. An unpublished row grants nothing. |
 
 The scheduling target also requires scope ingress epochs,
 capacity demand and management delivery barriers. Their physical model is not
@@ -1609,7 +1650,7 @@ The inventory includes required semantics beyond the currently available routes.
 | Poll/renew/release assignment | Enrolled worker to manager. | Only that worker's authorized scopes and current revision outcomes; release does not retire the app's recovery duty. |
 | Register/activate deployment | Control to manager. | Idempotent immutable schedule metadata and monotonic activation state; dispatch readiness remains distinct. |
 | Disable calendar | Control to manager. | Durable app revision fence and historical receipt; accepted jobs, recovery and creator policy remain independent. |
-| Obtain policy lease | Enrolled worker under its current assignment to manager. | Validated policy bound to the exact app, worker key and placement revision, capped by original source freshness and remaining authority. Injectable provider, server route and client exist; authoritative Control source and production host integration remain open. |
+| Obtain policy lease | Enrolled worker under its current assignment to manager. | Validated policy bound to the exact app, worker key and placement revision, capped by original source freshness and remaining authority. Native Control source, server route and client exist; production worker refresh integration remains open. |
 | Establish/close ingress scope | Trusted creator host through manager policy. | Durable recovery responsibility or an explicit fenced drain result. A worker cannot create authority for an arbitrary app. |
 | Submit job/intents | Assigned worker or native manager scheduling logic to manager queue. | Receipt for the stable immutable specification; changed content under the same job identity conflicts. |
 | Claim job | Enrolled worker with current assignment to manager queue. | A persisted delivery attempt and bounded authority, or no eligible work. |
@@ -1903,8 +1944,8 @@ revoke policy while retaining the same consumer scope and keep occupied capacity
 until native shutdown joins. Exact semantic receipts and status remain readable
 through the retained app scope after execution authority is gone. Authenticated
 transport accepts an injected finite source and retains original deadlines across
-manager transactions and HTTP. Authoritative Control source publication and
-production composition remain required work.
+manager transactions and HTTP. The server now uses the native Control policy
+ledger and finite cache. Production worker refresh composition remains required.
 
 Workflow provisioning preserves an existing creator schema's migrator ownership.
 Native PostgreSQL container tests exercise both provisioning orders, repeated
@@ -2096,7 +2137,7 @@ through the replacement before deleting the old source.
 | --- | --- |
 | Enrollment bootstrap and revocation | A revoked worker cannot regain equivalent authority by automatic enrollment. Finalize bootstrap trust, replacement authorization and registry freshness with auth ownership. |
 | Placement eligibility and capacity provider | Only platform-authorized app/zone combinations may be assigned. Select the trusted eligibility source and host adapter's durable request/progress contract. |
-| Policy source and archive acknowledgement | Implement the binding/lease contract above; select the authoritative effective-policy revision and freshness provider, cover its contributing writers, and define evidence for execution quiescence separately from calendar acknowledgement or lease expiry. |
+| Archive acknowledgement | The direct Control source provides bounded convergence under original observation validity. Define any stronger execution-quiescence evidence separately from calendar acknowledgement or lease expiry. |
 | Complete job envelopes | Keep closed metadata. Finalize activation, event/fanout, continuation cursors, management lifecycle revisions and operation-specific deployment prerequisites before their consumers are wired. |
 | Normal deployment publication | Bind activation revision issuance to a stable deploy command and immutable body. Artifact identity alone cannot distinguish a delayed retry from an intentional rollback. Compose mutable deployment side effects with command acceptance, connect archive/stage/restore to the durable handoff, and keep the calendar's activation origin explicit across delayed delivery. |
 | Scope retirement | Define ingress epoch closure and durable drain evidence. Registration expiry and empty polling cannot retire unpublished-work responsibility. |
@@ -2111,10 +2152,9 @@ outside the queue cutover.
 
 ### Dependency-ordered completion
 
-- Supply the revisioned authoritative Control policy source and compose the
-  authenticated lease path with creator bindings before production workers depend
-  on remote policy. Native generations, refresh tickets and injectable transport
-  already exist.
+- Compose the authenticated policy lease path with production creator bindings
+  before workers depend on remote policy. Native generations, refresh tickets,
+  transport and the authoritative Control source already exist.
 - Finalize the missing closed delivery, scope-recovery and retention contracts;
   add their manager models using the canonical migration/ORM pipeline.
 - Connect normal deployment registration, activation and queue holds to manager

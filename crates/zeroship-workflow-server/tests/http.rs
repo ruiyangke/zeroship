@@ -6,21 +6,23 @@
 
 #[path = "support/platform.rs"]
 mod platform;
+#[path = "support/policy.rs"]
+mod policy_fixture;
 #[path = "support/server_process.rs"]
 mod server_process;
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use ntex::{client::Client, http::StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
     service_assertion::{ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey},
     service_identity::endpoints,
-    service_peers::{service_issuer, CONTROL_SERVICE_NAME},
+    service_peers::{CONTROL_SERVICE_NAME, service_issuer},
     workflow_coordination::{
-        Assignment, ManageRun, ManagementOperation, RequestId, RunId, RunOperation, WorkerId,
-        AUDIENCE,
+        AUDIENCE, Assignment, ManageRun, ManagementOperation, RequestId, RunId, RunOperation,
+        WorkerId,
     },
 };
 
@@ -97,11 +99,13 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
     client.register(&registration).await.unwrap();
     // Independent requests must mint fresh assertions despite sharing a signer.
     client.register(&registration).await.unwrap();
-    assert!(client
-        .assignments(&ScopePage { after: None })
-        .await
-        .unwrap()
-        .is_empty());
+    assert!(
+        client
+            .assignments(&ScopePage { after: None })
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let mut apps = [AppId::mint(), AppId::mint()];
     apps.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -139,6 +143,7 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         assignment_revision: assignments[0].revision,
     };
     client.renew(&scope).await.unwrap();
+    verify_native_policy_source(&fixture, &client, &scope).await;
     fixture
         .admin
         .batch_execute("REVOKE UPDATE ON workflow_manager.assignments FROM zeroship_workflow")
@@ -286,6 +291,60 @@ async fn native_worker_client_uses_the_authenticated_coordinator_api() {
         Error::Refused(FailureCode::Unauthenticated)
     );
 }
+async fn verify_native_policy_source(
+    fixture: &platform::Platform,
+    client: &zeroship_workflow_client::WorkerCoordinator,
+    scope: &zeroship_core::workflow_coordination::AssignedScope,
+) {
+    use std::time::Instant;
+    use zeroship_core::{schema_name::SchemaName, workflow_policy::AppPolicy};
+    use zeroship_data_orm::{
+        ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
+    };
+    use zeroship_workflow_manager::policy::control::{self, ControlPolicyStore, RolloutPolicy};
+    assert!(matches!(
+        client.policy_lease(scope).await,
+        Err(zeroship_workflow_client::Error::Refused(
+            zeroship_core::workflow_coordination::FailureCode::Unavailable
+        ))
+    ));
+    let plan = policy_fixture::seed_app(fixture, &scope.app_id).await;
+    let url = fixture
+        .runtime_url
+        .replacen("zeroship_workflow@", "zeroship_control@", 1);
+    let database = Database::connect(
+        DbBinding::new(
+            "platform",
+            "policy-operator",
+            SchemaName::new("zeroship").unwrap(),
+        ),
+        ConnectOptions::new(&url, ProjectKeySource::unavailable()).connection_authority(),
+        control::collections().unwrap(),
+    )
+    .await
+    .unwrap();
+    let operator = ControlPolicyStore::new(database).unwrap();
+    let policy = AppPolicy {
+        admission: false,
+        ..AppPolicy::default()
+    };
+    operator.set_plan_policy(&plan, &policy).await.unwrap();
+    operator
+        .set_rollout(RolloutPolicy {
+            dispatch_paused: false,
+            ingress_disabled: false,
+            source_validity_ms: 30_000,
+        })
+        .await
+        .unwrap();
+    let leased = client.policy_lease(scope).await.unwrap();
+    assert_eq!(leased.policy(), &policy);
+    assert_eq!(leased.app_id(), &scope.app_id);
+    assert_eq!(leased.worker_id(), client.worker_id());
+    assert_eq!(leased.signing_key_id(), client.signing_key_id());
+    assert!(leased.expires_at() > Instant::now());
+}
+
 async fn post(
     client: &Client,
     url: &str,

@@ -5,20 +5,22 @@
 )]
 
 use crate::{
+    WorkflowHttpState,
     auth::{PostgresWorkerRegistry, WorkflowAuth},
     config::WorkflowSettings,
     coordinator::{Coordinator, Options},
-    WorkflowHttpState,
 };
-use futures::future::{select, Either};
+use futures::future::{Either, select};
 use ntex::web;
-use std::{future::Future, net::SocketAddr, pin::Pin, rc::Rc, sync::Arc, time::Duration};
+use std::{
+    future::Future, net::SocketAddr, num::NonZeroUsize, pin::Pin, rc::Rc, sync::Arc, time::Duration,
+};
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_core::{
     app_id::AppId,
     service_assertion::ServiceAssertionVerifier,
     service_peers::{
-        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME,
+        CONTROL_SERVICE_NAME, ServiceAuth, ServiceKeyring, WORKFLOW_SERVICE_NAME, service_issuer,
     },
     workflow_coordination::FailureCode,
     workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
@@ -26,9 +28,10 @@ use zeroship_core::{
 };
 use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
 use zeroship_workflow_manager::{
-    driver::{Driver, Options as DriverOptions, TickReport},
-    retention::HoldClient,
     Error as ManagerError,
+    driver::{Driver, Options as DriverOptions, TickReport},
+    policy::control::{self, ControlPolicies, ControlPolicyStore},
+    retention::HoldClient,
 };
 
 type Error = Box<dyn std::error::Error>;
@@ -38,6 +41,7 @@ pub struct ServerOptions {
     pub listen: SocketAddr,
     pub http_threads: usize,
     pub max_connections: usize,
+    pub policy_cache_entries: NonZeroUsize,
     pub max_request_bytes: usize,
     pub coordinator: Options,
     replay_sweep: Duration,
@@ -53,6 +57,8 @@ impl ServerOptions {
         let listen = settings.listen.get().parse()?;
         let http_threads = *settings.http_threads.get();
         let max_connections = *settings.max_connections.get();
+        let policy_cache_entries = NonZeroUsize::new(*settings.policy_cache_entries.get())
+            .ok_or("workflow policy cache capacity must be positive")?;
         let max_request_bytes = *settings.max_request_bytes.get();
         let replay_sweep = Duration::from_millis(*settings.replay_sweep_ms.get());
         let driver_interval = Duration::from_millis(*settings.driver_interval_ms.get());
@@ -97,6 +103,7 @@ impl ServerOptions {
             listen,
             http_threads,
             max_connections,
+            policy_cache_entries,
             max_request_bytes,
             coordinator,
             replay_sweep,
@@ -146,6 +153,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     // Verify migration readiness before accepting connections. Each HTTP thread
     // constructs its own bounded pool and retention transport in the state factory.
     let startup = Coordinator::connect(&url, options.coordinator, Rc::new(holds)).await?;
+    connect_policies(&url, options.coordinator, options.policy_cache_entries).await?;
     let driver = Driver::new(startup.queue.clone(), options.driver)?;
     drop(startup);
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
@@ -162,6 +170,7 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     ));
     let coordinator = options.coordinator;
     let max_request_bytes = options.max_request_bytes;
+    let policy_cache_entries = options.policy_cache_entries;
     let server = web::HttpServer::new(move || {
         let url = url.clone();
         let auth = auth.clone();
@@ -174,7 +183,9 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
                         service: Coordinator::connect(&url, coordinator, Rc::new(holds)).await?,
                         auth,
-                        policy_source: None,
+                        policy_source: Some(Rc::new(
+                            connect_policies(&url, coordinator, policy_cache_entries).await?,
+                        )),
                     }))
                 })
                 .configure(move |config| {
@@ -207,6 +218,38 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     };
     let _ = maintenance.cancel().await;
     result
+}
+
+async fn connect_policies(
+    url: &str,
+    options: Options,
+    capacity: NonZeroUsize,
+) -> Result<ControlPolicies, ManagerError> {
+    use zeroship_core::schema_name::SchemaName;
+    use zeroship_data_orm::{
+        ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
+    };
+    compio::time::timeout(options.command_timeout, async {
+        let database = Database::connect(
+            DbBinding::new(
+                "platform",
+                "workflow-policy",
+                SchemaName::new("zeroship").map_err(|_| ManagerError::Invalid)?,
+            ),
+            ConnectOptions::new(url, ProjectKeySource::unavailable())
+                .max_connections(
+                    NonZeroUsize::new(options.connections).ok_or(ManagerError::Invalid)?,
+                )
+                .connection_authority(),
+            control::collections()?,
+        )
+        .await?;
+        let store = ControlPolicyStore::new(database)?;
+        store.ready().await?;
+        ControlPolicies::new(store, capacity, options.command_timeout)
+    })
+    .await
+    .map_err(|_| ManagerError::Unavailable)?
 }
 
 async fn sweep_assertions(
