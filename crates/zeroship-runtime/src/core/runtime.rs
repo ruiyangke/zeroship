@@ -3417,9 +3417,6 @@ impl RuntimeInner {
         if !s.per_request_user.is_empty() {
             s.per_request_user.remove(&request_id);
         }
-        if !s.request_ctx_by_id.is_empty() {
-            s.request_ctx_by_id.remove(&request_id);
-        }
         if !s.request_by_id.is_empty() {
             s.request_by_id.remove(&request_id);
         }
@@ -3445,7 +3442,6 @@ impl RuntimeInner {
     fn discard_request_state(&self, request_id: u64) {
         let mut s = self.state.borrow_mut();
         s.per_request_user.remove(&request_id);
-        s.request_ctx_by_id.remove(&request_id);
         s.request_by_id.remove(&request_id);
         s.per_request_logs.remove(&request_id);
     }
