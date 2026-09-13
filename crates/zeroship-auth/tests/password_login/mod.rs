@@ -1,6 +1,7 @@
 //! Password refusal, account lockout and recovery through the production router.
 
 mod fixtures;
+mod enumeration;
 
 use crate::common::{self, auth_server::AuthServer, database::Database};
 use fixtures::*;
