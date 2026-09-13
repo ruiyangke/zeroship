@@ -7,6 +7,7 @@ use crate::{
     clock::{Clock, Sample, RESOLUTION_MILLIS},
     error::Error,
     models::{self, jobs, queue_scopes, Job},
+    retention::{self, Retention},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -67,6 +68,12 @@ pub struct Queue {
     pub(crate) database: Database,
     pub(crate) clock: Clock,
     pub(crate) options: Options,
+    pub(crate) holds: Rc<dyn crate::retention::HoldClient>,
+}
+
+struct PreparedSettlement<'a> {
+    successors: BTreeMap<&'a str, &'a JobSpec>,
+    digest: String,
 }
 
 /// A committed delivery with the manager's original monotonic lease budget.
@@ -139,7 +146,12 @@ impl Queue {
     ///
     /// # Errors
     /// Refuses invalid bounds and unavailable or incompatible storage.
-    pub async fn connect(binding: DbBinding, url: &str, options: Options) -> Result<Self, Error> {
+    pub async fn connect(
+        binding: DbBinding,
+        url: &str,
+        options: Options,
+        holds: Rc<dyn crate::retention::HoldClient>,
+    ) -> Result<Self, Error> {
         if options.transaction_timeout.is_zero()
             || Instant::now()
                 .checked_add(options.transaction_timeout)
@@ -159,7 +171,11 @@ impl Queue {
             models::collections()?,
         )
         .await?;
-        for collection in [jobs::Entity::COLLECTION, queue_scopes::Entity::COLLECTION] {
+        for collection in [
+            jobs::Entity::COLLECTION,
+            queue_scopes::Entity::COLLECTION,
+            models::schema::deployment_holds::Entity::COLLECTION,
+        ] {
             database
                 .collection(collection)?
                 .find(value!({}), value!({"limit":1}))
@@ -170,6 +186,7 @@ impl Queue {
             database,
             clock,
             options,
+            holds,
         })
     }
 
@@ -189,12 +206,28 @@ impl Queue {
     /// Refuses unknown apps, reused identities with different content and storage failures.
     pub async fn submit(&self, job: &JobSpec) -> Result<JobSpec, Error> {
         self.encode(job)?;
-        self.transact(|tx| async move {
-            lock_scope(&tx, &job.app_id).await?;
-            self.insert(&tx, job, self.clock.now().await?).await?;
-            Ok(job.clone())
-        })
-        .await
+        let budget = Budget::new(self.options.transaction_timeout);
+        loop {
+            let result = self
+                .transact_for(budget.clone(), |tx| async move {
+                    lock_scope(&tx, &job.app_id).await?;
+                    if !self.existing(&tx, job).await?
+                        && !retention::prepared(&tx, &job.app_id, &job.deployment_id).await?
+                    {
+                        return Ok(Retention::Acquire(job.deployment_id.clone()));
+                    }
+                    self.insert(&tx, job, self.clock.now().await?).await?;
+                    Ok(Retention::Ready(job.clone()))
+                })
+                .await?;
+            match result {
+                Retention::Ready(job) => return Ok(job),
+                Retention::Acquire(deployment) => {
+                    self.ensure_deployment_for(&job.app_id, &deployment, budget.clone())
+                        .await?;
+                }
+            }
+        }
     }
 
     /// Publish an app's immutable job under its current host-authenticated assignment.
@@ -220,20 +253,39 @@ impl Queue {
         }
         self.encode(job)?;
         let budget = Budget::new(self.options.transaction_timeout);
-        self.transact_for(budget.clone(), |tx| async move {
-            lock_scope(&tx, &assignment.app_id).await?;
-            let observed = authorize(tx.clone()).await?;
-            let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            budget.cap(sample, authority.expires_at.get())?;
-            self.insert(&tx, job, sample.millis).await?;
-            let observed = authorize(tx.clone()).await?;
-            let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            budget.cap(sample, authority.expires_at.get())?;
-            Ok(job.clone())
-        })
-        .await
+        loop {
+            let result = self
+                .transact_for(budget.clone(), |tx| {
+                    let authorize = &mut authorize;
+                    let budget = &budget;
+                    async move {
+                        lock_scope(&tx, &assignment.app_id).await?;
+                        let observed = authorize(tx.clone()).await?;
+                        let sample = self.clock.sample().await?;
+                        let authority = current(assignment, observed, sample.millis)?;
+                        budget.cap(sample, authority.expires_at.get())?;
+                        if !self.existing(&tx, job).await?
+                            && !retention::prepared(&tx, &job.app_id, &job.deployment_id).await?
+                        {
+                            return Ok(Retention::Acquire(job.deployment_id.clone()));
+                        }
+                        self.insert(&tx, job, sample.millis).await?;
+                        let observed = authorize(tx.clone()).await?;
+                        let sample = self.clock.sample().await?;
+                        let authority = current(assignment, observed, sample.millis)?;
+                        budget.cap(sample, authority.expires_at.get())?;
+                        Ok(Retention::Ready(job.clone()))
+                    }
+                })
+                .await?;
+            match result {
+                Retention::Ready(job) => return Ok(job),
+                Retention::Acquire(deployment) => {
+                    self.ensure_deployment_for(&job.app_id, &deployment, budget.clone())
+                        .await?;
+                }
+            }
+        }
     }
 
     /// Claim under a current assignment authenticated by the native host.
@@ -276,6 +328,7 @@ impl Queue {
                 return Ok(None);
             };
             let job = load(&tx, &assignment.app_id, &id).await?.ok_or(Error::Storage)?;
+            retention::require_held(&tx, &assignment.app_id, &job.spec()?.deployment_id).await?;
             crate::scheduling::validate_delivery(&tx, &job).await?;
             let attempt = job.attempt.checked_add(1).filter(|value| *value > 0)
                 .ok_or(Error::Capacity)?;
@@ -349,6 +402,7 @@ impl Queue {
                 .await?
                 .ok_or(Error::Conflict)?;
             matches_delivery(&job, delivery)?;
+            retention::require_held(&tx, &assignment.app_id, &delivery.job.deployment_id).await?;
             let sample = self.clock.sample().await?;
             live(&job, sample.millis)?;
             budget.cap(
@@ -429,6 +483,103 @@ impl Queue {
         R: FnMut(Database) -> Replay,
         Replay: Future<Output = Result<WorkerId, Error>>,
     {
+        let prepared = self.prepare_settlement(assignment, settlement)?;
+        let delivery = &settlement.delivery;
+        let budget = Budget::new(self.options.transaction_timeout);
+        loop {
+            let result = self
+                .transact_for(budget.clone(), |tx| {
+                    let authorize = &mut authorize;
+                    let authorize_replay = &mut authorize_replay;
+                    let successors = &prepared.successors;
+                    let digest = &prepared.digest;
+                    let budget = &budget;
+                    async move {
+                        lock_scope(&tx, &assignment.app_id).await?;
+                        let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
+                            .await?
+                            .ok_or(Error::Conflict)?;
+                        matches_delivery(&job, delivery)?;
+                        let outcome = serde_json::to_string(&settlement.outcome)
+                            .map_err(|_| Error::Invalid)?;
+                        let receipt = SettlementReceipt {
+                            job_id: delivery.job.id.clone(),
+                            app_id: assignment.app_id.clone(),
+                            attempt: delivery.attempt,
+                            outcome: settlement.outcome,
+                        };
+                        if job.state == "settled" {
+                            if job.settlement_digest.as_deref() != Some(digest.as_str())
+                                || job.outcome.as_deref() != Some(&outcome)
+                            {
+                                return Err(Error::Conflict);
+                            }
+                            if authorize_replay(tx.clone()).await? != delivery.worker_id {
+                                return Err(Error::Denied);
+                            }
+                            return Ok(Retention::Ready(receipt));
+                        }
+                        let observed = authorize(tx.clone()).await?;
+                        let sample = self.clock.sample().await?;
+                        cap_live_delivery(budget, assignment, observed, &job, sample)?;
+                        retention::require_held(
+                            &tx,
+                            &assignment.app_id,
+                            &delivery.job.deployment_id,
+                        )
+                        .await?;
+                        for successor in successors.values() {
+                            if !self.existing(&tx, successor).await?
+                                && !retention::prepared(
+                                    &tx,
+                                    &assignment.app_id,
+                                    &successor.deployment_id,
+                                )
+                                .await?
+                            {
+                                return Ok(Retention::Acquire(successor.deployment_id.clone()));
+                            }
+                        }
+                        for successor in successors.values() {
+                            self.insert(&tx, successor, sample.millis).await?;
+                        }
+                        update(
+                            &tx,
+                            fence(delivery),
+                            value!({
+                                "state":"settled","outcome":outcome,"settlement_digest":digest
+                            }),
+                        )
+                        .await?;
+                        crate::recovery::settled_page(
+                            &tx,
+                            &delivery.job,
+                            settlement.outcome,
+                            sample.millis,
+                        )
+                        .await?;
+                        let observed = authorize(tx.clone()).await?;
+                        let sample = self.clock.sample().await?;
+                        cap_live_delivery(budget, assignment, observed, &job, sample)?;
+                        Ok(Retention::Ready(receipt))
+                    }
+                })
+                .await?;
+            match result {
+                Retention::Ready(receipt) => return Ok(receipt),
+                Retention::Acquire(deployment) => {
+                    self.ensure_deployment_for(&assignment.app_id, &deployment, budget.clone())
+                        .await?;
+                }
+            }
+        }
+    }
+
+    fn prepare_settlement<'a>(
+        &self,
+        assignment: &VerifyAssignment,
+        settlement: &'a Settlement,
+    ) -> Result<PreparedSettlement<'a>, Error> {
         let delivery = &settlement.delivery;
         bound(assignment, delivery)?;
         if settlement.successors.len() > self.options.max_successors {
@@ -458,69 +609,7 @@ impl Queue {
             settlement.outcome,
             successors.values().collect::<Vec<_>>(),
         ))?);
-        let budget = Budget::new(self.options.transaction_timeout);
-        self.transact_for(budget.clone(), |tx| async move {
-            lock_scope(&tx, &assignment.app_id).await?;
-            let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
-                .await?
-                .ok_or(Error::Conflict)?;
-            matches_delivery(&job, delivery)?;
-            let outcome = serde_json::to_string(&settlement.outcome).map_err(|_| Error::Invalid)?;
-            let receipt = SettlementReceipt {
-                job_id: delivery.job.id.clone(),
-                app_id: assignment.app_id.clone(),
-                attempt: delivery.attempt,
-                outcome: settlement.outcome,
-            };
-            if job.state == "settled" {
-                if job.settlement_digest.as_deref() != Some(&digest)
-                    || job.outcome.as_deref() != Some(&outcome)
-                {
-                    return Err(Error::Conflict);
-                }
-                if authorize_replay(tx.clone()).await? != delivery.worker_id {
-                    return Err(Error::Denied);
-                }
-                return Ok(receipt);
-            }
-            let observed = authorize(tx.clone()).await?;
-            let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            live(&job, sample.millis)?;
-            budget.cap(
-                sample,
-                authority
-                    .expires_at
-                    .get()
-                    .min(job.lease_deadline.ok_or(Error::Storage)?),
-            )?;
-            for successor in successors.values() {
-                self.insert(&tx, successor, sample.millis).await?;
-            }
-            update(
-                &tx,
-                fence(delivery),
-                value!({
-                    "state":"settled","outcome":outcome,"settlement_digest":digest
-                }),
-            )
-            .await?;
-            crate::recovery::settled_page(&tx, &delivery.job, settlement.outcome, sample.millis)
-                .await?;
-            let observed = authorize(tx.clone()).await?;
-            let sample = self.clock.sample().await?;
-            let authority = current(assignment, observed, sample.millis)?;
-            live(&job, sample.millis)?;
-            budget.cap(
-                sample,
-                authority
-                    .expires_at
-                    .get()
-                    .min(job.lease_deadline.ok_or(Error::Storage)?),
-            )?;
-            Ok(receipt)
-        })
-        .await
+        Ok(PreparedSettlement { successors, digest })
     }
 
     fn deadline(&self, assignment: &Assignment, now: i64) -> Result<i64, Error> {
@@ -550,14 +639,11 @@ impl Queue {
         spec: &JobSpec,
         now: i64,
     ) -> Result<(), Error> {
-        let digest = digest(&self.encode(spec)?);
-        if let Some(job) = load(tx, &spec.app_id, spec.id.as_str()).await? {
-            return if job.spec_digest == digest && job.spec()? == *spec {
-                Ok(())
-            } else {
-                Err(Error::Conflict)
-            };
+        if self.existing(tx, spec).await? {
+            return Ok(());
         }
+        retention::require_held(tx, &spec.app_id, &spec.deployment_id).await?;
+        let digest = digest(&self.encode(spec)?);
         tx.collection(jobs::Entity::COLLECTION)?.insert(value!({
             "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"deployment_id":spec.deployment_id.as_str(),
             "operation":serde_json::to_string(&spec.operation).map_err(|_| Error::Invalid)?,
@@ -565,6 +651,24 @@ impl Queue {
             "created_at":now
         })).await?;
         Ok(())
+    }
+
+    pub(crate) async fn existing(&self, tx: &Database, spec: &JobSpec) -> Result<bool, Error> {
+        let digest = digest(&self.encode(spec)?);
+        if let Some(job) = load(tx, &spec.app_id, spec.id.as_str()).await? {
+            if job.spec_digest != digest || job.spec()? != *spec {
+                return Err(Error::Conflict);
+            }
+            match job.state.as_str() {
+                "settled" => {}
+                "ready" | "leased" => {
+                    retention::require_held(tx, &spec.app_id, &spec.deployment_id).await?;
+                }
+                _ => return Err(Error::Storage),
+            }
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     pub(crate) async fn transact<T, F, Fut>(&self, body: F) -> Result<T, Error>
@@ -702,6 +806,24 @@ fn matches_delivery(job: &Job, delivery: &Delivery) -> Result<(), Error> {
     Ok(())
 }
 
+fn cap_live_delivery(
+    budget: &Budget,
+    expected: &VerifyAssignment,
+    observed: Assignment,
+    job: &Job,
+    sample: Sample,
+) -> Result<(), Error> {
+    let authority = current(expected, observed, sample.millis)?;
+    live(job, sample.millis)?;
+    budget.cap(
+        sample,
+        authority
+            .expires_at
+            .get()
+            .min(job.lease_deadline.ok_or(Error::Storage)?),
+    )
+}
+
 fn live(job: &Job, now: i64) -> Result<(), Error> {
     if job.state != "leased" || job.lease_deadline.is_none_or(|deadline| deadline <= now) {
         return Err(Error::Conflict);
@@ -755,7 +877,7 @@ fn local_deadline(sample: Sample, deadline: i64) -> Result<Instant, Error> {
         .ok_or(Error::Invalid)
 }
 
-async fn bounded<T>(budget: Budget, future: impl Future<Output = T>) -> Result<T, Error> {
+pub async fn bounded<T>(budget: Budget, future: impl Future<Output = T>) -> Result<T, Error> {
     let mut future = Box::pin(future);
     let mut deadline = budget.0.get();
     let mut timer = Box::pin(compio::time::sleep(

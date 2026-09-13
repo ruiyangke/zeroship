@@ -1,4 +1,6 @@
 use ntex::{client::Client, http::StatusCode};
+#[path = "queue_control.rs"]
+mod queue_control;
 use std::{
     net::TcpListener,
     path::{Path, PathBuf},
@@ -8,6 +10,7 @@ use std::{
 
 pub struct ServerProcess {
     child: Child,
+    _control: queue_control::Control,
     config: PathBuf,
     log: PathBuf,
     pub url: String,
@@ -31,10 +34,12 @@ impl ServerProcess {
         let address = listener.local_addr().unwrap();
         drop(listener);
         let config = directory.join(format!("{name}.toml"));
+        let control = queue_control::Control::start(directory, name).await;
         super::platform::write_private(
             &config,
             toml::to_string(&serde_json::json!({"workflow":{
                 "listen":address.to_string(),"database_url":database,"service_peers_file":peers,
+                "control_url":control.url(),"service_key_file":control.key_file,
                 "http_threads":2,"max_request_bytes":1024,
             }}))
             .unwrap(),
@@ -43,6 +48,7 @@ impl ServerProcess {
         let child = spawn(&config, &log);
         let mut server = Self {
             child,
+            _control: control,
             config,
             log,
             url: format!("http://{address}"),

@@ -5,6 +5,7 @@ import { dialect, raw, table, t } from "../../../packages/zero-migrate/dist/inde
 export const managerIdentityColumns = {
   schema_version: ["id"],
   queue_scopes: ["id"],
+  deployment_holds: ["id", "app_id", "deployment_id", "holder_id"],
   workers: ["id"],
   assignments: ["id", "app_id", "worker_id"],
   placement_receipts: ["id", "app_id", "request_id", "worker_id"],
@@ -45,6 +46,13 @@ export function workflowManagerSchema(namespace) {
     },
     primaryKey: ["id"],
   });
+  create("deployment_holds", {
+    app_id: text(), deployment_id: text(), holder_id: text(),
+    deploy_hash: t.text(), generation: integer(), state: text(),
+  }, ["app_id", "deployment_id"], [
+    fk("deployment_hold_scope", ["app_id"], "queue_scopes", ["id"]),
+  ]);
+  index("deployment_holds", "pending", ["state", "app_id", "deployment_id"]);
   create("workers", {
     capacity: integer(), state: text(), expires_at: integer(),
     lock_version: integer().default(0),
@@ -100,6 +108,7 @@ export function workflowManagerSchema(namespace) {
   jobs.index("jobs_available_idx").add({ on: ["app_id", "state", "available_at", "id"] });
   jobs.index("jobs_lease_idx").add({ on: ["app_id", "state", "lease_deadline", "id"] });
   jobs.index("jobs_scope_key").add({ on: ["app_id", "id"], unique: true });
+  jobs.index("jobs_deployment_idx").add({ on: ["app_id", "deployment_id", "state"] });
 
   create("schedule_deployments", {
     app_id: text(), definition: text(), interpretation: text(), created_at: integer(),
@@ -111,6 +120,7 @@ export function workflowManagerSchema(namespace) {
     fk("schedule_activation_deploy", ["app_id", "deployment_id"], "schedule_deployments", ["app_id", "id"]),
   ]);
   table("schedule_activations", { schema: namespace }).index("schedule_activations_identity_key").add({ on: ["app_id", "id"], unique: true });
+  index("schedule_activations", "deployment", ["app_id", "deployment_id", "id"]);
   create("schedule_scopes", {
     revision: integer(), activation_id: text(),
   }, ["id"], [
@@ -126,6 +136,7 @@ export function workflowManagerSchema(namespace) {
   ]);
   table("schedules", { schema: namespace }).index("schedules_identity_key").add({ on: ["app_id", "id"], unique: true });
   index("schedules", "due", ["next_at", "id"]);
+  index("schedules", "activation", ["app_id", "activation_id"]);
   create("schedule_occurrences", {
     app_id: text(), schedule_id: text(), revision: integer(), scheduled_at: integer(),
     run_id: text(), job_id: text(), activation_id: text(),

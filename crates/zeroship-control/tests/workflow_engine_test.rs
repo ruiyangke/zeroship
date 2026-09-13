@@ -34,7 +34,7 @@ use zeroship_control::cron::workflow_engine::{
     StepRequest, StepResult, WorkflowEngineConfig,
 };
 use zeroship_control::cron::{
-    deploy_retention, workflow_blob_gc, workflow_retention, workflow_schedules,
+    workflow_blob_gc, workflow_retention, workflow_schedules,
     workflow_signal_fanout,
 };
 use zeroship_control::{
@@ -372,39 +372,6 @@ async fn seed_additional_deploy(fx: &Fixture, app_id: &AppId, _label: &str) -> S
         .await
         .expect("insert additional deploy");
     deploy_id
-}
-
-async fn age_deploy(fx: &Fixture, deploy_id: &str, activated_at: DateTime<Utc>) {
-    fx.pg
-        .execute(
-            "UPDATE zeroship.app_deploys \
-                SET activated_at = $2, created_at = $2 \
-              WHERE id = $1",
-            &[&deploy_id, &activated_at],
-        )
-        .await
-        .expect("age deploy");
-}
-
-async fn put_manifest_for_deploy(fx: &Fixture, app_id: &AppId, deploy_id: &str) -> String {
-    let row = fx
-        .pg
-        .query_one(
-            "SELECT deploy_hash, manifest_json \
-               FROM zeroship.app_deploys \
-              WHERE id = $1 AND app_id = $2",
-            &[&deploy_id, &app_id.as_str()],
-        )
-        .await
-        .expect("load deploy manifest");
-    let deploy_hash: String = row.get("deploy_hash");
-    let manifest_json: String = row.get("manifest_json");
-    fx.state
-        .blob_store
-        .put_manifest(app_id, &deploy_hash, manifest_json.as_bytes())
-        .await
-        .expect("put deploy manifest");
-    deploy_hash
 }
 
 async fn seed_workflow_cap_plan(fx: &Fixture, label: &str, run_cap: i64, app_cap: i64) -> String {
@@ -3975,232 +3942,6 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
 
 #[compio::test]
 #[serial]
-async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal() {
-    let fx = isolated_fixture("deploy-retention-drain").await;
-    compio::time::timeout(Duration::from_secs(10), async {
-        let (app_id, old_deploy) = seed_app_and_deploy(&fx, "deploy-retention-drain").await;
-        age_deploy(&fx, &old_deploy, Utc::now() - ChronoDuration::minutes(10)).await;
-        let old_hash = put_manifest_for_deploy(&fx, &app_id, &old_deploy).await;
-        let live_run = seed_run(
-            &fx,
-            &app_id,
-            &old_deploy,
-            "sleeping",
-            60_000,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await;
-        let active_deploy = seed_additional_deploy(&fx, &app_id, "deploy-retention-active").await;
-        let active_hash = put_manifest_for_deploy(&fx, &app_id, &active_deploy).await;
-
-        let count =
-            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_id, &old_deploy)
-                .await
-                .expect("count pinned runs");
-        assert_eq!(count, 1);
-        assert!(
-            !deploy_retention::deploy_bundle_reclaimable(
-                fx.pg.inner.as_ref(),
-                &app_id,
-                &old_deploy,
-            )
-            .await
-            .expect("old deploy guard while live"),
-            "superseded deploy with a live pinned run must be retained"
-        );
-        assert!(
-            !deploy_retention::deploy_bundle_reclaimable(
-                fx.pg.inner.as_ref(),
-                &app_id,
-                &active_deploy,
-            )
-            .await
-            .expect("active deploy guard"),
-            "active deploy must not be reclaimable even with no pinned runs"
-        );
-
-        let retained = deploy_retention::tick_with_config(
-            &fx.state,
-            deploy_retention::DeployRetentionConfig {
-                grace_window_ms: 0,
-                batch_size: 16,
-            },
-        )
-        .await
-        .expect("deploy retention tick with live pin");
-        assert_eq!(retained.candidates, 1);
-        assert_eq!(retained.retained_live_pins, 1);
-        assert_eq!(retained.manifests_deleted, 0);
-        assert!(fx
-            .state
-            .blob_store
-            .get_manifest(&app_id, &old_hash)
-            .await
-            .is_ok());
-
-        fx.pg
-            .execute(
-                "UPDATE zeroship.workflow_runs \
-                    SET state = 'completed', wake_at = NULL, terminal_at = now() \
-                  WHERE id = $1",
-                &[&live_run],
-            )
-            .await
-            .expect("complete pinned run");
-
-        let drained_count =
-            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_id, &old_deploy)
-                .await
-                .expect("count drained runs");
-        assert_eq!(drained_count, 0);
-        assert!(
-            deploy_retention::deploy_bundle_reclaimable(
-                fx.pg.inner.as_ref(),
-                &app_id,
-                &old_deploy,
-            )
-            .await
-            .expect("old deploy guard after drain"),
-            "superseded deploy with zero live pins must be reclaimable"
-        );
-
-        let reclaimed = deploy_retention::tick_with_config(
-            &fx.state,
-            deploy_retention::DeployRetentionConfig {
-                grace_window_ms: 0,
-                batch_size: 16,
-            },
-        )
-        .await
-        .expect("deploy retention tick after drain");
-        assert_eq!(reclaimed.candidates, 1);
-        assert_eq!(reclaimed.retained_live_pins, 0);
-        assert_eq!(reclaimed.manifests_deleted, 1);
-        assert!(matches!(
-            fx.state.blob_store.get_manifest(&app_id, &old_hash).await,
-            Err(zeroship_bundle::BlobError::NotFound(_))
-        ));
-        assert!(
-            fx.state
-                .blob_store
-                .get_manifest(&app_id, &active_hash)
-                .await
-                .is_ok(),
-            "active deploy manifest must survive deploy retention"
-        );
-    })
-    .await
-    .expect("test timeout");
-
-    drop(fx);
-    common::drain_pg().await;
-}
-
-#[compio::test]
-#[serial]
-async fn deploy_retention_counts_are_per_app() {
-    let fx = isolated_fixture("deploy-retention-per-app").await;
-    compio::time::timeout(Duration::from_secs(10), async {
-        let (app_a, old_a) = seed_app_and_deploy(&fx, "deploy-retention-app-a").await;
-        let (app_b, old_b) = seed_app_and_deploy(&fx, "deploy-retention-app-b").await;
-        let old_at = Utc::now() - ChronoDuration::minutes(10);
-        age_deploy(&fx, &old_a, old_at).await;
-        age_deploy(&fx, &old_b, old_at).await;
-        let old_a_hash = put_manifest_for_deploy(&fx, &app_a, &old_a).await;
-        let old_b_hash = put_manifest_for_deploy(&fx, &app_b, &old_b).await;
-
-        let _run_a = seed_run(
-            &fx, &app_a, &old_a, "queued", 60_000, None, None, None, None,
-        )
-        .await;
-        let _run_b = seed_run(
-            &fx,
-            &app_b,
-            &old_b,
-            "completed",
-            -1_000,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await;
-        let active_a = seed_additional_deploy(&fx, &app_a, "deploy-retention-app-a-live").await;
-        let active_b = seed_additional_deploy(&fx, &app_b, "deploy-retention-app-b-live").await;
-        let active_a_hash = put_manifest_for_deploy(&fx, &app_a, &active_a).await;
-        let active_b_hash = put_manifest_for_deploy(&fx, &app_b, &active_b).await;
-
-        let count_a =
-            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_a, &old_a)
-                .await
-                .expect("count app a pins");
-        let count_b =
-            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_b, &old_b)
-                .await
-                .expect("count app b pins");
-        assert_eq!(count_a, 1);
-        assert_eq!(count_b, 0);
-        assert!(
-            !deploy_retention::deploy_bundle_reclaimable(fx.pg.inner.as_ref(), &app_a, &old_a,)
-                .await
-                .expect("app a guard")
-        );
-        assert!(
-            deploy_retention::deploy_bundle_reclaimable(fx.pg.inner.as_ref(), &app_b, &old_b,)
-                .await
-                .expect("app b guard")
-        );
-
-        let stats = deploy_retention::tick_with_config(
-            &fx.state,
-            deploy_retention::DeployRetentionConfig {
-                grace_window_ms: 0,
-                batch_size: 16,
-            },
-        )
-        .await
-        .expect("deploy retention tick");
-        assert_eq!(stats.candidates, 2);
-        assert_eq!(stats.retained_live_pins, 1);
-        assert_eq!(stats.manifests_deleted, 1);
-
-        assert!(
-            fx.state
-                .blob_store
-                .get_manifest(&app_a, &old_a_hash)
-                .await
-                .is_ok(),
-            "app A old deploy stays because app A still has a live pin"
-        );
-        assert!(matches!(
-            fx.state.blob_store.get_manifest(&app_b, &old_b_hash).await,
-            Err(zeroship_bundle::BlobError::NotFound(_))
-        ));
-        assert!(fx
-            .state
-            .blob_store
-            .get_manifest(&app_a, &active_a_hash)
-            .await
-            .is_ok());
-        assert!(fx
-            .state
-            .blob_store
-            .get_manifest(&app_b, &active_b_hash)
-            .await
-            .is_ok());
-    })
-    .await
-    .expect("test timeout");
-
-    drop(fx);
-    common::drain_pg().await;
-}
-
-#[compio::test]
-#[serial]
 async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
     let fx = isolated_fixture("multi-app-sweeps").await;
     compio::time::timeout(Duration::from_secs(10), async {
@@ -7256,10 +6997,10 @@ async fn reap_over_two_apps(label: &str, second: SecondJournal) -> TwoAppReap {
 /// one unreadable app while reaping another, and reporting that skip in its
 /// return value. It does not cover the other sweeps that share
 /// `journalled_fleet` (scheduler reconcile, signal-fanout subscription GC,
-/// workflow/deploy retention, blob GC) - those still return a work count with no
+/// workflow retention, blob GC) - those still return a work count with no
 /// coverage beside it, and nothing here asserts otherwise. It does not cover the
-/// CONSERVATIVE arms: nothing here proves blob GC retains a blob, or deploy
-/// retention keeps a manifest, when an app is unreadable. It does not exercise
+/// CONSERVATIVE arms: nothing here proves blob GC retains a blob when an app is
+/// unreadable. It does not exercise
 /// the `apps_skipped` increment on the OTHER path - a journal that turns
 /// unreadable BETWEEN the catalog query and the per-app statement, which is the
 /// `skip_journal_scoped` arm inside the loop; both paths add to the same field
@@ -7496,8 +7237,8 @@ async fn retention_over_fleet(label: &str, apps: usize) -> FleetSweep {
 /// fleet-spanning transaction would open exactly one session and pass this test
 /// while holding every tenant's row locks for the whole sweep. It does not
 /// check lock DURATION at all. It does not cover the other fleet sweeps
-/// (scheduler reconcile, signal fanout, deploy retention, blob GC) - deploy
-/// retention and the blob ref sweep already hoist their connection, but nothing
+/// (scheduler reconcile, signal fanout, blob GC) - the blob ref sweep already
+/// hoists its connection, but nothing
 /// here would notice if that regressed. And 12 apps is not 10k: it shows the
 /// count is flat between two sizes, not that it is flat at scale.
 #[compio::test]
@@ -7782,7 +7523,6 @@ async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> (A
 struct FleetSweeps {
     reconcile: workflow_engine::SchedulerReconcile,
     fanout: workflow_signal_fanout::FanoutStats,
-    deploy: deploy_retention::DeployRetentionStats,
     retention: workflow_retention::RetentionStats,
     blob_ref: workflow_blob_gc::RefSweepStats,
     /// Whether the READABLE app's unreferenced blob is still in the object
@@ -7807,8 +7547,8 @@ struct FleetSweeps {
 /// `second` is the ONLY variable between the three tests below.
 ///
 /// The sweeps run in the order the crons would leave them independent:
-/// reconcile reads only; the subscription GC and deploy retention touch rows
-/// nothing else here reads; workflow retention prunes the aged terminal run
+/// reconcile reads only; subscription GC removes lapsed subscriptions;
+/// workflow retention prunes the aged terminal run
 /// (whose blob-hash set is empty, so it does not reach the blob store); and the
 /// blob ref sweep runs last against a blob no run references.
 async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> FleetSweeps {
@@ -7830,15 +7570,6 @@ async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> FleetSweeps
     let fanout = workflow_signal_fanout::tick(&ctl.state)
         .await
         .expect("signal fanout must survive an unreadable journal");
-    let deploy = deploy_retention::tick_with_config(
-        &ctl.state,
-        deploy_retention::DeployRetentionConfig {
-            grace_window_ms: 0,
-            batch_size: 128,
-        },
-    )
-    .await
-    .expect("deploy retention must survive an unreadable journal");
     let retention = workflow_retention::tick_with_config(
         &ctl.state,
         workflow_retention::WorkflowRetentionConfig {
@@ -7877,7 +7608,6 @@ async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> FleetSweeps
     FleetSweeps {
         reconcile,
         fanout,
-        deploy,
         retention,
         blob_ref,
         readable_blob_present,
@@ -7952,14 +7682,6 @@ async fn fleet_sweeps_all_report_the_tenant_they_excluded() {
         "the subscription GC must report the tenant it could not read"
     );
 
-    assert_eq!(
-        swept.deploy.candidates, 1,
-        "deploy retention must consider the readable app's superseded deploy"
-    );
-    assert_eq!(
-        swept.deploy.coverage.apps_skipped, 1,
-        "deploy retention must report the tenant it could not read"
-    );
 
     assert_eq!(
         swept.retention.runs, 1,
@@ -8019,8 +7741,6 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
     assert_eq!(swept.fanout.coverage.apps_skipped, 0);
     assert!(swept.fanout.coverage.apps_swept >= 2);
 
-    assert_eq!(swept.deploy.candidates, 2, "both apps' superseded deploys");
-    assert_eq!(swept.deploy.coverage.apps_skipped, 0);
 
     assert_eq!(swept.retention.runs, 2, "both apps' expired terminal runs");
     assert_eq!(swept.retention.coverage.apps_skipped, 0);
@@ -8134,14 +7854,6 @@ async fn fleet_sweeps_all_report_a_tenant_whose_journal_is_incomplete() {
         "the subscription GC must report the tenant whose journal is incomplete"
     );
 
-    assert_eq!(
-        swept.deploy.candidates, 1,
-        "deploy retention must consider only the complete app's superseded deploy"
-    );
-    assert_eq!(
-        swept.deploy.coverage.apps_skipped, 1,
-        "deploy retention must report the tenant whose journal is incomplete"
-    );
 
     assert_eq!(
         swept.retention.runs, 1,
@@ -8376,7 +8088,7 @@ async fn parked_cancel_reaper_counts_an_app_whose_journal_is_incomplete() {
 ///
 /// WHAT THIS DOES NOT CATCH. It reaches the limit through the REGISTERED
 /// count, which is the only limit the parked-cancel reaper has; it says nothing
-/// about the row-budget breaks in workflow retention, deploy retention or the
+/// about the row-budget breaks in workflow retention or the
 /// blob ref sweep, which count unvisited apps with the same idiom and are not
 /// exercised here. It cannot see an off-by-one in the OTHER direction if the
 /// stray-app floor is nonzero, which is why `apps_swept` is asserted exactly
@@ -8514,8 +8226,7 @@ async fn in_loop_denial_over_two_apps(
 /// exact defect the catalog-level skip was added to fix, one layer down and
 /// still live.
 ///
-/// WHAT THIS DOES NOT CATCH. It covers two sweeps, not five: the blob ref
-/// sweep and deploy retention run the whole tick in ONE transaction, so a
+/// WHAT THIS DOES NOT CATCH. The blob ref sweep runs its tick in a transaction, so a
 /// statement-level denial there aborts the tick by construction and has no skip
 /// arm to test - that remains a way these sweeps can fail fleet-wide, and
 /// nothing here would notice it regressing further. It does not prove the

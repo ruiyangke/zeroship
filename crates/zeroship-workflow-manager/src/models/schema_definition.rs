@@ -14,6 +14,17 @@ zeroship_data_orm::orm::schema! {
             next_due_at: Nullable<BigInt>,
         }
 
+        deployment_holds {
+            #[orm(primary_key)]
+            id: Text,
+            app_id: Text,
+            deployment_id: Text,
+            holder_id: Text,
+            deploy_hash: Nullable<Text>,
+            generation: BigInt,
+            state: Text,
+        }
+
         jobs {
             #[orm(primary_key)]
             id: Text,

@@ -126,6 +126,7 @@ async fn host(fixture: &Fixture) -> (Scheduler, Queue) {
         fixture.binding(),
         fixture.url(),
         zeroship_workflow_manager::Options::default(),
+        support::synthetic_holds(),
     )
     .await
     .unwrap();

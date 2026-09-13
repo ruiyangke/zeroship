@@ -4,17 +4,19 @@
     reason = "recovery shares the manager's owning compio runtime"
 )]
 
-use crate::{models::recovery_scopes, queue, Error, Queue};
+use crate::{
+    models::recovery_scopes,
+    queue::{self, Budget},
+    retention::{self, Retention},
+    Error, Queue,
+};
 use std::time::Duration;
 use zeroship_core::{
     app_id::AppId,
     workflow_coordination::Revision,
     workflow_jobs::{DeploymentId, JobId, JobOperation, JobOutcome, JobSpec},
 };
-use zeroship_data_orm::{
-    orm::{Database, Entity, FindOptions, FromRow, Operation, Output},
-    value,
-};
+use zeroship_data_orm::orm::{Database, FromRow, Insertable};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Options {
@@ -57,6 +59,16 @@ struct Scope {
     id: String,
 }
 
+#[derive(Insertable)]
+#[orm(entity = recovery_scopes)]
+struct NewScope<'a> {
+    id: &'a str,
+    deployment_id: &'a str,
+    activation_revision: i64,
+    next_due_at: i64,
+    pending_job_id: Option<&'a str>,
+}
+
 impl Recovery {
     /// # Errors
     /// Rejects unrepresentable intervals and pages outside the ORM row bound.
@@ -89,20 +101,42 @@ impl Recovery {
         deployment: &DeploymentId,
         activation_revision: Revision,
     ) -> Result<(), Error> {
-        self.queue
-            .transact(|tx| async move {
-                queue::register_scope_in(&tx, app).await?;
-                queue::lock_scope(&tx, app).await?;
-                ensure_in(
-                    &tx,
-                    app,
-                    deployment,
-                    activation_revision,
-                    self.queue.clock.now().await?,
-                )
-                .await
-            })
-            .await
+        let budget = Budget::new(self.queue.options.transaction_timeout);
+        loop {
+            let result = self
+                .queue
+                .transact_for(budget.clone(), |tx| async move {
+                    queue::register_scope_in(&tx, app).await?;
+                    queue::lock_scope(&tx, app).await?;
+                    if let Some(stored) = load(&tx, app).await? {
+                        validate_revision(&stored, deployment, activation_revision)?;
+                        let existing = DeploymentId::parse(&stored.deployment_id)
+                            .map_err(|_| Error::Storage)?;
+                        retention::require_held(&tx, app, &existing).await?;
+                    }
+                    if !retention::prepared(&tx, app, deployment).await? {
+                        return Ok(Retention::Acquire(deployment.clone()));
+                    }
+                    ensure_in(
+                        &tx,
+                        app,
+                        deployment,
+                        activation_revision,
+                        self.queue.clock.now().await?,
+                    )
+                    .await?;
+                    Ok(Retention::Ready(()))
+                })
+                .await?;
+            match result {
+                Retention::Ready(()) => return Ok(()),
+                Retention::Acquire(deployment) => {
+                    self.queue
+                        .ensure_deployment_for(app, &deployment, budget.clone())
+                        .await?;
+                }
+            }
+        }
     }
 
     /// Page due obligations by app identity, including apps with healthy owners.
@@ -114,22 +148,16 @@ impl Recovery {
     pub async fn due(&self, after: Option<&AppId>) -> Result<Vec<AppId>, Error> {
         self.queue
             .transact(|tx| async move {
-                let source = tx.entity::<recovery_scopes::Entity>()?.alias("r")?;
-                let mut filter = source
-                    .column(recovery_scopes::next_due_at)
-                    .lte(self.queue.clock.now().await?)?;
+                let mut filter = recovery_scopes::next_due_at.lte(self.queue.clock.now().await?)?;
                 if let Some(after) = after {
-                    filter = zeroship_data_orm::sql::Predicate::And(vec![
-                        filter,
-                        source.column(recovery_scopes::id).gt(after.as_str())?,
-                    ]);
+                    filter = filter.and(recovery_scopes::id.gt(after.as_str())?);
                 }
-                tx.from(&source)
+                tx.entity::<recovery_scopes::Entity>()?
+                    .query()
                     .filter(filter)
-                    .order_by(source.column(recovery_scopes::id).asc())
-                    .select(source.row::<Scope>())?
+                    .order_by(recovery_scopes::id.asc())
                     .limit(i64::from(self.page_size))?
-                    .all()
+                    .all::<Scope>()
                     .await?
                     .into_iter()
                     .map(|row| AppId::parse(&row.id).map_err(|_| Error::Storage))
@@ -145,34 +173,53 @@ impl Recovery {
     /// # Errors
     /// Refuses an unregistered scope, exhausted time range and storage failures.
     pub async fn dispatch(&self, app: &AppId) -> Result<Option<JobSpec>, Error> {
-        self.queue.transact(|tx| async move {
-            queue::lock_scope(&tx, app).await?;
-            let stored = load(&tx, app).await?.ok_or(Error::Denied)?;
-            if let Some(pending) = &stored.pending_job_id {
-                let job = queue::load(&tx, app, pending).await?.ok_or(Error::Storage)?;
-                match job.state.as_str() {
-                    "ready" | "leased" => return Ok(Some(job.spec()?)),
-                    "settled" => {},
-                    _ => return Err(Error::Storage),
+        self.queue
+            .transact(|tx| async move {
+                queue::lock_scope(&tx, app).await?;
+                let stored = load(&tx, app).await?.ok_or(Error::Denied)?;
+                if let Some(pending) = &stored.pending_job_id {
+                    let job = queue::load(&tx, app, pending)
+                        .await?
+                        .ok_or(Error::Storage)?;
+                    match job.state.as_str() {
+                        "ready" | "leased" => {
+                            let spec = job.spec()?;
+                            retention::require_held(&tx, app, &spec.deployment_id).await?;
+                            return Ok(Some(spec));
+                        }
+                        "settled" => {}
+                        _ => return Err(Error::Storage),
+                    }
                 }
-            }
-            let now = self.queue.clock.now().await?;
-            if stored.next_due_at > now { return Ok(None); }
-            let next_due_at = now.checked_add(self.interval_ms).ok_or(Error::Capacity)?;
-            let spec = JobSpec {
-                id: JobId::mint(), app_id: app.clone(),
-                deployment_id: DeploymentId::parse(&stored.deployment_id).map_err(|_| Error::Storage)?,
-                operation: JobOperation::Reconcile {},
-                available_at: now.try_into().map_err(|_| Error::Storage)?,
-            };
-            self.queue.insert(&tx, &spec, now).await?;
-            let updated = tx.collection(recovery_scopes::Entity::COLLECTION)?.execute(Operation::Update {
-                filter: value!({"id":app.as_str()}),
-                patch: value!({"next_due_at":next_due_at,"pending_job_id":spec.id.as_str()}), many: true,
-            }).await?;
-            if !matches!(updated, Output::Count(1)) { return Err(Error::Storage); }
-            Ok(Some(spec))
-        }).await
+                let now = self.queue.clock.now().await?;
+                if stored.next_due_at > now {
+                    return Ok(None);
+                }
+                let next_due_at = now.checked_add(self.interval_ms).ok_or(Error::Capacity)?;
+                let spec = JobSpec {
+                    id: JobId::mint(),
+                    app_id: app.clone(),
+                    deployment_id: DeploymentId::parse(&stored.deployment_id)
+                        .map_err(|_| Error::Storage)?,
+                    operation: JobOperation::Reconcile {},
+                    available_at: now.try_into().map_err(|_| Error::Storage)?,
+                };
+                self.queue.insert(&tx, &spec, now).await?;
+                let updated = tx
+                    .entity::<recovery_scopes::Entity>()?
+                    .update_many(
+                        recovery_scopes::id.eq(app.as_str())?,
+                        recovery_scopes::next_due_at
+                            .set(next_due_at)?
+                            .and(recovery_scopes::pending_job_id.set(Some(spec.id.as_str()))?)?,
+                    )
+                    .await?;
+                if updated != 1 {
+                    return Err(Error::Storage);
+                }
+                Ok(Some(spec))
+            })
+            .await
     }
 }
 
@@ -184,52 +231,69 @@ pub(crate) async fn ensure_in(
     activation_revision: Revision,
     now: i64,
 ) -> Result<(), Error> {
-    let scopes = tx.collection(recovery_scopes::Entity::COLLECTION)?;
+    retention::require_held(tx, app, deployment).await?;
+    let scopes = tx.entity::<recovery_scopes::Entity>()?;
     if let Some(stored) = load(tx, app).await? {
-        let revision =
-            Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)?;
-        if activation_revision < revision
-            || (activation_revision == revision && stored.deployment_id != deployment.as_str())
-        {
-            return Err(Error::Conflict);
-        }
+        let revision = validate_revision(&stored, deployment, activation_revision)?;
+        let existing = DeploymentId::parse(&stored.deployment_id).map_err(|_| Error::Storage)?;
+        retention::require_held(tx, app, &existing).await?;
         if activation_revision > revision {
-            let changed = scopes.execute(Operation::Update {
-                filter:value!({"id":app.as_str(), "activation_revision":revision.get()}),
-                patch:value!({"deployment_id":deployment.as_str(), "activation_revision":activation_revision.get()}), many:true,
-            }).await?;
-            if !matches!(changed, Output::Count(1)) {
+            let changed = scopes
+                .update_many(
+                    recovery_scopes::id
+                        .eq(app.as_str())?
+                        .and(recovery_scopes::activation_revision.eq(revision.get())?),
+                    recovery_scopes::deployment_id
+                        .set(deployment.as_str())?
+                        .and(
+                            recovery_scopes::activation_revision.set(activation_revision.get())?,
+                        )?,
+                )
+                .await?;
+            if changed != 1 {
                 return Err(Error::Storage);
             }
         }
     } else {
         scopes
-            .insert(value!({
-                "id":app.as_str(), "deployment_id":deployment.as_str(),
-                "activation_revision":activation_revision.get(), "next_due_at":now,
-            }))
+            .insert::<_, Scope>(NewScope {
+                id: app.as_str(),
+                deployment_id: deployment.as_str(),
+                activation_revision: activation_revision.get(),
+                next_due_at: now,
+                pending_job_id: None,
+            })
             .await?;
     }
     Ok(())
 }
 
+fn validate_revision(
+    stored: &Stored,
+    deployment: &DeploymentId,
+    activation_revision: Revision,
+) -> Result<Revision, Error> {
+    let revision = Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)?;
+    if activation_revision < revision
+        || (activation_revision == revision && stored.deployment_id != deployment.as_str())
+    {
+        return Err(Error::Conflict);
+    }
+    Ok(revision)
+}
+
 async fn load(tx: &Database, app: &AppId) -> Result<Option<Stored>, Error> {
     Ok(tx
         .entity::<recovery_scopes::Entity>()?
-        .find::<Stored>(
-            recovery_scopes::id.eq(app.as_str())?,
-            FindOptions {
-                limit: Some(1),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_iter()
-        .next())
+        .query()
+        .filter(recovery_scopes::id.eq(app.as_str())?)
+        .first::<Stored>()
+        .await?)
 }
 
 /// The queue calls this only for a fresh settlement under its app lock. A page
 /// with more work advances the manager's deadline without retiring responsibility.
+/// Stale, unrelated, and already-due pages leave the deadline unchanged.
 pub(crate) async fn settled_page(
     tx: &Database,
     job: &JobSpec,
@@ -237,10 +301,15 @@ pub(crate) async fn settled_page(
     now: i64,
 ) -> Result<(), Error> {
     if matches!(job.operation, JobOperation::Reconcile {}) && outcome == JobOutcome::Waiting {
-        tx.collection(recovery_scopes::Entity::COLLECTION)?.execute(Operation::Update {
-            filter:value!({"id":job.app_id.as_str(), "pending_job_id":job.id.as_str(), "next_due_at":{"$gt":now}}),
-            patch:value!({"next_due_at":now}), many:true,
-        }).await?;
+        tx.entity::<recovery_scopes::Entity>()?
+            .update_many(
+                recovery_scopes::id
+                    .eq(job.app_id.as_str())?
+                    .and(recovery_scopes::pending_job_id.eq(Some(job.id.as_str()))?)
+                    .and(recovery_scopes::next_due_at.gt(now)?),
+                recovery_scopes::next_due_at.set(now)?,
+            )
+            .await?;
     }
     Ok(())
 }

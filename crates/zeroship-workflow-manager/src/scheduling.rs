@@ -9,7 +9,10 @@ use crate::{
         schedule_activations, schedule_deployments, schedule_occurrences, schedule_scopes,
         schedules,
     },
-    queue, recovery, Error, Queue,
+    queue::{self, Budget},
+    recovery,
+    retention::{self, Retention},
+    Error, Queue,
 };
 use zeroship_core::{
     app_id::AppId,
@@ -201,7 +204,9 @@ impl Scheduler {
     /// Rejects unprepared deployments, stale/conflicting revisions, changed calendar
     /// interpretation and failed storage. Preparation alone grants no activation.
     pub async fn activate(&self, request: &ActivateSchedules) -> Result<JobSpec, Error> {
-        self.queue.transact(|tx| async move {
+        let budget = Budget::new(self.queue.options.transaction_timeout);
+        loop {
+            let result = self.queue.transact_for(budget.clone(), |tx| async move {
             queue::lock_scope(&tx, &request.app_id).await?;
             let existing = tx.entity::<schedule_activations::Entity>()?.find::<Activation>(
                 schedule_activations::app_id.eq(request.app_id.as_str())?
@@ -210,7 +215,7 @@ impl Scheduler {
             ).await?.into_iter().next();
             if let Some(existing) = existing {
                 if existing.deployment_id != request.deployment_id.as_str() { return Err(Error::Conflict); }
-                return activation_job(&tx, &request.app_id, &existing).await?.spec();
+                return Ok(Retention::Ready(activation_job(&tx, &request.app_id, &existing).await?.spec()?));
             }
             let active = active(&tx, &request.app_id).await?;
             if active.as_ref().is_some_and(|active| active.revision >= request.revision.get()) {
@@ -220,6 +225,9 @@ impl Scheduler {
             check_interpretation(&prepared)?;
             let metadata = metadata(&prepared, &request.app_id, &request.deployment_id)?;
             self.validate(&metadata)?;
+            if !retention::prepared(&tx, &request.app_id, &request.deployment_id).await? {
+                return Ok(Retention::Acquire(request.deployment_id.clone()));
+            }
             let now = self.queue.clock.now().await?;
             let job = JobSpec {
                 id: JobId::mint(), app_id: request.app_id.clone(), deployment_id: request.deployment_id.clone(),
@@ -249,8 +257,17 @@ impl Scheduler {
                 self.install(&tx, request, &job.id, descriptor, now).await?;
             }
             recovery::ensure_in(&tx, &request.app_id, &request.deployment_id, request.revision, now).await?;
-            Ok(job)
-        }).await
+            Ok(Retention::Ready(job))
+        }).await?;
+            match result {
+                Retention::Ready(job) => return Ok(job),
+                Retention::Acquire(deployment) => {
+                    self.queue
+                        .ensure_deployment_for(&request.app_id, &deployment, budget.clone())
+                        .await?;
+                }
+            }
+        }
     }
 
     async fn install(
@@ -423,6 +440,9 @@ impl Scheduler {
                 .ok_or(Error::Storage)?
                 .spec()?;
             check_occurrence(&existing, &definition.name, deployment, &job)?;
+            if !self.queue.existing(tx, &job).await? {
+                return Err(Error::Storage);
+            }
             return Ok(job);
         }
         let request = RequestId::mint();
@@ -515,6 +535,13 @@ async fn activation_job(
     };
     if job.spec()? != expected {
         return Err(Error::Storage);
+    }
+    match job.state.as_str() {
+        "ready" | "leased" => {
+            retention::require_held(tx, app, &expected.deployment_id).await?;
+        }
+        "settled" => {}
+        _ => return Err(Error::Storage),
     }
     Ok(job)
 }

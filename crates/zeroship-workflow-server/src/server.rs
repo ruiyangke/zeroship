@@ -12,12 +12,20 @@ use crate::{
 };
 use futures::future::{select, Either};
 use ntex::web;
-use std::{net::SocketAddr, rc::Rc, sync::Arc, time::Duration};
+use std::{future::Future, net::SocketAddr, pin::Pin, rc::Rc, sync::Arc, time::Duration};
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_core::{
+    app_id::AppId,
     service_assertion::ServiceAssertionVerifier,
-    service_peers::{load_peer_bundle, service_issuer, CONTROL_SERVICE_NAME},
+    service_peers::{
+        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, WORKFLOW_SERVICE_NAME,
+    },
+    workflow_coordination::FailureCode,
+    workflow_deployments::{HoldGeneration, HoldReceipt, QueueHoldRequest},
+    workflow_jobs::DeploymentId,
 };
+use zeroship_workflow_client::{Options as ClientOptions, QueueDeploymentHolds, Transport};
+use zeroship_workflow_manager::{retention::HoldClient, Error as ManagerError};
 
 type Error = Box<dyn std::error::Error>;
 
@@ -54,6 +62,12 @@ impl ServerOptions {
         if settings.service_peers_file.get().as_os_str().is_empty() {
             return Err("workflow.service_peers_file is required".into());
         }
+        if settings.service_key_file.get().as_os_str().is_empty() {
+            return Err("workflow.service_key_file is required".into());
+        }
+        if settings.control_url.get().is_empty() {
+            return Err("workflow.control_url is required for deployment queue retention".into());
+        }
         let coordinator = Options {
             connections: *settings.database_connections.get(),
             acquire_timeout: Duration::from_millis(*settings.database_acquire_timeout_ms.get()),
@@ -64,6 +78,7 @@ impl ServerOptions {
             max_pending_management: *settings.max_pending_management.get(),
         };
         coordinator.validate()?;
+        Transport::validate_config(settings.control_url.get(), client_options(coordinator))?;
         Ok(Self {
             listen,
             http_threads,
@@ -79,7 +94,14 @@ impl ServerOptions {
 /// Refuses unavailable metadata/identity stores or invalid peer keys. Loss of
 /// the shared authentication connection stops this process for supervisor recovery.
 pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(), Error> {
-    let peers = load_peer_bundle(settings.service_peers_file.get())?;
+    let mut keyring = ServiceKeyring::load(
+        service_issuer(WORKFLOW_SERVICE_NAME)?,
+        settings.service_key_file.get(),
+        settings.service_peers_file.get(),
+    )?;
+    let peers = keyring
+        .take_bundle()
+        .ok_or("workflow peer bundle unavailable")?;
     if peers
         .public_keys_for(&service_issuer(CONTROL_SERVICE_NAME)?)
         .is_empty()
@@ -87,9 +109,6 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
         return Err("workflow peer bundle must contain Control's verification key".into());
     }
     let url = settings.database_url.expose_str().to_owned();
-    // Verify migration readiness before accepting connections. Each HTTP thread
-    // subsequently constructs its own bounded pool through the state factory.
-    Coordinator::connect(&url, options.coordinator).await?;
     let (client, connection) = compio::time::timeout(
         options.coordinator.acquire_timeout,
         compio_postgres::connect(&url, compio_postgres::NoTls),
@@ -105,6 +124,12 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let client = Arc::new(client);
     let replay = Arc::new(SharedClientReplayStore::new(client.clone()));
     let verifier = Arc::new(ServiceAssertionVerifier::new(peers, replay.clone()));
+    let outbound = Arc::new(ServiceAuth::new(keyring, verifier.clone()));
+    let control_url = settings.control_url.get().clone();
+    let holds = ControlHolds::new(&control_url, outbound.clone(), options.coordinator)?;
+    // Verify migration readiness before accepting connections. Each HTTP thread
+    // constructs its own bounded pool and retention transport in the state factory.
+    Coordinator::connect(&url, options.coordinator, Rc::new(holds)).await?;
     compio::time::timeout(options.coordinator.command_timeout, replay.purge_expired()).await??;
     let auth = Arc::new(WorkflowAuth::new(
         verifier,
@@ -129,11 +154,14 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     let server = web::HttpServer::new(move || {
         let url = url.clone();
         let auth = auth.clone();
+        let outbound = outbound.clone();
+        let control_url = control_url.clone();
         async move {
             web::App::new()
                 .state_factory(async move || {
+                    let holds = ControlHolds::new(&control_url, outbound, coordinator)?;
                     Ok::<_, crate::coordinator::Error>(Rc::new(WorkflowHttpState {
-                        service: Coordinator::connect(&url, coordinator).await?,
+                        service: Coordinator::connect(&url, coordinator, Rc::new(holds)).await?,
                         auth,
                     }))
                 })
@@ -153,4 +181,78 @@ pub async fn run(settings: WorkflowSettings, options: ServerOptions) -> Result<(
     };
     drop(maintenance);
     result
+}
+
+fn client_options(options: Options) -> ClientOptions {
+    ClientOptions {
+        timeout: options.command_timeout,
+        ..ClientOptions::default()
+    }
+}
+
+#[derive(Debug)]
+struct ControlHolds(QueueDeploymentHolds);
+impl ControlHolds {
+    fn new(url: &str, auth: Arc<ServiceAuth>, options: Options) -> Result<Self, ManagerError> {
+        QueueDeploymentHolds::new(url, auth, client_options(options))
+            .map(Self)
+            .map_err(retention_error)
+    }
+}
+impl HoldClient for ControlHolds {
+    fn acquire<'a>(
+        &'a self,
+        app: &'a AppId,
+        deployment: &'a DeploymentId,
+        generation: HoldGeneration,
+    ) -> Pin<Box<dyn Future<Output = Result<HoldReceipt, ManagerError>> + 'a>> {
+        Box::pin(async move {
+            self.0
+                .acquire(&QueueHoldRequest {
+                    app_id: app.clone(),
+                    deploy_id: deployment.clone(),
+                    generation,
+                })
+                .await
+                .map_err(retention_error)
+        })
+    }
+    fn release<'a>(
+        &'a self,
+        app: &'a AppId,
+        deployment: &'a DeploymentId,
+        generation: HoldGeneration,
+    ) -> Pin<Box<dyn Future<Output = Result<HoldReceipt, ManagerError>> + 'a>> {
+        Box::pin(async move {
+            self.0
+                .release(&QueueHoldRequest {
+                    app_id: app.clone(),
+                    deploy_id: deployment.clone(),
+                    generation,
+                })
+                .await
+                .map_err(retention_error)
+        })
+    }
+}
+
+const fn retention_error(error: zeroship_workflow_client::Error) -> ManagerError {
+    use zeroship_workflow_client::Error;
+    match error {
+        Error::InvalidConfig | Error::Refused(FailureCode::Invalid) => ManagerError::Invalid,
+        Error::Unauthenticated
+        | Error::Refused(FailureCode::Unauthenticated | FailureCode::Denied) => {
+            ManagerError::Denied
+        }
+        Error::Refused(FailureCode::Conflict) => ManagerError::Conflict,
+        Error::Refused(FailureCode::Capacity) => ManagerError::Capacity,
+        Error::Timeout => ManagerError::Timeout,
+        Error::RequestTooLarge
+        | Error::ResponseTooLarge
+        | Error::InvalidResponse
+        | Error::Unavailable
+        | Error::Refused(FailureCode::RequestTooLarge | FailureCode::Unavailable) => {
+            ManagerError::Unavailable
+        }
+    }
 }

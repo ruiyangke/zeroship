@@ -6,6 +6,12 @@ app placement, job delivery, wake hints and management persist through the share
 process lifecycle and startup database-authority checks. It constructs no customer
 execution engine or payload store.
 
+Before publishing queue dependencies, the manager records its retention intent
+and obtains a deployment hold through Control. The server signs these requests
+as `svc/workflow`; Control derives the app's queue holder independently from
+worker journal holders. Queue retention carries no worker assignment or customer
+database credentials. Each HTTP thread owns its bounded Control client.
+
 The [manager and job queue design](../../docs/proposals/2026-09-11-workflow-worker.md)
 defines manager-owned cron, durable timers and the metadata job queue. Native
 queue and placement operations share the manager's database and transaction
@@ -61,8 +67,11 @@ includes the coordinator alongside the engine and example suites.
 Regenerate metadata SQL with
 `node crates/zeroship-workflow-manager/schema/generate.mjs`.
 
-The host needs a platform metadata database login and a peer verification bundle
-containing Control's key. It needs no customer connection, payload location or
-private signing key. `zeroship-workflow-server --config zeroship.toml --check-config`
+The host needs a platform metadata database login, `workflow.control_url`, its
+private `workflow.service_key_file`, and `workflow.service_peers_file` containing
+Control's public key. Control's peer bundle must contain the workflow service's
+public key. The Control origin requires HTTPS except for literal loopback HTTP
+addresses. The host needs no customer connection or payload location.
+`zeroship-workflow-server --config zeroship.toml --check-config`
 validates settings without connecting to dependencies. `/healthz` reports process
 liveness; `/readyz` verifies metadata and worker-registry access.

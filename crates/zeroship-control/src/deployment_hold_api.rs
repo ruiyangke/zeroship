@@ -1,4 +1,4 @@
-//! Worker-facing deployment metadata; customer journals never enter Control.
+//! Authenticated journal and queue retention; customer journals never enter Control.
 
 #![expect(
     clippy::future_not_send,
@@ -12,7 +12,7 @@ use ntex::web::{
 };
 use std::{
     cell::Cell,
-    future::{poll_fn, Future},
+    future::{Future, poll_fn},
     rc::Rc,
     sync::Arc,
     task::Poll,
@@ -21,13 +21,13 @@ use std::{
 use zeroship_core::{
     schema_name::SchemaName,
     service_assertion::presented_issuer,
-    service_identity::{endpoints, AuthError, ServiceEndpoint},
-    service_peers::{service_issuer, WORKER_SERVICE_NAME},
+    service_identity::{AuthError, ServiceEndpoint, endpoints},
+    service_peers::{WORKER_SERVICE_NAME, WORKFLOW_SERVICE_NAME, service_issuer},
     workflow_coordination::{Failure, FailureCode, VerifyAssignment, WorkerId},
-    workflow_deployments::{HoldReceipt, HoldRequest, HoldScope},
+    workflow_deployments::{HoldReceipt, HoldRequest, HoldScope, QueueHoldRequest},
 };
 use zeroship_data_orm::{
-    binding::DbBinding, encryption::ProjectKeySource, orm::Database, ConnectOptions,
+    ConnectOptions, binding::DbBinding, encryption::ProjectKeySource, orm::Database,
 };
 use zeroship_workflow_client::{self as coordination, ControlCoordinator, Options};
 use zeroship_workflow_manager::deployments::{self, DeploymentHolds, Error as DeploymentError};
@@ -114,6 +114,48 @@ impl DeploymentHoldApi {
         request: &HoldRequest,
     ) -> Result<HoldReceipt, DeploymentError> {
         self.change(worker, request, false).await
+    }
+
+    /// The HTTP boundary authenticates the workflow service before calling this.
+    /// Queue ownership is stable across manager replicas and has no worker lease.
+    ///
+    /// # Errors
+    /// Refuses foreign deployments, stale generations and unavailable storage.
+    pub async fn acquire_queue(
+        &self,
+        request: &QueueHoldRequest,
+    ) -> Result<HoldReceipt, DeploymentError> {
+        self.change_queue(request, true).await
+    }
+
+    /// # Errors
+    /// Refuses foreign deployments, stale generations and unavailable storage.
+    pub async fn release_queue(
+        &self,
+        request: &QueueHoldRequest,
+    ) -> Result<HoldReceipt, DeploymentError> {
+        self.change_queue(request, false).await
+    }
+
+    async fn change_queue(
+        &self,
+        request: &QueueHoldRequest,
+        acquire: bool,
+    ) -> Result<HoldReceipt, DeploymentError> {
+        let scope = HoldScope::for_queue(request.app_id.clone());
+        compio::time::timeout(REQUEST_TIMEOUT, async {
+            if acquire {
+                self.ledger
+                    .acquire(&scope, request.deploy_id.as_str(), request.generation)
+                    .await
+            } else {
+                self.ledger
+                    .release(&scope, request.deploy_id.as_str(), request.generation)
+                    .await
+            }
+        })
+        .await
+        .map_err(|_| DeploymentError::Timeout)?
     }
 
     async fn change(
@@ -251,7 +293,103 @@ pub fn configure(config: &mut web::ServiceConfig) {
             web::resource(endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE.path_template())
                 .state(web::types::JsonConfig::default().limit(MAX_REQUEST_BYTES))
                 .route(web::post().to(release)),
+        )
+        .service(
+            web::resource(endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE.path_template())
+                .state(web::types::JsonConfig::default().limit(MAX_REQUEST_BYTES))
+                .route(web::post().to(acquire_queue)),
+        )
+        .service(
+            web::resource(endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE.path_template())
+                .state(web::types::JsonConfig::default().limit(MAX_REQUEST_BYTES))
+                .route(web::post().to(release_queue)),
         );
+}
+
+async fn acquire_queue(
+    request: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    api: State<Rc<DeploymentHoldApi>>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        handle_queue(
+            request,
+            state,
+            api,
+            body,
+            endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
+            true,
+        )
+        .await,
+    )
+}
+
+async fn release_queue(
+    request: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    api: State<Rc<DeploymentHoldApi>>,
+    body: web::types::Payload,
+) -> web::HttpResponse {
+    respond(
+        handle_queue(
+            request,
+            state,
+            api,
+            body,
+            endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+            false,
+        )
+        .await,
+    )
+}
+
+async fn handle_queue(
+    request: web::HttpRequest,
+    state: State<Arc<AppState>>,
+    api: State<Rc<DeploymentHoldApi>>,
+    body: web::types::Payload,
+    endpoint: ServiceEndpoint,
+    acquire: bool,
+) -> Result<HoldReceipt, FailureCode> {
+    compio::time::timeout(REQUEST_TIMEOUT, async {
+        let authorization = request
+            .headers()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok());
+        let issuer = presented_issuer(authorization).ok_or(FailureCode::Unauthenticated)?;
+        let role = service_issuer(WORKFLOW_SERVICE_NAME).map_err(|_| FailureCode::Unavailable)?;
+        if issuer != role {
+            return Err(FailureCode::Unauthenticated);
+        }
+        crate::internal::verify_service_caller(&state, authorization, endpoint)
+            .await
+            .map_err(|error| match error {
+                AuthError::StoreUnavailable => FailureCode::Unavailable,
+                _ => FailureCode::Unauthenticated,
+            })?;
+        // Only the verified workflow role reaches body decoding. It cannot
+        // select a journal holder or substitute a worker's placement identity.
+        let mut body = body.into_inner();
+        let command =
+            <Json<QueueHoldRequest> as web::FromRequest<web::error::DefaultError>>::from_request(
+                &request, &mut body,
+            )
+            .await
+            .map_err(|error| match error {
+                web::error::JsonPayloadError::Overflow => FailureCode::RequestTooLarge,
+                _ => FailureCode::Invalid,
+            })?
+            .into_inner();
+        let result = if acquire {
+            api.acquire_queue(&command).await
+        } else {
+            api.release_queue(&command).await
+        };
+        result.map_err(failure)
+    })
+    .await
+    .map_err(|_| FailureCode::Unavailable)?
 }
 
 async fn acquire(

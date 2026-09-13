@@ -6,11 +6,12 @@
 )]
 
 use compio_postgres::{types::FromSql, Pool, PoolConfig, Row};
-use std::time::Duration;
+use std::{rc::Rc, time::Duration};
 use zeroship_core::schema_name::SchemaName;
 use zeroship_data_orm::binding::DbBinding;
 use zeroship_workflow_manager::{
     coordinator::{Coordinator as NativeCoordinator, Options as NativeOptions},
+    retention::HoldClient,
     Options as QueueOptions, Queue,
 };
 
@@ -101,7 +102,11 @@ pub struct Coordinator {
 impl Coordinator {
     /// # Errors
     /// Rejects invalid options, connection failures and incompatible metadata schemas.
-    pub async fn connect(url: &str, options: Options) -> Result<Self, Error> {
+    pub async fn connect(
+        url: &str,
+        options: Options,
+        holds: Rc<dyn HoldClient>,
+    ) -> Result<Self, Error> {
         options.validate()?;
         let mut config = PoolConfig::default();
         config
@@ -126,6 +131,7 @@ impl Coordinator {
                     transaction_timeout: options.command_timeout,
                     ..QueueOptions::default()
                 },
+                holds,
             ),
         )
         .await
@@ -178,6 +184,7 @@ impl Coordinator {
         for table in [
             "workers",
             "queue_scopes",
+            "deployment_holds",
             "jobs",
             "assignments",
             "placement_receipts",
@@ -213,6 +220,7 @@ impl Coordinator {
         self.pool.batch_execute(
             "SELECT id,capacity,state,expires_at,lock_version FROM workflow_manager.workers LIMIT 0;
              SELECT id,lock_version FROM workflow_manager.queue_scopes LIMIT 0;
+             SELECT id,app_id,deployment_id,holder_id,deploy_hash,generation,state FROM workflow_manager.deployment_holds LIMIT 0;
              SELECT id,app_id,deployment_id,operation,spec_digest,available_at,state,attempt,worker_id,assignment_revision,lease_deadline,outcome,settlement_digest,created_at FROM workflow_manager.jobs LIMIT 0;
              SELECT app_id,worker_id,revision,expires_at,released,wake_revision,next_due_at FROM workflow_manager.assignments LIMIT 0;
              SELECT app_id,request_id,operation,worker_id,expected_revision,wake_revision,result_revision,result_expires_at FROM workflow_manager.placement_receipts LIMIT 0;

@@ -80,9 +80,14 @@ case!(
 );
 
 async fn queue(fixture: &Fixture, options: Options) -> Queue {
-    Queue::connect(fixture.binding(), fixture.url(), options)
-        .await
-        .unwrap()
+    Queue::connect(
+        fixture.binding(),
+        fixture.url(),
+        options,
+        support::synthetic_holds(),
+    )
+    .await
+    .unwrap()
 }
 
 async fn now(fixture: &Fixture) -> i64 {
@@ -210,6 +215,30 @@ async fn authorized_submission_scope_replay_and_rollback(fixture: &Fixture) {
     assert!(stored(fixture, &foreign_spec.id).await.is_none());
 
     let spec = job(&app);
+    checks.set(0);
+    assert_eq!(
+        queue
+            .submit_authorized(&identity(&authority), &spec, |tx| {
+                checks.set(checks.get() + 1);
+                submission_authorization(tx, &authority, &spec, checks.get(), 1)
+            })
+            .await,
+        Err(Error::Denied)
+    );
+    assert_eq!(checks.get(), 1);
+    assert!(queue
+        .deployment_intents(&app, None, 1)
+        .await
+        .unwrap()
+        .is_empty());
+    assert_authorization_rolled_back(fixture, &app).await;
+
+    // Prepare retention independently so the following callbacks observe the
+    // transaction that inserts the job and its final authorization check.
+    queue
+        .ensure_deployment(&app, &spec.deployment_id)
+        .await
+        .unwrap();
     for reject_at in [1, 2] {
         checks.set(0);
         assert_eq!(
@@ -369,12 +398,16 @@ async fn authorized_submission_bounds_pending_authorization(fixture: &Fixture) {
         .await;
         let app = AppId::mint();
         queue.register_scope(&app).await.unwrap();
+        let spec = job(&app);
+        queue
+            .ensure_deployment(&app, &spec.deployment_id)
+            .await
+            .unwrap();
         let authority = assignment(fixture, &app).await;
         let mut observed = authority.clone();
         if short_assignment {
             observed.expires_at = (now(fixture).await + 1_000).try_into().unwrap();
         }
-        let spec = job(&app);
         let checks = Cell::new(0);
         let result = compio::time::timeout(
             Duration::from_secs(5),
@@ -523,6 +556,10 @@ async fn postgres_shortened_authority_bounds_commit_wait_and_receipt_replays() {
         .delivery()
         .clone();
     let successor = job(&app);
+    queue
+        .ensure_deployment(&app, &successor.deployment_id)
+        .await
+        .unwrap();
     let command = settlement(&delivery, vec![successor.clone()]);
     let Admin::Postgres(admin) = &fixture.admin else {
         unreachable!()
@@ -851,9 +888,14 @@ async fn delayed_jobs_and_redelivery(fixture: &Fixture) {
             .await,
         Err(Error::Conflict)
     );
-    let replacement = Queue::connect(fixture.binding(), fixture.url(), Options::default())
-        .await
-        .unwrap();
+    let replacement = Queue::connect(
+        fixture.binding(),
+        fixture.url(),
+        Options::default(),
+        support::synthetic_holds(),
+    )
+    .await
+    .unwrap();
     let replacement_authority = assignment(fixture, &app).await;
     let redelivered = replacement
         .claim(&replacement_authority)
@@ -982,9 +1024,14 @@ async fn atomic_successors_and_replayed_receipts(fixture: &Fixture) {
         vec![first.clone(), existing.clone(), first.clone()],
     );
     let receipt = queue.settle(&authority, &command).await.unwrap();
-    let reopened = Queue::connect(fixture.binding(), fixture.url(), Options::default())
-        .await
-        .unwrap();
+    let reopened = Queue::connect(
+        fixture.binding(),
+        fixture.url(),
+        Options::default(),
+        support::synthetic_holds(),
+    )
+    .await
+    .unwrap();
     assert_eq!(
         reopened.settle(&authority, &command).await.unwrap(),
         receipt
@@ -1119,6 +1166,10 @@ async fn revocation_rolls_back_mutations(fixture: &Fixture) {
     );
     assert_authorization_rolled_back(fixture, &app).await;
     let successor = job(&app);
+    queue
+        .ensure_deployment(&app, &successor.deployment_id)
+        .await
+        .unwrap();
     let command = settlement(&delivery, vec![successor.clone()]);
     checks.set(0);
     assert_eq!(
@@ -1225,6 +1276,7 @@ async fn cancellation_rolls_back_settlement(
             transaction_timeout: Duration::from_millis(100),
             ..Options::default()
         },
+        support::synthetic_holds(),
     )
     .await
     .unwrap();
@@ -1234,7 +1286,7 @@ async fn cancellation_rolls_back_settlement(
             .settle_authorized(
                 &identity(authority),
                 command,
-                |_| {
+                |tx| {
                     checks.set(checks.get() + 1);
                     let complete = checks.get() == 1;
                     let authority = authority.clone();
@@ -1242,6 +1294,7 @@ async fn cancellation_rolls_back_settlement(
                         if complete {
                             Ok(authority)
                         } else {
+                            assert_transaction_job(&tx, &command.delivery.job, "settled").await?;
                             std::future::pending().await
                         }
                     }
@@ -1269,6 +1322,7 @@ async fn claim_timeout_rolls_back(fixture: &Fixture) {
             transaction_timeout: Duration::from_secs(3),
             ..Options::default()
         },
+        support::synthetic_holds(),
     )
     .await
     .unwrap();
@@ -1340,6 +1394,7 @@ async fn bounds_and_privileges(fixture: &Fixture) {
             max_metadata_bytes: 1,
             ..Options::default()
         },
+        support::synthetic_holds(),
     )
     .await
     .unwrap();
@@ -1363,9 +1418,14 @@ async fn bounds_and_privileges(fixture: &Fixture) {
         },
     ] {
         assert_eq!(
-            Queue::connect(fixture.binding(), fixture.url(), invalid)
-                .await
-                .unwrap_err(),
+            Queue::connect(
+                fixture.binding(),
+                fixture.url(),
+                invalid,
+                support::synthetic_holds()
+            )
+            .await
+            .unwrap_err(),
             Error::Invalid
         );
     }

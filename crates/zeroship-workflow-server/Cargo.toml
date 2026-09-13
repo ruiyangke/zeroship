@@ -24,9 +24,9 @@ zeroship-core = { workspace = true }
 zeroship-authn = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-workflow-manager = { workspace = true }
+zeroship-workflow-client = { workspace = true }
 
 [dev-dependencies]
-zeroship-workflow-client = { workspace = true }
 zeroship-workflow = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }

@@ -12,10 +12,14 @@ use crate::{
 use std::{cell::Cell, time::Duration};
 use zeroship_core::{
     schema_name::SchemaName,
-    workflow_jobs::{JobOperation, JobSpec},
+    workflow_deployments::{HoldGeneration, HoldReceipt, HoldScope, HoldState},
+    workflow_jobs::{DeploymentId, JobOperation, JobSpec},
 };
 use zeroship_data_orm::binding::DbBinding;
-use zeroship_workflow_manager::{Options, Queue};
+use zeroship_workflow_manager::{
+    retention::{HoldClient, HoldFuture},
+    Options, Queue,
+};
 
 enum FaultDb {
     Sqlite(rusqlite::Connection),
@@ -99,6 +103,56 @@ case!(
     retention
 );
 
+/// Publication tests isolate the journal outbox from artifact retention. The
+/// manager's retention suite supplies a real catalog for deployment safety.
+#[derive(Debug)]
+struct PublicationHolds;
+
+impl PublicationHolds {
+    fn receipt(
+        app: &AppId,
+        deployment: &DeploymentId,
+        generation: HoldGeneration,
+        state: HoldState,
+    ) -> HoldReceipt {
+        HoldReceipt {
+            app_id: app.clone(),
+            deploy_id: deployment.as_str().into(),
+            deploy_hash: zeroship_bundle::sha256_hex(deployment.as_str().as_bytes()),
+            holder_id: HoldScope::for_queue(app.clone()).holder().into(),
+            generation,
+            state,
+        }
+    }
+}
+
+impl HoldClient for PublicationHolds {
+    fn acquire<'a>(
+        &'a self,
+        app: &'a AppId,
+        deployment: &'a DeploymentId,
+        generation: HoldGeneration,
+    ) -> HoldFuture<'a> {
+        Box::pin(async move { Ok(Self::receipt(app, deployment, generation, HoldState::Held)) })
+    }
+
+    fn release<'a>(
+        &'a self,
+        app: &'a AppId,
+        deployment: &'a DeploymentId,
+        generation: HoldGeneration,
+    ) -> HoldFuture<'a> {
+        Box::pin(async move {
+            Ok(Self::receipt(
+                app,
+                deployment,
+                generation,
+                HoldState::Released,
+            ))
+        })
+    }
+}
+
 pub(in crate::service) struct Manager {
     _directory: tempfile::TempDir,
     path: std::path::PathBuf,
@@ -140,6 +194,7 @@ impl Manager {
             ),
             &format!("sqlite:{}", path.display()),
             options,
+            Rc::new(PublicationHolds),
         )
         .await
         .unwrap()

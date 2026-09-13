@@ -121,6 +121,110 @@
         }
       ]
     },
+    "deployment_holds": {
+      "fields": {
+        "id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "id"
+          },
+          "primaryKey": true
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "app_id"
+          }
+        },
+        "deployment_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deployment_id"
+          }
+        },
+        "holder_id": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "holder_id"
+          }
+        },
+        "deploy_hash": {
+          "type": "string",
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "deploy_hash"
+          }
+        },
+        "generation": {
+          "type": "bigInt",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "generation"
+          }
+        },
+        "state": {
+          "type": "string",
+          "required": true,
+          "readable": true,
+          "filterable": true,
+          "sortable": true,
+          "projectable": true,
+          "storage": {
+            "valueColumn": "state"
+          }
+        }
+      },
+      "options": {
+        "softDelete": false,
+        "versioning": false,
+        "strictness": "strict"
+      },
+      "indexes": [
+        {
+          "name": "deployment_holds_scope_key",
+          "fields": [
+            "app_id",
+            "deployment_id"
+          ],
+          "unique": true
+        },
+        {
+          "name": "deployment_holds_pending_idx",
+          "fields": [
+            "state",
+            "app_id",
+            "deployment_id"
+          ]
+        }
+      ]
+    },
     "jobs": {
       "fields": {
         "id": {
@@ -306,6 +410,14 @@
             "id"
           ],
           "unique": true
+        },
+        {
+          "name": "jobs_deployment_idx",
+          "fields": [
+            "app_id",
+            "deployment_id",
+            "state"
+          ]
         }
       ]
     },
@@ -789,6 +901,14 @@
             "id"
           ],
           "unique": true
+        },
+        {
+          "name": "schedule_activations_deployment_idx",
+          "fields": [
+            "app_id",
+            "deployment_id",
+            "id"
+          ]
         }
       ]
     },
@@ -1167,6 +1287,13 @@
           "fields": [
             "next_at",
             "id"
+          ]
+        },
+        {
+          "name": "schedules_activation_idx",
+          "fields": [
+            "app_id",
+            "activation_id"
           ]
         }
       ]

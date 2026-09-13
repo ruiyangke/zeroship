@@ -1101,17 +1101,36 @@ classes and generation sequences.
 Control derives holder identity from the authenticated service role and scoped
 app. A body cannot choose another holder. Replacement workers preserve the stable
 journal holder; manager replicas share their stable logical queue holder. Releasing
-a queue dependency cannot release a journal dependency, or vice versa. The current
-worker hold API and `HoldScope::for_app` are not yet authorization for queue-owned
-manager holds; extend that contract explicitly.
+a queue dependency cannot release a journal dependency, or vice versa. The queue
+hold endpoints accept the workflow service role and derive `HoldScope::for_queue`;
+the worker endpoints retain their enrolled-worker checks and derive
+`HoldScope::for_app`. Queue requests carry the app, deployment and generation,
+without choosing a holder or claiming worker placement.
 
-The existing Control reclamation loop in
+The manager records acquiring, held, releasing and released intents in its own
+database. A fresh publication confirms the hold before committing an executable
+dependency. External hold requests run outside the queue transaction; publication
+revalidates its authority and hold under the app lock within the original request
+budget. Release closes admission under that lock and checks unsettled jobs,
+schedule frontiers and recovery responsibility. Completed receipts remain useful
+for exact retries without retaining executable code. Generation tombstones fence
+late replies after release and reacquisition.
+
+The Control reclamation loop in
 [`deploy_retention.rs`](../../crates/zeroship-control/src/cron/deploy_retention.rs)
-still derives pins from creator journals. Its `reclaim_manifest_if_guarded`
-path does not consult the native `app_deploy_holds` ledger. Replace that loop
-with the shared hold/reclamation protocol before enabling production admission
-that relies on native holds. A tested hold API does not protect a bundle while
-an independent deletion path ignores it.
+uses native typed ORM over the platform deployment catalog and the normal app
+deployment pointer. It takes the app lock before the deployment fence, matching
+normal activation. Current or staged code and either holder class prevent
+reclamation. Activation refuses a reclaiming or deleted deployment in the same
+transaction that changes the normal app pointer.
+
+The collector commits the reclaiming fence before deleting the manifest outside
+the transaction. Failed or interrupted deletion leaves durable retry state;
+an already absent manifest permits completion. Catalog and holder tombstones
+remain closed to acquisition. Bounded rotating scans advance past retained or
+failing candidates, and a captured upper bound prevents new deployments from
+indefinitely postponing retries. Collection runs independently of the old
+workflow sweeps and never opens customer journals.
 
 Control remains the production owner of hold acquisition and reclamation APIs.
 Its native ledger lives in `zeroship-workflow-manager::deployments` for reuse by
@@ -1650,14 +1669,27 @@ and transaction rollback. Retention tests cover unresolved hash recovery,
 concurrent replies and stale generations. The full creator library passes,
 including schema parity, object storage and executor-free activation delivery.
 
+Queue retention is now required by the native queue, scheduler and recovery
+operations. PostgreSQL and SQLite tests cover lost hold replies, stale generations,
+failed publication, schedule replacement, pending jobs after replacement and
+independent journal retention. They use a separate deployment catalog and ordinary
+app artifacts. Authorization tests preserve post-write revocation and cancellation
+rollback while also refusing unauthorized hold preparation. The Control collector
+now uses the same native retention ledger and protects the normal deployment
+pointer in its reclamation transaction. Its canonical platform grant, deletion
+recovery and activation-race regressions pass. The tests also verify independent
+queue and journal holders, app scope, archived current deployments and denial of
+creator-schema access. The collector is the production caller of manifest
+deletion; it no longer delegates deletion authority to creator journal scans.
+
 The manager scheduling loop, scope deadline orchestration, capacity activation,
 and ordinary worker/CLI consumer composition still require implementation and integration.
 The consumer accepts activation, advance and reconciliation jobs; the queue claim is not
 filtered by operation. Other delivered operation handlers must land before
 switching a host that receives cron, management or collection jobs to this loop.
-Queue-owned deployment holds must also be acquired before publishing those jobs
-in the production host. Persisting a deployment identity in the queue does not
-protect its bundle from Control reclamation.
+The server injects an authenticated Control hold client into its native queue.
+Production deployment registration, scheduling-loop composition and durable
+retention-intent reconciliation still require host integration.
 Publication intents and advance-job receipts exist in the journal; their
 delivered reconciliation and queue settlement are integrated natively. Creator
 reconciliation tests exercise persisted progress, failed publication, policy
