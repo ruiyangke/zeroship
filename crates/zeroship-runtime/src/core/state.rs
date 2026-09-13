@@ -1175,6 +1175,12 @@ pub enum OpResult {
     /// to be no-ops). See `websocket_native::network::drain_events`.
     #[cfg(feature = "runtime_native_websocket")]
     WebSocketEvent { ws_id: u32 },
+    /// A retained native subscription call or iterator is ready to advance.
+    #[cfg(feature = "runtime_native_websocket")]
+    SubscriptionAdvance { ws_id: u32 },
+    /// A native subscription handshake or keepalive deadline elapsed.
+    #[cfg(feature = "runtime_native_websocket")]
+    SubscriptionTimer(crate::rpc::subscription::Timer),
     /// A native `node:net.Socket` event is ready for EventEmitter
     /// dispatch on the V8 thread. Payload is queued under
     /// `RuntimeState::native_sockets[socket_id].events`.

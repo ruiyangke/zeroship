@@ -9,9 +9,9 @@
 // server-side `_onMessage` / `_onClose` by pushing `WsEvent::*` onto
 // its events queue and letting the pump dispatch.
 //
-// The bootstrap's `dispatchSubscription(name, input, ws)` routes a
-// subscription procedure (`fn.config = { kind: "subscription" }`)
-// across an already-accepted server-side WebSocket. Frame protocol:
+// The native runtime captures the procedure dictionary when it accepts an
+// upgrade, then resolves and invokes the string wire id after the hello frame.
+// Frame protocol:
 //
 //   client → server (first):  {"t":"hello","input":<json>}
 //   server → client:           {"t":"data","value":<json>}   each yield
@@ -31,7 +31,7 @@ use std::time::Duration;
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::runtime::Runtime;
 use zeroship_runtime::websocket_native::network::WsEvent;
-use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx};
+use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, init_v8};
 
 // ── Test scaffolding ────────────────────────────────────────────────────
 
@@ -75,9 +75,8 @@ fn server_id(client_id: u32) -> u32 {
 }
 
 /// Inject an event on the SERVER side of the pair (simulating an
-/// incoming frame from the client) and wake the pump. The server's
-/// `addEventListener("message", ...)` listener is wired via the
-/// bootstrap; the pump dispatches via `dispatch::dispatch_pending_ws_events`.
+/// incoming frame from the client) and wake the pump. Subscription-owned
+/// sockets are intercepted by the native RPC transport before DOM dispatch.
 fn inject_server_message(runtime: &Runtime, server_ws_id: u32, data: &str) {
     inject_server_event(runtime, server_ws_id, WsEvent::MessageText(data.into()));
 }
@@ -177,6 +176,16 @@ fn client_saw_data_frame(runtime: &Runtime, client_ws_id: u32) -> bool {
         .unwrap_or(false)
 }
 
+fn global_bool(runtime: &Runtime, name: &str) -> bool {
+    runtime.with_scope(|scope| {
+        let global = scope.get_current_context().global(scope);
+        let key = v8::String::new(scope, name).unwrap();
+        global
+            .get(scope, key.into())
+            .is_some_and(|value| value.is_true())
+    })
+}
+
 /// Run the runtime's pump until the predicate fires (or timeout).
 async fn pump_until<F: FnMut() -> bool>(runtime: &Runtime, mut predicate: F) {
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -221,7 +230,10 @@ fn subscription_runs_async_gen_and_emits_frames() {
         pump_until(&runtime, || client_saw_close(&runtime, client_id)).await;
 
         let (frames, close) = drain_outgoing_with_close(&runtime, client_id);
-        let data_count = frames.iter().filter(|f| f.contains("\"t\":\"data\"")).count();
+        let data_count = frames
+            .iter()
+            .filter(|f| f.contains("\"t\":\"data\""))
+            .count();
         assert_eq!(data_count, 3, "expected 3 data frames, got: {frames:#?}");
         assert!(
             frames.iter().any(|f| f.contains("\"t\":\"end\"")),
@@ -229,6 +241,103 @@ fn subscription_runs_async_gen_and_emits_frames() {
         );
         let (code, _) = close.expect("expected close frame");
         assert_eq!(code, 1000, "expected normal close, got {code}");
+    });
+}
+
+#[test]
+fn subscription_uses_native_string_lookup_validation_and_context() {
+    init_v8();
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: r#"
+            globalThis.__zsDispatch = () => { throw new Error("forged dispatcher ran"); };
+            async function* internalName(input, ctx) {
+                yield {
+                    validated: input.validated,
+                    context: typeof ctx.requestId === "string",
+                };
+            }
+            internalName.config = {
+                kind: "subscription",
+                input: {
+                    parse(value) { return { validated: value.raw === true }; },
+                },
+            };
+            export default {
+                rpc: {sub: internalName},
+            };
+        "#
+        .into(),
+    }];
+    let runtime = Runtime::builder().modules(modules).build();
+    let client_id = upgrade(&runtime);
+    let server_ws_id = server_id(client_id);
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        inject_server_message(
+            &runtime,
+            server_ws_id,
+            r#"{"t":"hello","input":{"raw":true}}"#,
+        );
+
+        pump_until(&runtime, || client_saw_close(&runtime, client_id)).await;
+
+        let (frames, close) = drain_outgoing_with_close(&runtime, client_id);
+        let data = frames
+            .iter()
+            .find(|frame| frame.contains("\"t\":\"data\""))
+            .expect("data frame missing");
+        assert!(
+            data.contains("\"validated\":true"),
+            "validator result missing: {data}"
+        );
+        assert!(
+            data.contains("\"context\":true"),
+            "RPC context missing: {data}"
+        );
+        assert_eq!(close.expect("close frame missing").0, 1000);
+    });
+}
+
+#[test]
+fn subscription_resolves_lazy_procedure_records() {
+    init_v8();
+    let modules = vec![ModuleEntry {
+        specifier: "index.js".into(),
+        source: r#"
+            async function* loaded() { yield "loaded"; }
+            export default {
+                rpc: {
+                    sub: {
+                        async load() {
+                            await Promise.resolve();
+                            return loaded;
+                        },
+                    },
+                },
+            };
+        "#
+        .into(),
+    }];
+    let runtime = Runtime::builder().modules(modules).build();
+    let client_id = upgrade(&runtime);
+    let server_ws_id = server_id(client_id);
+
+    compio::runtime::Runtime::new().unwrap().block_on(async {
+        runtime.start_pump();
+        inject_server_message(&runtime, server_ws_id, r#"{"t":"hello","input":null}"#);
+
+        pump_until(&runtime, || client_saw_close(&runtime, client_id)).await;
+
+        let (frames, close) = drain_outgoing_with_close(&runtime, client_id);
+        assert!(
+            frames
+                .iter()
+                .any(|frame| frame.contains("\"value\":\"loaded\"")),
+            "lazy procedure output missing: {frames:#?}",
+        );
+        assert_eq!(close.expect("close frame missing").0, 1000);
     });
 }
 
@@ -265,19 +374,30 @@ fn subscription_emits_error_envelope_on_throw() {
 
         let (frames, close) = drain_outgoing_with_close(&runtime, client_id);
 
-        let data_count = frames.iter().filter(|f| f.contains("\"t\":\"data\"")).count();
+        let data_count = frames
+            .iter()
+            .filter(|f| f.contains("\"t\":\"data\""))
+            .count();
         let error = frames.iter().find(|f| f.contains("\"t\":\"error\""));
-        assert_eq!(data_count, 1, "expected 1 data frame before error, got: {frames:#?}");
+        assert_eq!(
+            data_count, 1,
+            "expected 1 data frame before error, got: {frames:#?}"
+        );
         let err = error.expect("error frame missing");
-        assert!(err.contains("\"code\":\"INTERNAL\""), "error envelope missing code: {err}");
-        assert!(err.contains("\"message\":\"kaboom\""), "error envelope missing message: {err}");
+        assert!(
+            err.contains("\"code\":\"INTERNAL\""),
+            "error envelope missing code: {err}"
+        );
+        assert!(
+            err.contains("\"message\":\"kaboom\""),
+            "error envelope missing message: {err}"
+        );
         let (code, _) = close.expect("close frame missing");
         assert_eq!(code, 1011, "expected error close 1011, got {code}");
     });
 }
 
-/// Handler that returns a non-iterator → emits an error envelope and
-/// closes (per `dispatchSubscription` contract).
+/// A handler that returns a non-iterator emits an error envelope and closes.
 #[test]
 fn subscription_rejects_non_iterator_handler() {
     init_v8();
@@ -352,28 +472,8 @@ fn subscription_stops_when_client_closes() {
         // Now close the client side — drives the server's `_onClose`.
         inject_server_close(&runtime, server_ws_id, 1000, "test-close");
 
-        // Wait until the server-side ready_state transitions to closed
-        // (the bootstrap fires `_onClose` which sets readyState=CLOSED
-        // and runs the generator's finally). We observe via the
-        // server-side native_websockets state having no `send_tx` or
-        // — simpler — by checking the global flag via a no-op tick.
-        // Pair sockets don't have a `closed` field; observe via the
-        // events queue having a Close on the server side too.
-        pump_until(&runtime, || {
-            use zeroship_runtime::websocket_native::network as nw;
-            let state = runtime.state();
-            let Some(ws) = nw::lookup_native_ws_state(&state, server_ws_id) else {
-                return true;
-            };
-            let s = ws.borrow();
-            s.events.iter().any(|e| matches!(e, WsEvent::Close { .. }))
-                || s.events.is_empty() // events drained → close already dispatched
-        })
-        .await;
-        // The actual cleanup-ran assertion lives in bootstrap behaviour;
-        // here we just verify the test reached this point without
-        // hanging (i.e. close propagated and the generator's finally
-        // had a chance to run).
+        pump_until(&runtime, || global_bool(&runtime, "__cleanupRan")).await;
+        assert!(global_bool(&runtime, "__cleanupRan"));
     });
 }
 

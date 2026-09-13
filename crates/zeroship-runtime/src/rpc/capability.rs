@@ -155,65 +155,6 @@ pub(crate) fn with_procedure_frame<'s, R>(
     }
 }
 
-fn enter_kind_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let value = args.get(0);
-    let kind = if value.is_string() {
-        ProcedureKind::from_wire(&value.to_rust_string_lossy(scope))
-    } else {
-        None
-    };
-    let kind = kind.or_else(|| current_kind(scope));
-    rv.set_double(enter_frame(scope, kind) as f64);
-}
-
-fn exit_kind_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    _rv: v8::ReturnValue,
-) {
-    let value = args.get(0);
-    if !value.is_number() {
-        return;
-    }
-    let Some(token) = value.number_value(scope) else {
-        return;
-    };
-    if token < 1.0 || token.fract() != 0.0 || token as u64 != dispatch_generation(scope) {
-        return;
-    }
-    if let Some(frame) = current_frame(scope)
-        && let Some(parent) = frame.get_index(scope, 2)
-    {
-        set_frame(scope, parent);
-    }
-}
-
-fn clear_kind_callback(
-    scope: &mut v8::PinScope,
-    _args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    rv.set_double(enter_frame(scope, None) as f64);
-}
-
-/// Install callbacks captured by the internal dispatcher and dev transport.
-/// Creator evaluation starts after the bootstrap removes these globals.
-pub fn install_globals<'s>(scope: &mut v8::PinScope<'s, '_>, global: v8::Local<v8::Object>) {
-    let f = v8::Function::new(scope, enter_kind_callback).unwrap();
-    let key = v8::String::new(scope, "__zsEnterKind").unwrap();
-    global.set(scope, key.into(), f.into());
-    let f = v8::Function::new(scope, exit_kind_callback).unwrap();
-    let key = v8::String::new(scope, "__zsExitKind").unwrap();
-    global.set(scope, key.into(), f.into());
-    let f = v8::Function::new(scope, clear_kind_callback).unwrap();
-    let key = v8::String::new(scope, "__zsClearKind").unwrap();
-    global.set(scope, key.into(), f.into());
-}
-
 // ---------------------------------------------------------------------------
 // capability_violation error envelope
 // ---------------------------------------------------------------------------
