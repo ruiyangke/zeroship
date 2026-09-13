@@ -50,6 +50,10 @@ outcome after later lifecycle changes or policy expiry. Changed command
 bodies conflict; infrastructure failures remain retryable. Lifecycle rejection
 and database failure are separate paths, so a failed write cannot become a
 permanent denial. Receipt compaction awaits a coordinator redelivery contract.
+Management captures host authority before opening its journal transaction. Its
+original deadline covers app-lock waits and settlement, even if the host refreshes
+policy meanwhile. Missing authority permits only exact immutable receipt readback;
+an unseen command remains retryable without writing a denial receipt.
 App-operation `RequestId` receipts also persist without an age-based expiry.
 Retries return their original result, and changed operation bodies conflict.
 Lifecycle changes do not free an accepted request identity for reuse. Replaying

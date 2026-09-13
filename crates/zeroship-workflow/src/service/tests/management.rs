@@ -282,9 +282,10 @@ async fn replay_contract(store: Rc<OrmStore>) {
         .await
         .unwrap()
         .with_deployments(deployments.binding(&[&local, &foreign]));
+    unconfigured_replay(&service, &request, original).await;
     for app_id in [&local, &foreign] {
         service
-            .register_app(app_id, configured_policy(1, AppPolicy::default()))
+            .register_app(app_id, configured_policy(2, AppPolicy::default()))
             .await
             .unwrap();
     }
@@ -316,6 +317,54 @@ async fn replay_contract(store: Rc<OrmStore>) {
         (1, "queued".into())
     );
     assert_eq!(receipt_count(&service, &concurrent).await, 1);
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "receipt replay uses the owning compio journal"
+)]
+async fn unconfigured_replay(
+    service: &WorkflowService,
+    request: &ManageRun,
+    original: ManagementOutcome,
+) {
+    let local = &request.app_id;
+    let unconfigured = service.for_app(local.clone());
+    assert_eq!(
+        unconfigured.apply_management(request).await.unwrap(),
+        original
+    );
+    let mut changed = request.clone();
+    changed.command = ManagementOperation::Transition {
+        operation: RunOperation::Pause,
+    };
+    assert!(matches!(
+        unconfigured.apply_management(&changed).await,
+        Err(WorkflowServiceError::Conflict(_))
+    ));
+    let fresh = restart(local, request.run_id.as_str());
+    assert!(matches!(
+        unconfigured.apply_management(&fresh).await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert_eq!(receipt_count(service, &fresh).await, 0);
+    service
+        .policies
+        .install(
+            local,
+            PolicySnapshot::lease(1.try_into().unwrap(), AppPolicy::default(), Instant::now())
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        unconfigured.apply_management(request).await.unwrap(),
+        original
+    );
+    assert!(matches!(
+        unconfigured.apply_management(&fresh).await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert_eq!(receipt_count(service, &fresh).await, 0);
 }
 
 async fn outcome_contract(store: Rc<OrmStore>) {
@@ -622,6 +671,7 @@ impl ReceiptFault {
 
 #[derive(Clone, Copy)]
 enum BarrierSite {
+    AppLock,
     Receipt,
     Lifecycle,
 }
@@ -641,6 +691,7 @@ impl PgBarrier {
              BEGIN PERFORM pg_advisory_xact_lock(73921861); RETURN NEW; END $$;",
         ).await.unwrap();
         blocker.batch_execute(match site {
+            BarrierSite::AppLock => "CREATE TRIGGER management_barrier BEFORE UPDATE ON customer.__zeroship_workflow_app_state FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
             BarrierSite::Receipt => "CREATE TRIGGER management_barrier BEFORE INSERT ON customer.__zeroship_workflow_management_receipts FOR EACH ROW EXECUTE FUNCTION customer.management_barrier()",
             BarrierSite::Lifecycle => "CREATE TRIGGER management_barrier BEFORE UPDATE ON customer.__zeroship_workflow_runs FOR EACH ROW WHEN (OLD.generation IS DISTINCT FROM NEW.generation) EXECUTE FUNCTION customer.management_barrier()",
         }).await.unwrap();
@@ -696,14 +747,23 @@ impl PgBarrier {
         }).await.expect("cancelled management must release its transaction while the barrier is still held");
     }
 
-    async fn remove(self) {
+    async fn release(&self) {
         assert!(self
             .blocker
             .query_one("SELECT pg_advisory_unlock(73921861)", &[])
             .await
             .unwrap()
             .get::<_, bool>(0));
+    }
+
+    async fn remove(self) {
+        self.release().await;
+        self.remove_trigger().await;
+    }
+
+    async fn remove_trigger(self) {
         self.blocker.batch_execute(match self.site {
+            BarrierSite::AppLock => "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_app_state",
             BarrierSite::Receipt => "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_management_receipts",
             BarrierSite::Lifecycle => "DROP TRIGGER management_barrier ON customer.__zeroship_workflow_runs",
         }).await.unwrap();
@@ -746,5 +806,228 @@ async fn cancellation_contract(site: BarrierSite) {
     );
     assert_eq!(scope.apply_management(&request).await.unwrap(), outcome);
     assert_eq!(head(&service, &local, &run).await, (1, "queued".into()));
+    assert_eq!(receipt_count(&service, &request).await, 1);
+}
+
+#[compio::test]
+async fn postgres_management_revocation_during_app_lock_is_retryable() {
+    let fixture = PostgresFixture::start().await;
+    let (service, local, _, _deployments) =
+        registered_service(Rc::new(fixture.store.clone())).await;
+    let run = start(&service, &local).await;
+    let scope = service.for_app(local.clone());
+    let request = restart(&local, &run);
+    let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::AppLock).await;
+    let pending = match select(
+        barrier.blocked_worker().boxed_local(),
+        scope.apply_management(&request).boxed_local(),
+    )
+    .await
+    {
+        Either::Left((_, pending)) => pending,
+        Either::Right((result, _)) => panic!("management ended before its app lock: {result:?}"),
+    };
+    service
+        .policies
+        .install(
+            &local,
+            configured_policy(
+                2,
+                AppPolicy {
+                    admission: false,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    barrier.release().await;
+    assert!(matches!(
+        pending.await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    barrier.remove_trigger().await;
+    assert_rolled_back(&service, &local, &run, &request).await;
+    assert_eq!(
+        scope.apply_management(&request).await.unwrap(),
+        ManagementOutcome::Denied {}
+    );
+    assert_eq!(receipt_count(&service, &request).await, 1);
+    service
+        .policies
+        .install(&local, configured_policy(3, AppPolicy::default()))
+        .unwrap();
+    assert_eq!(
+        scope.apply_management(&request).await.unwrap(),
+        ManagementOutcome::Denied {}
+    );
+    assert_eq!(
+        scope
+            .apply_management(&restart(&local, &run))
+            .await
+            .unwrap(),
+        ManagementOutcome::Applied {
+            state: RunState::Queued
+        }
+    );
+}
+
+#[compio::test]
+async fn postgres_management_app_lock_wait_keeps_original_policy_deadline() {
+    let fixture = PostgresFixture::start().await;
+    let (service, local, _, _deployments) =
+        registered_service(Rc::new(fixture.store.clone())).await;
+    let run = start(&service, &local).await;
+    let scope = service.for_app(local.clone());
+    let request = restart(&local, &run);
+    let barrier = PgBarrier::install(&fixture.admin_url, BarrierSite::AppLock).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    service
+        .policies
+        .install(
+            &local,
+            PolicySnapshot::lease(2.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
+        )
+        .unwrap();
+    let (worker, pending) = match select(
+        barrier.blocked_worker().boxed_local(),
+        scope.apply_management(&request).boxed_local(),
+    )
+    .await
+    {
+        Either::Left(result) => result,
+        Either::Right((result, _)) => panic!("management ended before its app lock: {result:?}"),
+    };
+    service
+        .policies
+        .install(
+            &local,
+            PolicySnapshot::lease(
+                2.try_into().unwrap(),
+                AppPolicy::default(),
+                deadline + Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let budget = Duration::from_secs(5);
+    assert!(budget.as_millis() < u128::from(zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS));
+    let result = compio::time::timeout(budget, pending)
+        .await
+        .expect("the original policy deadline must cancel app-lock waiting");
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert!(service.policies.authority(&local).is_ok());
+    barrier.wait_for_rollback(worker).await;
+    barrier.remove().await;
+    assert_rolled_back(&service, &local, &run, &request).await;
+    assert_eq!(
+        scope.apply_management(&request).await.unwrap(),
+        ManagementOutcome::Applied {
+            state: RunState::Queued
+        }
+    );
+    assert_eq!(receipt_count(&service, &request).await, 1);
+}
+
+#[compio::test]
+async fn sqlite_management_captures_policy_before_waiting_for_journal() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = sqlite_store(&directory.path().join("zs-workflow.sqlite")).await;
+    waiting_authority_contract(Rc::new(store)).await;
+}
+
+#[compio::test]
+async fn postgres_management_captures_policy_before_waiting_for_journal() {
+    let fixture = PostgresFixture::start().await;
+    waiting_authority_contract(Rc::new(fixture.store.clone())).await;
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "native journal waits stay on the owning compio thread"
+)]
+async fn waiting_authority_contract(store: Rc<OrmStore>) {
+    let (service, local, _, _deployments) = registered_service(store).await;
+    let run = start(&service, &local).await;
+    let scope = service.for_app(local.clone());
+    let request = restart(&local, &run);
+    let mut blocker = service.begin().await.unwrap();
+    app::lock_app(&mut blocker, &local).await.unwrap();
+    let mut pending = scope.apply_management(&request).boxed_local();
+    assert!(matches!(
+        futures::poll!(&mut pending),
+        std::task::Poll::Pending
+    ));
+    service
+        .policies
+        .install(
+            &local,
+            configured_policy(
+                2,
+                AppPolicy {
+                    admission: false,
+                    ..Default::default()
+                },
+            ),
+        )
+        .unwrap();
+    blocker.commit().await.unwrap();
+    assert!(matches!(
+        pending.await,
+        Err(WorkflowServiceError::Unavailable(_))
+    ));
+    assert_rolled_back(&service, &local, &run, &request).await;
+
+    service
+        .policies
+        .install(&local, configured_policy(3, AppPolicy::default()))
+        .unwrap();
+    let mut blocker = service.begin().await.unwrap();
+    app::lock_app(&mut blocker, &local).await.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+    service
+        .policies
+        .install(
+            &local,
+            PolicySnapshot::lease(4.try_into().unwrap(), AppPolicy::default(), deadline).unwrap(),
+        )
+        .unwrap();
+    let mut pending = scope.apply_management(&request).boxed_local();
+    assert!(matches!(
+        futures::poll!(&mut pending),
+        std::task::Poll::Pending
+    ));
+    service
+        .policies
+        .install(
+            &local,
+            PolicySnapshot::lease(
+                4.try_into().unwrap(),
+                AppPolicy::default(),
+                deadline + Duration::from_secs(30),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let budget = Duration::from_secs(3);
+    assert!(budget.as_millis() < u128::from(zeroship_data_orm::budgets::DB_LOCK_TIMEOUT_MS));
+    let result = compio::time::timeout(budget, pending)
+        .await
+        .expect("management must keep its original deadline before the journal opens");
+    assert!(
+        matches!(result, Err(WorkflowServiceError::Unavailable(_))),
+        "{result:?}"
+    );
+    assert!(service.policies.authority(&local).is_ok());
+    blocker.commit().await.unwrap();
+    assert_rolled_back(&service, &local, &run, &request).await;
+    assert_eq!(
+        scope.apply_management(&request).await.unwrap(),
+        ManagementOutcome::Applied {
+            state: RunState::Queued
+        }
+    );
     assert_eq!(receipt_count(&service, &request).await, 1);
 }

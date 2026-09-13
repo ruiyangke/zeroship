@@ -9,13 +9,12 @@ use super::{
     app::{decode, encode, lock_app},
     control::{self, Preparation},
     models,
-    policy::PolicyAuthority,
+    policy::{CapturedPolicy, PolicyAuthority},
     store::Transaction,
     types::{digest, storage_id},
     AppWorkflows,
 };
 use crate::WorkflowServiceError;
-use std::time::Instant;
 use zeroship_core::workflow_coordination::{ManageRun, ManagementOperation, ManagementOutcome};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions},
@@ -37,49 +36,48 @@ impl AppWorkflows {
         &self,
         command: &ManageRun,
     ) -> Result<ManagementOutcome, WorkflowServiceError> {
-        if command.app_id != self.app {
-            return Err(WorkflowServiceError::PermissionDenied);
-        }
-        let digest = digest(command)?;
-        let mut tx = self.service.begin().await?;
-        lock_app(&mut tx, &self.app).await?;
-        let stored = tx
-            .database()
-            .entity::<models::management_receipts::Entity>()?
-            .find::<models::ManagementResult>(
-                models::management_receipts::app_id
-                    .eq(self.app.as_str())?
-                    .and(models::management_receipts::request_id.eq(command.request_id.as_str())?),
-                FindOptions {
-                    limit: Some(1),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        if let Some(receipt) = stored.into_iter().next() {
-            if receipt.digest != digest {
-                return Err(WorkflowServiceError::Conflict(
-                    "workflow management request was reused with a different command".into(),
-                ));
-            }
-            return decode(&receipt.outcome);
-        }
-        let authority = self.service.policies.authority(&self.app)?;
-        let deadline = authority.deadline;
-        let attempt = Box::pin(self.apply_management_authorized(tx, command, &digest, &authority));
-        if let Some(deadline) = deadline {
-            // Cancellation covers lifecycle mutation and settlement. If a
-            // commit's acknowledgement is lost, the next host reads its receipt.
-            compio::time::timeout(deadline.saturating_duration_since(Instant::now()), attempt)
-                .await
-                .map_err(|_| {
-                    WorkflowServiceError::Unavailable(
-                        "workflow management authority expired".into(),
+        let captured = CapturedPolicy::capture(&self.service.policies, &self.app);
+        captured
+            .run(async {
+                if command.app_id != self.app {
+                    return Err(WorkflowServiceError::PermissionDenied);
+                }
+                let digest = digest(command)?;
+                let mut tx = self.service.begin().await?;
+                let authority = captured.authority();
+                if authority.is_ok() {
+                    lock_app(&mut tx, &self.app).await?;
+                }
+                // Immutable receipts can be replayed without fresh mutation authority.
+                // A missing receipt must still fail with the original captured error.
+                let stored = tx
+                    .database()
+                    .entity::<models::management_receipts::Entity>()?
+                    .find::<models::ManagementResult>(
+                        models::management_receipts::app_id
+                            .eq(self.app.as_str())?
+                            .and(
+                                models::management_receipts::request_id
+                                    .eq(command.request_id.as_str())?,
+                            ),
+                        FindOptions {
+                            limit: Some(1),
+                            ..Default::default()
+                        },
                     )
-                })?
-        } else {
-            attempt.await
-        }
+                    .await?;
+                if let Some(receipt) = stored.into_iter().next() {
+                    if receipt.digest != digest {
+                        return Err(WorkflowServiceError::Conflict(
+                            "workflow management request was reused with a different command"
+                                .into(),
+                        ));
+                    }
+                    return decode(&receipt.outcome);
+                }
+                Box::pin(self.apply_management_authorized(tx, command, &digest, authority?)).await
+            })
+            .await
     }
 
     async fn apply_management_authorized(

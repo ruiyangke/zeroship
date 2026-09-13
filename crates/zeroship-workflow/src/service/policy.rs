@@ -133,7 +133,11 @@ impl CapturedPolicy {
         policies: &HostPolicies,
         app: &AppId,
     ) -> Result<(), WorkflowServiceError> {
-        self.0.as_ref().map_err(Clone::clone)?.check(policies, app)
+        self.authority()?.check(policies, app)
+    }
+
+    pub(super) fn authority(&self) -> Result<&PolicyAuthority, WorkflowServiceError> {
+        self.0.as_ref().map_err(Clone::clone)
     }
 
     pub(super) fn run<'a, T: 'a>(
