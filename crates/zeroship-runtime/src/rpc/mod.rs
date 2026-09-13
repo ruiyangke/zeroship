@@ -12,8 +12,8 @@
 //!   - `ctx_holder.rs`: per-request `RpcCtx` `#[v8_class]` with lazy
 //!     accessors for `requestId` / `traceId` / `method` / `url` /
 //!     `headers` / `signal` / `user` / `idempotencyKey`.
-//!   - `dispatch.rs`: ALS slot install/restore + `__zeroshipGetRpcCtx()`
-//!     that lets the holder survive `await` boundaries.
+//!   - `dispatch.rs`: ALS slot install/restore that lets the holder survive
+//!     `await` boundaries and backs the native `zeroship` module exports.
 //!   - `abort.rs`: per-isolate `AbortRegistry` +
 //!     `entered_for_eviction(app_id)` — fires every in-flight
 //!     procedure's `ctx.signal` when the worker's LRU cache evicts the
@@ -34,9 +34,7 @@ pub use capability::{
     build_capability_violation, current_kind, dispatch_generation, with_kind, ProcedureKind,
 };
 pub use ctx_holder::{mint_rpc_ctx, RpcCtx};
-pub use dispatch::{
-    install_globals as install_dispatch_globals, rpc_ctx_als_key, with_rpc_context,
-};
+pub use dispatch::{rpc_ctx_als_key, with_rpc_context};
 pub use error::{
     build, install_global, throw, RpcError, RpcErrorBuildOptions, RpcErrorInit, ZsErrorCode,
 };

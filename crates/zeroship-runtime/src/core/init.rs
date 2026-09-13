@@ -3007,10 +3007,6 @@ pub fn install_dom(scope: &mut v8::PinScope) {
     // already exists on the global is fine because V8 wires the Error
     // intrinsic before user-visible install hooks fire.
     crate::rpc::install_global(scope, global);
-    // Install `__zeroshipGetRpcCtx` so the `getRequestContext` export
-    // in the `zeroship` JS module can read the per-request platform
-    // ctx out of V8's embedder-data slot.
-    crate::rpc::install_dispatch_globals(scope, global);
     // Native Request + Response: install AFTER dom (which gives us
     // FormData / AbortSignal that the constructors need to resolve via
     // globalThis).
