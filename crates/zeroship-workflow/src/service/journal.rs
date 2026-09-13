@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
+    sql::RowLimit,
     value,
 };
 
@@ -45,21 +45,17 @@ pub(crate) async fn load(
     let mut after = None;
     let page_limit = RowLimit::default().get();
     loop {
-        let mut predicates = vec![
-            source.column(models::steps::app_id).eq(app.as_str())?,
-            source.column(models::steps::run_id).eq(id)?,
-            source.column(models::steps::generation).eq(generation)?,
-        ];
+        let mut predicates = source
+            .column(models::steps::app_id)
+            .eq(app.as_str())?
+            .and(source.column(models::steps::run_id).eq(id)?)
+            .and(source.column(models::steps::generation).eq(generation)?);
         if let Some(after) = after {
-            predicates.push(Predicate::compare(
-                Operand::Path(source.column(models::steps::ordinal).asc().path),
-                CompareOp::Gt,
-                Operand::Lit(Literal::Int(after)),
-            ));
+            predicates = predicates.and(source.column(models::steps::ordinal).gt(after)?);
         }
         let page = db
             .from(&source)
-            .filter(Predicate::And(predicates))
+            .filter(predicates)
             .order_by(source.column(models::steps::ordinal).asc())
             .select(source.row::<models::StoredStep>())?
             .limit(page_limit)?
@@ -373,34 +369,30 @@ async fn validate_child_dependency(
         pending.push((id.clone(), true));
         let mut after: Option<String> = None;
         loop {
-            let mut filter = vec![
-                wait.column(models::waits::app_id).eq(app.as_str())?,
-                wait.column(models::waits::run_id).eq(id.as_str())?,
-                Predicate::is_not_null(Operand::Path(
-                    wait.column(models::waits::child_id).asc().path,
-                )),
-            ];
+            let mut filter = wait
+                .column(models::waits::app_id)
+                .eq(app.as_str())?
+                .and(wait.column(models::waits::run_id).eq(id.as_str())?)
+                .and(wait.column(models::waits::child_id).is_not_null());
             if let Some(after) = &after {
-                filter.push(Predicate::compare(
-                    Operand::Path(wait.column(models::waits::id).asc().path),
-                    CompareOp::Gt,
-                    Operand::Lit(Literal::Text(after.clone())),
-                ));
+                filter = filter.and(wait.column(models::waits::id).gt(after.as_str())?);
             }
             let page = db
                 .from(&wait)
                 .inner_join(
                     &run,
-                    Predicate::And(vec![
-                        wait.column(models::waits::app_id)
-                            .eq_column(run.column(models::runs::app_id))?,
-                        wait.column(models::waits::run_id)
-                            .eq_column(run.column(models::runs::id))?,
-                        wait.column(models::waits::generation)
-                            .eq_column(run.column(models::runs::generation))?,
-                    ]),
+                    wait.column(models::waits::app_id)
+                        .eq(run.column(models::runs::app_id))?
+                        .and(
+                            wait.column(models::waits::run_id)
+                                .eq(run.column(models::runs::id))?,
+                        )
+                        .and(
+                            wait.column(models::waits::generation)
+                                .eq(run.column(models::runs::generation))?,
+                        ),
                 )?
-                .filter(Predicate::And(filter))
+                .filter(filter)
                 .order_by(wait.column(models::waits::id).asc())
                 .select(wait.row::<ChildDependency>())?
                 .limit(page_limit)?
@@ -473,39 +465,37 @@ pub(crate) async fn resolve(
             let rows = tx
                 .database()
                 .from(&signals)
-                .filter(Predicate::And(vec![
-                    signals.column(models::signals::app_id).eq(app.as_str())?,
-                    signals.column(models::signals::run_id).eq(id.as_str())?,
+                .filter(
                     signals
-                        .column(models::signals::signal_type)
-                        .eq(signal_type)?,
-                    signals
-                        .column(models::signals::consumed_generation)
-                        .eq(None::<i64>)?,
-                    Predicate::compare(
-                        Operand::Path(signals.column(models::signals::created_at).asc().path),
-                        CompareOp::Gte,
-                        Operand::Lit(Literal::Int(oldest)),
-                    ),
-                    Predicate::compare(
-                        Operand::Path(signals.column(models::signals::created_at).asc().path),
-                        CompareOp::Lte,
-                        Operand::Lit(Literal::Int(latest)),
-                    ),
-                    Predicate::Or(vec![
-                        signals
-                            .column(models::signals::target_generation)
-                            .eq(None::<i64>)?,
-                        Predicate::And(vec![
+                        .column(models::signals::app_id)
+                        .eq(app.as_str())?
+                        .and(signals.column(models::signals::run_id).eq(id.as_str())?)
+                        .and(
+                            signals
+                                .column(models::signals::signal_type)
+                                .eq(signal_type)?,
+                        )
+                        .and(
+                            signals
+                                .column(models::signals::consumed_generation)
+                                .eq(None::<i64>)?,
+                        )
+                        .and(signals.column(models::signals::created_at).gte(oldest)?)
+                        .and(signals.column(models::signals::created_at).lte(latest)?)
+                        .and(
                             signals
                                 .column(models::signals::target_generation)
-                                .eq(Some(generation))?,
-                            signals
-                                .column(models::signals::target_ordinal)
-                                .eq(Some(i64::from(step.ordinal)))?,
-                        ]),
-                    ]),
-                ]))
+                                .eq(None::<i64>)?
+                                .or(signals
+                                    .column(models::signals::target_generation)
+                                    .eq(Some(generation))?
+                                    .and(
+                                        signals
+                                            .column(models::signals::target_ordinal)
+                                            .eq(Some(i64::from(step.ordinal)))?,
+                                    )),
+                        ),
+                )
                 .order_by(signals.column(models::signals::created_at).asc())
                 .order_by(signals.column(models::signals::id).asc())
                 .select(signals.row::<models::SignalMessage>())?

@@ -185,9 +185,11 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
 
-CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_publication_scans" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL, "after_job" text, "upper_job" text, CONSTRAINT "__zeroship_workflow_publication_scan_app" FOREIGN KEY ("id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_schema"."__zeroship_workflow_reconciliation_scans" ("id" text PRIMARY KEY NOT NULL, "revision" bigint NOT NULL, "phase" text NOT NULL, "after_id" text, "upper_id" text, CONSTRAINT "__zeroship_workflow_reconciliation_scan_app" FOREIGN KEY ("id") REFERENCES "__zeroship_workflow_schema"."__zeroship_workflow_app_state" ("app_id") ON DELETE RESTRICT);
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_publications" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C", ALTER COLUMN "deploy_id" TYPE text COLLATE "C";
+
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_deployment_holds" ALTER COLUMN "deploy_id" TYPE text COLLATE "C";
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_job_receipts" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
 
@@ -199,7 +201,7 @@ ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_schedules" ALTER C
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_occurrences" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "app_id" TYPE text COLLATE "C", ALTER COLUMN "schedule_id" TYPE text COLLATE "C", ALTER COLUMN "job_id" TYPE text COLLATE "C", ALTER COLUMN "run_id" TYPE text COLLATE "C";
 
-ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_publication_scans" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "after_job" TYPE text COLLATE "C", ALTER COLUMN "upper_job" TYPE text COLLATE "C";
+ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_reconciliation_scans" ALTER COLUMN "id" TYPE text COLLATE "C", ALTER COLUMN "after_id" TYPE text COLLATE "C", ALTER COLUMN "upper_id" TYPE text COLLATE "C";
 
 ALTER TABLE "__zeroship_workflow_schema"."__zeroship_workflow_tasks" ALTER COLUMN "job_id" TYPE text COLLATE "C";
-INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'c5bc33ed1f795b46cde7f56df25a8491266314d6e6b189ff33cd9023ce673c57');
+INSERT INTO "__zeroship_workflow_schema".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', '6a4938fc929933360b4bb313611dc8af27ffe07c4fed196aef7edecc5dca8122');

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation},
-    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
+    sql::RowLimit,
     value,
 };
 
@@ -46,27 +46,31 @@ pub(crate) async fn invocation(
         .from(&generation)
         .inner_join(
             &deployment,
-            Predicate::And(vec![
-                generation
-                    .column(models::generations::app_id)
-                    .eq_column(deployment.column(models::deploys::app_id))?,
-                generation
-                    .column(models::generations::deploy_id)
-                    .eq_column(deployment.column(models::deploys::id))?,
-            ]),
-        )?
-        .filter(Predicate::And(vec![
             generation
                 .column(models::generations::app_id)
-                .eq(app.as_str())?,
+                .eq(deployment.column(models::deploys::app_id))?
+                .and(
+                    generation
+                        .column(models::generations::deploy_id)
+                        .eq(deployment.column(models::deploys::id))?,
+                ),
+        )?
+        .filter(
             generation
-                .column(models::generations::run_id)
-                .eq(id.as_str())?,
-            generation
-                .column(models::generations::generation)
-                .eq(run.integer("generation")?)?,
-            deployment.column(models::deploys::state).eq("available")?,
-        ]))
+                .column(models::generations::app_id)
+                .eq(app.as_str())?
+                .and(
+                    generation
+                        .column(models::generations::run_id)
+                        .eq(id.as_str())?,
+                )
+                .and(
+                    generation
+                        .column(models::generations::generation)
+                        .eq(run.integer("generation")?)?,
+                )
+                .and(deployment.column(models::deploys::state).eq("available")?),
+        )
         .select((
             generation.row::<models::GenerationInput>(),
             deployment.row::<models::DeploymentHash>(),
@@ -420,27 +424,25 @@ async fn publish_cancelled_children(
     let source = tx.database().entity::<models::runs::Entity>()?.alias("r")?;
     let mut after: Option<String> = None;
     loop {
-        let mut filter = vec![
-            source.column(models::runs::app_id).eq(app.as_str())?,
-            source.column(models::runs::parent_id).eq(Some(parent))?,
-            source
-                .column(models::runs::parent_generation)
-                .eq(Some(generation))?,
-            source.column(models::runs::cascade).eq(1i64)?,
-            source.column(models::runs::control).eq("cancel")?,
-            source.column(models::runs::task_id).eq(None::<String>)?,
-        ];
+        let mut filter = source
+            .column(models::runs::app_id)
+            .eq(app.as_str())?
+            .and(source.column(models::runs::parent_id).eq(Some(parent))?)
+            .and(
+                source
+                    .column(models::runs::parent_generation)
+                    .eq(Some(generation))?,
+            )
+            .and(source.column(models::runs::cascade).eq(1i64)?)
+            .and(source.column(models::runs::control).eq("cancel")?)
+            .and(source.column(models::runs::task_id).eq(None::<String>)?);
         if let Some(after) = &after {
-            filter.push(Predicate::compare(
-                Operand::Path(source.column(models::runs::id).asc().path),
-                CompareOp::Gt,
-                Operand::Lit(Literal::Text(after.clone())),
-            ));
+            filter = filter.and(source.column(models::runs::id).gt(after.as_str())?);
         }
         let page = tx
             .database()
             .from(&source)
-            .filter(Predicate::And(filter))
+            .filter(filter)
             .order_by(source.column(models::runs::id).asc())
             .select(source.row::<CancelledChild>())?
             .limit(RowLimit::default().get())?
@@ -663,38 +665,37 @@ async fn wake_parents(
     let page_limit = RowLimit::default().get();
     let mut after: Option<String> = None;
     loop {
-        let mut filter = vec![
-            wait.column(models::waits::app_id).eq(app.as_str())?,
-            wait.column(models::waits::child_id).eq(Some(child))?,
-            run.column(models::runs::task_id).eq(None::<String>)?,
-            run.column(models::runs::control).eq("none")?,
-            Predicate::Or(vec![
-                run.column(models::runs::state).eq("waiting")?,
-                run.column(models::runs::state).eq("sleeping")?,
-                run.column(models::runs::state).eq("queued")?,
-            ]),
-        ];
+        let mut filter = wait
+            .column(models::waits::app_id)
+            .eq(app.as_str())?
+            .and(wait.column(models::waits::child_id).eq(Some(child))?)
+            .and(run.column(models::runs::task_id).eq(None::<String>)?)
+            .and(run.column(models::runs::control).eq("none")?)
+            .and(
+                run.column(models::runs::state)
+                    .eq("waiting")?
+                    .or(run.column(models::runs::state).eq("sleeping")?)
+                    .or(run.column(models::runs::state).eq("queued")?),
+            );
         if let Some(after) = &after {
-            filter.push(Predicate::compare(
-                Operand::Path(wait.column(models::waits::id).asc().path),
-                CompareOp::Gt,
-                Operand::Lit(Literal::Text(after.clone())),
-            ));
+            filter = filter.and(wait.column(models::waits::id).gt(after.as_str())?);
         }
         let page = db
             .from(&wait)
             .inner_join(
                 &run,
-                Predicate::And(vec![
-                    wait.column(models::waits::app_id)
-                        .eq_column(run.column(models::runs::app_id))?,
-                    wait.column(models::waits::run_id)
-                        .eq_column(run.column(models::runs::id))?,
-                    wait.column(models::waits::generation)
-                        .eq_column(run.column(models::runs::generation))?,
-                ]),
+                wait.column(models::waits::app_id)
+                    .eq(run.column(models::runs::app_id))?
+                    .and(
+                        wait.column(models::waits::run_id)
+                            .eq(run.column(models::runs::id))?,
+                    )
+                    .and(
+                        wait.column(models::waits::generation)
+                            .eq(run.column(models::runs::generation))?,
+                    ),
             )?
-            .filter(Predicate::And(filter))
+            .filter(filter)
             .order_by(wait.column(models::waits::id).asc())
             .select(wait.row::<WaitingParent>())?
             .limit(page_limit)?
@@ -790,26 +791,22 @@ async fn compensation_failures(
     let mut after = None;
     let mut failures = Vec::new();
     loop {
-        let mut filter = vec![
-            source.column(models::steps::app_id).eq(app.as_str())?,
-            source.column(models::steps::run_id).eq(id)?,
-            source.column(models::steps::generation).eq(generation)?,
-            Predicate::Not(Box::new(
+        let mut filter = source
+            .column(models::steps::app_id)
+            .eq(app.as_str())?
+            .and(source.column(models::steps::run_id).eq(id)?)
+            .and(source.column(models::steps::generation).eq(generation)?)
+            .and(
                 source
                     .column(models::steps::compensation_error)
-                    .eq(None::<String>)?,
-            )),
-        ];
+                    .is_not_null(),
+            );
         if let Some(after) = after {
-            filter.push(Predicate::compare(
-                Operand::Path(source.column(models::steps::ordinal).asc().path),
-                CompareOp::Lt,
-                Operand::Lit(Literal::Int(after)),
-            ));
+            filter = filter.and(source.column(models::steps::ordinal).lt(after)?);
         }
         let page = db
             .from(&source)
-            .filter(Predicate::And(filter))
+            .filter(filter)
             .order_by(source.column(models::steps::ordinal).desc())
             .select(source.row::<models::CompensationFailure>())?
             .limit(page_limit)?
@@ -842,52 +839,45 @@ async fn retarget_parent_steps(
     let page_limit = RowLimit::default().get();
     let mut after: Option<(String, i64, i64)> = None;
     loop {
-        let mut filter = vec![
-            wait.column(models::waits::app_id).eq(app.as_str())?,
-            wait.column(models::waits::child_id).eq(Some(id))?,
-        ];
+        let mut filter = wait
+            .column(models::waits::app_id)
+            .eq(app.as_str())?
+            .and(wait.column(models::waits::child_id).eq(Some(id))?);
         if let Some((run_id, generation, ordinal)) = &after {
-            filter.push(Predicate::Or(vec![
-                Predicate::compare(
-                    Operand::Path(step.column(models::steps::run_id).asc().path),
-                    CompareOp::Gt,
-                    Operand::Lit(Literal::Text(run_id.clone())),
-                ),
-                Predicate::And(vec![
-                    step.column(models::steps::run_id).eq(run_id.as_str())?,
-                    Predicate::compare(
-                        Operand::Path(step.column(models::steps::generation).asc().path),
-                        CompareOp::Gt,
-                        Operand::Lit(Literal::Int(*generation)),
-                    ),
-                ]),
-                Predicate::And(vec![
-                    step.column(models::steps::run_id).eq(run_id.as_str())?,
-                    step.column(models::steps::generation).eq(*generation)?,
-                    Predicate::compare(
-                        Operand::Path(step.column(models::steps::ordinal).asc().path),
-                        CompareOp::Gt,
-                        Operand::Lit(Literal::Int(*ordinal)),
-                    ),
-                ]),
-            ]));
+            filter = filter.and(
+                step.column(models::steps::run_id)
+                    .gt(run_id.as_str())?
+                    .or(step
+                        .column(models::steps::run_id)
+                        .eq(run_id.as_str())?
+                        .and(step.column(models::steps::generation).gt(*generation)?))
+                    .or(step
+                        .column(models::steps::run_id)
+                        .eq(run_id.as_str())?
+                        .and(step.column(models::steps::generation).eq(*generation)?)
+                        .and(step.column(models::steps::ordinal).gt(*ordinal)?)),
+            );
         }
         let page = db
             .from(&step)
             .inner_join(
                 &wait,
-                Predicate::And(vec![
-                    step.column(models::steps::app_id)
-                        .eq_column(wait.column(models::waits::app_id))?,
-                    step.column(models::steps::run_id)
-                        .eq_column(wait.column(models::waits::run_id))?,
-                    step.column(models::steps::generation)
-                        .eq_column(wait.column(models::waits::generation))?,
-                    step.column(models::steps::ordinal)
-                        .eq_column(wait.column(models::waits::ordinal))?,
-                ]),
+                step.column(models::steps::app_id)
+                    .eq(wait.column(models::waits::app_id))?
+                    .and(
+                        step.column(models::steps::run_id)
+                            .eq(wait.column(models::waits::run_id))?,
+                    )
+                    .and(
+                        step.column(models::steps::generation)
+                            .eq(wait.column(models::waits::generation))?,
+                    )
+                    .and(
+                        step.column(models::steps::ordinal)
+                            .eq(wait.column(models::waits::ordinal))?,
+                    ),
             )?
-            .filter(Predicate::And(filter))
+            .filter(filter)
             .order_by(step.column(models::steps::run_id).asc())
             .order_by(step.column(models::steps::generation).asc())
             .order_by(step.column(models::steps::ordinal).asc())

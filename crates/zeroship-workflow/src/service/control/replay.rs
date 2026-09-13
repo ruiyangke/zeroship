@@ -6,7 +6,7 @@ use zeroship_core::app_id::AppId;
 use zeroship_data_orm::{
     budgets::MAX_INSERT_MANY_BATCH,
     orm::{Entity, FromRow, Insertable, Operation},
-    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
+    sql::RowLimit,
     Value,
 };
 
@@ -57,28 +57,22 @@ pub(super) async fn copy_prefix(
     let page_limit = RowLimit::default().get().min(MAX_INSERT_MANY_BATCH as i64);
     let mut after = None;
     loop {
-        let mut predicates = vec![
-            steps.column(models::steps::app_id).eq(app.as_str())?,
-            steps.column(models::steps::run_id).eq(run)?,
-            steps
-                .column(models::steps::generation)
-                .eq(source_generation)?,
-            Predicate::compare(
-                Operand::Path(steps.column(models::steps::ordinal).asc().path),
-                CompareOp::Lt,
-                Operand::Lit(Literal::Int(i64::from(prefix))),
-            ),
-        ];
+        let mut predicates = steps
+            .column(models::steps::app_id)
+            .eq(app.as_str())?
+            .and(steps.column(models::steps::run_id).eq(run)?)
+            .and(
+                steps
+                    .column(models::steps::generation)
+                    .eq(source_generation)?,
+            )
+            .and(steps.column(models::steps::ordinal).lt(i64::from(prefix))?);
         if let Some(after) = after {
-            predicates.push(Predicate::compare(
-                Operand::Path(steps.column(models::steps::ordinal).asc().path),
-                CompareOp::Gt,
-                Operand::Lit(Literal::Int(after)),
-            ));
+            predicates = predicates.and(steps.column(models::steps::ordinal).gt(after)?);
         }
         let page = db
             .from(&steps)
-            .filter(Predicate::And(predicates))
+            .filter(predicates)
             .order_by(steps.column(models::steps::ordinal).asc())
             .select(steps.row::<Checkpoint>())?
             .limit(page_limit)?
@@ -107,43 +101,36 @@ pub(super) async fn copy_prefix(
     let refs = db.entity::<models::payload_refs::Entity>()?.alias("p")?;
     let mut after: Option<(String, i64)> = None;
     loop {
-        let mut predicates = vec![
-            refs.column(models::payload_refs::app_id).eq(app.as_str())?,
-            refs.column(models::payload_refs::run_id).eq(run)?,
-            refs.column(models::payload_refs::generation)
-                .eq(source_generation)?,
-            Predicate::Or(vec![
-                refs.column(models::payload_refs::slot).eq("input")?,
-                Predicate::And(vec![
-                    refs.column(models::payload_refs::slot).eq("step")?,
-                    Predicate::compare(
-                        Operand::Path(refs.column(models::payload_refs::ordinal).asc().path),
-                        CompareOp::Lt,
-                        Operand::Lit(Literal::Int(i64::from(prefix))),
-                    ),
-                ]),
-            ]),
-        ];
+        let mut predicates = refs
+            .column(models::payload_refs::app_id)
+            .eq(app.as_str())?
+            .and(refs.column(models::payload_refs::run_id).eq(run)?)
+            .and(
+                refs.column(models::payload_refs::generation)
+                    .eq(source_generation)?,
+            )
+            .and(
+                refs.column(models::payload_refs::slot).eq("input")?.or(refs
+                    .column(models::payload_refs::slot)
+                    .eq("step")?
+                    .and(
+                        refs.column(models::payload_refs::ordinal)
+                            .lt(i64::from(prefix))?,
+                    )),
+            );
         if let Some((slot, ordinal)) = &after {
-            predicates.push(Predicate::Or(vec![
-                Predicate::compare(
-                    Operand::Path(refs.column(models::payload_refs::slot).asc().path),
-                    CompareOp::Gt,
-                    Operand::Lit(Literal::Text(slot.clone())),
-                ),
-                Predicate::And(vec![
-                    refs.column(models::payload_refs::slot).eq(slot.as_str())?,
-                    Predicate::compare(
-                        Operand::Path(refs.column(models::payload_refs::ordinal).asc().path),
-                        CompareOp::Gt,
-                        Operand::Lit(Literal::Int(*ordinal)),
-                    ),
-                ]),
-            ]));
+            predicates = predicates.and(
+                refs.column(models::payload_refs::slot)
+                    .gt(slot.as_str())?
+                    .or(refs
+                        .column(models::payload_refs::slot)
+                        .eq(slot.as_str())?
+                        .and(refs.column(models::payload_refs::ordinal).gt(*ordinal)?)),
+            );
         }
         let page = db
             .from(&refs)
-            .filter(Predicate::And(predicates))
+            .filter(predicates)
             .order_by(refs.column(models::payload_refs::slot).asc())
             .order_by(refs.column(models::payload_refs::ordinal).asc())
             .select(refs.row::<PayloadReference>())?

@@ -13,7 +13,6 @@ use crate::{
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::Predicate,
     value,
 };
 
@@ -279,7 +278,7 @@ impl WorkflowService {
             .await
     }
 
-    async fn reconcile_deployment_hold_checked(
+    pub(super) async fn reconcile_deployment_hold_checked(
         &self,
         app: &AppId,
         deployment: &str,
@@ -381,25 +380,17 @@ impl WorkflowService {
         let tx = self.begin().await?;
         let db = tx.database();
         let source = db.entity::<holds::Entity>()?.alias("h")?;
-        let mut predicates = vec![
-            source.column(holds::app_id).eq(app.as_str())?,
-            Predicate::Or(vec![
-                source.column(holds::state).eq("acquiring")?,
-                source.column(holds::state).eq("releasing")?,
-            ]),
-        ];
+        let mut predicate = source.column(holds::app_id).eq(app.as_str())?.and(
+            source
+                .column(holds::state)
+                .in_values(["acquiring", "releasing"])?,
+        );
         if let Some(after) = after {
-            predicates.push(Predicate::compare(
-                zeroship_data_orm::sql::Operand::Path(source.column(holds::deploy_id).asc().path),
-                zeroship_data_orm::sql::CompareOp::Gt,
-                zeroship_data_orm::sql::Operand::Lit(zeroship_data_orm::sql::Literal::Text(
-                    after.into(),
-                )),
-            ));
+            predicate = predicate.and(source.column(holds::deploy_id).gt(after)?);
         }
         let rows = db
             .from(&source)
-            .filter(Predicate::And(predicates))
+            .filter(predicate)
             .order_by(source.column(holds::deploy_id).asc())
             .select(source.row::<PendingHold>())?
             .limit(i64::from(limit))?

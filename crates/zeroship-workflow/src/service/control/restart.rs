@@ -12,7 +12,7 @@ use serde_json::json;
 use std::collections::BTreeSet;
 use zeroship_data_orm::{
     orm::{FindOptions, Operation, Output},
-    sql::{CompareOp, Literal, Operand, Predicate, RowLimit},
+    sql::RowLimit,
 };
 
 const MAX_DESCENDANT_INSPECTIONS: usize = 16_384;
@@ -108,23 +108,27 @@ pub(in crate::service) async fn prepare(
         .from(&child)
         .inner_join(
             &wait,
-            Predicate::And(vec![
-                wait.column(models::waits::app_id)
-                    .eq_column(child.column(models::runs::app_id))?,
-                wait.column(models::waits::child_id)
-                    .eq_column(child.column(models::runs::id))?,
-            ]),
+            wait.column(models::waits::app_id)
+                .eq(child.column(models::runs::app_id))?
+                .and(
+                    wait.column(models::waits::child_id)
+                        .eq(child.column(models::runs::id))?,
+                ),
         )?
-        .filter(Predicate::And(vec![
-            wait.column(models::waits::app_id).eq(app.as_str())?,
-            wait.column(models::waits::run_id).eq(run_id)?,
-            wait.column(models::waits::generation).eq(current)?,
-            Predicate::Not(Box::new(Predicate::Or(vec![
-                child.column(models::runs::state).eq("completed")?,
-                child.column(models::runs::state).eq("failed")?,
-                child.column(models::runs::state).eq("cancelled")?,
-            ]))),
-        ]))
+        .filter(
+            wait.column(models::waits::app_id)
+                .eq(app.as_str())?
+                .and(wait.column(models::waits::run_id).eq(run_id)?)
+                .and(wait.column(models::waits::generation).eq(current)?)
+                .and(
+                    child
+                        .column(models::runs::state)
+                        .eq("completed")?
+                        .or(child.column(models::runs::state).eq("failed")?)
+                        .or(child.column(models::runs::state).eq("cancelled")?)
+                        .negate(),
+                ),
+        )
         .select(child.row::<models::KeyedRun>())?
         .limit(1)?
         .all()
@@ -325,21 +329,16 @@ async fn has_active_descendants(
     while let Some(parent) = pending.pop() {
         let mut after: Option<String> = None;
         loop {
-            let mut filter = vec![
-                run.column(models::runs::app_id).eq(app.as_str())?,
+            let mut filter = run.column(models::runs::app_id).eq(app.as_str())?.and(
                 run.column(models::runs::parent_id)
                     .eq(Some(parent.as_str()))?,
-            ];
+            );
             if let Some(after) = &after {
-                filter.push(Predicate::compare(
-                    Operand::Path(run.column(models::runs::id).asc().path),
-                    CompareOp::Gt,
-                    Operand::Lit(Literal::Text(after.clone())),
-                ));
+                filter = filter.and(run.column(models::runs::id).gt(after.as_str())?);
             }
             let page = db
                 .from(&run)
-                .filter(Predicate::And(filter))
+                .filter(filter)
                 .order_by(run.column(models::runs::id).asc())
                 .select(run.row::<models::KeyedRun>())?
                 .limit(page_limit)?

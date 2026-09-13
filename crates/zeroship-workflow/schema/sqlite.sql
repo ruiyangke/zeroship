@@ -179,7 +179,7 @@ CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_pending_idx" ON
 
 CREATE INDEX IF NOT EXISTS "__zeroship_workflow_job_publications_deployment_idx" ON "__zeroship_workflow_job_publications" ("app_id", "deploy_id", "confirmed_at");
 
-CREATE TABLE "__zeroship_workflow_publication_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "after_job" TEXT, "upper_job" TEXT, CONSTRAINT "__zeroship_workflow_publication_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
+CREATE TABLE "__zeroship_workflow_reconciliation_scans" ("id" TEXT PRIMARY KEY NOT NULL, "revision" INTEGER NOT NULL, "phase" TEXT NOT NULL, "after_id" TEXT, "upper_id" TEXT, CONSTRAINT "__zeroship_workflow_reconciliation_scan_app" FOREIGN KEY (id) REFERENCES "__zeroship_workflow_app_state"(app_id) ON DELETE RESTRICT);
 
 SELECT 1;
-INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'c19e44589fec75c32aeb26bbc6cbbbef9564bf04c5e023fddd9614b3b9b62520');
+INSERT INTO "main".__zeroship_workflow_schema_version (id, fingerprint) VALUES ('workflow', 'cce1410632109e726359d10dd3701ec0322fe864131f38bdaf418e337146c514');

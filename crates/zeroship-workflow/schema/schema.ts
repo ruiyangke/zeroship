@@ -214,21 +214,22 @@ export function workflowSchema(namespace) {
   ]);
   index("job_publications", "pending", ["app_id", "confirmed_at", "id"]);
   index("job_publications", "deployment", ["app_id", "deploy_id", "confirmed_at"]);
-  create("publication_scans", {
-    revision: integer(), after_job: t.text(), upper_job: t.text(),
-  }, ["id"], [fk("publication_scan_app", ["id"], "app_state", ["app_id"])]);
+  create("reconciliation_scans", {
+    revision: integer(), phase: text(), after_id: t.text(), upper_id: t.text(),
+  }, ["id"], [fk("reconciliation_scan_app", ["id"], "app_state", ["app_id"])]);
   // The migration DSL does not expose the column collation facet yet. Cursor
   // order and identity copies must use bytewise comparison; SQLite uses BINARY.
   dialect({
     postgres() {
       for (const [name, columns] of Object.entries({
         job_publications: ["id", "app_id", "run_id", "deploy_id"],
+        deployment_holds: ["deploy_id"],
         job_receipts: ["id", "app_id", "run_id"],
         activations: ["id", "app_id", "deploy_id"],
         activation_scopes: ["id", "activation_id"],
         schedules: ["id", "app_id", "name"],
         occurrences: ["id", "app_id", "schedule_id", "job_id", "run_id"],
-        publication_scans: ["id", "after_job", "upper_job"],
+        reconciliation_scans: ["id", "after_id", "upper_id"],
         tasks: ["job_id"],
       })) {
         raw({

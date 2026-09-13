@@ -12,7 +12,6 @@ use crate::{WorkflowExecution, WorkflowServiceError};
 use zeroship_core::{app_id::AppId, typed_id};
 use zeroship_data_orm::{
     orm::{Entity, FindOptions, FromRow, Operation, Output},
-    sql::{CompareOp, Literal, Operand, Predicate},
     value, Value,
 };
 
@@ -61,45 +60,40 @@ impl WorkflowService {
                     .inner_join(
                         &app_state,
                         run.column(models::runs::app_id)
-                            .eq_column(app_state.column(models::app_state::app_id))?,
+                            .eq(app_state.column(models::app_state::app_id))?,
                     )?
                     .left_join(
                         &deploy,
-                        Predicate::And(vec![
-                            run.column(models::runs::app_id)
-                                .eq_column(deploy.column(models::deploys::app_id))?,
-                            run.column(models::runs::deploy_id)
-                                .eq_column(deploy.column(models::deploys::id))?,
-                            deploy.column(models::deploys::state).eq("available")?,
-                        ]),
+                        run.column(models::runs::app_id)
+                            .eq(deploy.column(models::deploys::app_id))?
+                            .and(
+                                run.column(models::runs::deploy_id)
+                                    .eq(deploy.column(models::deploys::id))?,
+                            )
+                            .and(deploy.column(models::deploys::state).eq("available")?),
                     )?
                     .left_join(
                         &delivered,
-                        Predicate::And(vec![
-                            run.column(models::runs::app_id)
-                                .eq_column(delivered.column(models::job_receipts::app_id))?,
-                            run.column(models::runs::id)
-                                .eq_column(delivered.column(models::job_receipts::run_id))?,
-                        ]),
+                        run.column(models::runs::app_id)
+                            .eq(delivered.column(models::job_receipts::app_id))?
+                            .and(
+                                run.column(models::runs::id)
+                                    .eq(delivered.column(models::job_receipts::run_id))?,
+                            ),
                     )?
-                    .filter(Predicate::And(vec![
-                        delivered.column(models::job_receipts::id).is_null(),
-                        run.column(models::runs::app_id).eq(app.as_str())?,
-                        Predicate::compare(
-                            Operand::Path(run.column(models::runs::due_at).asc().path),
-                            CompareOp::Lte,
-                            Operand::Lit(Literal::Int(now)),
-                        ),
-                        Predicate::Or(vec![
-                            Predicate::is_not_null(Operand::Path(
-                                run.column(models::runs::task_id).asc().path,
-                            )),
-                            Predicate::Not(Box::new(run.column(models::runs::control).eq("none")?)),
-                            Predicate::is_not_null(Operand::Path(
-                                deploy.column(models::deploys::id).asc().path,
-                            )),
-                        ]),
-                    ]))
+                    .filter(
+                        delivered
+                            .column(models::job_receipts::id)
+                            .is_null()
+                            .and(run.column(models::runs::app_id).eq(app.as_str())?)
+                            .and(run.column(models::runs::due_at).lte(Some(now))?)
+                            .and(
+                                run.column(models::runs::task_id)
+                                    .is_not_null()
+                                    .or(run.column(models::runs::control).eq("none")?.negate())
+                                    .or(deploy.column(models::deploys::id).is_not_null()),
+                            ),
+                    )
                     .order_by(run.column(models::runs::due_at).asc())
                     .order_by(run.column(models::runs::id).asc())
                     .select((run.row::<DueRun>(), app_state.row::<PollOrder>()))?
@@ -470,17 +464,18 @@ pub(super) async fn inspect_task(
     let initial = tx
         .database()
         .from(&source)
-        .filter(Predicate::And(vec![
-            Predicate::Or(
-                tx.host_app_ids()?
-                    .into_iter()
-                    .map(|app| source.column(models::tasks::app_id).eq(app.as_str()))
-                    .collect::<Result<Vec<_>, _>>()?,
-            ),
-            source.column(models::tasks::id).eq(task_id)?,
-            source.column(models::tasks::worker).eq(worker.as_str())?,
-            source.column(models::tasks::token_hash).eq(token.hash())?,
-        ]))
+        .filter(
+            source
+                .column(models::tasks::app_id)
+                .in_values(
+                    tx.host_app_ids()?
+                        .into_iter()
+                        .map(|app| app.as_str().to_owned()),
+                )?
+                .and(source.column(models::tasks::id).eq(task_id)?)
+                .and(source.column(models::tasks::worker).eq(worker.as_str())?)
+                .and(source.column(models::tasks::token_hash).eq(token.hash())?),
+        )
         .select(source.row::<models::TaskRecord>())?
         .limit(1)?
         .all()

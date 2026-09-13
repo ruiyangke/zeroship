@@ -1,14 +1,14 @@
 //! Serialize authoritative observations before reading their contributing inputs.
 
-use super::{PolicyObservation, models::schema};
+use super::{models::schema, PolicyObservation};
 use crate::Error;
 use schema::{apps, plans, workflow_policy_ledger as ledger, workflow_rollout_config as rollout};
 use std::time::{Duration, Instant};
 use zeroship_core::{app_id::AppId, workflow_coordination::Revision, workflow_policy::AppPolicy};
 use zeroship_data_orm::{
-    Value,
     error::DbError,
     orm::{ConflictTarget, Database, FromRow, Insertable, IsolationLevel, TransactionOptions},
+    Value,
 };
 
 /// Complete operator-owned source settings, independent of creator input.
@@ -191,7 +191,7 @@ async fn read_source(
             &plan_source,
             app_source
                 .column(apps::plan_id)
-                .eq_column(plan_source.column(plans::id))?,
+                .eq(plan_source.column(plans::id))?,
         )?
         .inner_join(&switches, switches.column(rollout::id).eq("global")?)?
         .filter(filter)

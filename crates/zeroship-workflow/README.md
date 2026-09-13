@@ -146,13 +146,17 @@ original workflow backend and the factory pins the physical creator schema.
 The provider must resolve independently authorized deployment-host resources;
 manager placement IDs and revisions only select those resources and their
 retention client. Production resource provisioning and installation remain open.
-`service::reconciliation` persists the selected publication page and its progress
-in the creator job receipt. It reserves each item before attempting publication,
+`service::reconciliation` persists a selected publication or deployment-hold page
+and its progress in the creator job receipt. It reserves each item before I/O,
 so retries reach later items even when an earlier request stalls. Confirmation
 checks the exact manager receipt under the original delivery and policy bounds.
-Page completion commits its receipt with an app-scoped scan cursor revision;
-competing jobs cannot move that cursor backwards. Failed items remain pending for
-the next bounded scan. A waiting page advances the manager's recovery deadline
+Hold recovery rereads the existing durable intent and validates the matching
+generation and acknowledgement; it creates no new acquisition or release intent.
+Page completion commits its receipt with an app-scoped scan cursor revision and
+phase. Publication completion moves to holds; hold completion returns to
+publications. Captured bounds prevent publication churn from starving holds,
+and competing jobs cannot move the cursor or phase backwards. Failed items remain
+pending for the next bounded scan. A waiting page advances the manager's recovery deadline
 only when it settles the currently recorded recovery job. Completed scans retain
 periodic responsibility and provide no app-drain proof. The operation loads no
 app code and examines no other app or database.
@@ -164,12 +168,11 @@ consumers. `service::WorkflowService` records customer-side acquisition and rele
 intents and reconciles them through `DeploymentHoldClient`. A release closes
 deployment admission under the app lock and checks retained journal dependencies
 before contacting the platform. Lost responses and host cancellation leave
-durable work to retry. The worker automatically reconciles pending holds through
-its host-bound clients, including after restart or policy-lease expiry. Recovery
-rotates between assigned apps and advances past failed intents; individual calls
-are bounded by the maintenance timeout. Execution and maintenance use independent
-wake queue entries so busy polling cannot starve recovery. Production host
-composition remains unfinished; the journal-reading collector has not yet been replaced.
+durable work to retry. Delivered reconciliation uses the original manager grant
+and host policy to bound pending hold recovery. The older local runner still
+retries holds through its independent maintenance loop until host cutover.
+Production host composition remains unfinished; the journal-reading collector
+has not yet been replaced.
 `OrmStore::connect` accepts the host's `DbBinding`, connection factory and keys.
 The ORM owns database selection, native values and transaction settlement;
 the workflow service has no separate PostgreSQL or SQLite runtime adapter.

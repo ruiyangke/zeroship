@@ -118,7 +118,7 @@ async fn start(app: &AppWorkflows, count: usize) -> Vec<JobSpec> {
 
 async fn scans(service: &WorkflowService, app: &AppId) -> Vec<super::super::store::Row> {
     let tx = service.begin().await.unwrap();
-    let rows = journal_rows(&tx, "publication_scans", json!({"id":app.as_str()})).await;
+    let rows = journal_rows(&tx, "reconciliation_scans", json!({"id":app.as_str()})).await;
     tx.commit().await.unwrap();
     rows
 }
@@ -153,6 +153,8 @@ macro_rules! case {
         }
     };
 }
+mod deployment_holds;
+
 case!(
     sqlite_reconciliation_pages_replay_without_code_and_preserve_scope,
     postgres_reconciliation_pages_replay_without_code_and_preserve_scope,
@@ -231,7 +233,7 @@ async fn pages(store: Rc<OrmStore>) {
         scope.reconcile_job(&changed, &publisher, options(1)).await,
         Err(WorkflowServiceError::Conflict(_))
     ));
-    for expected in [JobOutcome::Waiting, JobOutcome::Completed] {
+    for expected in [JobOutcome::Waiting, JobOutcome::Waiting] {
         let grant = Grant::new(&jobs[0]);
         assert_eq!(
             scope
@@ -247,21 +249,55 @@ async fn pages(store: Rc<OrmStore>) {
         &jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>()
     );
     assert!(scope.pending_jobs(None, 10).await.unwrap().is_empty());
-    let state = scans(&reopened, &app).await;
+    assert_explicit_empty_phase_transitions(&reopened, &scope, &jobs[0], &publisher).await;
+}
+
+async fn assert_explicit_empty_phase_transitions(
+    service: &WorkflowService,
+    scope: &AppWorkflows,
+    seed: &JobSpec,
+    publisher: &Publisher,
+) {
+    let state = scans(service, scope.app_id()).await;
     assert_eq!(state[0].integer("revision").unwrap(), 4);
-    assert!(state[0].optional_text("after_job").unwrap().is_none());
-    let empty = Grant::new(&jobs[0]);
+    assert!(state[0].optional_text("after_id").unwrap().is_none());
+    assert_eq!(state[0].text("phase").unwrap(), "deployment_holds");
+    let empty = Grant::new(seed);
     assert_eq!(
         scope
-            .reconcile_job(&empty, &publisher, options(1))
+            .reconcile_job(&empty, publisher, options(1))
             .await
             .unwrap()
             .outcome,
         JobOutcome::Completed
     );
     assert_eq!(
-        scans(&reopened, &app).await[0].integer("revision").unwrap(),
+        scans(service, scope.app_id()).await[0]
+            .integer("revision")
+            .unwrap(),
         5
+    );
+    assert_eq!(
+        scans(service, scope.app_id()).await[0]
+            .text("phase")
+            .unwrap(),
+        "publications"
+    );
+    assert_eq!(
+        scope
+            .reconcile_job(&Grant::new(seed), publisher, options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Waiting
+    );
+    assert_eq!(
+        scope
+            .reconcile_job(&Grant::new(seed), publisher, options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed
     );
 }
 
@@ -289,7 +325,7 @@ async fn timeout_progress(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Waiting
     );
     assert_eq!(
         publisher.calls.borrow().as_slice(),
@@ -298,6 +334,14 @@ async fn timeout_progress(store: Rc<OrmStore>) {
     assert!(!confirmed(&service, &app, &jobs[0].id).await);
     assert!(confirmed(&service, &app, &jobs[1].id).await);
     publisher.hang = None;
+    assert_eq!(
+        scope
+            .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(2))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed
+    );
     let next = Grant::new(&jobs[0]);
     scope
         .reconcile_job(&next, &publisher, options(2))
@@ -345,6 +389,14 @@ async fn failures(store: Rc<OrmStore>) {
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    assert_eq!(
+        scope
+            .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(3))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed
+    );
     scope
         .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(3))
         .await
@@ -383,6 +435,14 @@ async fn policy(store: Rc<OrmStore>) {
         .await
         .unwrap();
     assert_eq!(publisher.calls.borrow().len(), 1);
+    assert_eq!(
+        scope
+            .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed
+    );
     scope
         .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
         .await
@@ -428,12 +488,20 @@ async fn concurrency(store: Rc<OrmStore>) {
             .await
             .unwrap()
             .outcome,
-        JobOutcome::Completed
+        JobOutcome::Waiting
     );
     assert_eq!(
         scope.pending_jobs(None, 10).await.unwrap().len(),
         1,
         "newer intent is outside the captured upper boundary"
+    );
+    assert_eq!(
+        scope
+            .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Completed
     );
     scope
         .reconcile_job(&Grant::new(&jobs[0]), &publisher, options(1))
@@ -478,17 +546,17 @@ async fn sqlite_reconciliation_receipt_failure_does_not_advance_the_scan() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("zs-workflow.sqlite");
     let store = Rc::new(sqlite_store(&path).await);
-    receipt_rollback(store, ReceiptFault::Sqlite(path)).await;
+    Box::pin(receipt_rollback(store, ReceiptFault::Sqlite(path))).await;
 }
 
 #[compio::test]
 async fn postgres_reconciliation_receipt_failure_does_not_advance_the_scan() {
     let fixture = PostgresFixture::start().await;
     let client = connect(&fixture.admin_url).await;
-    receipt_rollback(
+    Box::pin(receipt_rollback(
         Rc::new(fixture.store.clone()),
         ReceiptFault::Postgres(Box::new(client)),
-    )
+    ))
     .await;
 }
 
@@ -511,7 +579,7 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     assert!(confirmed(&service, &app, &jobs[0].id).await);
     let state = scans(&service, &app).await;
     assert_eq!(state[0].integer("revision").unwrap(), 1);
-    assert!(state[0].optional_text("after_job").unwrap().is_none());
+    assert!(state[0].optional_text("after_id").unwrap().is_none());
     fault.set(false).await;
     let receipt = scope
         .reconcile_job(&grant.retry(), &publisher, options(1))
@@ -530,5 +598,38 @@ async fn receipt_rollback(store: Rc<OrmStore>, fault: ReceiptFault) {
     assert_eq!(
         scope.job_receipt(&grant.delivery.job).await.unwrap(),
         Some(receipt)
+    );
+
+    let last_publication = Grant::new(&jobs[0]);
+    fault.set(true).await;
+    assert!(scope
+        .reconcile_job(&last_publication, &publisher, options(1))
+        .await
+        .is_err());
+    let unchanged = scans(&service, &app).await;
+    assert_eq!(unchanged[0].integer("revision").unwrap(), 2);
+    assert_eq!(unchanged[0].text("phase").unwrap(), "publications");
+    assert_eq!(
+        unchanged[0].optional_text("after_id").unwrap().as_deref(),
+        Some(jobs[0].id.as_str())
+    );
+    assert!(confirmed(&service, &app, &jobs[1].id).await);
+    fault.set(false).await;
+    assert_eq!(
+        scope
+            .reconcile_job(&last_publication.retry(), &publisher, options(1))
+            .await
+            .unwrap()
+            .outcome,
+        JobOutcome::Waiting
+    );
+    let advanced = scans(&service, &app).await;
+    assert_eq!(advanced[0].integer("revision").unwrap(), 3);
+    assert_eq!(advanced[0].text("phase").unwrap(), "deployment_holds");
+    assert!(advanced[0].optional_text("after_id").unwrap().is_none());
+    assert_eq!(
+        publisher.calls.borrow().len(),
+        jobs.len(),
+        "phase finalization retries must not resubmit confirmed publications"
     );
 }
