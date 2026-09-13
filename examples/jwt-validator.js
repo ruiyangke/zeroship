@@ -6,7 +6,7 @@
 //     non-browser clients (curl, webhooks) can hit the same logic.
 //
 // `env.JWT_SECRET` is the signing key. Set via:
-//   zeroship secret set JWT_SECRET=<random> --app=<uuid>
+//   zeroship secret set JWT_SECRET=<random> --app=<app-id>
 
 "use server";
 

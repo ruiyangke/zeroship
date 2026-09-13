@@ -7,7 +7,7 @@ use std::sync::Arc;
 use zeroship_auth::{
     config::AuthConfig,
     headers::SecurityHeaders,
-    oidc::{refresh::RefreshSessionPool, Issuer},
+    oidc::{Issuer, refresh::RefreshSessionPool},
     server,
 };
 
@@ -29,10 +29,26 @@ impl AuthServer {
         Self::configured(database, Some(issuer), &[]).await
     }
 
+    pub async fn with_mailer(
+        database: &Database,
+        mailer: Arc<dyn zeroship_mailer::Mailer>,
+    ) -> Self {
+        Self::build(database, None, &[], Some(mailer)).await
+    }
+
     pub async fn configured(
         database: &Database,
         issuer: Option<Arc<Issuer>>,
         extra: &[&str],
+    ) -> Self {
+        Self::build(database, issuer, extra, None).await
+    }
+
+    async fn build(
+        database: &Database,
+        issuer: Option<Arc<Issuer>>,
+        extra: &[&str],
+        mailer: Option<Arc<dyn zeroship_mailer::Mailer>>,
     ) -> Self {
         let database_url = database.auth_url().to_string();
         let pg = Arc::new(database.connect_as_auth().await);
@@ -55,6 +71,7 @@ impl AuthServer {
             let db_state = db_state.clone();
             let refresh_pool = pool_state.clone();
             let issuer = issuer.clone();
+            let mailer = mailer.clone();
             let frame_ancestor_origins = frame_ancestor_origins.clone();
             async move {
                 let app = web::App::new()
@@ -63,8 +80,13 @@ impl AuthServer {
                     .state(refresh_pool)
                     .middleware(SecurityHeaders::new(frame_ancestor_origins))
                     .configure(server::configure(google_enabled, github_enabled));
-                if let Some(issuer) = issuer {
+                let app = if let Some(issuer) = issuer {
                     app.state(issuer)
+                } else {
+                    app
+                };
+                if let Some(mailer) = mailer {
+                    app.state(mailer)
                 } else {
                     app
                 }

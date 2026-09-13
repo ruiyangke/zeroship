@@ -10,7 +10,7 @@
  * Deploy:
  *   cd examples/hr-system && npm install
  *   pnpm build          # vite build -> dist/app.zship
- *   zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<token>
+ *   zeroship deploy ./dist/app.zship --app=<app-id> --control=http://localhost:9090 --token=<token>
  *
  * `deploy` uploads a .zship archive, so it takes the archive path rather than
  * this directory, and the credential flag is --token (or ZEROSHIP_TOKEN, or

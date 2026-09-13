@@ -21,11 +21,27 @@ const PACKAGE_VERSION = "0.1.0";
 const MISSING_TOKEN_MESSAGE =
   "set ZEROSHIP_TOKEN (run `zeroship login`)";
 
-const appInput = {
-  app: z
-    .string()
-    .min(1)
-    .describe("App id or app name. Names are resolved with list_apps."),
+const appTargetSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("id"),
+      appId: z.string().refine(isAppId, "appId must be a canonical AppId"),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("name"),
+      appName: z.string().min(1),
+    })
+    .strict(),
+]);
+
+type AppTarget = z.infer<typeof appTargetSchema>;
+
+const appTargetInput = {
+  target: appTargetSchema.describe(
+    "Choose an app by canonical AppId or by its exact name.",
+  ),
 };
 
 export const TOOL_NAMES = [
@@ -97,12 +113,12 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "get_app",
     {
-      description: "Get one zeroship app by id or name.",
-      inputSchema: appInput,
+      description: "Get one zeroship app by an explicit typed-ID or name target.",
+      inputSchema: appTargetInput,
     },
-    async ({ app }) =>
+    async ({ target }) =>
       withClient(client, async (control) => {
-        const id = await resolveAppId(control, app);
+        const id = await resolveAppTarget(control, target);
         return jsonResult(appDetails(await control.apps.get(id)));
       }),
   );
@@ -131,17 +147,17 @@ export function createZeroshipMcpServer(
     {
       description: "Deploy a local .zship to an app, creating missing named apps.",
       inputSchema: {
-        ...appInput,
+        ...appTargetInput,
         zshipPath: z
           .string()
           .min(1)
           .describe("Path to the local .zship artifact."),
       },
     },
-    async ({ app, zshipPath }) =>
+    async ({ target, zshipPath }) =>
       withClient(client, async (control) => {
         const artifact = await readFile(zshipPath);
-        const { id, created } = await resolveAppIdForDeploy(control, app);
+        const { id, created } = await resolveAppTargetForDeploy(control, target);
         const deploy = await control.apps.deploy(id, artifact);
         return jsonResult({
           app_id: id,
@@ -158,7 +174,7 @@ export function createZeroshipMcpServer(
     {
       description: "Read recent worker logs for a zeroship app.",
       inputSchema: {
-        ...appInput,
+        ...appTargetInput,
         limit: z
           .number()
           .int()
@@ -167,9 +183,9 @@ export function createZeroshipMcpServer(
           .describe("Maximum log lines to return."),
       },
     },
-    async ({ app, limit }) =>
+    async ({ target, limit }) =>
       withClient(client, async (control) => {
-        const id = await resolveAppId(control, app);
+        const id = await resolveAppTarget(control, target);
         const logs = await control.apps.logs(id);
         return jsonResult({
           app_id: id,
@@ -181,12 +197,12 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "archive_app",
     {
-      description: "Archive a zeroship app by id or name.",
-      inputSchema: appInput,
+      description: "Archive a zeroship app by an explicit typed-ID or name target.",
+      inputSchema: appTargetInput,
     },
-    async ({ app }) =>
+    async ({ target }) =>
       withClient(client, async (control) => {
-        const id = await resolveAppId(control, app);
+        const id = await resolveAppTarget(control, target);
         return jsonResult(appDetails(await control.apps.archive(id)));
       }),
   );
@@ -194,12 +210,12 @@ export function createZeroshipMcpServer(
   server.registerTool(
     "restore_app",
     {
-      description: "Restore an archived zeroship app by id or name.",
-      inputSchema: appInput,
+      description: "Restore an archived zeroship app by an explicit typed-ID or name target.",
+      inputSchema: appTargetInput,
     },
-    async ({ app }) =>
+    async ({ target }) =>
       withClient(client, async (control) => {
-        const id = await resolveAppId(control, app);
+        const id = await resolveAppTarget(control, target);
         return jsonResult(appDetails(await control.apps.unarchive(id)));
       }),
   );
@@ -227,25 +243,28 @@ async function withClient(
   }
 }
 
-async function resolveAppId(client: ControlClient, app: string): Promise<AppId> {
-  if (isAppId(app)) return app;
-  const existing = await findAppByName(client, app);
+async function resolveAppTarget(
+  client: ControlClient,
+  target: AppTarget,
+): Promise<AppId> {
+  if (target.kind === "id") return target.appId;
+  const existing = await findAppByName(client, target.appName);
   if (!existing) {
-    throw new Error(`app \`${app}\` not found`);
+    throw new Error(`app \`${target.appName}\` not found`);
   }
   return existing.id;
 }
 
-async function resolveAppIdForDeploy(
+async function resolveAppTargetForDeploy(
   client: ControlClient,
-  app: string,
+  target: AppTarget,
 ): Promise<{ id: AppId; created: AppRecord | null }> {
-  if (isAppId(app)) return { id: app, created: null };
+  if (target.kind === "id") return { id: target.appId, created: null };
 
-  const existing = await findAppByName(client, app);
+  const existing = await findAppByName(client, target.appName);
   if (existing) return { id: existing.id, created: null };
 
-  const created = await client.apps.create({ name: app });
+  const created = await client.apps.create({ name: target.appName });
   return { id: created.id, created };
 }
 

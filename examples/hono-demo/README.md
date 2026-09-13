@@ -22,7 +22,7 @@ curl -X POST http://localhost:3000/echo -d '{"ping":"pong"}' -H 'content-type: a
 
 ```bash
 pnpm build            # vite build -> dist/app.zship
-zeroship deploy ./dist/app.zship --app=<uuid> --control=http://localhost:9090 --token=<token>
+zeroship deploy ./dist/app.zship --app=<app-id> --control=http://localhost:9090 --token=<token>
 ```
 
 `deploy` uploads a `.zship` archive, so it needs the build step first and a path
