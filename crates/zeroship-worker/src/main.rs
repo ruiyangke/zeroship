@@ -22,7 +22,6 @@ use zeroship_core::config::{
 use zeroship_runtime::init::init_v8;
 use zeroship_storage::StorageBackendConfig;
 use zeroship_worker::config::{WorkerSettings, WorkerSettingsConsumer, WorkerSettingsSources};
-use zeroship_worker::executable;
 
 use crate::sync::{SharedEnvs, SharedVersions};
 

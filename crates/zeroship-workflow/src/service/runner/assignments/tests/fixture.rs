@@ -220,73 +220,75 @@ impl Exchange {
     }
 }
 
-pub(super) async fn peer(
-    fixture: &Fixture,
+pub(super) fn peer<'a>(
+    fixture: &'a Fixture,
     exchanges: Vec<Exchange>,
-    test: impl AsyncFnOnce(WorkerCoordinator),
-) {
-    let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let client = WorkerCoordinator::new(
-        &format!("http://{}", listener.local_addr().unwrap()),
-        fixture.auth.clone(),
-        Options::default(),
-    )
-    .unwrap();
-    let (issuer, key) = fixture.auth.signing_identity().unwrap();
-    let mut trust = ServiceTrustBundle::new();
-    trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
-    let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
-    let (done, completed) = oneshot::channel();
-    let server = async {
-        let mut exchanges = VecDeque::from(exchanges);
-        let mut replies = Vec::new();
-        let mut completed = completed;
-        loop {
-            let (mut stream, _) =
-                match futures::future::select(completed, listener.accept().boxed_local()).await {
-                    Either::Left((result, _)) => {
-                        result.unwrap();
-                        break;
-                    }
-                    Either::Right((socket, remaining)) => {
-                        completed = remaining;
-                        socket.unwrap()
-                    }
-                };
-            let observed = request(&mut stream).await;
-            let index = exchanges
-                .iter()
-                .position(|exchange| {
-                    exchange.endpoint.path_template() == observed.path
-                        && exchange.request == observed.body
-                })
-                .unwrap_or_else(|| {
-                    panic!(
-                        "unexpected metadata request: {} {}",
-                        observed.path, observed.body
-                    )
-                });
-            let exchange = exchanges.remove(index).unwrap();
-            verify_service_call(
-                &verifier,
-                Some(&observed.authorization),
-                AUDIENCE,
-                exchange.endpoint,
-            )
-            .await
-            .unwrap();
-            assert!(
+    test: impl AsyncFnOnce(WorkerCoordinator) + 'a,
+) -> LocalBoxFuture<'a, ()> {
+    Box::pin(async move {
+        let listener = compio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = WorkerCoordinator::new(
+            &format!("http://{}", listener.local_addr().unwrap()),
+            fixture.auth.clone(),
+            Options::default(),
+        )
+        .unwrap();
+        let (issuer, key) = fixture.auth.signing_identity().unwrap();
+        let mut trust = ServiceTrustBundle::new();
+        trust.trust_signing_key(issuer, key.key_id(), key).unwrap();
+        let verifier = ServiceAssertionVerifier::new(trust, Arc::new(InMemoryReplayStore::new()));
+        let (done, completed) = oneshot::channel();
+        let server = async {
+            let mut exchanges = VecDeque::from(exchanges);
+            let mut replies = Vec::new();
+            let mut completed = completed;
+            loop {
+                let (mut stream, _) =
+                    match futures::future::select(completed, listener.accept().boxed_local()).await
+                    {
+                        Either::Left((result, _)) => {
+                            result.unwrap();
+                            break;
+                        }
+                        Either::Right((socket, remaining)) => {
+                            completed = remaining;
+                            socket.unwrap()
+                        }
+                    };
+                let observed = request(&mut stream).await;
+                let index = exchanges
+                    .iter()
+                    .position(|exchange| {
+                        exchange.endpoint.path_template() == observed.path
+                            && exchange.request == observed.body
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "unexpected metadata request: {} {}",
+                            observed.path, observed.body
+                        )
+                    });
+                let exchange = exchanges.remove(index).unwrap();
                 verify_service_call(
                     &verifier,
                     Some(&observed.authorization),
                     AUDIENCE,
-                    exchange.endpoint
+                    exchange.endpoint,
                 )
                 .await
-                .is_err(),
-                "assertion replay must be rejected"
-            );
-            replies.push(compio::runtime::spawn(async move {
+                .unwrap();
+                assert!(
+                    verify_service_call(
+                        &verifier,
+                        Some(&observed.authorization),
+                        AUDIENCE,
+                        exchange.endpoint
+                    )
+                    .await
+                    .is_err(),
+                    "assertion replay must be rejected"
+                );
+                replies.push(compio::runtime::spawn(async move {
                 if let Some(gate) = exchange.gate { gate.wait().await; }
                 let body = serde_json::to_vec(&exchange.response).unwrap();
                 let mut response = format!("HTTP/1.1 {} Test\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n", exchange.status, body.len()).into_bytes();
@@ -294,23 +296,24 @@ pub(super) async fn peer(
                 stream.write_all(response).await.0.unwrap();
                 stream.flush().await.unwrap();
             }));
-        }
-        assert!(
-            exchanges.is_empty(),
-            "expected metadata exchanges were omitted"
-        );
-        for reply in replies {
-            reply.await.unwrap();
-        }
-    };
-    compio::time::timeout(Duration::from_secs(15), async {
-        futures::join!(server, async {
-            test(client).await;
-            done.send(()).unwrap();
-        });
+            }
+            assert!(
+                exchanges.is_empty(),
+                "expected metadata exchanges were omitted"
+            );
+            for reply in replies {
+                reply.await.unwrap();
+            }
+        };
+        compio::time::timeout(Duration::from_secs(15), async {
+            futures::join!(server, async {
+                test(client).await;
+                done.send(()).unwrap();
+            });
+        })
+        .await
+        .expect("assignment HTTP fixture hung");
     })
-    .await
-    .expect("assignment HTTP fixture hung");
 }
 
 struct Request {
