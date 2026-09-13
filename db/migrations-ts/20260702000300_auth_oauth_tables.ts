@@ -8,6 +8,29 @@ import {
   sequence,
 } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  app_session_anchors: ["global_user_id"],
+  app_user_identities: ["global_user_id"],
+  audit_events: ["actor_user_id"],
+  authz_decisions: ["actor_user_id"],
+  device_grants: ["principal_id"],
+  email_verifications: ["user_id"],
+  federated_identities: ["user_id"],
+  gateway_sessions: ["user_id"],
+  identity_links: ["principal_id"],
+  idp_sessions: ["user_id"],
+  magic_links: ["user_id"],
+  oauth_authorization_codes: ["user_id"],
+  oauth_clients: ["created_by"],
+  oauth_grants: ["user_id"],
+  oauth_refresh_tokens: ["user_id"],
+  oidc_session_clients: ["user_id"],
+  principal_grants: ["principal_id"],
+  totp_backup_codes: ["user_id"],
+  totp_credentials: ["user_id"],
+  users: ["id"],
+};
+
 export default {
   name: "auth_oauth_tables",
   schema() {
@@ -369,10 +392,6 @@ export default {
     });
     table("users", { schema: "zeroship" }).create({
       columns: {
-        // A typed id, and deliberately WITHOUT a database default: a SQL-side
-        // generator for `usr_<base62>` would be a second minter beside
-        // `UserId::mint`, and one producer per identifier is what keeps the id
-        // answerable. Every insert supplies the id.
         id: t.text().notNull(),
         email: t.text({ caseSensitive: false }).notNull(),
         email_verified_at: t.timestamp(),
@@ -392,12 +411,12 @@ export default {
       },
       primaryKey: ["id"],
     });
-    // The shape the id must hold, mirroring `apps_id_shape`. The character
-    // class is case-inclusive because `zeroship_core::typed_id`'s BASE62
-    // alphabet is `0..9A..Za..z` and case is significant in it. Twenty-two
-    // characters is base62 of 128 bits.
-    table("users", { schema: "zeroship" })
-      .check("users_id_shape")
-      .add({ expr: (col) => col("id").regex("^usr_[0-9a-z]{25}$") });
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
+    }
   },
 };

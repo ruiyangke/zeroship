@@ -59,6 +59,7 @@ use zeroship_control::reserved_names::RESERVED_APP_NAMES;
 use zeroship_control::{
     api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
+use zeroship_core::AppId;
 
 use crate::common;
 
@@ -216,20 +217,21 @@ async fn app_row_count(fx: &Fixture, name: &str) -> i64 {
     rows[0].get("n")
 }
 
-async fn cleanup_app(fx: &Fixture, id: Uuid) {
-    // `app_members.app_id` is a `uuid` column - bind the `Uuid` directly, the
-    // way `Registry::create_app` does.
+async fn cleanup_app(fx: &Fixture, id: &AppId) {
     let _ = fx
         .state
         .control_pg
-        .execute("DELETE FROM zeroship.organization_members om \
+        .execute(
+            "DELETE FROM zeroship.organization_members om \
                  USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
-                 WHERE om.organization_id = p.organization_id AND a.id = $1", &[&id])
+                 WHERE om.organization_id = p.organization_id AND a.id = $1",
+            &[&id.as_str()],
+        )
         .await;
     let _ = fx
         .state
         .control_pg
-        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&id])
+        .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&id.as_str()])
         .await;
 }
 
@@ -281,13 +283,10 @@ async fn every_reserved_name_is_refused_and_an_ordinary_name_is_accepted() {
         StatusCode::CREATED,
         "an unreserved name must still be creatable through the same route: {body}"
     );
-    let created_id: Uuid = body["id"]
-        .as_str()
-        .expect("created app carries an id")
-        .parse()
+    let created_id = AppId::parse(body["id"].as_str().expect("created app carries an id"))
         .expect("app id parses");
 
-    cleanup_app(&fx, created_id).await;
+    cleanup_app(&fx, &created_id).await;
     creator.cleanup(&fx.state).await;
     drop(control);
     drop(fx);
@@ -326,13 +325,10 @@ async fn a_reserved_name_is_refused_in_every_letter_case() {
         "uppercase itself is not what is refused - an uppercase unreserved name \
          must be created: {body}"
     );
-    let created_id: Uuid = body["id"]
-        .as_str()
-        .expect("created app carries an id")
-        .parse()
+    let created_id = AppId::parse(body["id"].as_str().expect("created app carries an id"))
         .expect("app id parses");
 
-    cleanup_app(&fx, created_id).await;
+    cleanup_app(&fx, &created_id).await;
     creator.cleanup(&fx.state).await;
     drop(control);
     drop(fx);
@@ -422,13 +418,10 @@ async fn a_name_in_the_app_id_namespace_is_refused_by_the_route() {
         StatusCode::CREATED,
         "an underscore name outside the id namespace must still be created: {body}"
     );
-    let created_id: Uuid = body["id"]
-        .as_str()
-        .expect("created app carries an id")
-        .parse()
+    let created_id = AppId::parse(body["id"].as_str().expect("created app carries an id"))
         .expect("app id parses");
 
-    cleanup_app(&fx, created_id).await;
+    cleanup_app(&fx, &created_id).await;
     creator.cleanup(&fx.state).await;
     drop(control);
     drop(fx);
@@ -465,7 +458,7 @@ async fn registry_refuses_a_reserved_name_directly() {
         .await
         .expect("an unreserved name is created by the same call");
 
-    cleanup_app(&fx, record.id).await;
+    cleanup_app(&fx, &record.id).await;
     creator.cleanup(&fx.state).await;
     drop(fx);
     common::drain_pg().await;

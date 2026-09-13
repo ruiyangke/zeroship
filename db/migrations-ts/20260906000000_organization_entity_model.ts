@@ -1,5 +1,13 @@
 import { grant, now, raw, t, table } from "@zeroship/migrate";
 
+const userIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
+  organizations: ["personal_owner_id", "created_by"],
+  projects: ["created_by"],
+  organization_members: ["user_id", "added_by", "changed_by"],
+  project_members: ["user_id", "added_by", "changed_by"],
+  organization_invites: ["invited_by", "consumed_by"],
+};
+
 // The ownership root. An ORGANIZATION owns projects, a project owns apps, and an
 // app reaches its organization through exactly ONE path: apps.project_id ->
 // projects.organization_id. There is no second edge to keep in agreement,
@@ -59,10 +67,8 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 // and `(organization_id, user_id)` is consumed by the `organization_members`
 // primary key, so the two agree on every write to either side.
 //
-// USER AND APP FOREIGN KEYS POINT AT uuid COLUMNS, ON PURPOSE. `zeroship.users`
-// and `zeroship.apps` still key on uuid; converting them to typed ids is a
-// separate sweep with its own consumers. The new tables use typed-id TEXT for
-// their OWN ids and keep uuid where they reference those two.
+// User references use the same internal `usr` ID contract as `zeroship.users.id`.
+// App references remain UUIDs because `zeroship.apps.id` is still a UUID.
 //
 // `apps.project_id` IS ADDED NOT NULL WITH NO BACKFILL. Pre-launch, no deployed
 // database holds app rows to carry across, so a default-less NOT NULL add is the
@@ -513,7 +519,7 @@ export default {
     // ---- sortable typed-id collations -------------------------------------
     // Every column above whose whole semantic domain is a canonical typed id,
     // plus every foreign-key copy of one. PostgreSQL's locale collation does not
-    // keep the base62 alphabet in numeric order, so a sortable entity id needs
+    // keep the base36 alphabet in numeric order, so a sortable entity id needs
     // bytewise ordering -- and the COPIES need the identical collation even
     // though nothing orders them, because a join against the collated id cannot
     // use a copy's ordinary index when the two collations differ. A missed copy
@@ -546,6 +552,13 @@ export default {
           "typed-id text domains need bytewise comparison, including matching copies used by "
           + "indexed joins",
       });
+    }
+    for (const [tableName, columns] of Object.entries(userIdColumnsByTable)) {
+      for (const column of columns) {
+        table(tableName, { schema: "zeroship" })
+          .check(`${tableName}_${column}_usr_shape`)
+          .add({ expr: (col) => col(column).regex("^usr_[0-9a-z]{25}$") });
+      }
     }
 
     // ---- grants ------------------------------------------------------------

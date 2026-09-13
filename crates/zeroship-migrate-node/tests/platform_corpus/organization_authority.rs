@@ -6,8 +6,8 @@ const ORGANIZATION: &str = "org_0000000000000000000001";
 const OTHER_ORGANIZATION: &str = "org_0000000000000000000002";
 const PROJECT: &str = "prj_0000000000000000000001";
 const OTHER_PROJECT: &str = "prj_0000000000000000000002";
-const MEMBER: &str = "11111111-1111-1111-1111-111111111111";
-const STRANGER: &str = "22222222-2222-2222-2222-222222222222";
+const MEMBER: &str = "usr_0000000000000000000000001";
+const STRANGER: &str = "usr_0000000000000000000000002";
 
 #[test]
 fn project_membership_requires_matching_organization_membership() {
@@ -15,7 +15,7 @@ fn project_membership_requires_matching_organization_membership() {
         seed_graph(client).await;
         let insert = "INSERT INTO zeroship.project_members
             (project_id, organization_id, user_id, role)
-            VALUES ($1, $2, $3::text::uuid, $4)";
+            VALUES ($1, $2, $3, $4)";
 
         refuses(
             client
@@ -49,7 +49,7 @@ fn project_membership_requires_matching_organization_membership() {
         );
 
         let member_insert = "INSERT INTO zeroship.organization_members
-            (organization_id, user_id, role) VALUES ($1, $2::text::uuid, $3)";
+            (organization_id, user_id, role) VALUES ($1, $2, $3)";
         refuses(
             client
                 .execute(member_insert, &[&ORGANIZATION, &STRANGER, &"superuser"])
@@ -69,7 +69,7 @@ fn project_membership_requires_matching_organization_membership() {
         );
 
         accepts(client.execute(
-            "DELETE FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2::text::uuid",
+            "DELETE FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2",
             &[&ORGANIZATION, &MEMBER],
         ).await);
         let remaining = client
@@ -285,13 +285,13 @@ fn control_can_manage_membership_but_cannot_redefine_roles() {
             client
                 .execute(
                     "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
-             VALUES ($1, $2::text::uuid, $3)",
+             VALUES ($1, $2, $3)",
                     &[&ORGANIZATION, &STRANGER, &"viewer"],
                 )
                 .await,
         );
         let membership = client.query_one(
-            "SELECT role FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2::text::uuid",
+            "SELECT role FROM zeroship.organization_members WHERE organization_id = $1 AND user_id = $2",
             &[&ORGANIZATION, &STRANGER],
         ).await.unwrap();
         assert_eq!(membership.get::<_, String>(0), "viewer");
@@ -361,8 +361,8 @@ async fn seed_graph(client: &Client) {
         client
             .execute(
                 "INSERT INTO zeroship.users (id, email, name) VALUES
-         ($1::text::uuid, 'member@authority.test', 'Member'),
-         ($2::text::uuid, 'stranger@authority.test', 'Stranger')",
+         ($1, 'member@authority.test', 'Member'),
+         ($2, 'stranger@authority.test', 'Stranger')",
                 &[&MEMBER, &STRANGER],
             )
             .await
@@ -395,7 +395,7 @@ async fn seed_graph(client: &Client) {
         client
             .execute(
                 "INSERT INTO zeroship.organization_members (organization_id, user_id, role)
-         VALUES ($1, $2::text::uuid, 'admin')",
+         VALUES ($1, $2, 'admin')",
                 &[&ORGANIZATION, &MEMBER],
             )
             .await,
@@ -447,7 +447,7 @@ async fn invite(
          (id, token_hash, organization_id, email, role, role_rank, role_billing_rank,
           invited_by, invited_by_rank, invited_by_billing_rank, purpose, expires_at)
          VALUES ($1, decode($1, 'escape'), $2, $3, $4, $5, $6,
-                 $7::text::uuid, $8, $9, 'organization_invite', now() + interval '1 day')",
+                 $7, $8, $9, 'organization_invite', now() + interval '1 day')",
             &[
                 &id,
                 &ORGANIZATION,

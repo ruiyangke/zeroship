@@ -7,7 +7,7 @@
 //! need to reverse `pws_` to `(app, global_user)`.
 //!
 //! The row is keyed on `(app_client_id, global_user_id)` where
-//! `app_client_id` is the per-app OAuth client_id (`oac_<base62>`). The
+//! `app_client_id` is the per-app OAuth client_id (`oac_<base36>`). The
 //! `pairwise_sub` is the deterministic `pws_…` projection (a column, not
 //! the PK: re-login / re-grant re-derives the SAME value and UPSERTS the
 //! one row). `relay_email` stays `NULL` until the consent flow populates it
@@ -46,7 +46,7 @@ const fn identity_upsert_sql() -> &'static str {
 ///   - `relay_email` is LEFT UNTOUCHED, so the gateway projection never
 ///     clobbers an alias minted at consent time.
 ///
-/// `app_client_id` is the per-app OAuth client_id (`oac_<base62>`,
+/// `app_client_id` is the per-app OAuth client_id (`oac_<base36>`,
 /// `route.oauth_client_id`); `pairwise_sub` is the derived `pws_…`.
 ///
 /// # Errors

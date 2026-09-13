@@ -8,8 +8,8 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use compio_postgres::GenericClient;
-use zeroship_core::user_id::UserId;
 use zeroship_core::device_grant::{PLATFORM_CLI_ISSUABLE_SCOPES, PLATFORM_PROVIDER};
+use zeroship_core::UserId;
 
 /// Whether this call wrote the first-seen marker and default grants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +38,7 @@ mod tests {
     #[test]
     fn only_a_raced_existing_marker_requires_live_entitlement_refresh() {
         assert!(!PlatformCliGrantMaterialization::Materialized.requires_entitlement_refresh());
-        assert!(
-            PlatformCliGrantMaterialization::AlreadyMaterialized
-                .requires_entitlement_refresh()
-        );
+        assert!(PlatformCliGrantMaterialization::AlreadyMaterialized.requires_entitlement_refresh());
     }
 }
 
@@ -123,7 +120,7 @@ pub async fn materialize_default_grants(
     pg: &(impl GenericClient + ?Sized),
     principal_id: &UserId,
 ) -> Result<PlatformCliGrantMaterialization, PlatformCliGrantError> {
-    let provider_subject = principal_id.as_str().to_string();
+    let provider_subject = principal_id.as_str();
     let grants: Vec<String> = PLATFORM_CLI_ISSUABLE_SCOPES
         .iter()
         .map(|grant| (*grant).to_owned())

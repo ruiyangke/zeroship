@@ -2,7 +2,7 @@ import { currentSetting, table } from "@zeroship/migrate";
 
 // Every tenant predicate here compares a typed-id text column against
 // `current_setting`, which is text. NO CAST BELONGS ON EITHER SIDE. A cast to
-// uuid would not merely be redundant: an `app_<base62>` value raises
+// uuid would not merely be redundant: an `app_<base36>` value raises
 // `invalid input syntax for type uuid` inside the policy, and a policy that
 // raises is not a policy that denies - the statement errors instead of
 // returning no rows, so a broken predicate reads as an outage rather than as a

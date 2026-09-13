@@ -256,7 +256,7 @@ impl RouteCache {
         routes.get(app_id).cloned()
     }
 
-    /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base62>`).
+    /// Resolve a route by its per-app OAuth `client_id` (= `oac_<base36>`).
     ///
     /// For per-app back-channel logout, the inbound
     /// `logout_token.aud` carries the per-app `client_id`; the BCL handler uses

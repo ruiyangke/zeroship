@@ -22,28 +22,29 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use compio_postgres::{connect, NoTls};
 use compio_postgres::types::ToSql;
+use compio_postgres::{connect, NoTls};
 use futures::channel::oneshot;
 use ntex::web::{self, test};
 use serial_test::serial;
 use uuid::Uuid;
 use zeroship_bundle::{sha256_hex, BlobStore, LocalDiskBlobStore};
-use zeroship_control::cron::{
-    deploy_retention, workflow_blob_gc, workflow_retention, workflow_schedules,
-    workflow_signal_fanout,
-};
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, RunUpdate, StepCheckpoint, StepDispatcher,
     StepRequest, StepResult, WorkflowEngineConfig,
+};
+use zeroship_control::cron::{
+    deploy_retention, workflow_blob_gc, workflow_retention, workflow_schedules,
+    workflow_signal_fanout,
 };
 use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+use zeroship_core::AppId;
 use zeroship_workflow::advance::{
-    collect_post_apply_registrations_on_conn, WorkflowAdvanceNackKind,
-    WorkflowAdvanceRegistration, WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
+    collect_post_apply_registrations_on_conn, WorkflowAdvanceNackKind, WorkflowAdvanceRegistration,
+    WorkflowAdvanceResponse, WorkflowRunDispatchRequest,
 };
 use zeroship_workflow::claim::{claim_workflow_run_on_conn, WorkflowClaimOutcome};
 use zeroship_workflow::engine::STUCK_STRIKE_LIMIT_FIELD;
@@ -60,10 +61,8 @@ const TEST_WORKER_OWNER: &str = "test-worker-owner";
 static TIMING_TEST_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn tmpdir(label: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "zs-wf-engine-{label}-{}",
-        Uuid::new_v4().simple()
-    ));
+    let path =
+        std::env::temp_dir().join(format!("zs-wf-engine-{label}-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&path).expect("mkdir tmp");
     path
 }
@@ -104,7 +103,7 @@ struct Fixture {
 #[derive(Clone)]
 struct TestPg {
     inner: Arc<compio_postgres::Client>,
-    default_app_id: Arc<Mutex<Option<Uuid>>>,
+    default_app_id: Arc<Mutex<Option<AppId>>>,
 }
 
 impl TestPg {
@@ -115,31 +114,32 @@ impl TestPg {
         }
     }
 
-    fn set_default_app_id(&self, app_id: Uuid) {
+    fn set_default_app_id(&self, app_id: &AppId) {
         *self
             .default_app_id
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app_id);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(app_id.clone());
     }
 
-    fn workflow_sql_for_app(app_id: Uuid, sql: &str) -> String {
-        let tables = WorkflowTables::for_app_id(&app_id);
+    fn workflow_sql_for_app(app_id: &AppId, sql: &str) -> String {
+        let tables = WorkflowTables::for_app_id(app_id);
         sql.replace("zeroship.workflow_runs", &tables.runs)
             .replace("zeroship.workflow_steps", &tables.steps)
             .replace("zeroship.workflow_signals", &tables.signals)
-            .replace(
-                "zeroship.workflow_subscriptions",
-                &tables.subscriptions,
-            )
+            .replace("zeroship.workflow_subscriptions", &tables.subscriptions)
             .replace("zeroship.workflow_blobs", &tables.blobs)
     }
 
     fn rewrite(&self, sql: &str) -> String {
-        let app_id = *self
+        let app_id = self
             .default_app_id
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        app_id.map_or_else(|| sql.to_string(), |app_id| Self::workflow_sql_for_app(app_id, sql))
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        app_id.map_or_else(
+            || sql.to_string(),
+            |app_id| Self::workflow_sql_for_app(&app_id, sql),
+        )
     }
 
     async fn batch_execute(&self, sql: &str) -> Result<(), compio_postgres::Error> {
@@ -186,9 +186,7 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
     try_pg(db_url).await.expect("pg connect")
 }
 
-async fn try_pg(
-    db_url: &str,
-) -> Result<compio_postgres::Client, compio_postgres::Error> {
+async fn try_pg(db_url: &str) -> Result<compio_postgres::Client, compio_postgres::Error> {
     let (client, conn) = connect(db_url, NoTls).await?;
     compio::runtime::spawn(async move {
         let _ = conn.run().await;
@@ -256,7 +254,9 @@ async fn build_fixture_with_gateway(
 
     Fixture {
         state: Arc::new(AppState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(
+                zeroship_core::service_peers::ServiceAuth::unconfigured(),
+            ),
             registry,
             env_store,
             stripe_store,
@@ -316,21 +316,12 @@ async fn spend_blocked_gateway() -> web::HttpResponse {
     web::HttpResponse::PaymentRequired().json(&serde_json::json!({"code": "SPEND_LIMIT"}))
 }
 
-async fn seed_app_and_deploy(fx: &Fixture, label: &str) -> (Uuid, String) {
-    seed_app_and_deploy_on_plan(
-        fx,
-        label,
-        &zeroship_control::plan_catalog::free_plan_id(),
-    )
-    .await
+async fn seed_app_and_deploy(fx: &Fixture, label: &str) -> (AppId, String) {
+    seed_app_and_deploy_on_plan(fx, label, &zeroship_control::plan_catalog::free_plan_id()).await
 }
 
-async fn seed_app_and_deploy_on_plan(
-    fx: &Fixture,
-    label: &str,
-    plan_id: &str,
-) -> (Uuid, String) {
-    let app_id = Uuid::new_v4();
+async fn seed_app_and_deploy_on_plan(fx: &Fixture, label: &str, plan_id: &str) -> (AppId, String) {
+    let app_id = AppId::mint();
     let name = format!("wf-{label}-{}", Uuid::new_v4().simple());
     // Workflow admission is what this file is about, not authority, so the app
     // wants a home rather than a creator.
@@ -339,7 +330,7 @@ async fn seed_app_and_deploy_on_plan(
         .execute(
             "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id, organization_id) \
              SELECT $1, $2, $3, true, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
-            &[&app_id, &name, &plan_id, &project],
+            &[&app_id.as_str(), &name, &plan_id, &project],
         )
         .await
         .expect("insert app");
@@ -347,7 +338,7 @@ async fn seed_app_and_deploy_on_plan(
     PgStore::provision(fx.pg.inner.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
-    fx.pg.set_default_app_id(app_id);
+    fx.pg.set_default_app_id(&app_id);
     let deploy_id = format!("dep_{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
@@ -355,7 +346,7 @@ async fn seed_app_and_deploy_on_plan(
              VALUES ($1, $2, $3, $4, now())",
             &[
                 &deploy_id,
-                &app_id,
+                &app_id.as_str(),
                 &format!("hash-{deploy_id}"),
                 &serde_json::json!({"version":1,"workflows":["TestWorkflow"]}).to_string(),
             ],
@@ -365,7 +356,7 @@ async fn seed_app_and_deploy_on_plan(
     (app_id, deploy_id)
 }
 
-async fn seed_additional_deploy(fx: &Fixture, app_id: Uuid, label: &str) -> String {
+async fn seed_additional_deploy(fx: &Fixture, app_id: &AppId, label: &str) -> String {
     let deploy_id = format!("dep_{}_{}", label, Uuid::new_v4().simple());
     fx.pg
         .execute(
@@ -373,7 +364,7 @@ async fn seed_additional_deploy(fx: &Fixture, app_id: Uuid, label: &str) -> Stri
              VALUES ($1, $2, $3, $4, now())",
             &[
                 &deploy_id,
-                &app_id,
+                &app_id.as_str(),
                 &format!("hash-{deploy_id}"),
                 &serde_json::json!({"version":1,"workflows":["TestWorkflow"]}).to_string(),
             ],
@@ -395,14 +386,14 @@ async fn age_deploy(fx: &Fixture, deploy_id: &str, activated_at: DateTime<Utc>) 
         .expect("age deploy");
 }
 
-async fn put_manifest_for_deploy(fx: &Fixture, app_id: Uuid, deploy_id: &str) -> String {
+async fn put_manifest_for_deploy(fx: &Fixture, app_id: &AppId, deploy_id: &str) -> String {
     let row = fx
         .pg
         .query_one(
             "SELECT deploy_hash, manifest_json \
                FROM zeroship.app_deploys \
               WHERE id = $1 AND app_id = $2",
-            &[&deploy_id, &app_id],
+            &[&deploy_id, &app_id.as_str()],
         )
         .await
         .expect("load deploy manifest");
@@ -410,7 +401,7 @@ async fn put_manifest_for_deploy(fx: &Fixture, app_id: Uuid, deploy_id: &str) ->
     let manifest_json: String = row.get("manifest_json");
     fx.state
         .blob_store
-        .put_manifest(&app_id, &deploy_hash, manifest_json.as_bytes())
+        .put_manifest(app_id, &deploy_hash, manifest_json.as_bytes())
         .await
         .expect("put deploy manifest");
     deploy_hash
@@ -444,7 +435,7 @@ async fn seed_workflow_cap_plan(fx: &Fixture, label: &str, run_cap: i64, app_cap
 #[allow(clippy::too_many_arguments)]
 async fn seed_run(
     fx: &Fixture,
-    app_id: Uuid,
+    app_id: &AppId,
     deploy_id: &str,
     state: &str,
     wake_delta_ms: i64,
@@ -453,9 +444,9 @@ async fn seed_run(
     lease_delta_ms: Option<i64>,
     dispatch_nonce: Option<&str>,
 ) -> String {
-    fx.pg.set_default_app_id(app_id);
-    common::provision_app_workflow_schema(fx.pg.inner.as_ref(), &app_id).await;
-    PgStore::provision(fx.pg.inner.as_ref(), &app_id)
+    fx.pg.set_default_app_id(&app_id);
+    common::provision_app_workflow_schema(fx.pg.inner.as_ref(), app_id).await;
+    PgStore::provision(fx.pg.inner.as_ref(), app_id)
         .await
         .expect("provision workflow journal for run seed");
     let run_id = zeroship_core::typed_id::new_workflow_run_id();
@@ -473,7 +464,7 @@ async fn seed_run(
                      CASE WHEN $4 IN ('completed','failed','cancelled','stalled') THEN now() ELSE NULL END)",
             &[
                 &run_id,
-                &app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 &state,
                 &input,
@@ -491,7 +482,7 @@ async fn seed_run(
         "queued" | "running" | "sleeping" | "waiting" | "compensating"
     ) {
         fx.scheduler_store
-            .register_timer(&run_id, app_id, wake_at)
+            .register_timer(&run_id, &app_id, wake_at)
             .await
             .expect("register seeded workflow timer");
     }
@@ -558,10 +549,11 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
         state.as_str(),
         "queued" | "running" | "sleeping" | "waiting" | "compensating"
     ) {
-        let app_id: Uuid = row.get("app_id");
+        let app_id_raw: String = row.get("app_id");
+        let app_id = AppId::parse(&app_id_raw).expect("workflow run app id");
         let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
         fx.scheduler_store
-            .register_timer(run_id, app_id, wake_at)
+            .register_timer(run_id, &app_id, wake_at)
             .await
             .expect("register existing workflow timer");
     }
@@ -588,7 +580,7 @@ fn aligned_planned_instant(ticks_before_now: i64, interval_ms: i64) -> DateTime<
 #[allow(clippy::too_many_arguments)]
 async fn insert_interval_schedule(
     fx: &Fixture,
-    app_id: Uuid,
+    app_id: &AppId,
     deploy_id: &str,
     name: &str,
     workflow_name: &str,
@@ -609,7 +601,7 @@ async fn insert_interval_schedule(
                      $7, 'epoch', $8, $9, $10, $11, $12, true, now())",
             &[
                 &schedule_id,
-                &app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 &format!("hash-{deploy_id}"),
                 &name,
@@ -653,10 +645,7 @@ async fn schedule_run_count(fx: &Fixture, schedule_id: &str) -> i64 {
         .get("n")
 }
 
-async fn schedule_run_started_instants(
-    fx: &Fixture,
-    schedule_id: &str,
-) -> Vec<DateTime<Utc>> {
+async fn schedule_run_started_instants(fx: &Fixture, schedule_id: &str) -> Vec<DateTime<Utc>> {
     let prefix = format!("sched:{schedule_id}:%");
     fx.pg
         .query(
@@ -737,31 +726,25 @@ async fn claim_for_test_dispatch(
     request: WorkflowRunDispatchRequest,
 ) -> Result<StepRequest, DispatchOutcome> {
     let claim_config = config(TEST_WORKER_OWNER);
-    match claim_workflow_run_on_conn(
-        state.control_pg.as_ref(),
-        &request,
-        &claim_config,
-    )
-    .await
-    {
+    match claim_workflow_run_on_conn(state.control_pg.as_ref(), &request, &claim_config).await {
         Ok(WorkflowClaimOutcome::Claimed(request)) => Ok(request),
         Ok(WorkflowClaimOutcome::Terminal(registrations)) => Err(DispatchOutcome::Completed(
             WorkflowAdvanceResponse::ack(request.run_id, registrations),
         )),
-        Ok(WorkflowClaimOutcome::ClaimLost) => Err(DispatchOutcome::Completed(
-            WorkflowAdvanceResponse::nack(
+        Ok(WorkflowClaimOutcome::ClaimLost) => {
+            Err(DispatchOutcome::Completed(WorkflowAdvanceResponse::nack(
                 request.run_id,
                 WorkflowAdvanceNackKind::ClaimLost,
                 "workflow claim lost",
-            ),
-        )),
-        Ok(WorkflowClaimOutcome::Backpressure(reason)) => Err(DispatchOutcome::Completed(
-            WorkflowAdvanceResponse::nack(
+            )))
+        }
+        Ok(WorkflowClaimOutcome::Backpressure(reason)) => {
+            Err(DispatchOutcome::Completed(WorkflowAdvanceResponse::nack(
                 request.run_id,
                 WorkflowAdvanceNackKind::Backpressure,
                 reason,
-            ),
-        )),
+            )))
+        }
         Err(e) => Err(DispatchOutcome::Completed(WorkflowAdvanceResponse::nack(
             request.run_id,
             WorkflowAdvanceNackKind::ApplyFailed,
@@ -790,11 +773,11 @@ async fn apply_like_worker(
         apply_config,
         result,
     )
-        .await
-        .expect("test dispatcher worker-style apply");
+    .await
+    .expect("test dispatcher worker-style apply");
     let registrations = collect_post_apply_registrations_on_conn(
         state.control_pg.as_ref(),
-        request.app_id,
+        &request.app_id,
         &run_id,
         true,
     )
@@ -803,11 +786,11 @@ async fn apply_like_worker(
     DispatchOutcome::Completed(WorkflowAdvanceResponse::ack(run_id, registrations))
 }
 
-fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
+fn authed(req: test::TestRequest, app_id: &AppId) -> test::TestRequest {
     let token =
-        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, &app_id.to_string());
+        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, app_id.as_str());
     req.header("authorization", format!("Bearer {token}"))
-        .header(workflow_instance_api::APP_ID_HEADER, app_id.to_string())
+        .header(workflow_instance_api::APP_ID_HEADER, app_id.as_str())
 }
 
 #[derive(Clone)]
@@ -990,8 +973,10 @@ impl StepDispatcher for JoinChildrenDispatcher {
             .cloned();
 
         if let Some(child) = next_child {
-            let mut checkpoint =
-                running_child_checkpoint(child.ordinal, child.child_run_id.as_deref().unwrap_or(""));
+            let mut checkpoint = running_child_checkpoint(
+                child.ordinal,
+                child.child_run_id.as_deref().unwrap_or(""),
+            );
             checkpoint.name = child.name;
             checkpoint.name_occurrence = child.name_occurrence;
             let result = StepResult::from_checkpoints(
@@ -1182,11 +1167,7 @@ impl StepDispatcher for CaughtStepFailureDispatcher {
                 }
             ])
         };
-        let result = batch_step_result(
-            &request.run_id,
-            &request.dispatch_nonce,
-            outcomes,
-        );
+        let result = batch_step_result(&request.run_id, &request.dispatch_nonce, outcomes);
         apply_like_worker(&self.state, &request, result).await
     }
 }
@@ -1251,11 +1232,7 @@ impl StepDispatcher for UncaughtStepFailureDispatcher {
                 }
             ])
         };
-        let result = batch_step_result(
-            &request.run_id,
-            &request.dispatch_nonce,
-            outcomes,
-        );
+        let result = batch_step_result(&request.run_id, &request.dispatch_nonce, outcomes);
         apply_like_worker(&self.state, &request, result).await
     }
 }
@@ -1504,10 +1481,12 @@ async fn assert_tick_claimed(fx: &Fixture, claimed: usize, expected: usize, labe
         let claimed_by: Option<String> = row.get("claimed_by");
         let nonce: Option<String> = row.get("dispatch_nonce");
         let strikes: i16 = row.get("stuck_strikes");
-        let app_id: uuid::Uuid = row.get("app_id");
+        let app_id_raw: String = row.get("app_id");
+        let app_id = AppId::parse(&app_id_raw).expect("workflow run app id");
         dump.push_str(&format!(
             "  id={id} state={state} wake_at={wake_at:?} claimed_by={claimed_by:?} \
-             nonce={nonce:?} strikes={strikes} app={app_id}\n"
+             nonce={nonce:?} strikes={strikes} app={}\n",
+            app_id.as_str()
         ));
     }
     panic!(
@@ -1574,7 +1553,11 @@ async fn workflow_step_summaries(fx: &Fixture, run_id: &str) -> Vec<(i32, String
         .collect()
 }
 
-fn batch_step_result(run_id: &str, dispatch_nonce: &str, outcomes: serde_json::Value) -> StepResult {
+fn batch_step_result(
+    run_id: &str,
+    dispatch_nonce: &str,
+    outcomes: serde_json::Value,
+) -> StepResult {
     serde_json::from_value(serde_json::json!({
         "runId": run_id,
         "dispatchNonce": dispatch_nonce,
@@ -1696,20 +1679,12 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     let fx = isolated_fixture("scheduler-boot-reconcile").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "scheduler-boot-reconcile").await;
     let due_run = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     let future_run = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "sleeping",
         60_000,
@@ -1732,16 +1707,17 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
         .expect("control scheduler reconcile");
     assert_eq!(seeded.registered, 2);
     assert!(store.timer(&due_run).await.expect("due timer").is_some());
-    assert!(store.timer(&future_run).await.expect("future timer").is_some());
+    assert!(store
+        .timer(&future_run)
+        .await
+        .expect("future timer")
+        .is_some());
 
     let mut wheel = TimerWheel::new(WakeHandle::new());
-    let fired = scheduler_store_engine::fire_once(
-        &store,
-        &mut wheel,
-        &StoreSchedulerConfig::default(),
-    )
-    .await
-    .expect("store fire once");
+    let fired =
+        scheduler_store_engine::fire_once(&store, &mut wheel, &StoreSchedulerConfig::default())
+            .await
+            .expect("store fire once");
     assert_eq!(fired.len(), 1);
     assert_eq!(fired[0].run_id, due_run);
 
@@ -1749,8 +1725,8 @@ async fn control_scheduler_reconcile_seeds_from_per_app_journal() {
     let next_deadline = now + ChronoDuration::milliseconds(120_000);
     let lapsed = store
         .claim_lapsed_inflight(now, 16, next_deadline)
-    .await
-    .expect("claim lapsed inflight");
+        .await
+        .expect("claim lapsed inflight");
     assert_eq!(lapsed.len(), 1);
 
     // Teardown: the fixture (and any dispatcher/service built from its state)
@@ -1768,21 +1744,13 @@ async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
     workflow_engine::reset_inflight_dispatches_for_test();
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-timer").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     fx.pg
         .execute(
             "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("archive app");
@@ -1796,7 +1764,10 @@ async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
     )
     .await
     .expect("fire archived timer");
-    assert_eq!(fired, 1, "the scheduler should consume the stale timer once");
+    assert_eq!(
+        fired, 1,
+        "the scheduler should consume the stale timer once"
+    );
     assert_eq!(
         dispatcher.dispatches(),
         0,
@@ -1827,7 +1798,10 @@ async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
         .await
         .expect("load archived journal row")
         .get("state");
-    assert_eq!(journal_state, "queued", "archive must preserve workflow history");
+    assert_eq!(
+        journal_state, "queued",
+        "archive must preserve workflow history"
+    );
 
     let archived_reconcile = workflow_engine::reconcile_scheduler_from_journal(&fx.state)
         .await
@@ -1840,7 +1814,7 @@ async fn archived_app_timer_is_parked_and_rebuilt_after_unarchive() {
     fx.pg
         .execute(
             "UPDATE zeroship.apps SET archived_at = NULL WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("unarchive app");
@@ -1866,21 +1840,13 @@ async fn archived_app_is_rejected_at_the_worker_claim_boundary() {
     let fx = isolated_fixture("archived-worker-claim").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "archived-worker-claim").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     fx.pg
         .execute(
             "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("archive app before worker claim");
@@ -1919,15 +1885,7 @@ async fn claim_journal_preserves_same_name_child_occurrences() {
     let fx = isolated_fixture("child-journal-occurrence").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-journal-occurrence").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
 
@@ -1989,7 +1947,7 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-spawn-idempotent").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "running",
         -1_000,
@@ -2002,7 +1960,11 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     let result = batch_step_result(
         &parent,
         "wfd_child",
-        serde_json::json!([child_outcome("ChildOnce", serde_json::json!({"n": 1}), true)]),
+        serde_json::json!([child_outcome(
+            "ChildOnce",
+            serde_json::json!({"n": 1}),
+            true
+        )]),
     );
 
     assert!(
@@ -2028,7 +1990,9 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
     );
     assert_eq!(row.get::<_, String>("kind"), "child");
     assert_eq!(row.get::<_, String>("step_state"), "running");
-    let child_id: String = row.get::<_, Option<String>>("child_run_id").expect("child id");
+    let child_id: String = row
+        .get::<_, Option<String>>("child_run_id")
+        .expect("child id");
 
     let child_row = fx
         .pg
@@ -2044,7 +2008,10 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         child_row.get::<_, Option<String>>("dedup_key"),
         Some(workflow_engine::child_dedup_key(&parent, 0))
     );
-    assert_eq!(child_row.get::<_, Option<String>>("parent_run_id"), Some(parent.clone()));
+    assert_eq!(
+        child_row.get::<_, Option<String>>("parent_run_id"),
+        Some(parent.clone())
+    );
     assert_eq!(
         child_row.get::<_, Option<String>>("parent_wait_step_key"),
         Some(workflow_engine::child_signal_type(0))
@@ -2086,7 +2053,11 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         )
         .await
         .expect("count children");
-    assert_eq!(child_count.get::<_, i64>("n"), 1, "replay must not double-spawn");
+    assert_eq!(
+        child_count.get::<_, i64>("n"),
+        1,
+        "replay must not double-spawn"
+    );
 
     fx.pg
         .execute(
@@ -2111,15 +2082,13 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
             output_ref: None,
         },
     );
-    assert!(
-        workflow_engine::apply_step_result(
-            &fx.state,
-            "owner-child-terminal",
-            child_terminal.clone(),
-        )
-        .await
-        .expect("child terminal apply")
-    );
+    assert!(workflow_engine::apply_step_result(
+        &fx.state,
+        "owner-child-terminal",
+        child_terminal.clone(),
+    )
+    .await
+    .expect("child terminal apply"));
     assert!(
         fx.scheduler_store
             .timer(&parent)
@@ -2157,7 +2126,11 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         )
         .await
         .expect("count child join signals");
-    assert_eq!(signals.get::<_, i64>("n"), 1, "terminal hook must be idempotent");
+    assert_eq!(
+        signals.get::<_, i64>("n"),
+        1,
+        "terminal hook must be idempotent"
+    );
     fx.pg
         .execute(
             "UPDATE zeroship.workflow_runs SET wake_at = NULL WHERE id = $1",
@@ -2167,7 +2140,7 @@ async fn child_spawn_is_idempotent_and_terminal_hook_wakes_parent() {
         .expect("simulate lost parent wake");
 
     fx.scheduler_store
-        .ack_register_next(&parent, app_id, Utc::now())
+        .ack_register_next(&parent, &app_id, Utc::now())
         .await
         .expect("register lost parent wake safety-net timer");
     let rearmed = workflow_engine::fire_once(
@@ -2218,7 +2191,7 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-join-parent-strand").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "waiting",
         -1_000,
@@ -2260,7 +2233,7 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
                          $6, $7, true, 1, now(), $8, $9, $10)",
                 &[
                     &child_id,
-                    &app_id,
+                    &app_id.as_str(),
                     &deploy_id,
                     &serde_json::json!({"ordinal": ordinal}),
                     &dedup_key,
@@ -2325,12 +2298,8 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
             workflow_engine::register_run_timer(&fx.state, &parent)
                 .await
                 .expect("sync no-wake waiting parent with live children");
-            assert_scheduler_presence(
-                &fx,
-                &parent,
-                "no-wake parent park with live child steps",
-            )
-            .await;
+            assert_scheduler_presence(&fx, &parent, "no-wake parent park with live child steps")
+                .await;
         }
     }
 
@@ -2371,28 +2340,24 @@ async fn concurrent_child_terminals_keep_claimed_parent_registered() {
         }
         compio::time::sleep(Duration::from_millis(20)).await;
     }
-    assert!(
-        completed,
-        "parent join did not settle completed: {:?}",
-        {
-            let row = fx
-                .pg
-                .query_one(
-                    "SELECT state, claimed_by, dispatch_nonce, wake_at \
+    assert!(completed, "parent join did not settle completed: {:?}", {
+        let row = fx
+            .pg
+            .query_one(
+                "SELECT state, claimed_by, dispatch_nonce, wake_at \
                        FROM zeroship.workflow_runs \
                       WHERE id = $1",
-                    &[&parent],
-                )
-                .await
-                .expect("load unsettled parent");
-            (
-                row.get::<_, String>("state"),
-                row.get::<_, Option<String>>("claimed_by"),
-                row.get::<_, Option<String>>("dispatch_nonce"),
-                row.get::<_, Option<DateTime<Utc>>>("wake_at"),
+                &[&parent],
             )
-        }
-    );
+            .await
+            .expect("load unsettled parent");
+        (
+            row.get::<_, String>("state"),
+            row.get::<_, Option<String>>("claimed_by"),
+            row.get::<_, Option<String>>("dispatch_nonce"),
+            row.get::<_, Option<DateTime<Utc>>>("wake_at"),
+        )
+    });
 
     let parent_row = fx
         .pg
@@ -2446,7 +2411,7 @@ async fn claim_compensation_drain_registers_parent_wake() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "claim-comp-drain-parent").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "waiting",
         -1_000,
@@ -2480,7 +2445,7 @@ async fn claim_compensation_drain_registers_parent_wake() {
                      $6, $7, true, 1, now(), 'cancelled', $8)",
             &[
                 &child,
-                &app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 &serde_json::json!({}),
                 &workflow_engine::child_dedup_key(&parent, 0),
@@ -2512,7 +2477,7 @@ async fn claim_compensation_drain_registers_parent_wake() {
         .await
         .expect("insert parent child wait step");
     fx.scheduler_store
-        .ack_register_next(&child, app_id, Utc::now())
+        .ack_register_next(&child, &app_id, Utc::now())
         .await
         .expect("register compensating child");
 
@@ -2571,7 +2536,10 @@ async fn claim_compensation_drain_registers_parent_wake() {
 async fn parent_cancel_cascades_cooperatively_to_descendants() {
     let fx = isolated_fixture("child-cascade").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade").await;
-    let parent = seed_run(&fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None).await;
+    let parent = seed_run(
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
+    )
+    .await;
     let child = zeroship_core::typed_id::new_workflow_run_id();
     fx.pg
         .execute(
@@ -2581,7 +2549,7 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
              VALUES ($1, 'TestWorkflow', $2, $3, 'queued', $4, $5, now(), $6, $7, true, 1, now())",
             &[
                 &child,
-                &app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 &serde_json::json!({}),
                 &workflow_engine::child_dedup_key(&parent, 0),
@@ -2600,7 +2568,7 @@ async fn parent_cancel_cascades_cooperatively_to_descendants() {
     .await;
     let req = authed(
         test::TestRequest::post().uri(&format!("/internal/workflows/runs/{parent}/cancel")),
-        app_id,
+        &app_id,
     )
     .to_request();
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -2672,7 +2640,7 @@ async fn cancel_requested_inflight_child_apply_cancels_without_committing_step()
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade-sleep").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "cancelled",
         -1_000,
@@ -2693,7 +2661,7 @@ async fn cancel_requested_inflight_child_apply_cancels_without_committing_step()
                      $6, $7, true, 1, now(), $8, $9, $10)",
             &[
                 &child,
-                &app_id,
+                &app_id.as_str(),
                 &deploy_id,
                 &serde_json::json!({}),
                 &workflow_engine::child_dedup_key(&parent, 0),
@@ -2752,7 +2720,10 @@ async fn cancel_requested_inflight_child_apply_cancels_without_committing_step()
         .get::<_, Option<DateTime<Utc>>>("wake_at")
         .is_none());
     assert_eq!(child_terminal.get::<_, Option<String>>("claimed_by"), None);
-    assert_eq!(child_terminal.get::<_, Option<String>>("dispatch_nonce"), None);
+    assert_eq!(
+        child_terminal.get::<_, Option<String>>("dispatch_nonce"),
+        None
+    );
     let step_count = fx
         .pg
         .query_one(
@@ -2778,7 +2749,10 @@ async fn cancel_requested_inflight_child_apply_cancels_without_committing_step()
         .inflight(&child)
         .await
         .expect("load child inflight after apply cancel");
-    assert!(timer.is_none(), "child timer should clear after apply cancel");
+    assert!(
+        timer.is_none(),
+        "child timer should clear after apply cancel"
+    );
     assert!(
         inflight.is_none(),
         "child inflight row should clear after apply cancel"
@@ -2794,7 +2768,7 @@ async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations()
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cancel-replay-free-many").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "cancelled",
         -1_000,
@@ -2819,7 +2793,7 @@ async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations()
                          $8, $9, true, 1, true, now())",
                 &[
                     &child,
-                    &app_id,
+                    &app_id.as_str(),
                     &deploy_id,
                     &serde_json::json!({"ordinal": ordinal}),
                     &workflow_engine::child_dedup_key(&parent, ordinal as i32),
@@ -2844,7 +2818,7 @@ async fn cancel_requested_parked_child_dispatch_is_replay_free_many_iterations()
             fx.pg.inner.as_ref(),
             &WorkflowRunDispatchRequest {
                 run_id: child.clone(),
-                app_id,
+                app_id: app_id.clone(),
             },
             &cfg,
         )
@@ -2926,7 +2900,7 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-cascade-sleep-two").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "cancelled",
         -1_000,
@@ -2951,7 +2925,7 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
                          $8, $9, true, 1, true, now())",
                 &[
                     &child,
-                    &app_id,
+                    &app_id.as_str(),
                     &deploy_id,
                     &serde_json::json!({}),
                     &workflow_engine::child_dedup_key(&parent, ordinal),
@@ -2964,7 +2938,7 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
             .await
             .expect("insert sleeping cascade child");
         fx.scheduler_store
-            .register_timer(&child, app_id, future_wake)
+            .register_timer(&child, &app_id, future_wake)
             .await
             .expect("register stale future child timer");
         child_ids.push(child);
@@ -3007,8 +2981,14 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
             )
             .await
             .expect("load child states");
-        if states.iter().all(|row| row.get::<_, String>("state") == "cancelled") {
-            assert_eq!(claimed, 2, "both sleeping children should be fired exactly once");
+        if states
+            .iter()
+            .all(|row| row.get::<_, String>("state") == "cancelled")
+        {
+            assert_eq!(
+                claimed, 2,
+                "both sleeping children should be fired exactly once"
+            );
             for row in states {
                 assert!(!row.get::<_, bool>("cancel_requested"));
                 assert!(row.get::<_, Option<DateTime<Utc>>>("wake_at").is_none());
@@ -3047,7 +3027,10 @@ async fn cascade_cancel_repair_registers_all_sleeping_children_due_now() {
                     }
                     compio::time::sleep(Duration::from_millis(10)).await;
                 }
-                assert!(scheduler_cleared, "child scheduler rows should clear after cancel ack");
+                assert!(
+                    scheduler_cleared,
+                    "child scheduler rows should clear after cancel ack"
+                );
             }
             // Teardown: this is an early return out of the polling loop, and
             // locals are dropped only after the body returns - by which point
@@ -3092,7 +3075,7 @@ async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "child-live-cap").await;
     let parent = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "running",
         -1_000,
@@ -3127,7 +3110,10 @@ async fn max_live_descendants_rejects_child_spawn_as_catchable_step_failure() {
     assert_eq!(step.get::<_, String>("state"), "failed");
     let error: Option<serde_json::Value> = step.get("error");
     assert_eq!(
-        error.as_ref().and_then(|value| value.get("type")).and_then(serde_json::Value::as_str),
+        error
+            .as_ref()
+            .and_then(|value| value.get("type"))
+            .and_then(serde_json::Value::as_str),
         Some("LimitExceededError")
     );
     let run = fx
@@ -3160,7 +3146,7 @@ async fn blob_output_step_refcount_co_commits_with_journal_row() {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "blob-ref-commit").await;
         let run_id = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "running",
             0,
@@ -3216,9 +3202,15 @@ async fn blob_output_step_refcount_co_commits_with_journal_row() {
             .await
             .expect("load blob step");
         assert_eq!(row.get::<_, String>("output_kind"), "blob");
-        assert_eq!(row.get::<_, Option<String>>("output_hash").as_deref(), Some(hash.as_str()));
+        assert_eq!(
+            row.get::<_, Option<String>>("output_hash").as_deref(),
+            Some(hash.as_str())
+        );
         assert!(row.get::<_, Option<serde_json::Value>>("output").is_none());
-        assert_eq!(row.get::<_, Option<i64>>("output_size"), Some(bytes.len() as i64));
+        assert_eq!(
+            row.get::<_, Option<i64>>("output_size"),
+            Some(bytes.len() as i64)
+        );
 
         let blob = fx
             .pg
@@ -3256,7 +3248,7 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
         let (app_id, deploy_id) = seed_app_and_deploy(&fx, "blob-ref-gc").await;
         let run_id = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "running",
             0,
@@ -3321,8 +3313,7 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
             .put_blob(&orphan_hash, &orphan)
             .await
             .expect("write orphan blob");
-        let old = Utc::now()
-            - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 60);
+        let old = Utc::now() - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 60);
         fx.pg
             .execute(
                 "INSERT INTO zeroship.workflow_blobs \
@@ -3392,7 +3383,10 @@ async fn workflow_blob_ref_gc_reclaims_zero_refs_but_not_referenced_hashes() {
 /// `workflow_blob_is_referenced` exists to answer.
 ///
 /// Returns (deleted, first app's row survives, object survives).
-async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) -> (usize, bool, bool) {
+async fn ref_sweep_over_a_shared_hash(
+    label: &str,
+    second_app_holds_it: bool,
+) -> (usize, bool, bool) {
     let fx = isolated_fixture(label).await;
     let (first, _) = seed_app_and_deploy(&fx, &format!("{label}-first")).await;
     let (second, _) = seed_app_and_deploy(&fx, &format!("{label}-second")).await;
@@ -3407,7 +3401,7 @@ async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) ->
     let aged = Utc::now() - ChronoDuration::seconds(workflow_blob_gc::REF_SWEEP_GRACE_SECS + 3_600);
 
     // The first app is done with it: zero refcount, aged past the grace window.
-    fx.pg.set_default_app_id(first);
+    fx.pg.set_default_app_id(&first);
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_blobs \
@@ -3420,7 +3414,7 @@ async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) ->
     if second_app_holds_it {
         // The second app is NOT done with it. Refcount 1 and recent, so its own
         // row could never be collected on its own account.
-        fx.pg.set_default_app_id(second);
+        fx.pg.set_default_app_id(&second);
         fx.pg
             .execute(
                 "INSERT INTO zeroship.workflow_blobs \
@@ -3435,7 +3429,7 @@ async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) ->
     let swept = workflow_blob_gc::tick_ref_sweep(&fx.state)
         .await
         .expect("run the ref sweep");
-    fx.pg.set_default_app_id(first);
+    fx.pg.set_default_app_id(&first);
     let row_survives = !fx
         .pg
         .query(
@@ -3474,14 +3468,18 @@ async fn ref_sweep_over_a_shared_hash(label: &str, second_app_holds_it: bool) ->
 /// app's row, which no sweep should touch and which is not asserted here.
 #[compio::test]
 async fn ref_sweep_keeps_a_blob_a_second_app_still_references() {
-    let (deleted, row_survives, object_survives) = ref_sweep_over_a_shared_hash("blob-shared-held", true).await;
+    let (deleted, row_survives, object_survives) =
+        ref_sweep_over_a_shared_hash("blob-shared-held", true).await;
     assert_eq!(deleted, 0, "a blob another app holds must not be collected");
     assert!(
         row_survives,
         "the retained blob must keep its ROW: without it the ref sweep can never \
          look at this blob again, and the object outlives every reference to it"
     );
-    assert!(object_survives, "and the bytes the second app still points at");
+    assert!(
+        object_survives,
+        "and the bytes the second app still points at"
+    );
 }
 
 /// The control: identical, minus the second app's row.
@@ -3491,7 +3489,8 @@ async fn ref_sweep_keeps_a_blob_a_second_app_still_references() {
 /// on one variable.
 #[compio::test]
 async fn ref_sweep_collects_a_shared_hash_no_other_app_holds() {
-    let (deleted, row_survives, object_survives) = ref_sweep_over_a_shared_hash("blob-shared-free", false).await;
+    let (deleted, row_survives, object_survives) =
+        ref_sweep_over_a_shared_hash("blob-shared-free", false).await;
     assert_eq!(deleted, 1, "with no other holder the blob is collectible");
     assert!(!row_survives, "and its row goes");
     assert!(!object_survives, "and so do its bytes");
@@ -3579,7 +3578,7 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "fanout-redrain-register").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "waiting",
         -1_000,
@@ -3611,7 +3610,7 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
             "INSERT INTO zeroship.workflow_subscriptions \
                 (id, app_id, topic, run_id, signal_name, type_filter, ordinal, created_at, expires_at) \
              VALUES ($1, $2, $3, $4, 'topic', 'topic.event', 0, now(), $5)",
-            &[&subscription_id, &app_id, &topic, &run_id, &expires_at],
+            &[&subscription_id, &app_id.as_str(), &topic, &run_id, &expires_at],
         )
         .await
         .expect("insert topic subscription");
@@ -3622,7 +3621,7 @@ async fn signal_fanout_redrain_registers_delivered_pending_broadcast() {
              VALUES ($1, $2, $3, 'topic.event', $4, 'app', $5, $6, 'pending', $7)",
             &[
                 &broadcast_id,
-                &app_id,
+                &app_id.as_str(),
                 &topic,
                 &serde_json::json!({"ok": true}),
                 &format!("idem-{broadcast_id}"),
@@ -3702,7 +3701,7 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
 
         let expired = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "completed",
             -1_000,
@@ -3714,7 +3713,7 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
         .await;
         let fresh = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "failed",
             -1_000,
@@ -3726,7 +3725,7 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
         .await;
         let live = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "compensating",
             -1_000,
@@ -3819,7 +3818,7 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
                          'completed', $6, $6)",
                 &[
                     &broadcast_id,
-                    &app_id,
+                    &app_id.as_str(),
                     &serde_json::json!({"expired": true}),
                     &format!("idem-{broadcast_id}"),
                     &deploy_id,
@@ -3851,7 +3850,7 @@ async fn workflow_retention_reaps_only_expired_terminal_runs() {
                 "INSERT INTO zeroship.workflow_subscriptions \
                     (id, app_id, topic, run_id, signal_name, ordinal, created_at, expires_at) \
                  VALUES ($1, $2, 'retention.topic', $3, 'wait', 0, $4, $4)",
-                &[&subscription_id, &app_id, &expired, &old_terminal_at],
+                &[&subscription_id, &app_id.as_str(), &expired, &old_terminal_at],
             )
             .await
             .expect("insert expired subscription");
@@ -3980,16 +3979,11 @@ async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal
     let fx = isolated_fixture("deploy-retention-drain").await;
     compio::time::timeout(Duration::from_secs(10), async {
         let (app_id, old_deploy) = seed_app_and_deploy(&fx, "deploy-retention-drain").await;
-        age_deploy(
-            &fx,
-            &old_deploy,
-            Utc::now() - ChronoDuration::minutes(10),
-        )
-        .await;
-        let old_hash = put_manifest_for_deploy(&fx, app_id, &old_deploy).await;
+        age_deploy(&fx, &old_deploy, Utc::now() - ChronoDuration::minutes(10)).await;
+        let old_hash = put_manifest_for_deploy(&fx, &app_id, &old_deploy).await;
         let live_run = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &old_deploy,
             "sleeping",
             60_000,
@@ -3999,16 +3993,13 @@ async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal
             None,
         )
         .await;
-        let active_deploy = seed_additional_deploy(&fx, app_id, "deploy-retention-active").await;
-        let active_hash = put_manifest_for_deploy(&fx, app_id, &active_deploy).await;
+        let active_deploy = seed_additional_deploy(&fx, &app_id, "deploy-retention-active").await;
+        let active_hash = put_manifest_for_deploy(&fx, &app_id, &active_deploy).await;
 
-        let count = deploy_retention::deploy_pinned_run_count(
-            fx.pg.inner.as_ref(),
-            &app_id,
-            &old_deploy,
-        )
-        .await
-        .expect("count pinned runs");
+        let count =
+            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_id, &old_deploy)
+                .await
+                .expect("count pinned runs");
         assert_eq!(count, 1);
         assert!(
             !deploy_retention::deploy_bundle_reclaimable(
@@ -4060,13 +4051,10 @@ async fn deploy_retention_reclaims_superseded_manifest_after_pinned_run_terminal
             .await
             .expect("complete pinned run");
 
-        let drained_count = deploy_retention::deploy_pinned_run_count(
-            fx.pg.inner.as_ref(),
-            &app_id,
-            &old_deploy,
-        )
-        .await
-        .expect("count drained runs");
+        let drained_count =
+            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_id, &old_deploy)
+                .await
+                .expect("count drained runs");
         assert_eq!(drained_count, 0);
         assert!(
             deploy_retention::deploy_bundle_reclaimable(
@@ -4121,55 +4109,49 @@ async fn deploy_retention_counts_are_per_app() {
         let old_at = Utc::now() - ChronoDuration::minutes(10);
         age_deploy(&fx, &old_a, old_at).await;
         age_deploy(&fx, &old_b, old_at).await;
-        let old_a_hash = put_manifest_for_deploy(&fx, app_a, &old_a).await;
-        let old_b_hash = put_manifest_for_deploy(&fx, app_b, &old_b).await;
+        let old_a_hash = put_manifest_for_deploy(&fx, &app_a, &old_a).await;
+        let old_b_hash = put_manifest_for_deploy(&fx, &app_b, &old_b).await;
 
         let _run_a = seed_run(
-            &fx, app_a, &old_a, "queued", 60_000, None, None, None, None,
+            &fx, &app_a, &old_a, "queued", 60_000, None, None, None, None,
         )
         .await;
         let _run_b = seed_run(
-            &fx, app_b, &old_b, "completed", -1_000, None, None, None, None,
-        )
-        .await;
-        let active_a = seed_additional_deploy(&fx, app_a, "deploy-retention-app-a-live").await;
-        let active_b = seed_additional_deploy(&fx, app_b, "deploy-retention-app-b-live").await;
-        let active_a_hash = put_manifest_for_deploy(&fx, app_a, &active_a).await;
-        let active_b_hash = put_manifest_for_deploy(&fx, app_b, &active_b).await;
-
-        let count_a = deploy_retention::deploy_pinned_run_count(
-            fx.pg.inner.as_ref(),
-            &app_a,
-            &old_a,
-        )
-        .await
-        .expect("count app a pins");
-        let count_b = deploy_retention::deploy_pinned_run_count(
-            fx.pg.inner.as_ref(),
+            &fx,
             &app_b,
             &old_b,
+            "completed",
+            -1_000,
+            None,
+            None,
+            None,
+            None,
         )
-        .await
-        .expect("count app b pins");
+        .await;
+        let active_a = seed_additional_deploy(&fx, &app_a, "deploy-retention-app-a-live").await;
+        let active_b = seed_additional_deploy(&fx, &app_b, "deploy-retention-app-b-live").await;
+        let active_a_hash = put_manifest_for_deploy(&fx, &app_a, &active_a).await;
+        let active_b_hash = put_manifest_for_deploy(&fx, &app_b, &active_b).await;
+
+        let count_a =
+            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_a, &old_a)
+                .await
+                .expect("count app a pins");
+        let count_b =
+            deploy_retention::deploy_pinned_run_count(fx.pg.inner.as_ref(), &app_b, &old_b)
+                .await
+                .expect("count app b pins");
         assert_eq!(count_a, 1);
         assert_eq!(count_b, 0);
         assert!(
-            !deploy_retention::deploy_bundle_reclaimable(
-                fx.pg.inner.as_ref(),
-                &app_a,
-                &old_a,
-            )
-            .await
-            .expect("app a guard")
+            !deploy_retention::deploy_bundle_reclaimable(fx.pg.inner.as_ref(), &app_a, &old_a,)
+                .await
+                .expect("app a guard")
         );
         assert!(
-            deploy_retention::deploy_bundle_reclaimable(
-                fx.pg.inner.as_ref(),
-                &app_b,
-                &old_b,
-            )
-            .await
-            .expect("app b guard")
+            deploy_retention::deploy_bundle_reclaimable(fx.pg.inner.as_ref(), &app_b, &old_b,)
+                .await
+                .expect("app b guard")
         );
 
         let stats = deploy_retention::tick_with_config(
@@ -4227,14 +4209,30 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
         let old_terminal_at = Utc::now() - ChronoDuration::minutes(10);
 
         let run_a = seed_run(
-            &fx, app_a, &deploy_a, "completed", -1_000, None, None, None, None,
+            &fx,
+            &app_a,
+            &deploy_a,
+            "completed",
+            -1_000,
+            None,
+            None,
+            None,
+            None,
         )
         .await;
         let run_b = seed_run(
-            &fx, app_b, &deploy_b, "completed", -1_000, None, None, None, None,
+            &fx,
+            &app_b,
+            &deploy_b,
+            "completed",
+            -1_000,
+            None,
+            None,
+            None,
+            None,
         )
         .await;
-        for (app_id, run_id) in [(app_a, &run_a), (app_b, &run_b)] {
+        for (app_id, run_id) in [(&app_a, &run_a), (&app_b, &run_b)] {
             fx.pg
                 .execute(
                     &TestPg::workflow_sql_for_app(
@@ -4259,7 +4257,7 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
         .await
         .expect("retention sweep");
         assert_eq!(stats.runs, 2, "retention must sweep both app journals");
-        for (app_id, run_id) in [(app_a, &run_a), (app_b, &run_b)] {
+        for (app_id, run_id) in [(&app_a, &run_a), (&app_b, &run_b)] {
             let row = fx
                 .pg
                 .query_one(
@@ -4276,8 +4274,8 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
 
         let planned = Utc::now() - ChronoDuration::milliseconds(1_000);
         for (app_id, deploy_id, name) in [
-            (app_a, deploy_a.as_str(), "sweep-a"),
-            (app_b, deploy_b.as_str(), "sweep-b"),
+            (&app_a, deploy_a.as_str(), "sweep-a"),
+            (&app_b, deploy_b.as_str(), "sweep-b"),
         ] {
             let schedule_id = zeroship_core::typed_id::new_workflow_schedule_id();
             fx.pg
@@ -4290,7 +4288,7 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
                              1000, 'epoch', $6, 'allow', 'skip', 0, $7, true, now())",
                     &[
                         &schedule_id,
-                        &app_id,
+                        &app_id.as_str(),
                         &deploy_id,
                         &format!("hash-{deploy_id}"),
                         &name,
@@ -4314,7 +4312,7 @@ async fn retention_and_schedule_sweeps_visit_multiple_app_journals() {
         .await
         .expect("schedule sweep");
         assert_eq!(fired, 2, "schedule sweep must fire both app journals");
-        for app_id in [app_a, app_b] {
+        for app_id in [&app_a, &app_b] {
             let row = fx
                 .pg
                 .query_one(
@@ -4348,7 +4346,7 @@ async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent
         let skip_first = aligned_planned_instant(5, interval_ms);
         let skip_id = insert_interval_schedule(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "skip-live",
             "TestWorkflow",
@@ -4382,12 +4380,15 @@ async fn schedule_overlap_policy_skip_blocks_live_run_and_allow_fires_concurrent
             "skipIfRunning must not create a second run while the first is live"
         );
         assert_eq!(schedule_run_count(&fx, &skip_id).await, 1);
-        assert_eq!(schedule_run_started_instants(&fx, &skip_id).await, vec![skip_first]);
+        assert_eq!(
+            schedule_run_started_instants(&fx, &skip_id).await,
+            vec![skip_first]
+        );
 
         let allow_first = aligned_planned_instant(7, interval_ms);
         let allow_id = insert_interval_schedule(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "allow-live",
             "TestWorkflow",
@@ -4449,7 +4450,7 @@ async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
     let planned = aligned_planned_instant(9, interval_ms);
     let schedule_id = insert_interval_schedule(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "catch-up-bounded",
         "TestWorkflow",
@@ -4473,7 +4474,10 @@ async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
         "catch-up backfill must create exactly catch_up_max runs"
     );
     assert_eq!(schedule_run_count(&fx, &schedule_id).await, 3);
-    assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 3);
+    assert_eq!(
+        schedule_run_scheduler_timer_count(&fx, &schedule_id).await,
+        3
+    );
 
     let expected = vec![
         planned,
@@ -4484,8 +4488,7 @@ async fn schedule_catch_up_backfill_is_bounded_by_max_and_drops_excess() {
         schedule_run_started_instants(&fx, &schedule_id).await,
         expected
     );
-    let (last_fire_at, last_fired_epoch, next_fire_at) =
-        schedule_fire_row(&fx, &schedule_id).await;
+    let (last_fire_at, last_fired_epoch, next_fire_at) = schedule_fire_row(&fx, &schedule_id).await;
     assert_eq!(last_fire_at, expected.last().copied());
     assert_eq!(
         last_fired_epoch,
@@ -4507,7 +4510,7 @@ async fn archived_app_schedule_remains_due_until_unarchive() {
     let planned = aligned_planned_instant(2, 1_000);
     let schedule_id = insert_interval_schedule(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "archived-schedule",
         "TestWorkflow",
@@ -4521,7 +4524,7 @@ async fn archived_app_schedule_remains_due_until_unarchive() {
     fx.pg
         .execute(
             "UPDATE zeroship.apps SET archived_at = now() WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("archive scheduled app");
@@ -4548,7 +4551,7 @@ async fn archived_app_schedule_remains_due_until_unarchive() {
     fx.pg
         .execute(
             "UPDATE zeroship.apps SET archived_at = NULL WHERE id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("unarchive scheduled app");
@@ -4578,7 +4581,7 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
     let planned = aligned_planned_instant(2, 1_000);
     let schedule_id = insert_interval_schedule(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "schedule-archive-lock-order",
         "TestWorkflow",
@@ -4595,12 +4598,11 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
         .transaction()
         .await
         .expect("begin archive-side transaction");
+    let lifecycle_lock = zeroship_core::app_derivation::lifecycle_lock_seed(&app_id);
     lifecycle_tx
         .query_one(
-            "SELECT pg_advisory_xact_lock( \
-                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-             )",
-            &[&app_id],
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&lifecycle_lock],
         )
         .await
         .expect("hold archive lifecycle lock");
@@ -4644,7 +4646,7 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
                         )::oid \
                         AND objsubid = 1 \
                  ) AS waiting",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await
             .expect("observe lifecycle lock waiter");
@@ -4656,11 +4658,14 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
     }
     let mut app_probe_conn = pg(&fx.db_url).await;
     let app_row_probe = if lifecycle_waiter {
-        let probe_tx = app_probe_conn.transaction().await.expect("begin app-row probe");
+        let probe_tx = app_probe_conn
+            .transaction()
+            .await
+            .expect("begin app-row probe");
         let result = probe_tx
             .query(
                 "SELECT id FROM zeroship.apps WHERE id = $1 FOR UPDATE NOWAIT",
-                &[&app_id],
+                &[&app_id.as_str()],
             )
             .await;
         probe_tx.rollback().await.expect("rollback app-row probe");
@@ -4680,7 +4685,10 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
                 &[&schedule_id],
             )
             .await;
-        probe_tx.rollback().await.expect("rollback schedule-row probe");
+        probe_tx
+            .rollback()
+            .await
+            .expect("rollback schedule-row probe");
         Some(result)
     } else {
         None
@@ -4704,17 +4712,19 @@ async fn schedule_fire_does_not_invert_archive_lifecycle_lock_order() {
     assert!(
         app_row_probe.is_ok(),
         "schedule fire locked the joined app row before lifecycle: {}",
-        app_row_probe
-            .err()
-            .map_or_else(|| "unknown probe failure".to_string(), |error| error.to_string())
+        app_row_probe.err().map_or_else(
+            || "unknown probe failure".to_string(),
+            |error| error.to_string()
+        )
     );
     let schedule_row_probe = schedule_row_probe.expect("schedule-row probe did not run");
     assert!(
         schedule_row_probe.is_ok(),
         "schedule fire locked its schedule row before lifecycle: {}",
-        schedule_row_probe
-            .err()
-            .map_or_else(|| "unknown probe failure".to_string(), |error| error.to_string())
+        schedule_row_probe.err().map_or_else(
+            || "unknown probe failure".to_string(),
+            |error| error.to_string()
+        )
     );
     assert_eq!(fired, 1);
     assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
@@ -4736,7 +4746,7 @@ async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
     let planned = aligned_planned_instant(2, interval_ms);
     let schedule_id = insert_interval_schedule(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "normal-cadence",
         "TestWorkflow",
@@ -4757,11 +4767,16 @@ async fn schedule_normal_cadence_fires_one_tick_and_rearms() {
     .expect("normal cadence schedule sweep");
     assert_eq!(fired, 1, "one due tick should create one scheduled run");
     assert_eq!(schedule_run_count(&fx, &schedule_id).await, 1);
-    assert_eq!(schedule_run_started_instants(&fx, &schedule_id).await, vec![planned]);
-    assert_eq!(schedule_run_scheduler_timer_count(&fx, &schedule_id).await, 1);
+    assert_eq!(
+        schedule_run_started_instants(&fx, &schedule_id).await,
+        vec![planned]
+    );
+    assert_eq!(
+        schedule_run_scheduler_timer_count(&fx, &schedule_id).await,
+        1
+    );
 
-    let (last_fire_at, last_fired_epoch, next_fire_at) =
-        schedule_fire_row(&fx, &schedule_id).await;
+    let (last_fire_at, last_fired_epoch, next_fire_at) = schedule_fire_row(&fx, &schedule_id).await;
     assert_eq!(last_fire_at, Some(planned));
     assert_eq!(last_fired_epoch, Some(planned.timestamp_millis()));
     assert!(
@@ -4805,7 +4820,7 @@ async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
     // share the single lease deadline the claim transaction stamped.
     let first_id = insert_interval_schedule(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "expired-lease-first",
         "TestWorkflow",
@@ -4818,7 +4833,7 @@ async fn schedule_sweep_fires_claims_whose_batch_lease_already_expired() {
     .await;
     let second_id = insert_interval_schedule(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "expired-lease-second",
         "TestWorkflow",
@@ -4863,7 +4878,7 @@ async fn batch_step_result_applies_atomically_and_preserves_effn1() {
 
         let run_id = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "running",
             -1_000,
@@ -4950,7 +4965,7 @@ async fn batch_step_result_applies_atomically_and_preserves_effn1() {
 
         let sleep_run = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "running",
             -1_000,
@@ -5022,7 +5037,7 @@ async fn batch_step_result_applies_atomically_and_preserves_effn1() {
 
         let single_run = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             "running",
             -1_000,
@@ -5072,15 +5087,7 @@ async fn caught_step_failure_continues_run_to_completion() {
     let fx = isolated_fixture("caught-step-failure").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "caught-step-failure").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     let dispatcher = Arc::new(CaughtStepFailureDispatcher::new(&fx.state));
@@ -5095,13 +5102,21 @@ async fn caught_step_failure_continues_run_to_completion() {
     .expect("first tick");
     assert_eq!(first, 1);
     let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "queued").await;
-    assert!(wake_at.is_some(), "failed step should schedule immediate replay");
+    assert!(
+        wake_at.is_some(),
+        "failed step should schedule immediate replay"
+    );
     assert_eq!(strikes, 0, "failed step row is durable progress");
     assert_eq!(error, None);
     assert_eq!(dispatcher.requests().len(), 1);
     assert_eq!(
         workflow_step_summaries(&fx, &run_id).await,
-        vec![(0, "may-fail".to_string(), "run".to_string(), "failed".to_string())]
+        vec![(
+            0,
+            "may-fail".to_string(),
+            "run".to_string(),
+            "failed".to_string()
+        )]
     );
 
     // The replay is scheduled at a wake_at slightly in the future, and `wait_for_run_state`
@@ -5134,8 +5149,18 @@ async fn caught_step_failure_continues_run_to_completion() {
     assert_eq!(
         workflow_step_summaries(&fx, &run_id).await,
         vec![
-            (0, "may-fail".to_string(), "run".to_string(), "failed".to_string()),
-            (1, "after-catch".to_string(), "run".to_string(), "completed".to_string()),
+            (
+                0,
+                "may-fail".to_string(),
+                "run".to_string(),
+                "failed".to_string()
+            ),
+            (
+                1,
+                "after-catch".to_string(),
+                "run".to_string(),
+                "completed".to_string()
+            ),
         ]
     );
 
@@ -5149,15 +5174,7 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     let fx = isolated_fixture("uncaught-step-failure").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "uncaught-step-failure").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     let dispatcher = Arc::new(UncaughtStepFailureDispatcher::new(&fx.state));
@@ -5172,7 +5189,10 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     .expect("first tick");
     assert_tick_claimed(&fx, first, 1, "uncaught_step_failure first tick").await;
     let (wake_at, strikes, _) = wait_for_run_state(&fx, &run_id, "queued").await;
-    assert!(wake_at.is_some(), "failed step should schedule exactly one replay");
+    assert!(
+        wake_at.is_some(),
+        "failed step should schedule exactly one replay"
+    );
     assert_eq!(strikes, 0);
 
     // MODE B fix: TICK UNTIL THE REPLAY IS PICKED UP, because one tick is not the
@@ -5219,13 +5239,21 @@ async fn uncaught_step_failure_fails_after_one_extra_replay() {
     assert_eq!(wake_at, None);
     assert_eq!(strikes, 0);
     assert_eq!(
-        error.as_ref().and_then(|e| e.get("type")).and_then(serde_json::Value::as_str),
+        error
+            .as_ref()
+            .and_then(|e| e.get("type"))
+            .and_then(serde_json::Value::as_str),
         Some("PermanentError")
     );
     assert_eq!(dispatcher.requests().len(), 2);
     assert_eq!(
         workflow_step_summaries(&fx, &run_id).await,
-        vec![(0, "uncaught".to_string(), "run".to_string(), "failed".to_string())],
+        vec![(
+            0,
+            "uncaught".to_string(),
+            "run".to_string(),
+            "failed".to_string()
+        )],
         "terminal replay must not add a second failed step row"
     );
     let failed_rows = fx
@@ -5266,33 +5294,33 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
                 SET runtime_limits_json = runtime_limits_json || $2::jsonb \
               WHERE id = (SELECT plan_id FROM zeroship.apps WHERE id = $1)",
             &[
-                &app_id,
+                &app_id.as_str(),
                 &serde_json::json!({ STUCK_STRIKE_LIMIT_FIELD: 2 }),
             ],
         )
         .await
         .expect("set worker-visible stuck strike limit");
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     let dispatcher = Arc::new(ZeroProgressDispatcher::new(&fx.state));
     let cfg = config("owner-stuck-strikes");
 
-    let first = workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-        .await
-        .expect("first zero-progress tick");
+    let first = workflow_engine::fire_once(
+        &fx.scheduler_store,
+        &fx.state,
+        Arc::clone(&dispatcher),
+        cfg.clone(),
+    )
+    .await
+    .expect("first zero-progress tick");
     assert_eq!(first, 1);
     let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "queued").await;
-    assert!(wake_at.is_some(), "first strike requeues for another attempt");
+    assert!(
+        wake_at.is_some(),
+        "first strike requeues for another attempt"
+    );
     assert_eq!(strikes, 1);
     assert_eq!(error, None);
     // Was `let _ = wait_for_scheduler_timer(..)`, which waits only for the timer ROW to
@@ -5305,9 +5333,10 @@ async fn zero_progress_frontier_trips_stuck_strikes_to_stalled() {
         "UNSETTLED frontier creates no workflow_steps row"
     );
 
-    let second = workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg)
-        .await
-        .expect("second zero-progress tick");
+    let second =
+        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg)
+            .await
+            .expect("second zero-progress tick");
     assert_eq!(second, 1);
     let (wake_at, strikes, error) = wait_for_run_state(&fx, &run_id, "stalled").await;
     assert_eq!(wake_at, None);
@@ -5343,7 +5372,7 @@ async fn tick_claims_due_run_and_sets_owner_and_nonce() {
     let fx = isolated_fixture("claim").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "claim").await;
     let run_id = seed_run(
-        &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
     let (dispatcher, releases) = BlockingDispatcher::with_capacity(Arc::clone(&fx.state), 1);
@@ -5391,7 +5420,7 @@ async fn concurrent_ticks_claim_disjoint_rows() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "concurrent").await;
     for _ in 0..8 {
         seed_run(
-            &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
+            &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
         )
         .await;
     }
@@ -5413,10 +5442,8 @@ async fn concurrent_ticks_claim_disjoint_rows() {
     wait_for_requests(&d1, 4).await;
     wait_for_requests(&d2, 4).await;
 
-    let s1: std::collections::BTreeSet<_> =
-        d1.requests().into_iter().map(|r| r.run_id).collect();
-    let s2: std::collections::BTreeSet<_> =
-        d2.requests().into_iter().map(|r| r.run_id).collect();
+    let s1: std::collections::BTreeSet<_> = d1.requests().into_iter().map(|r| r.run_id).collect();
+    let s2: std::collections::BTreeSet<_> = d2.requests().into_iter().map(|r| r.run_id).collect();
     assert_eq!(s1.len(), 4);
     assert_eq!(s2.len(), 4);
     assert!(s1.is_disjoint(&s2), "SKIP LOCKED claim sets overlap");
@@ -5441,7 +5468,7 @@ async fn stale_lease_is_taken_over_after_ttl() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "stale").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "running",
         -1_000,
@@ -5494,7 +5521,7 @@ async fn lease_handoff_rejects_stale_writer_after_second_owner_commits() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "lease-handoff-guard").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "running",
         -1_000,
@@ -5582,7 +5609,7 @@ async fn sleep_suspension_resolves_into_journal_row_at_wake() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "sleep").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "sleeping",
         -1_000,
@@ -5633,7 +5660,7 @@ async fn apply_outcome_checkpoints_idempotently() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "apply").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "running",
         -1_000,
@@ -5711,7 +5738,7 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
     let (app_id, deploy_id) = seed_app_and_deploy_on_plan(&fx, "journal-cap", &plan_id).await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "running",
         -1_000,
@@ -5725,7 +5752,11 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
     let first = StepResult::from_checkpoints(
         run_id.clone(),
         "wfd_journal_cap_1".to_string(),
-        vec![StepCheckpoint::completed_run(0, "first", first_output.clone())],
+        vec![StepCheckpoint::completed_run(
+            0,
+            "first",
+            first_output.clone(),
+        )],
         RunUpdate::Queued,
     );
     assert!(
@@ -5798,7 +5829,11 @@ async fn assert_journal_bytes_grows_and_state_cap_errors_without_oversized_row()
         .await
         .expect("load capped steps");
     let ordinals: Vec<i32> = rows.into_iter().map(|row| row.get("ordinal")).collect();
-    assert_eq!(ordinals, vec![0], "oversized checkpoint row was not written");
+    assert_eq!(
+        ordinals,
+        vec![0],
+        "oversized checkpoint row was not written"
+    );
 }
 
 #[compio::test]
@@ -5815,7 +5850,7 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
     for (state, waiting_key, wake_delta_ms) in cases {
         let run_id = seed_run(
             &fx,
-            app_id,
+            &app_id,
             &deploy_id,
             state,
             wake_delta_ms,
@@ -5827,7 +5862,10 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
         .await;
         let wake_at: DateTime<Utc> = fx
             .pg
-            .query_one("SELECT wake_at FROM zeroship.workflow_runs WHERE id = $1", &[&run_id])
+            .query_one(
+                "SELECT wake_at FROM zeroship.workflow_runs WHERE id = $1",
+                &[&run_id],
+            )
             .await
             .expect("load wake")
             .get("wake_at");
@@ -5861,9 +5899,8 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
         let resp = test::call_service(
             &app,
             authed(
-                test::TestRequest::post()
-                    .uri(&format!("/internal/workflows/runs/{run_id}/pause")),
-                app_id,
+                test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
+                &app_id,
             )
             .to_request(),
         )
@@ -5881,7 +5918,8 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
             .expect("load paused run");
         assert_eq!(row.get::<_, String>("state"), "paused");
         assert_eq!(
-            row.get::<_, Option<String>>("paused_from_status").as_deref(),
+            row.get::<_, Option<String>>("paused_from_status")
+                .as_deref(),
             Some(original_state.as_str())
         );
         assert!(
@@ -5912,9 +5950,8 @@ async fn pause_resume_controls_cover_due_skip_and_restore_state() {
         let resp = test::call_service(
             &app,
             authed(
-                test::TestRequest::post()
-                    .uri(&format!("/internal/workflows/runs/{run_id}/resume")),
-                app_id,
+                test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
+                &app_id,
             )
             .to_request(),
         )
@@ -5979,7 +6016,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "pause-signal-resume").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "waiting",
         -1_000,
@@ -6024,7 +6061,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6042,7 +6079,10 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
     assert_eq!(paused.get::<_, String>("state"), "paused");
     assert_eq!(paused.get::<_, Option<DateTime<Utc>>>("wake_at"), None);
     let (timer, inflight) = scheduler_presence(&fx, &run_id).await;
-    assert!(timer.is_none() && inflight.is_none(), "pause should de-register");
+    assert!(
+        timer.is_none() && inflight.is_none(),
+        "pause should de-register"
+    );
 
     let status = test::call_service(
         &app,
@@ -6050,7 +6090,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{run_id}/signal"))
                 .set_json(&serde_json::json!({"type": "go", "payload": {"during": "pause"}})),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6076,7 +6116,7 @@ async fn pause_signal_resume_registers_no_timeout_waiting_run() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6124,7 +6164,7 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "preserve-park").await;
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "waiting",
         -1_000,
@@ -6173,7 +6213,10 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
         compio::time::sleep(Duration::from_millis(10)).await;
     }
     let (timer, inflight) = scheduler_presence(&fx, &run_id).await;
-    assert!(timer.is_none(), "parked no-timeout wait should not keep a timer");
+    assert!(
+        timer.is_none(),
+        "parked no-timeout wait should not keep a timer"
+    );
     assert!(
         inflight.is_none(),
         "preserve ack must clear scheduler inflight for parked no-timeout wait"
@@ -6190,7 +6233,10 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
     )
     .await
     .expect("reap parked no-timeout wait");
-    assert_eq!(reaped, 0, "parked no-timeout wait should not be redispatched");
+    assert_eq!(
+        reaped, 0,
+        "parked no-timeout wait should not be redispatched"
+    );
     compio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(
         dispatcher.requests().len(),
@@ -6212,7 +6258,7 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{run_id}/signal"))
                 .set_json(&serde_json::json!({"type": "go", "payload": {"wake": true}})),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6235,7 +6281,10 @@ async fn preserve_ack_parks_no_timeout_wait_off_inflight_reaper() {
         .inflight(&run_id)
         .await
         .expect("load signaled inflight");
-    assert!(inflight.is_none(), "signal registration should not recreate inflight");
+    assert!(
+        inflight.is_none(),
+        "signal registration should not recreate inflight"
+    );
 
     drop(app);
     drop(dispatcher);
@@ -6248,18 +6297,11 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
     let fx = isolated_fixture("pause-mid").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "pause-mid").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
-    let (dispatcher, release) = GatedCheckpointDispatcher::new(Arc::clone(&fx.state),
+    let (dispatcher, release) = GatedCheckpointDispatcher::new(
+        Arc::clone(&fx.state),
         StepCheckpoint::completed_run(0, "a", serde_json::json!({"ok": true})),
         RunUpdate::Queued,
     );
@@ -6289,7 +6331,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6307,7 +6349,8 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         .expect("paused running row");
     assert_eq!(row.get::<_, String>("state"), "paused");
     assert_eq!(
-        row.get::<_, Option<String>>("paused_from_status").as_deref(),
+        row.get::<_, Option<String>>("paused_from_status")
+            .as_deref(),
         Some("running")
     );
     assert_eq!(
@@ -6338,7 +6381,8 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         if steps.len() == 1 && row.get::<_, Option<String>>("claimed_by").is_none() {
             assert_eq!(row.get::<_, String>("state"), "paused");
             assert_eq!(
-                row.get::<_, Option<String>>("paused_from_status").as_deref(),
+                row.get::<_, Option<String>>("paused_from_status")
+                    .as_deref(),
                 Some("queued")
             );
             break;
@@ -6353,7 +6397,11 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         )
         .await
         .expect("landed steps");
-    assert_eq!(steps.len(), 1, "paused apply must land exactly one checkpoint");
+    assert_eq!(
+        steps.len(),
+        1,
+        "paused apply must land exactly one checkpoint"
+    );
     assert_eq!(steps[0].get::<_, i32>("ordinal"), 0);
     assert_eq!(steps[0].get::<_, String>("name"), "a");
 
@@ -6374,7 +6422,7 @@ async fn pause_mid_dispatch_lands_checkpoint_but_suppresses_requeue() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6418,18 +6466,11 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
     let fx = isolated_fixture("cancel-mid").await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "cancel-mid").await;
     let run_id = seed_run(
-        &fx,
-        app_id,
-        &deploy_id,
-        "queued",
-        -1_000,
-        None,
-        None,
-        None,
-        None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
-    let (dispatcher, release) = GatedCheckpointDispatcher::new(Arc::clone(&fx.state),
+    let (dispatcher, release) = GatedCheckpointDispatcher::new(
+        Arc::clone(&fx.state),
         StepCheckpoint::completed_run(0, "a", serde_json::json!({"ok": true})),
         RunUpdate::Queued,
     );
@@ -6458,7 +6499,7 @@ async fn cancel_mid_dispatch_discards_late_outcome() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/cancel")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6500,7 +6541,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
 
     let guarded = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "completed",
         -1_000,
@@ -6539,7 +6580,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{guarded}/restart"))
                 .set_json(&serde_json::json!({"from": {"name": "b"}})),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6560,7 +6601,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{guarded}/restart"))
                 .set_json(&serde_json::json!({})),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6583,7 +6624,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
 
     let run_id = seed_run(
         &fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "completed",
         -1_000,
@@ -6622,7 +6663,7 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{run_id}/restart"))
                 .set_json(&serde_json::json!({"from": {"name": "b"}})),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -6644,7 +6685,10 @@ async fn restart_rewinds_prefix_requeues_and_guards_completed_compensation() {
     assert_eq!(rows[0].get::<_, String>("state"), "queued");
     assert!(rows[0].get::<_, Option<DateTime<Utc>>>("wake_at").is_some());
     assert_eq!(rows[0].get::<_, i32>("next_ordinal"), 1);
-    assert_eq!(rows[0].get::<_, Option<i32>>("restarted_from_ordinal"), Some(1));
+    assert_eq!(
+        rows[0].get::<_, Option<i32>>("restarted_from_ordinal"),
+        Some(1)
+    );
     register_existing_run_timer(&fx, &run_id).await;
     let rows = fx
         .pg
@@ -6700,7 +6744,7 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
     for _ in 0..6 {
         run_ids.push(
             seed_run(
-                &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
+                &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
             )
             .await,
         );
@@ -6712,9 +6756,14 @@ async fn per_app_cap_does_not_livelock_queued_runs() {
     let dispatcher = Arc::new(CompleteDispatcher::new(&fx.state));
 
     for _ in 0..200 {
-        workflow_engine::fire_once(&fx.scheduler_store, &fx.state, Arc::clone(&dispatcher), cfg.clone())
-            .await
-            .expect("tick");
+        workflow_engine::fire_once(
+            &fx.scheduler_store,
+            &fx.state,
+            Arc::clone(&dispatcher),
+            cfg.clone(),
+        )
+        .await
+        .expect("tick");
         let elapsed_deadline = Utc::now() - ChronoDuration::milliseconds(1);
         fx.pg
             .execute(
@@ -6785,14 +6834,17 @@ async fn gateway_402_backpressure_parks_claim_without_step_attempt() {
     let fx = isolated_fixture_with_gateway("gw-402", &gateway.url("")).await;
     let (app_id, deploy_id) = seed_app_and_deploy(&fx, "gw-402").await;
     let run_id = seed_run(
-        &fx, app_id, &deploy_id, "queued", -1_000, None, None, None, None,
+        &fx, &app_id, &deploy_id, "queued", -1_000, None, None, None, None,
     )
     .await;
 
     let claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(GatewayStepDispatcher::new(fx.state.gateway_url.clone(), test_control_service_auth())),
+        Arc::new(GatewayStepDispatcher::new(
+            fx.state.gateway_url.clone(),
+            test_control_service_auth(),
+        )),
         WorkflowEngineConfig::default(),
     )
     .await
@@ -6882,10 +6934,10 @@ fn dsn_as_role(dsn: &str, role: &str, password: &str) -> String {
 
 /// Seed one workflow run that is parked with a cancel request outstanding -
 /// exactly what `reap_parked_cancel_requested_batch` exists to pull forward.
-async fn seed_parked_cancel_run(fx: &Fixture, app_id: Uuid, deploy_id: &str) -> String {
+async fn seed_parked_cancel_run(fx: &Fixture, app_id: &AppId, deploy_id: &str) -> String {
     let run_id = seed_run(
         fx,
-        app_id,
+        &app_id,
         deploy_id,
         "sleeping",
         60 * 60 * 1_000,
@@ -6895,7 +6947,7 @@ async fn seed_parked_cancel_run(fx: &Fixture, app_id: Uuid, deploy_id: &str) -> 
         None,
     )
     .await;
-    fx.pg.set_default_app_id(app_id);
+    fx.pg.set_default_app_id(&app_id);
     fx.pg
         .execute(
             "UPDATE zeroship.workflow_runs SET cancel_requested = true WHERE id = $1",
@@ -6911,8 +6963,8 @@ async fn seed_parked_cancel_run(fx: &Fixture, app_id: Uuid, deploy_id: &str) -> 
 /// `to_regclass` raises `permission denied for schema app_<uuid>`. The journal
 /// TABLES are untouched and still exist - which is the point, because catalog
 /// visibility is not privilege.
-async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
-    let schema = quote_ident(&format!("app_{}", app_id.as_hyphenated()));
+async fn revoke_journal_access(fx: &Fixture, app_id: &AppId) {
+    let schema = quote_ident(&WorkflowTables::for_app_id(app_id).app_schema);
     fx.pg
         .inner
         .batch_execute(&format!(
@@ -6942,8 +6994,8 @@ async fn revoke_journal_access(fx: &Fixture, app_id: &Uuid) {
 /// `app_<uuid>` at all. It is seeded by hand here because "the census cannot see
 /// this state" and "this state cannot happen" are different claims, and only the
 /// second one is the code's.
-async fn make_journal_incomplete(fx: &Fixture, app_id: &Uuid) {
-    let schema = quote_ident(&format!("app_{}", app_id.as_hyphenated()));
+async fn make_journal_incomplete(fx: &Fixture, app_id: &AppId) {
+    let schema = quote_ident(&WorkflowTables::for_app_id(app_id).app_schema);
     fx.pg
         .inner
         .batch_execute(&format!(
@@ -6984,9 +7036,9 @@ async fn reap_over_two_apps(label: &str, second: SecondJournal) -> TwoAppReap {
     let fx = isolated_fixture(label).await;
 
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "readable").await;
-    let good_run = seed_parked_cancel_run(&fx, good_app, &good_deploy).await;
+    let good_run = seed_parked_cancel_run(&fx, &good_app, &good_deploy).await;
     let (other_app, other_deploy) = seed_app_and_deploy(&fx, "other").await;
-    let _other_run = seed_parked_cancel_run(&fx, other_app, &other_deploy).await;
+    let _other_run = seed_parked_cancel_run(&fx, &other_app, &other_deploy).await;
     match second {
         SecondJournal::Usable => {}
         SecondJournal::Unreadable => revoke_journal_access(&fx, &other_app).await,
@@ -7009,7 +7061,7 @@ async fn reap_over_two_apps(label: &str, second: SecondJournal) -> TwoAppReap {
         reap
     };
 
-    fx.pg.set_default_app_id(good_app);
+    fx.pg.set_default_app_id(&good_app);
     let row = fx
         .pg
         .query_one(
@@ -7181,8 +7233,19 @@ async fn sessions_opened(fx: &Fixture) -> i64 {
 /// per-app `Registry::conn` site.
 async fn seed_expired_run_with_blob(fx: &Fixture, label: &str, terminal_at: DateTime<Utc>) {
     let (app_id, deploy_id) = seed_app_and_deploy(fx, label).await;
-    let run_id = seed_run(fx, app_id, &deploy_id, "completed", -1_000, None, None, None, None).await;
-    fx.pg.set_default_app_id(app_id);
+    let run_id = seed_run(
+        fx,
+        &app_id,
+        &deploy_id,
+        "completed",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
+    fx.pg.set_default_app_id(&app_id);
     fx.pg
         .execute(
             "UPDATE zeroship.workflow_runs SET wake_at = NULL, terminal_at = $2 WHERE id = $1",
@@ -7328,7 +7391,7 @@ async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadabl
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
     let run_id = seed_run(
         &fx,
-        good_app,
+        &good_app,
         &good_deploy,
         "sleeping",
         60_000,
@@ -7357,7 +7420,7 @@ async fn run_lookup_finds_a_readable_apps_run_while_another_journal_is_unreadabl
         )
         .await
         .expect("timer must be registered");
-    assert_eq!(row.get::<_, Uuid>("app_id"), good_app);
+    assert_eq!(row.get::<_, String>("app_id"), good_app.as_str());
     drop(ctl);
     drop(fx);
     common::drain_pg().await;
@@ -7372,7 +7435,7 @@ async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "lookup-good").await;
     let _present = seed_run(
         &fx,
-        good_app,
+        &good_app,
         &good_deploy,
         "sleeping",
         60_000,
@@ -7388,7 +7451,7 @@ async fn run_lookup_refuses_to_report_absent_while_a_journal_is_unreadable() {
     let ctl = control_role_fixture(&fx, "lookup-unreadable").await;
     let unknown = "wfr_does_not_exist";
     fx.scheduler_store
-        .register_timer(unknown, good_app, Utc::now())
+        .register_timer(unknown, &good_app, Utc::now())
         .await
         .expect("register a timer whose journal cannot be resolved");
     let absent = workflow_engine::register_run_timer(&ctl.state, unknown).await;
@@ -7476,13 +7539,13 @@ async fn control_role_fixture(fx: &Fixture, label: &str) -> Fixture {
 /// cron fleet has something to count on every tenant. Rows go in through `fx`
 /// (the superuser: the journal DDL and the platform inserts need it); the blob
 /// goes into `ctl`'s object store, because `ctl` is what runs the sweeps.
-async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> (Uuid, String) {
+async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> (AppId, String) {
     let (app_id, deploy_id) = seed_app_and_deploy(fx, label).await;
 
     // Scheduler reconcile: one live run with a wake row to re-register.
     let live_run = seed_run(
         fx,
-        app_id,
+        &app_id,
         &deploy_id,
         "sleeping",
         60 * 60 * 1_000,
@@ -7494,14 +7557,14 @@ async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> (U
     .await;
 
     // Signal-fanout subscription GC: one subscription that has already lapsed.
-    fx.pg.set_default_app_id(app_id);
+    fx.pg.set_default_app_id(&app_id);
     let subscription_id = format!("wfsub_{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_subscriptions \
                 (id, app_id, topic, run_id, signal_name, ordinal, expires_at) \
              VALUES ($1, $2, 'sweep-coverage-topic', $3, 'sig', 0, now() - interval '1 hour')",
-            &[&subscription_id, &app_id, &live_run],
+            &[&subscription_id, &app_id.as_str(), &live_run],
         )
         .await
         .expect("seed a lapsed subscription");
@@ -7510,10 +7573,21 @@ async fn seed_app_for_all_sweeps(fx: &Fixture, ctl: &Fixture, label: &str) -> (U
     // The live run above still pins the first, so the sweep RETAINS it - which
     // is fine, because `candidates` is the count being paired with coverage and
     // it is incremented before the pin check.
-    let _newer = seed_additional_deploy(fx, app_id, "newer").await;
+    let _newer = seed_additional_deploy(fx, &app_id, "newer").await;
 
     // Workflow retention: one terminal run aged well past any window used here.
-    let old_run = seed_run(fx, app_id, &deploy_id, "completed", -1_000, None, None, None, None).await;
+    let old_run = seed_run(
+        fx,
+        &app_id,
+        &deploy_id,
+        "completed",
+        -1_000,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await;
     fx.pg
         .execute(
             "UPDATE zeroship.workflow_runs SET wake_at = NULL, terminal_at = $2 WHERE id = $1",
@@ -7630,7 +7704,7 @@ async fn sweeps_over_two_apps(label: &str, second: SecondJournal) -> FleetSweeps
     // Read the row as the SUPERUSER (`fx`), not through `ctl`: the point is
     // what the sweep left behind, and a revoked-privilege read would report an
     // absent row for a reason that has nothing to do with the sweep.
-    fx.pg.set_default_app_id(readable);
+    fx.pg.set_default_app_id(&readable);
     let readable_blob_row_present = !fx
         .pg
         .query(
@@ -7782,7 +7856,10 @@ async fn fleet_sweeps_report_full_coverage_when_every_journal_is_readable() {
     );
     assert!(swept.reconcile.coverage.apps_swept >= 2);
 
-    assert_eq!(swept.fanout.subscriptions_expired, 2, "both apps' lapsed subscriptions");
+    assert_eq!(
+        swept.fanout.subscriptions_expired, 2,
+        "both apps' lapsed subscriptions"
+    );
     assert_eq!(swept.fanout.coverage.apps_skipped, 0);
     assert!(swept.fanout.coverage.apps_swept >= 2);
 
@@ -7918,7 +7995,6 @@ async fn fleet_sweeps_all_report_a_tenant_whose_journal_is_incomplete() {
         swept.retention.coverage.apps_skipped, 1,
         "workflow retention must report the tenant whose journal is incomplete"
     );
-
 }
 
 /// Seed one app a live topic subscriber and a pending broadcast for it.
@@ -7928,7 +8004,7 @@ async fn fleet_sweeps_all_report_a_tenant_whose_journal_is_incomplete() {
 /// below.
 async fn seed_topic_broadcast(
     fx: &Fixture,
-    app_id: Uuid,
+    app_id: &AppId,
     deploy_id: &str,
     run_id: &str,
     created_at: DateTime<Utc>,
@@ -7937,13 +8013,13 @@ async fn seed_topic_broadcast(
     let broadcast_id = zeroship_core::typed_id::new_workflow_broadcast_id();
     let subscription_id = zeroship_core::typed_id::new_workflow_subscription_id();
     let expires_at = Utc::now() + ChronoDuration::seconds(300);
-    fx.pg.set_default_app_id(app_id);
+    fx.pg.set_default_app_id(&app_id);
     fx.pg
         .execute(
             "INSERT INTO zeroship.workflow_subscriptions \
                 (id, app_id, topic, run_id, signal_name, type_filter, ordinal, created_at, expires_at) \
              VALUES ($1, $2, $3, $4, 'topic', 'topic.event', 0, now(), $5)",
-            &[&subscription_id, &app_id, &topic, &run_id, &expires_at],
+            &[&subscription_id, &app_id.as_str(), &topic, &run_id, &expires_at],
         )
         .await
         .expect("insert topic subscription");
@@ -7955,7 +8031,7 @@ async fn seed_topic_broadcast(
              VALUES ($1, $2, $3, 'topic.event', $4, 'app', $5, $6, 'pending', $7, $8)",
             &[
                 &broadcast_id,
-                &app_id,
+                &app_id.as_str(),
                 &topic,
                 &serde_json::json!({"ok": true}),
                 &format!("idem-{broadcast_id}"),
@@ -8004,7 +8080,7 @@ async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
     let (broken_app, broken_deploy) = seed_app_and_deploy(&fx, "fanout-broken").await;
     let broken_run = seed_run(
         &fx,
-        broken_app,
+        &broken_app,
         &broken_deploy,
         "waiting",
         -1_000,
@@ -8016,7 +8092,7 @@ async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
     .await;
     let (broken_broadcast, _broken_topic) = seed_topic_broadcast(
         &fx,
-        broken_app,
+        &broken_app,
         &broken_deploy,
         &broken_run,
         Utc::now() - ChronoDuration::seconds(600),
@@ -8026,7 +8102,7 @@ async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
     let (good_app, good_deploy) = seed_app_and_deploy(&fx, "fanout-good").await;
     let good_run = seed_run(
         &fx,
-        good_app,
+        &good_app,
         &good_deploy,
         "waiting",
         -1_000,
@@ -8037,7 +8113,7 @@ async fn fanout_refuses_a_broadcast_whose_journal_is_incomplete() {
     )
     .await;
     let (good_broadcast, _good_topic) =
-        seed_topic_broadcast(&fx, good_app, &good_deploy, &good_run, Utc::now()).await;
+        seed_topic_broadcast(&fx, &good_app, &good_deploy, &good_run, Utc::now()).await;
 
     make_journal_incomplete(&fx, &broken_app).await;
 
@@ -8155,18 +8231,24 @@ async fn parked_cancel_reaper_counts_an_app_whose_journal_is_incomplete() {
 async fn parked_cancel_reaper_counts_the_apps_its_batch_limit_never_reached() {
     let fx = isolated_fixture("sweep-coverage-batch-limit").await;
     let (first_app, first_deploy) = seed_app_and_deploy(&fx, "limit-a").await;
-    let _first_run = seed_parked_cancel_run(&fx, first_app, &first_deploy).await;
+    let _first_run = seed_parked_cancel_run(&fx, &first_app, &first_deploy).await;
     let (second_app, second_deploy) = seed_app_and_deploy(&fx, "limit-b").await;
-    let _second_run = seed_parked_cancel_run(&fx, second_app, &second_deploy).await;
+    let _second_run = seed_parked_cancel_run(&fx, &second_app, &second_deploy).await;
 
-    let capped =
-        workflow_engine::reap_parked_cancel_requested_batch(&fx.scheduler_store, &fx.state.registry, 1)
-            .await
-            .expect("reap with a limit of one");
-    let uncapped =
-        workflow_engine::reap_parked_cancel_requested_batch(&fx.scheduler_store, &fx.state.registry, 64)
-            .await
-            .expect("reap with a limit above the fleet size");
+    let capped = workflow_engine::reap_parked_cancel_requested_batch(
+        &fx.scheduler_store,
+        &fx.state.registry,
+        1,
+    )
+    .await
+    .expect("reap with a limit of one");
+    let uncapped = workflow_engine::reap_parked_cancel_requested_batch(
+        &fx.scheduler_store,
+        &fx.state.registry,
+        64,
+    )
+    .await
+    .expect("reap with a limit above the fleet size");
 
     drop(fx);
     common::drain_pg().await;
@@ -8287,7 +8369,8 @@ async fn in_loop_denial_over_two_apps(
 /// (a schema dropped mid-tick) is a different SQLSTATE and is not exercised.
 #[compio::test]
 async fn fleet_sweeps_count_a_journal_denied_after_the_catalog_said_readable() {
-    let (fanout, retention) = in_loop_denial_over_two_apps("sweep-coverage-in-loop-denied", true).await;
+    let (fanout, retention) =
+        in_loop_denial_over_two_apps("sweep-coverage-in-loop-denied", true).await;
 
     assert_eq!(
         fanout.subscriptions_expired, 1,
@@ -8316,7 +8399,8 @@ async fn fleet_sweeps_count_a_journal_denied_after_the_catalog_said_readable() {
 /// consistent with a sweep that miscounts every app it visits.
 #[compio::test]
 async fn fleet_sweeps_count_no_skips_when_every_journal_answers() {
-    let (fanout, retention) = in_loop_denial_over_two_apps("sweep-coverage-in-loop-clean", false).await;
+    let (fanout, retention) =
+        in_loop_denial_over_two_apps("sweep-coverage-in-loop-clean", false).await;
 
     assert_eq!(fanout.subscriptions_expired, 2);
     assert_eq!(

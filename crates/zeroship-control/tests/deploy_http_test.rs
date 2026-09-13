@@ -31,7 +31,7 @@ use ntex::http::StatusCode;
 use ntex::web::{self, test};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 
 use zeroship_bundle::{
     AssetEntry, AuthConfig, BlobStore, LocalDiskBlobStore, Manifest, ManifestMetadata, ScopeDef,
@@ -400,7 +400,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -495,7 +495,7 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/octet-stream")
         .set_payload(body)
@@ -524,7 +524,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
     let db_url = db_url();
 
     let fx = build_test_state(&db_url, "auth").await;
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let body: Vec<u8> = b"won't ever be looked at".to_vec();
 
     let app = test::init_service(
@@ -540,7 +540,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
 
     // No authorization header at all.
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("content-type", "application/x-zship")
         .set_payload(body.clone())
         .to_request();
@@ -555,7 +555,7 @@ async fn deploy_missing_auth_returns_401_without_consuming_body() {
 
     // Invalid PAT bearer should also reject — same status.
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", "Bearer not-a-valid-pat")
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -617,7 +617,7 @@ async fn deploy_manifest_not_first_returns_400() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -698,7 +698,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -793,7 +793,7 @@ async fn deploy_noncolliding_scope_returns_200() {
     .await;
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -883,8 +883,8 @@ async fn deploy_service(
     .await
 }
 
-async fn schema_exists(conn: &compio_postgres::Client, app_id: &Uuid) -> bool {
-    let schema = app_id.to_string();
+async fn schema_exists(conn: &compio_postgres::Client, app_id: &AppId) -> bool {
+    let schema = app_id.as_str();
     let rows = conn
         .query(
             "SELECT 1 FROM information_schema.schemata WHERE schema_name = $1",
@@ -921,7 +921,8 @@ async fn deploy_rejects_legacy_migration_approval_query() {
 
     let req = test::TestRequest::post()
         .uri(&format!(
-            "/api/apps/{app_id}/deploy?approved_versions=abc&expected_manifest={}",
+            "/api/apps/{}/deploy?approved_versions=abc&expected_manifest={}",
+            app_id.as_str(),
             "deadbeef".repeat(8)
         ))
         .header("authorization", pat.bearer())
@@ -970,7 +971,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
     let bundle = zship_with_legacy_migrations_key();
 
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(bundle)
@@ -1051,10 +1052,10 @@ async fn deploy_to_nonexistent_app_does_not_write_blobs() {
     .await;
 
     // Never created through the registry, so no app row exists for it.
-    let ghost_id = Uuid::new_v4();
+    let ghost_id = AppId::mint();
     let pat = common::authz_fixture::seeded_principal(&fx.state).await;
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{ghost_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", ghost_id.as_str()))
         .header("authorization", pat.bearer())
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -1099,7 +1100,7 @@ async fn deploy_is_rate_limited() {
     // Small admin quota so 31 requests actually cross it.
     let fx =
         build_test_state_with_admin_quota(&db_url, "ratelimit", Quota::per_minute(5, 60)).await;
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
 
     let app = test::init_service(
         web::App::new().state(fx.state.clone()).service(
@@ -1127,7 +1128,7 @@ async fn deploy_is_rate_limited() {
     let mut statuses = Vec::new();
     for _ in 0..31 {
         let req = test::TestRequest::post()
-            .uri(&format!("/api/apps/{app_id}/deploy"))
+            .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
             .header("authorization", pat.bearer())
             .header("x-forwarded-for", caller_ip.as_str())
             .header("content-type", "application/x-zship")
@@ -1221,7 +1222,7 @@ fn zship_with_descriptor(descriptor: Option<&[u8]>) -> Vec<u8> {
 /// cannot control which row is newest cannot tell "newest" from "any".
 async fn insert_applied_migration(
     conn: &compio_postgres::Client,
-    app_id: &Uuid,
+    app_id: &AppId,
     submitted_by: &UserId,
     descriptor_sha256: &str,
     applied_at: &str,
@@ -1234,7 +1235,7 @@ async fn insert_applied_migration(
          VALUES ($1, $2, 'applied', '{}'::jsonb, '{}'::jsonb, 'test-ceiling', 1, \
                  '[]'::jsonb, $3, $4::text::timestamptz, $5)",
         &[
-            app_id,
+            &app_id.as_str(),
             &Uuid::now_v7(),
             &submitted_by.as_str(),
             &applied_at,
@@ -1250,7 +1251,7 @@ async fn insert_applied_migration(
 /// Read through `get_routes()` rather than off `zeroship.apps`, because that is
 /// the projection the gateway polls. Asserting the 409 alone would pass on a
 /// build that answers 409 AND commits the UPDATE.
-async fn live_deploy_hash(state: &AppState, app_id: &Uuid) -> Option<String> {
+async fn live_deploy_hash(state: &AppState, app_id: &AppId) -> Option<String> {
     state
         .registry
         .get_routes()
@@ -1268,12 +1269,12 @@ async fn post_zship(
             Error = ntex::web::Error,
         >,
     >,
-    app_id: &Uuid,
+    app_id: &AppId,
     bearer: &str,
     body: Vec<u8>,
 ) -> (StatusCode, serde_json::Value) {
     let req = test::TestRequest::post()
-        .uri(&format!("/api/apps/{app_id}/deploy"))
+        .uri(&format!("/api/apps/{}/deploy", app_id.as_str()))
         .header("authorization", bearer)
         .header("content-type", "application/x-zship")
         .set_payload(body)
@@ -1286,7 +1287,7 @@ async fn post_zship(
 }
 
 /// Create an app named for `label`, owned by `owner_id`.
-async fn create_labelled_app(state: &AppState, label: &str, owner_id: &UserId) -> Uuid {
+async fn create_labelled_app(state: &AppState, label: &str, owner_id: &UserId) -> AppId {
     state
         .registry
         .create_app(
@@ -1341,8 +1342,9 @@ async fn deploy_with_unapplied_schema_is_refused_and_nothing_goes_live() {
     assert!(
         body.get("remedy")
             .and_then(|v| v.as_str())
-            .is_some_and(|remedy| remedy.contains("zeroship migrate")
-                && remedy.contains(&app_id.to_string())),
+            .is_some_and(
+                |remedy| remedy.contains("zeroship migrate") && remedy.contains(app_id.as_str())
+            ),
         "the body must carry the remedy command naming this app, got {body}",
     );
     // THE ASSERTION THAT MAKES THE 409 MEAN SOMETHING. A build that answers 409

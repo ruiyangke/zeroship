@@ -20,6 +20,7 @@ use zeroship_control::{
     workflow_instance_api, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString,
     StripeStore,
 };
+use zeroship_core::AppId;
 use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 
@@ -95,7 +96,9 @@ async fn build_fixture(database: crate::workflow_postgres::Database, label: &str
 
     Fixture {
         state: Arc::new(AppState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(
+                zeroship_core::service_peers::ServiceAuth::unconfigured(),
+            ),
             registry,
             env_store,
             stripe_store,
@@ -147,7 +150,7 @@ async fn build_fixture(database: crate::workflow_postgres::Database, label: &str
     }
 }
 
-async fn seed_app(fx: &Fixture, label: &str, workflows: &[&str]) -> (Uuid, String) {
+async fn seed_app(fx: &Fixture, label: &str, workflows: &[&str]) -> (AppId, String) {
     seed_app_on_plan(
         fx,
         label,
@@ -162,8 +165,8 @@ async fn seed_app_on_plan(
     label: &str,
     workflows: &[&str],
     plan_id: &str,
-) -> (Uuid, String) {
-    let app_id = Uuid::new_v4();
+) -> (AppId, String) {
+    let app_id = AppId::mint();
     let app_name = format!("wf-api-{label}-{}", Uuid::new_v4().simple());
     // These cases are about workflow admission, not about who owns the app, so
     // the app just needs a home. See `common::unowned_project`.
@@ -174,7 +177,7 @@ async fn seed_app_on_plan(
                  (id, name, plan_id, workflows_enabled, project_id, organization_id) \
              SELECT $1, $2, $3, true, p.id, p.organization_id \
                FROM zeroship.projects p WHERE p.id = $4",
-            &[&app_id, &app_name, &plan_id, &project],
+            &[&app_id.as_str(), &app_name, &plan_id, &project],
         )
         .await
         .expect("insert app");
@@ -197,7 +200,12 @@ async fn seed_app_on_plan(
         .execute(
             "INSERT INTO zeroship.app_deploys (id, app_id, deploy_hash, manifest_json, activated_at) \
              VALUES ($1, $2, $3, $4, now())",
-            &[&deploy_id, &app_id, &format!("hash-{deploy_id}"), &manifest],
+            &[
+                &deploy_id,
+                &app_id.as_str(),
+                &format!("hash-{deploy_id}"),
+                &manifest,
+            ],
         )
         .await
         .expect("insert app deploy");
@@ -240,8 +248,8 @@ async fn pg_json_size(fx: &Fixture, value: &Value) -> i64 {
         .get("bytes")
 }
 
-async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
-    let app_id = Uuid::new_v4();
+async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> AppId {
+    let app_id = AppId::mint();
     let project = common::unowned_project(fx.pg.as_ref()).await;
     fx.pg
         .execute(
@@ -250,7 +258,7 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
              SELECT $1, $2, $3, true, p.id, p.organization_id \
                FROM zeroship.projects p WHERE p.id = $4",
             &[
-                &app_id,
+                &app_id.as_str(),
                 &format!("wf-api-nodeploy-{label}-{}", Uuid::new_v4().simple()),
                 &zeroship_control::plan_catalog::free_plan_id(),
                 &project,
@@ -265,23 +273,20 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
     app_id
 }
 
-fn wf_sql(app_id: Uuid, sql: &str) -> String {
-    let tables = WorkflowTables::for_app_id(&app_id);
+fn wf_sql(app_id: &AppId, sql: &str) -> String {
+    let tables = WorkflowTables::for_app_id(app_id);
     sql.replace("zeroship.workflow_runs", &tables.runs)
         .replace("zeroship.workflow_steps", &tables.steps)
         .replace("zeroship.workflow_signals", &tables.signals)
-        .replace(
-            "zeroship.workflow_subscriptions",
-            &tables.subscriptions,
-        )
+        .replace("zeroship.workflow_subscriptions", &tables.subscriptions)
         .replace("zeroship.workflow_blobs", &tables.blobs)
 }
 
-fn authed(req: test::TestRequest, app_id: Uuid) -> test::TestRequest {
+fn authed(req: test::TestRequest, app_id: &AppId) -> test::TestRequest {
     let token =
-        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, &app_id.to_string());
+        zeroship_core::auth::derive_app_scoped_control_token(TEST_CONTROL_KEY, app_id.as_str());
     req.header("authorization", format!("Bearer {token}"))
-        .header(workflow_instance_api::APP_ID_HEADER, app_id.to_string())
+        .header(workflow_instance_api::APP_ID_HEADER, app_id.as_str())
 }
 
 fn run_id(value: &Value) -> String {
@@ -337,7 +342,11 @@ async fn workflow_routes_reject_missing_auth() {
 
 #[compio::test]
 async fn archived_app_rejects_new_runs_until_restore() {
-    let fx = build_fixture(crate::workflow_postgres::Database::new(), "archived-admission").await;
+    let fx = build_fixture(
+        crate::workflow_postgres::Database::new(),
+        "archived-admission",
+    )
+    .await;
     let (app_id, _) = seed_app(&fx, "archived-admission", &["Checkout"]).await;
     fx.state
         .registry
@@ -358,7 +367,7 @@ async fn archived_app_rejects_new_runs_until_restore() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": { "orderId": 1 } })),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -369,10 +378,10 @@ async fn archived_app_rejects_new_runs_until_restore() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE app_id = $1",
             ),
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("count archived app runs")
@@ -391,7 +400,7 @@ async fn archived_app_rejects_new_runs_until_restore() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": { "orderId": 2 } })),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -424,7 +433,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": { "orderId": 1 } })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -438,10 +447,10 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         .pg
         .query_one(
             &wf_sql(
-                app_a,
+                &app_a,
                 "SELECT state FROM zeroship.workflow_runs WHERE id = $1 AND app_id = $2",
             ),
-            &[&first_run, &app_a],
+            &[&first_run, &app_a.as_str()],
         )
         .await
         .expect("created run row");
@@ -451,7 +460,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         &app,
         authed(
             test::TestRequest::get().uri(&format!("/internal/workflows/runs/{first_run}")),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -467,7 +476,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         &app,
         authed(
             test::TestRequest::get().uri(&format!("/internal/workflows/runs/{first_run}")),
-            app_b,
+            &app_b,
         )
         .to_request(),
     )
@@ -481,26 +490,33 @@ async fn create_conflicts_status_and_cross_app_isolation() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{first_run}/signal"))
                 .set_json(&json!({ "type": "approved", "payload": { "ok": true } })),
-            app_b,
+            &app_b,
         )
         .to_request(),
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::NOT_FOUND, "app B cannot signal app A run");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "app B cannot signal app A run"
+    );
 
     let status = test::call_service(
         &app,
         authed(
-            test::TestRequest::post()
-                .uri(&format!("/internal/workflows/runs/{first_run}/cancel")),
-            app_b,
+            test::TestRequest::post().uri(&format!("/internal/workflows/runs/{first_run}/cancel")),
+            &app_b,
         )
         .to_request(),
     )
     .await
     .status();
-    assert_eq!(status, StatusCode::NOT_FOUND, "app B cannot cancel app A run");
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "app B cannot cancel app A run"
+    );
 
     let resp = test::call_service(
         &app,
@@ -508,7 +524,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": { "orderId": 2 }, "key": "order:2" })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -527,7 +543,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
                     "key": "order:2",
                     "onConflict": "join"
                 })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -542,7 +558,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
             test::TestRequest::post()
                 .uri("/internal/workflows/OtherWorkflow/runs")
                 .set_json(&json!({ "input": {}, "key": "order:2", "onConflict": "reject" })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -565,7 +581,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
                     "key": "order:2",
                     "onConflict": "reject"
                 })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -584,7 +600,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
                     "key": "order:2",
                     "onConflict": { "policy": "replace" }
                 })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -597,7 +613,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
         .pg
         .query(
             &wf_sql(
-                app_a,
+                &app_a,
                 "SELECT id, state, dedup_key \
                FROM zeroship.workflow_runs \
               WHERE id = ANY($1) \
@@ -632,7 +648,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
             test::TestRequest::post()
                 .uri("/internal/workflows/MissingWorkflow/runs")
                 .set_json(&json!({ "input": {} })),
-            app_a,
+            &app_a,
         )
         .to_request(),
     )
@@ -646,7 +662,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": {} })),
-            app_no_deploy,
+            &app_no_deploy,
         )
         .to_request(),
     )
@@ -680,7 +696,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": { "orderId": 5 } })),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -692,7 +708,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
     fx.pg
         .execute(
             &wf_sql(
-                app_id,
+                &app_id,
                 "UPDATE zeroship.workflow_runs \
                 SET state = 'waiting', wake_at = $1, waiting_step_key = 'wait:0:approved:approved:60000' \
               WHERE id = $2",
@@ -709,7 +725,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{run_id}/signal"))
                 .set_json(&json!({ "type": "approved", "payload": { "by": "usr_test" } })),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -722,12 +738,12 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT state, wake_at \
                FROM zeroship.workflow_runs \
               WHERE id = $1 AND app_id = $2",
             ),
-            &[&run_id, &app_id],
+            &[&run_id, &app_id.as_str()],
         )
         .await
         .expect("read signaled run");
@@ -743,7 +759,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT type, payload, origin, delivery \
                FROM zeroship.workflow_signals \
               WHERE run_id = $1",
@@ -753,7 +769,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .await
         .expect("signal row");
     assert_eq!(signal.get::<_, String>("type"), "approved");
-    assert_eq!(signal.get::<_, Value>("payload"), json!({ "by": "usr_test" }));
+    assert_eq!(
+        signal.get::<_, Value>("payload"),
+        json!({ "by": "usr_test" })
+    );
     assert_eq!(signal.get::<_, String>("origin"), "app");
     assert_eq!(signal.get::<_, String>("delivery"), "direct");
 
@@ -776,7 +795,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": oversized_input })),
-            create_cap_app,
+            &create_cap_app,
         )
         .to_request(),
     )
@@ -791,10 +810,10 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .pg
         .query(
             &wf_sql(
-                create_cap_app,
+                &create_cap_app,
                 "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_runs WHERE app_id = $1",
             ),
-            &[&create_cap_app],
+            &[&create_cap_app.as_str()],
         )
         .await
         .expect("count capped create runs");
@@ -819,7 +838,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": capped_input })),
-            signal_cap_app,
+            &signal_cap_app,
         )
         .to_request(),
     )
@@ -839,7 +858,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
             test::TestRequest::post()
                 .uri(&format!("/internal/workflows/runs/{capped_run_id}/signal"))
                 .set_json(&json!({ "type": "approved", "payload": capped_payload })),
-            signal_cap_app,
+            &signal_cap_app,
         )
         .to_request(),
     )
@@ -854,7 +873,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
         .pg
         .query(
             &wf_sql(
-                signal_cap_app,
+                &signal_cap_app,
                 "SELECT COUNT(*)::bigint AS n FROM zeroship.workflow_signals WHERE run_id = $1",
             ),
             &[&capped_run_id],
@@ -885,7 +904,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
             test::TestRequest::post()
                 .uri("/internal/workflows/Checkout/runs")
                 .set_json(&json!({ "input": { "orderId": 6 } })),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -897,7 +916,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     fx.pg
         .execute(
             &wf_sql(
-                app_id,
+                &app_id,
                 "UPDATE zeroship.workflow_runs \
                 SET state = 'sleeping', wake_at = $1, waiting_step_key = 'sleep:0:cooldown' \
               WHERE id = $2",
@@ -909,7 +928,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     fx.pg
         .execute(
             &wf_sql(
-                app_id,
+                &app_id,
                 "INSERT INTO zeroship.workflow_steps \
                     (run_id, ordinal, name, name_occurrence, kind, state, wake_at, batch_id, batch_width) \
                  VALUES ($1, 0, 'cooldown', 0, 'sleep', 'running', $2, 'wfd_pause_resume', 1)",
@@ -923,7 +942,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/pause")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -935,7 +954,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
             ),
             &[&run_id],
@@ -952,7 +971,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/resume")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -964,7 +983,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT state, wake_at FROM zeroship.workflow_runs WHERE id = $1",
             ),
             &[&run_id],
@@ -986,7 +1005,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
     fx.pg
         .execute(
             &wf_sql(
-                app_id,
+                &app_id,
                 "UPDATE zeroship.workflow_runs \
                 SET state = 'running', claimed_by = 'owner-a', dispatch_nonce = 'wfd_claim', \
                     lease_expires = $2 \
@@ -1001,7 +1020,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         &app,
         authed(
             test::TestRequest::post().uri(&format!("/internal/workflows/runs/{run_id}/cancel")),
-            app_id,
+            &app_id,
         )
         .to_request(),
     )
@@ -1013,7 +1032,7 @@ async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
         .pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT state, wake_at, claimed_by, dispatch_nonce \
                FROM zeroship.workflow_runs WHERE id = $1",
             ),
@@ -1043,7 +1062,7 @@ async fn install_timer_registration_failpoint(fx: &Fixture) {
     fx.pg
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS zeroship.zs_test_timer_insert_fails \
-                 (app_id uuid PRIMARY KEY); \
+                 (app_id text PRIMARY KEY); \
              CREATE OR REPLACE FUNCTION zeroship.zs_test_fail_timer_insert() \
                  RETURNS trigger AS $fp$ \
              BEGIN \
@@ -1074,36 +1093,36 @@ async fn remove_timer_registration_failpoint(fx: &Fixture) {
         .expect("remove timer registration failpoint");
 }
 
-async fn arm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
+async fn arm_timer_registration_failure(fx: &Fixture, app_id: &AppId) {
     fx.pg
         .execute(
             "INSERT INTO zeroship.zs_test_timer_insert_fails (app_id) \
              VALUES ($1) ON CONFLICT DO NOTHING",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("arm timer registration failure");
 }
 
-async fn disarm_timer_registration_failure(fx: &Fixture, app_id: Uuid) {
+async fn disarm_timer_registration_failure(fx: &Fixture, app_id: &AppId) {
     fx.pg
         .execute(
             "DELETE FROM zeroship.zs_test_timer_insert_fails WHERE app_id = $1",
-            &[&app_id],
+            &[&app_id.as_str()],
         )
         .await
         .expect("disarm timer registration failure");
 }
 
-async fn count_runs(fx: &Fixture, app_id: Uuid, workflow_name: &str) -> i64 {
+async fn count_runs(fx: &Fixture, app_id: &AppId, workflow_name: &str) -> i64 {
     fx.pg
         .query_one(
             &wf_sql(
-                app_id,
+                &app_id,
                 "SELECT count(*)::bigint AS n FROM zeroship.workflow_runs \
                   WHERE app_id = $1 AND workflow_name = $2",
             ),
-            &[&app_id, &workflow_name],
+            &[&app_id.as_str(), &workflow_name],
         )
         .await
         .expect("count runs")
@@ -1130,7 +1149,7 @@ async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one()
     let fx = build_fixture(crate::workflow_postgres::Database::new(), "timerfail").await;
     let (app_id, _) = seed_app(&fx, "timerfail", &["Charge"]).await;
     install_timer_registration_failpoint(&fx).await;
-    arm_timer_registration_failure(&fx, app_id).await;
+    arm_timer_registration_failure(&fx, &app_id).await;
 
     let app = test::init_service(
         web::App::new()
@@ -1146,7 +1165,7 @@ async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one()
             test::TestRequest::post()
                 .uri("/internal/workflows/Charge/runs")
                 .set_json(&json!({ "input": { "amountCents": 4200 } })),
-            app_id,
+            &app_id,
         )
         .to_request()
     };
@@ -1157,15 +1176,15 @@ async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one()
         StatusCode::INTERNAL_SERVER_ERROR,
         "a start whose timer registration fails must not report success"
     );
-    let runs_after_failed_start = count_runs(&fx, app_id, "Charge").await;
+    let runs_after_failed_start = count_runs(&fx, &app_id, "Charge").await;
 
     // The client retries the 500. Registration now succeeds.
-    disarm_timer_registration_failure(&fx, app_id).await;
+    disarm_timer_registration_failure(&fx, &app_id).await;
     let resp = test::call_service(&app, start()).await;
     assert_eq!(resp.status(), StatusCode::CREATED);
     let body: Value = serde_json::from_slice(&test::read_body(resp).await).unwrap();
     let retried_run = run_id(&body);
-    let runs_after_retry = count_runs(&fx, app_id, "Charge").await;
+    let runs_after_retry = count_runs(&fx, &app_id, "Charge").await;
 
     // Both counts in one assertion so a failure reports the whole story: how
     // many runs the failed start left behind, and how many exist after the

@@ -698,7 +698,7 @@ impl AppState {
     /// client for `app_id` named `name`, using the apex host derived from
     /// `app_base_domain`. Wraps [`app_oauth_client::ensure_app_client`] with
     /// a fresh control-DB connection. On success returns the per-app
-    /// `client_id` (`oac_<base62-app-id>`).
+    /// `client_id` (`oac_<base36-app-id>`).
     ///
     /// `declared_scopes` are the app's manifest `auth.scopes`: validated and
     /// mirrored into `zeroship.oauth_clients.scopes` and

@@ -128,7 +128,7 @@ export default {
       .add({ expr: (col) => col("status").in(["active", "draining", "gone"]) });
 
     // The typed-id domain needs bytewise comparison; PostgreSQL's locale
-    // collation does not keep the base62 alphabet in numeric order. There are no
+    // collation does not keep the base36 alphabet in numeric order. There are no
     // foreign-key copies of this id yet, so this is the only column to pin.
     raw({
       sql: 'ALTER TABLE "zeroship"."worker_instances" ALTER COLUMN "id" TYPE text COLLATE "C"',

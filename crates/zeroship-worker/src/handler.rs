@@ -4076,7 +4076,7 @@ mod workflow_tests {
     use zeroship_workflow::store::pg::{PgStore, WorkflowTables};
 
     use super::tests::{
-        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value, worker_app_path,
+        gateway_authorization, init_runtime, test_service_auth, tmpdir, usage_value,
     };
     use super::*;
 

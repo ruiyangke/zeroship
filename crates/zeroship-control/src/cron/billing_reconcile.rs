@@ -515,7 +515,7 @@ async fn sweep<S: StripeApi>(
             &[&period],
         )
         .await?;
-    // `usage_aggregates.app_id` is `text` holding the canonical `app_<base62>`
+    // `usage_aggregates.app_id` is `text` holding the canonical `app_<base36>`
     // rendering. Parse-and-validate every row rather than trusting it blind: an
     // FX-abort-style fail-closed error beats silently skipping a row that would
     // have been billable (a dropped row here is dropped revenue).
@@ -1257,8 +1257,8 @@ fn safety_net_finding_dedup_key(
 }
 
 /// The durable `billing_reconciliation_findings.entity_id` for one
-/// `(app, meter, period)` safety-net subject: `billing-correction:app_<base62>:
-/// <meter>:<period_start>`, built from the app id's printed `app_<base62>`
+/// `(app, meter, period)` safety-net subject: `billing-correction:app_<base36>:
+/// <meter>:<period_start>`, built from the app id's printed `app_<base36>`
 /// form (`AppId::as_str`), never its byte representation. `load_correction_history`
 /// looks this key up on every later tick, so the format is load-bearing: a
 /// key built one way must always compare equal to itself built the same way

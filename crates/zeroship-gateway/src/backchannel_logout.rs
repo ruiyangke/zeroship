@@ -63,7 +63,7 @@ pub async fn handle(
 
     // Per-app BCL disambiguation: each per-app
     // OAuth client registers its own `backchannel_logout_uri` with its own
-    // `aud` (= the per-app `client_id`, `oac_<base62>`). Peek the token's `aud`
+    // `aud` (= the per-app `client_id`, `oac_<base36>`). Peek the token's `aud`
     // (routing only — the signature is still verified below) to learn which
     // client it is for; a per-app client resolves to one app's subdomain so we
     // revoke only THAT app's sessions.

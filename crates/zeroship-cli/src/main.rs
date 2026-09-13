@@ -1050,7 +1050,7 @@ fn deploy_auto_create(args: &[String]) -> bool {
 /// > of on the app the caller meant.
 ///
 /// Widening the parse removed that INSTANCE and left the CLASS. An app id is
-/// `app_<base62>` (`zeroship_core::app_id::AppId`), which is not a uuid in any
+/// `app_<base36>` (`zeroship_core::app_id::AppId`), which is not a uuid in any
 /// of those four spellings, so every `--app=app_...` reproduced the same bug -
 /// measured, not predicted, by
 /// `tests::a_typed_app_id_deploys_to_that_app_and_creates_nothing` before this
@@ -1067,7 +1067,7 @@ pub(crate) enum AppTarget {
 
 /// Accept an `--app` value only if it is an app ID, naming the distinction.
 ///
-/// The canonical rendering is `app_<base62>`. A uuid in any spelling
+/// The canonical rendering is `app_<base36>`. A uuid in any spelling
 /// `uuid::Uuid` accepts is taken too, and THAT ARM IS TRANSITIONAL:
 /// `zeroship.apps.id` is still a `uuid` column, so a uuid is what
 /// `POST /api/apps` hands back and what control's `/api/apps/{id}` parses
@@ -1365,7 +1365,7 @@ mod tests {
     /// premise is preserved because it is still true of the uuid renderings:
     /// the server parses that path segment with `id.parse::<Uuid>()`, which
     /// takes the simple (32 hex, no hyphens), hyphenated, braced and
-    /// `urn:uuid:` forms. The canonical `app_<base62>` rendering is added
+    /// `urn:uuid:` forms. The canonical `app_<base36>` rendering is added
     /// beside them.
     ///
     /// What CHANGED is the consequence of a miss. Under the old helper a

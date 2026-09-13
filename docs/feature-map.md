@@ -190,7 +190,7 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Native runtime-descriptor binding | &#x1F7E2; | internal (runtime plugin boot hook) | `crates/zeroship-runtime/src/core/plugin.rs`, `crates/zeroship-data-v8/src/lib.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/src/lib.rs` | Runtime validates the descriptor, then data-v8 installs the app-at-deploy collection set before creator modules evaluate. |
 | Per-app Postgres schema isolation | &#x1F7E2; | internal | `crates/zeroship-migrate-server/src/apply.rs` | `docs/reference/db.md` | &mdash; | The migration service derives the schema from app_id; SQLite uses one file per app. |
 | Descriptor assignments | 🟢 | declared generators on Row<S> fields | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `crates/zeroship-data-orm/src/sql/statement.rs` | `docs/reference/db.md` | `sdks/db/tests/p7-pr1-system-field-builders.test.ts` | Generators and lifecycle roles come from the migration-generated descriptor. |
-| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base62, sortable. |
+| Typed-id prefix system | 🟢 | `t.id('prefix')` / Id<S> | `crates/zeroship-data-orm/src/crud/assignment_pass.rs`, `sdks/db/src/types.ts` | `docs/reference/db.md` | `sdks/db/tests/p7-id-prefix.test.ts` | UUIDv7 base36, sortable. |
 | Collection.insert / insertMany | 🟢 | `Collection.insert(doc)` / `insertMany(docs)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Result outside tx; bare Row inside tx. |
 | Collection.find / get | 🟢 | `Collection.find(filter, opts?)` / `get(...)` | `crates/zeroship-data-orm/src/crud/mod.rs` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | Auto-filters the declared soft-delete field; masked → MaskedValue. |
 | Query builder (lazy thenable) | 🟢 | `@zeroship/db` Query class | `sdks/db/src/query.ts` | `docs/reference/db.md` | `sdks/db/tests/query.test.ts` | sort/limit/skip/select/after/paginate/with/first/unique. |
@@ -904,7 +904,7 @@ observability, and OIDC/OAuth protocol primitives.
 | Redis cluster client | 🟢 | internal (zeroship-kv) | `libs/compio-redis/src/cluster.rs` | — | `libs/compio-redis/tests/cluster.rs` | CLUSTER SLOTS; MOVED/ASK; SSRF allowlist. |
 | Redis connection pool | 🟢 | internal | `libs/compio-redis/src/pool.rs` | — | `libs/compio-redis/src/pool.rs` | LIFO; test-on-borrow; no wait queue. |
 | Redis — no TLS | 🔵 | internal | `libs/compio-redis/src/lib.rs` | — | — | rediss:// not implemented; MITM possible. |
-| typed_id — UUIDv7 base62 IDs | 🟢 | internal | `crates/zeroship-core/src/typed_id.rs` | — | `crates/zeroship-core/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |
+| typed_id — UUIDv7 base36 IDs | 🟢 | internal | `crates/zeroship-id/src/typed_id.rs` | — | `crates/zeroship-id/src/typed_id.rs` | usr/app/ses/wak/oac; parse_with_prefix. |
 | Wire types — AppRecord/RouteEntry/... | 🟢 | internal | `crates/zeroship-core/src/types.rs` | `docs/architecture/gateway-routing.md` | — | env_version monotonic counter. |
 | Wire types — UsageReport/AppUsage/ControlEvent | 🟢 | internal | `crates/zeroship-core/src/types.rs` | — | — | CommonError enum. |
 | AppRuntimeLimits | 🟢 | internal | `crates/zeroship-core/src/types.rs` | `docs/reference/runtime-limits.md` | — | Defaults None. |

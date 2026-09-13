@@ -3,7 +3,7 @@
 #
 # THE WHOLE POINT IS THAT THIS DEFECT COMPILES. `zeroship.apps.id`,
 # `zeroship.users.id` and every foreign-key copy of them are `text` holding a
-# typed id (`app_<base62>`, `usr_<base62>`). A `row.get::<_, Uuid>("app_id")`
+# typed id (`app_<base36>`, `usr_<base36>`). A `row.get::<_, Uuid>("app_id")`
 # against one of those columns type-checks perfectly and raises
 # `WrongType { postgres: Text, rust: "Uuid" }` at runtime, on first contact with
 # a database. `cargo check` is blind to it, `cargo test` is blind to it unless a

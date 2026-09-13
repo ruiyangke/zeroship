@@ -50,7 +50,10 @@ use std::convert::TryFrom;
 use compio_postgres::{Client, NoTls};
 use serde_json::Value;
 use uuid::Uuid;
-use zeroship_id::{AppId, OrganizationId, ProjectId, UserId};
+use zeroship_id::{AppId, UserId};
+
+#[cfg(test)]
+use zeroship_id::{OrganizationId, ProjectId};
 
 use crate::policy::ManagedPosture;
 

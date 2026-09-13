@@ -6,7 +6,7 @@ import {
   type PaymentsClientOptions,
 } from "../src/connect";
 
-const CREATOR = "usr_creator_1";
+const CREATOR = "usr_0000000002e4nenowz3qmamtd";
 
 /**
  * Build a client whose `fetch` records every outgoing request and returns a

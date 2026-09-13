@@ -55,6 +55,9 @@ export default {
     table("app_egress_rules", { schema: "zeroship" }).check("app_egress_rules_verdict_check").add({ expr: (col) => col("verdict").in(["accept", "reject"]) });
     table("app_egress_rules", { schema: "zeroship" }).check("app_egress_rules_kind_check").add({ expr: (col) => col("kind").in(["name", "cidr"]) });
     table("app_egress_rules", { schema: "zeroship" }).check("app_egress_rules_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });
+    table("app_egress_rules", { schema: "zeroship" })
+      .check("app_egress_rules_created_by_usr_shape")
+      .add({ expr: (col) => col("created_by").regex("^usr_[0-9a-z]{25}$") });
     table("app_egress_rules", { schema: "zeroship" }).index("app_egress_rules_app_id_idx").add({ on: ["app_id"] });
     table("app_egress_rules", { schema: "zeroship" }).foreignKey("app_egress_rules_app_id_fkey").add({ columns: ["app_id"], references: { table: "apps", columns: ["id"] }, onDelete: "cascade" });
     grant({ privileges: ["select", "insert", "update", "delete"], on: { kind: "table", schema: "zeroship", names: ["app_egress_rules"] }, to: ["zeroship_control"] });

@@ -306,12 +306,12 @@ test("ControlError ignores a non-string trace_id", async () => {
 const ORG = "org_0123456789abcdefghijkl";
 const PRJ = "prj_0123456789abcdefghijkl";
 const IVT = "ivt_0123456789abcdefghijkl";
-const USER = "11111111-2222-3333-4444-555555555555";
+const USER = "usr_0000000002e4nenowz3qmamtd";
 
 /**
  * The whole organization/project surface, stated as the request each method
  * makes. Method, path and body are the three things a mistake here sends
- * somewhere else, and every path segment carries a typed id or a UUID - the
+ * somewhere else, and every path segment carries a typed id - the
  * server parses those before authorization runs, so a slug sent here is a 400
  * rather than a silent denial.
  *

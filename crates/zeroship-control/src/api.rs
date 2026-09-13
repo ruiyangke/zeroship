@@ -65,8 +65,8 @@ pub struct SetPlanBody {
 /// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
 #[derive(Debug, Deserialize)]
 pub struct GrantCreditBody {
-    /// The creator (a `users.id` UUID — the `organization_billing` key).
-    pub organization_id: Uuid,
+    /// The organization billing subject.
+    pub organization_id: OrganizationId,
     /// Positive grant amount in cents.
     pub amount_cents: i64,
     /// Grant kind — one of `grant`/`promo`/`goodwill`. Defaults to `grant`.
@@ -1816,7 +1816,7 @@ pub async fn get_app_logs(
 /// Named rather than inlined so it can be bound by a test that needs no
 /// worker. The worker reads this path segment as a typed app id, so control
 /// renders it the same way the gateway renders `/dispatch`: the app id's own
-/// canonical `app_<base62>` form, never a uuid rendering.
+/// canonical `app_<base36>` form, never a uuid rendering.
 fn worker_logs_url(worker_url: &str, app_id: &AppId) -> String {
     format!(
         "{}/logs/{}",
@@ -2341,7 +2341,7 @@ mod worker_log_path_tests {
     /// only other one is the gateway's `/dispatch`, and the two have to agree,
     /// because the worker parses both segments with the same
     /// `zeroship_core::app_id::AppId::parse`, which accepts only the canonical
-    /// `app_<base62>` rendering.
+    /// `app_<base36>` rendering.
     ///
     /// The live-database harness that exercises this path end to end mounts a
     /// stub worker on `/logs/{app_id}`, which matches ANY segment, so it cannot

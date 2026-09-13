@@ -34,7 +34,7 @@ use zeroship_control::organizations::{
     TransferOwnershipBody, UpdateOrganizationBody, UpdateProjectBody,
 };
 use zeroship_control::Registry;
-use zeroship_core::UserId;
+use zeroship_core::{AppId, UserId};
 use zeroship_mailer::RecordingMailer;
 
 use crate::common;
@@ -2484,7 +2484,7 @@ async fn a_closed_organization_releases_its_slug() {
 /// token back out of the database for the same reason; this one reads the
 /// affected-row count.
 ///
-/// The app id is a fresh UUID, so the failure is the one being bound rather
+/// The app id is freshly minted, so the failure is the one being bound rather
 /// than a foreign key on some other column: no row is examined at all.
 ///
 /// No `drain_pg` teardown, and it cannot have one: the body is expected to
@@ -2500,5 +2500,5 @@ async fn seating_an_app_that_does_not_exist_refuses_instead_of_seating_nobody() 
     // shape that made it necessary: `Fx::new` returns the fixture, and a
     // database it cannot reach ends the run before any case is entered.
     let fx = Fx::new().await;
-    common::seat_app_organization_member(&fx.pg, &Uuid::new_v4(), &UserId::mint(), "owner").await;
+    common::seat_app_organization_member(&fx.pg, &AppId::mint(), &UserId::mint(), "owner").await;
 }

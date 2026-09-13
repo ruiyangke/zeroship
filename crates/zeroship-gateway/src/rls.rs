@@ -5,7 +5,7 @@
 //! `app_session_anchors`, `app_user_identities` — are `FORCE ROW LEVEL
 //! SECURITY` with a `tenant_isolation` policy keyed on a per-request GUC:
 //!
-//!   - `zeroship.tenant_app`    — the app's typed id (`app_<base62>`), for
+//!   - `zeroship.tenant_app`    — the app's typed id (`app_<base36>`), for
 //!     `app_id`-keyed tables (`gateway_sessions`, `app_session_anchors`; also
 //!     `app_secrets`, which the gateway never touches).
 //!   - `zeroship.tenant_client` — the per-app OAuth `oac_…` `client_id`, for the

@@ -31,8 +31,6 @@ use std::sync::Arc;
 
 use compio::io::{AsyncRead, AsyncWriteExt};
 use compio::net::{TcpListener, TcpStream};
-use uuid::Uuid;
-
 use zeroship_control::worker_health::{self, HealthView, Liveness};
 
 use crate::common;

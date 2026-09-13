@@ -805,8 +805,8 @@ pub fn has_app(app_id: &AppId) -> bool {
 ///
 /// Used by the mandatory workflow handler tests.
 #[cfg(test)]
-pub fn has_pinned_workflow_app(app_id: &Uuid, deploy_hash: &str) -> bool {
-    let key = PinnedWorkflowKey::new(*app_id, deploy_hash);
+pub fn has_pinned_workflow_app(app_id: &AppId, deploy_hash: &str) -> bool {
+    let key = PinnedWorkflowKey::new(app_id.clone(), deploy_hash);
     CACHE.with(|c| {
         let cache = c.borrow();
         cache
@@ -892,11 +892,7 @@ fn evict_lru(cache: &mut AppCache) -> bool {
         tracing::info!(app_id = oldest_id.as_str(), "worker: evicting LRU isolate");
         crate::metrics::inc(&crate::metrics::LRU_EVICTIONS_TOTAL);
 
-        // Fire every in-flight `AbortController` for this app BEFORE removing
-        // the isolate. `rpc::abort::entered_for_eviction` still takes a raw
-        // `uuid::Uuid`, and `AppId` carries no route to its bits, so that fan-out
-        // cannot be reached from here until that boundary accepts `AppId`; the
-        // native-socket close below is unaffected and still runs.
+        // Fire every in-flight `AbortController` before removing the isolate.
         if let Some(entry) = cache.isolates.get(&oldest_id) {
             let active_sockets = entry.runtime.active_native_socket_count();
             if active_sockets > 0 {
@@ -908,6 +904,9 @@ fn evict_lru(cache: &mut AppCache) -> bool {
                     "worker: closing native sockets before isolate eviction"
                 );
             }
+            entry.runtime.with_scope(|scope| {
+                zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_id);
+            });
         }
 
         cache.isolates.remove(&oldest_id);
@@ -965,8 +964,9 @@ fn evict_pinned_lru_for_app(cache: &mut AppCache, app_id: &AppId) -> bool {
                 "worker: closing native sockets before pinned workflow isolate eviction"
             );
         }
-        // Same boundary gap as `evict_lru`: `entered_for_eviction` cannot be
-        // reached with an `AppId` yet.
+        entry.runtime.with_scope(|scope| {
+            zeroship_runtime::rpc::entered_for_eviction(scope, &oldest_key.app_id);
+        });
     }
 
     cache.workflow_isolates.remove(&oldest_key);
