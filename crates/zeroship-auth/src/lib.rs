@@ -31,10 +31,6 @@ pub mod store;
 pub mod ui;
 
 #[cfg(test)]
-#[path = "../../../tests/fixtures/platform_db/mod.rs"]
-mod platform_fixture;
-
-#[cfg(test)]
 #[path = "../tests/common/database.rs"]
 #[allow(
     dead_code,

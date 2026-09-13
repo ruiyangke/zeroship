@@ -22,6 +22,7 @@ mod cli_device_refresh_test;
 mod config_env_tier;
 mod device_grant_test;
 mod federation;
+mod gotrue;
 mod logout;
 mod email_verification;
 mod magic_login;
