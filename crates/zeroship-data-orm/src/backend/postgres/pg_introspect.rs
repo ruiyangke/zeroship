@@ -53,18 +53,13 @@ fn coded_sql(context: &str, e: compio_postgres::Error) -> SchemaError {
     SchemaError::new(context, e)
 }
 
-/// Introspect the live schema for the given app + collection. Returns an
-/// empty [`LiveSchema`] if the schema itself does not exist yet (first deploy).
-///
-/// We restrict the catalog scan to the app's namespace (`nspname = <app_id>`)
-/// to avoid leaking cross-tenant metadata. The query joins
-/// `pg_namespace -> pg_class -> pg_attribute / pg_index` and pulls
-/// `pg_get_expr(adbin, adrelid)` for default expressions along with
-/// `provolatile` for any function the default invokes.
-pub(crate) async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSchema, SchemaError> {
+/// Read catalog metadata for the bound physical schema on the supplied connection.
+pub(crate) async fn read_live_schema(
+    client: &compio_postgres::Client,
+    schema: &str,
+) -> Result<LiveSchema, SchemaError> {
     let mut out = LiveSchema::default();
-    let app_param = app_id.to_string();
-    let params: Vec<&str> = vec![app_param.as_str()];
+    let params = [schema];
 
     // ----- columns -----
     //
@@ -96,7 +91,7 @@ SELECT c.relname AS table_name,
    AND NOT a.attisdropped
  ORDER BY c.relname, a.attnum
 "#;
-    let rows = pool
+    let rows = client
         .query_text_params(col_sql, &params)
         .await
         .map_err(|e| coded_sql("read columns failed", e))?;
@@ -203,7 +198,7 @@ SELECT con.conname AS constraint_name,
   JOIN pg_namespace n ON n.oid = cl.relnamespace
  WHERE n.nspname = $1 AND con.contype = 'f'
 "#;
-    let rows = pool
+    let rows = client
         .query_text_params(fk_sql, &params)
         .await
         .map_err(|e| coded_sql("read foreign_keys failed", e))?;
@@ -252,7 +247,7 @@ SELECT c.relname AS table_name,
  WHERE n.nspname = $1
    AND NOT i.indisprimary
 "#;
-    let rows = pool
+    let rows = client
         .query_text_params(idx_sql, &params)
         .await
         .map_err(|e| coded_sql("read indexes failed", e))?;

@@ -1004,7 +1004,11 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
             .await
             .expect("CREATE garbled");
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect garbled");
             let parent = live

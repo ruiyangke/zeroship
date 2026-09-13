@@ -135,8 +135,15 @@ impl ScopedExecutor for RecordingBackend {
 }
 #[async_trait(?Send)]
 impl Catalog for RecordingBackend {
-    async fn introspect_schema(&self, app_id: &str) -> Result<LiveSchema, DbError> {
-        self.0.introspect_schema(app_id).await
+    async fn introspect_schema(
+        &self,
+        app_id: &str,
+        schema: &SchemaName,
+        session: Option<&Session>,
+    ) -> Result<LiveSchema, DbError> {
+        self.0
+            .introspect_schema(app_id, schema, unwrap_session(session))
+            .await
     }
 }
 impl Protection for RecordingBackend {
