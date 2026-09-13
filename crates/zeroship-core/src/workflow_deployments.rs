@@ -3,7 +3,9 @@
 //! Journal holders survive worker replacement. A journal holder does not confer
 //! authority on a manager queue; the host authenticates each retention caller.
 
-use crate::{app_id::AppId, typed_id, workflow_coordination::Revision};
+use crate::{
+    app_id::AppId, typed_id, workflow_coordination::Revision, workflow_jobs::DeploymentId,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -14,7 +16,7 @@ pub enum Error {
     GenerationExhausted,
 }
 
-/// Stable host authority for a customer's journal, independent of worker instances.
+/// Stable host retention identity, independent of process instances.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HoldScope {
     app: AppId,
@@ -28,6 +30,14 @@ impl HoldScope {
         Self { app, holder }
     }
 
+    /// Stable queue identity for the app's authoritative manager namespace.
+    /// Queue and journal generations cannot release each other's retention.
+    #[must_use]
+    pub fn for_queue(app: AppId) -> Self {
+        let holder = format!("dqh_{}", app.as_str().trim_start_matches("app_"));
+        Self { app, holder }
+    }
+
     #[must_use]
     pub fn app(&self) -> &AppId {
         &self.app
@@ -38,9 +48,11 @@ impl HoldScope {
         &self.holder
     }
 
-    /// The host obtains these identities from its authenticated app assignment.
+    /// The trusted host obtains the holder class from authenticated authority.
     pub fn new(app: AppId, holder: String) -> Result<Self, Error> {
-        typed_id::parse_with_prefix(&holder, "dhl").map_err(|_| Error::InvalidHolder)?;
+        typed_id::parse_with_prefix(&holder, "dhl")
+            .or_else(|_| typed_id::parse_with_prefix(&holder, "dqh"))
+            .map_err(|_| Error::InvalidHolder)?;
         Ok(Self { app, holder })
     }
 }
@@ -114,6 +126,16 @@ pub struct HoldRequest {
     pub generation: HoldGeneration,
 }
 
+/// Metadata selected by the trusted workflow manager. Control derives the queue
+/// holder from the verified service role, never from request fields.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct QueueHoldRequest {
+    pub app_id: AppId,
+    pub deploy_id: DeploymentId,
+    pub generation: HoldGeneration,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +154,73 @@ mod tests {
             HoldScope::new(AppId::mint(), typed_id::generate("wrk")),
             Err(Error::InvalidHolder)
         );
+    }
+
+    #[test]
+    fn queue_scope_is_stable_and_distinct_from_journal_scope() {
+        let app = AppId::mint();
+        let queue = HoldScope::for_queue(app.clone());
+        let journal = HoldScope::for_app(app.clone());
+        assert_eq!(queue, HoldScope::for_queue(app.clone()));
+        assert_ne!(queue, journal);
+        assert_ne!(queue, HoldScope::for_queue(AppId::mint()));
+        assert_eq!(queue.app(), &app);
+        typed_id::parse_with_prefix(queue.holder(), "dqh").unwrap();
+        assert_eq!(
+            HoldScope::new(app, queue.holder().to_owned()).unwrap(),
+            queue
+        );
+    }
+
+    #[test]
+    fn queue_hold_request_preserves_typed_scope_and_rejects_body_authority() {
+        let request = QueueHoldRequest {
+            app_id: AppId::mint(),
+            deploy_id: DeploymentId::mint(),
+            generation: HoldGeneration::try_from(1).unwrap(),
+        };
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<QueueHoldRequest>(encoded.clone()).unwrap(),
+            request
+        );
+        for field in [
+            "holderId",
+            "assignmentRevision",
+            "workerId",
+            "input",
+            "credentials",
+        ] {
+            let mut invalid = encoded.clone();
+            invalid[field] = serde_json::json!({"forged":true});
+            assert!(
+                serde_json::from_value::<QueueHoldRequest>(invalid).is_err(),
+                "{field}"
+            );
+        }
+        for (field, value) in [
+            ("appId", serde_json::json!(DeploymentId::mint())),
+            ("deployId", serde_json::json!(AppId::mint())),
+            ("deployId", serde_json::json!("dep_invalid")),
+            ("generation", serde_json::json!(0)),
+            ("generation", serde_json::json!(-1)),
+            ("generation", serde_json::json!(1.5)),
+        ] {
+            let mut invalid = encoded.clone();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<QueueHoldRequest>(invalid).is_err(),
+                "{field}"
+            );
+        }
+        for field in ["appId", "deployId", "generation"] {
+            let mut invalid = encoded.clone();
+            invalid.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<QueueHoldRequest>(invalid).is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

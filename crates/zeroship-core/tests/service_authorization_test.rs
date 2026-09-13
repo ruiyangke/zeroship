@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use zeroship_core::service_assertion::ROLE_PATH_SEGMENTS;
 use zeroship_core::service_identity::{
-    authorize, endpoints, service_allowlist, MechanismTag, ServiceEndpoint, ServiceIdentity,
-    ServiceName, ServicePrincipal, TrustDomain,
+    MechanismTag, ServiceEndpoint, ServiceIdentity, ServiceName, ServicePrincipal, TrustDomain,
+    authorize, endpoints, service_allowlist,
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
@@ -15,6 +15,8 @@ const CATALOG: &[ServiceEndpoint] = &[
     endpoints::CONTROL_VERSIONS,
     endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
     endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
+    endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
+    endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
     endpoints::WORKFLOW_WORKERS,
     endpoints::WORKFLOW_ASSIGN,
     endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
@@ -46,12 +48,13 @@ const CATALOG: &[ServiceEndpoint] = &[
 ];
 
 /// The principals the table grants to, which must each own exactly one row.
-const PRINCIPALS: [&str; 5] = [
+const PRINCIPALS: [&str; 6] = [
     "svc/control",
     "svc/auth",
     "svc/migrate-server",
     "svc/gateway",
     "svc/worker",
+    "svc/workflow",
 ];
 
 fn identity(trust_domain: &str, name: &str) -> ServiceIdentity {
@@ -110,6 +113,18 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "control",
             "POST",
             "/v1/deployment-holds/release",
+        ),
+        (
+            endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
+            "control",
+            "POST",
+            "/v1/deployment-holds/queue/acquire",
+        ),
+        (
+            endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+            "control",
+            "POST",
+            "/v1/deployment-holds/queue/release",
         ),
         (
             endpoints::WORKFLOW_WORKERS,
@@ -306,7 +321,7 @@ fn endpoint_catalog_records_exact_measured_operations() {
 fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     let all = CATALOG;
 
-    assert_eq!(service_allowlist().len(), 5);
+    assert_eq!(service_allowlist().len(), PRINCIPALS.len());
     assert_allowlist_row(
         "svc/control",
         &[
@@ -330,6 +345,14 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
         all,
     );
     assert_allowlist_row("svc/migrate-server", &[], all);
+    assert_allowlist_row(
+        "svc/workflow",
+        &[
+            endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_ACQUIRE,
+            endpoints::CONTROL_QUEUE_DEPLOYMENT_HOLD_RELEASE,
+        ],
+        all,
+    );
     assert_allowlist_row(
         "svc/gateway",
         &[
