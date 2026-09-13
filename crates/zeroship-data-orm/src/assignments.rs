@@ -63,10 +63,9 @@ impl AssignmentPlan {
                 } else {
                     return None;
                 };
-                let physical = schema[&column.name]
-                    .storage
-                    .value_column
-                    .as_deref()
+                let physical = schema
+                    .get(&column.name)
+                    .and_then(|definition| definition.storage.value_column.as_deref())
                     .unwrap_or(&column.name);
                 Some(ColumnAssignment {
                     column: physical.into(),
@@ -104,6 +103,28 @@ mod tests {
     use super::*;
     use crate::schema::{Assignment, CollectionSchema, ColumnSchema, LogicalType};
     use crate::sql::lifecycle::AssignedValue;
+
+    #[test]
+    fn a_missing_assignment_field_keeps_the_logical_column_fallback() {
+        let mut revision = ColumnSchema::new(LogicalType::Integer);
+        revision.assignment = Some(Assignment {
+            by: AssignmentGenerator::Increment(2),
+            on: AssignmentEvent::Write,
+        });
+        revision.storage.value_column = Some("stored_revision".into());
+        let original = CollectionSchema::new([("revision".into(), revision)]).into_fields();
+        let plan = AssignmentPlan::from_schema(&original);
+        let mapped = plan.write_assignments(&original, None, false, false);
+        assert_eq!(mapped.columns[0].column, "stored_revision");
+
+        let assignments = plan.write_assignments(&FieldMap::new(), None, false, false);
+        assert_eq!(assignments.columns.len(), 1);
+        assert_eq!(assignments.columns[0].column, "revision");
+        assert!(matches!(
+            assignments.columns[0].value,
+            AssignedValue::Increment(2)
+        ));
+    }
 
     #[test]
     fn native_and_decoded_assignments_keep_generators_and_physical_columns() {
