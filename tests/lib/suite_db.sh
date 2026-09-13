@@ -5,17 +5,10 @@
 #
 # THE LOGIC IS NOW IN RUST: xtask/src/platform_db/suite_db.rs (the
 # decisions), src/admin.rs (the server), src/fingerprint.rs (the name), reached
-# through `zs-testkit suite-db`. This file is the shell BINDING - it keeps the
-# function names and the exported-variable contract tests/run_auth_suite.sh and
-# tests/run_billing_suite.sh already source, so neither of them changed. Those
-# modules carry the design notes: why the name is a hash of the migration set,
-# what a shared database does and does not isolate, and the measurements behind
-# the provisioning lock. What follows is only what a SHELL caller needs.
-#
-# NOT tests/lib/scratch_db.sh. That file serves the e2e stack scripts, which
-# stand up a whole platform and want a virgin database that dies with the run.
-# This file serves the suite gates, which run thousands of tests that already
-# scope their own fixtures and want a database that OUTLIVES the run.
+# through `zs-testkit suite-db`. This file provides the function names and
+# exported variables consumed by the remaining worker and billing runners.
+# The Rust modules describe schema fingerprints and the provisioning lock.
+# Shared schema selection does not establish fixture isolation.
 #
 # NOTHING IS EVER DROPPED HERE, AND `WITH (FORCE)` APPEARS NOWHERE. A failed
 # suite's database is the primary debugging artifact, and a shared database is
@@ -36,7 +29,7 @@
 #
 # THERE IS NO `run_psql` SEAM ANY MORE. It existed because shell has no
 # database client; the Rust side connects with compio-postgres. A caller that
-# still defines `run_psql` for its own probes (run_auth_suite.sh does) is
+# still defines `run_psql` for its own probes is
 # unaffected - nothing here consults it.
 #
 # tests/lib_suite_db_selftest.sh covers this file. The cases that scripted a

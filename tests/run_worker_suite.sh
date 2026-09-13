@@ -20,7 +20,7 @@
 #
 # THE DATABASE is `zeroship_worker_test_<hash of db/migrations-ts/*.ts>`,
 # created if absent, migrated, and never dropped - the same shape
-# tests/run_auth_suite.sh uses, and for the same reasons (two agents on one
+# tests/lib/suite_db.sh provides, and for the same reasons (two agents on one
 # commit share it; a branch that edits a migration gets its own automatically;
 # a database no branch can name is provably reclaimable). See tests/lib/
 # suite_db.sh.
@@ -252,21 +252,9 @@ fi
 # Workspace-wide, a test that cannot reach its backend now FAILS rather than
 # announcing, so there is no marker to count in this log.
 #
-# The blunt instrument below is unaffected, and it is what the named count could
-# never see anyway: the
-# other 108 tests quietly disappearing.
-#
-# MEASURED 2026-08-29 against a migrated PostgreSQL 18: 116 passed
-# (35 lib + 81 bin + 0 doctests), 0 failed. The floor carries ~9 percent
-# headroom, the same margin tests/run_auth_suite.sh and the CI test-target
-# floor use. Raise it as the crate grows; a fixed floor gets looser with every
-# test added, which is the wrong direction for a guard against coverage loss.
-#
-# IT DOES NOT COVER EITHER NAMED LIVE SET AND MUST NOT BE READ AS DOING SO.
-# Misspelling the feature in the `#[cfg]` would report 108 passed - ABOVE this
-# floor - while the two named arms report 0 of 7 and 0 of 1. The three arms are
-# complementary, not redundant. A named set that loses one pass is a change no
-# percentage floor can distinguish from a Tuesday.
+# The aggregate floor detects missing ordinary test groups. Named workflow and
+# boot-posture groups retain their own floors because an aggregate can remain
+# above its threshold when a required group disappears.
 WORKER_MIN_PASSED=106
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$LOG" | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 if [ "$passed" -lt "$WORKER_MIN_PASSED" ]; then
