@@ -18,6 +18,27 @@ composition remain incomplete. The creator calendar loop has been removed,
 so the current CLI task loop does not generate scheduled jobs. The provisioning instructions
 below still apply today.
 
+## Workflow class exports
+
+The retained app entry names workflows through its named class exports or an
+explicit `default.workflows` dictionary. The export key is the workflow name;
+the constructor's JavaScript `name` property has no routing meaning. Synthetic
+entries can preserve named exports with `export *` from the creator entry.
+
+`step.call(Child, input)` and `step.startMany(Child, items)` resolve the actual
+constructor against these bindings before producing a child frontier. Frozen
+classes and minified identifiers work without renaming the constructor. An
+unexported constructor cannot select another workflow by copying its name.
+Each constructor must have an unambiguous export name, and each name must select
+the same constructor wherever it is declared. Repeating the same binding in
+named exports and `default.workflows` is allowed. Conflicting bindings fail the
+dispatch. Inherited dictionary properties and a bare default constructor do not
+declare workflows, and a missing name never falls back to another class.
+
+Development workflow execution uses the retained normal app bundle. Live
+HTTP/RPC development snapshots do not supply workflow lookup, so reloading the
+page handler does not replace the code selected by an existing workflow run.
+
 ## Rust integration
 
 `zeroship-workflow` owns the journal engine, claim/apply protocol, scoped HTTP

@@ -742,13 +742,15 @@ class ZsJournalBackedStep {
     #phase = "running";
     #trigger = {};
     #compensatorRegistry = new Map();
+    #workflowNames;
 
-    constructor(steps, quiescence, runId = "", outputRead = undefined, phase = "running", trigger = {}) {
+    constructor(steps, quiescence, runId = "", outputRead = undefined, phase = "running", trigger = {}, workflowNames = new Map()) {
         this.#quiescence = quiescence;
         this.#runId = runId;
         this.#outputRead = outputRead;
         this.#phase = phase;
         this.#trigger = trigger;
+        this.#workflowNames = workflowNames;
         for (const row of steps) this.#stepsByOrdinal.set(row.ordinal, row);
     }
 
@@ -874,7 +876,10 @@ class ZsJournalBackedStep {
 
     call(WorkflowClass, input, options) {
         this.#assertNotNested();
-        const name = WorkflowClass.name ?? "Workflow";
+        const name = this.#workflowNames.get(WorkflowClass);
+        if (name === undefined) {
+            throw wfErr("child workflow must be an exported workflow constructor", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
         const issued = this.#issue(name, "child");
         if (issued.record) return this.#recordPromise(issued.record);
         return this.#suspendFrontier({
@@ -1296,27 +1301,41 @@ function wfSuppressUnhandledRejection(promise) {
     promise.catch(() => {});
 }
 
-async function resolveWorkflow(userNamespace, workflowName) {
+function workflowClasses(userNamespace) {
     const mod = userNamespace ?? {};
     const def = mod.default && typeof mod.default === "object" ? mod.default : {};
-    // Dev: the module the runtime imports is the Vite plugin's dev-bootstrap,
-    // not the creator's file, and the creator's module is fetched over HTTP
-    // through Vite's ModuleRunner. Dev therefore cannot present a static
-    // workflow dict the way a bundled .zship can, and exposes an async
-    // resolver instead. Without this branch `pnpm dev` starts a run and then
-    // fails every dispatch with WORKFLOW_NOT_FOUND -- which is how it behaved
-    // (docs/pilot/e2e-scenarios.md, scenario 11 workflows leg).
-    if (typeof def.loadWorkflow === "function") {
-        const lazy = await def.loadWorkflow(workflowName);
-        if (typeof lazy === "function") return lazy;
+    const classes = new Map();
+    const names = new Map();
+    const isWorkflow = (value) => typeof value === "function"
+        && value.prototype != null && typeof value.prototype.run === "function";
+    const add = (name, constructor) => {
+        if (!name || !isWorkflow(constructor)) {
+            throw wfErr("workflow export must name a constructor with run(trigger, step)", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        if ((classes.has(name) && classes.get(name) !== constructor)
+            || (names.has(constructor) && names.get(constructor) !== name)) {
+            throw wfErr("workflow export bindings must be unambiguous", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        classes.set(name, constructor);
+        names.set(constructor, name);
+    };
+    // Bind constructor identity before invoking app code. Minification, frozen
+    // classes and later changes to Function.name cannot change child targets.
+    for (const name of Object.keys(mod)) {
+        if (name !== "default" && isWorkflow(mod[name])) add(name, mod[name]);
     }
-    const candidates = [
-        mod[workflowName],
-        def.workflows && typeof def.workflows === "object" ? def.workflows[workflowName] : undefined,
-        def[workflowName],
-        typeof mod.default === "function" ? mod.default : undefined,
-    ];
-    const found = candidates.find((candidate) => typeof candidate === "function");
+    const declared = def.workflows;
+    if (declared != null) {
+        if (typeof declared !== "object" || Array.isArray(declared)) {
+            throw wfErr("default.workflows must be a workflow dictionary", 500, "WORKFLOW_DEFINITION_ERROR");
+        }
+        for (const name of Object.keys(declared)) add(name, declared[name]);
+    }
+    return { classes, names };
+}
+
+function resolveWorkflow(registry, workflowName) {
+    const found = registry.classes.get(workflowName);
     if (!found) throw wfErr("Workflow not found: " + workflowName, 404, "WORKFLOW_NOT_FOUND");
     return found;
 }
@@ -1399,7 +1418,8 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
     const ContinueAsNewSignal = ZsWorkflowContinueAsNewSignal;
     const SuspendSignal = ZsWorkflowSuspendSignal;
     try {
-        const WorkflowClass = await resolveWorkflow(userNamespace, workflowName);
+        const registry = workflowClasses(userNamespace);
+        const WorkflowClass = resolveWorkflow(registry, workflowName);
         const workflow = new WorkflowClass();
         if (typeof workflow.run !== "function") {
             throw wfErr(`Workflow ${workflowName} has no run(trigger, step) method`, 500, "WORKFLOW_DEFINITION_ERROR");
@@ -1413,6 +1433,7 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
             wfOutputReader(envelope),
             String(envelope.phase ?? "running"),
             trigger,
+            registry.names,
         );
         if (envelope.phase === "compensating") {
             try {
