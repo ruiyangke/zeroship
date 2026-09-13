@@ -20,6 +20,68 @@ struct NewReading<'a> {
     nickname: Option<&'a str>,
 }
 
+#[compio::test]
+async fn typed_reads_keep_execution_state_off_the_callers_stack() {
+    const CALLER_FUTURE_BUDGET: usize = 2048;
+    let owner = CollectionFixture::sqlite("readings", readings::Entity::schema().clone()).await;
+    let db = &owner.database;
+    let entity = db.entity::<readings::Entity>().unwrap();
+    let _: Reading = entity
+        .insert(NewReading {
+            title: "measured",
+            counter: 1,
+            score: None,
+            nickname: None,
+        })
+        .await
+        .unwrap();
+    let alias = entity.alias("r").unwrap();
+    let find = entity.find::<Reading>(Filter::all(), FindOptions::default());
+    let all = entity.query().all::<Reading>();
+    let first = entity.query().first::<Reading>();
+    let count = entity.count(Filter::all());
+    let projected = db
+        .from(&alias)
+        .select(alias.row::<Reading>())
+        .unwrap()
+        .all();
+    let dynamic = entity.collection.find(value!({}), value!({}));
+    let caller = async {
+        let found = entity
+            .find::<Reading>(Filter::all(), FindOptions::default())
+            .await?;
+        let queried = entity.query().all::<Reading>().await?;
+        Ok::<_, DbError>((found, queried))
+    };
+    let sizes = [
+        ("find", std::mem::size_of_val(&find)),
+        ("query.all", std::mem::size_of_val(&all)),
+        ("query.first", std::mem::size_of_val(&first)),
+        ("count", std::mem::size_of_val(&count)),
+        ("projection.all", std::mem::size_of_val(&projected)),
+        ("caller", std::mem::size_of_val(&caller)),
+    ];
+    eprintln!(
+        "typed read future sizes: {sizes:?}; dynamic baseline: {}",
+        std::mem::size_of_val(&dynamic)
+    );
+    assert_eq!(find.await.unwrap().len(), 1);
+    assert_eq!(all.await.unwrap().len(), 1);
+    assert_eq!(first.await.unwrap().unwrap().title, "measured");
+    assert_eq!(count.await.unwrap(), 1);
+    assert_eq!(projected.await.unwrap().len(), 1);
+    assert!(matches!(dynamic.await.unwrap(), Output::Rows {rows, ..} if rows.len() == 1));
+    let (found, queried) = caller.await.unwrap();
+    assert_eq!((found.len(), queried.len()), (1, 1));
+    owner.close().await;
+    for (operation, size) in sizes {
+        assert!(
+            size <= CALLER_FUTURE_BUDGET,
+            "{operation} future exceeds the caller stack budget: {size}"
+        );
+    }
+}
+
 async fn exercise(db: &Database) {
     let readings = db.entity::<readings::Entity>().unwrap();
     for (title, counter, score, nickname) in [

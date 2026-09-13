@@ -6,8 +6,6 @@ const todo = (overrides: Partial<Todo> = {}): Todo => ({
   id: "todo_1",
   created_at: Date.now(),
   updated_at: Date.now(),
-  created_by: null,
-  updated_by: null,
   version: 1,
   userId: "usr_public",
   title: "Write component tests",
@@ -15,7 +13,6 @@ const todo = (overrides: Partial<Todo> = {}): Todo => ({
   tags: [],
   done: false,
   archived: false,
-  deleted_at: null,
   ...overrides,
 });
 

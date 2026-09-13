@@ -43,7 +43,7 @@ describe("Infer helpers", () => {
         email: t.string().required(),
       }),
       todos: schema({
-        id: t.number().required().primaryKey(),
+        id: t.bigInt().required().primaryKey(),
         userId: t.ref("users").required(),
       }),
       workspaces: schema({

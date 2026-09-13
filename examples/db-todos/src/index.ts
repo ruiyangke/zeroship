@@ -6,7 +6,7 @@
 //   • multi-collection DB model with typed wrappers on env.db
 //   • t.ref("users")  — typed cross-table relations + native FK
 //   • .unique() / .index() — materialised as real backend indexes
-//   • Validation: required / min / max / enum / pattern (existing SDK)
+//   • Input validation at the RPC boundary
 //   • query() / mutation() / action() wrappers (B3) — capability-scoped:
 //       - query   reads only
 //       - mutation read+write
@@ -16,23 +16,18 @@
 //   exports become RPC procedures at /__zeroship/v1/<id>.
 
 import { env } from "zeroship";
-import type { Db, TransactionOptions } from "@zeroship/db";
+import type { TransactionOptions } from "@zeroship/db";
 import { query, mutation, action, stream } from "@zeroship/rpc/server";
 import { runQuery } from "@zeroship/server";
 import {
-  dbSchema,
-  type Priority,
+  parseCreateTodoInput,
+  parseSeedUserInput,
+  type CreateTodoInput,
   type SeedUserInput,
-  type Todo,
   type TodoSnapshot,
-  type User,
 } from "./schema";
 
-export default { schema: dbSchema };
-
-// Local `db` shorthand for this legacy inline-schema example. New apps get
-// this module augmentation from generated/zeroship/env.db.ts.
-const db = env.db as Db<typeof dbSchema>;
+const db = env.db;
 
 // Brand types flow from t.ref(): a todo's `userId` is `Id<"users">`.
 // Passing a todo id where a user id is expected is a compile-time error.
@@ -189,14 +184,9 @@ export const subscribeTodos = stream(
 // Mutations — read+write RPC procedures.
 // ---------------------------------------------------------------------------
 
-type CreateTodoInput = {
-  userId: string;
-  title: string;
-  priority?: Priority;
-};
-
 export const createTodo = mutation(
-  async (args: CreateTodoInput) => {
+  async (input: CreateTodoInput) => {
+    const args = parseCreateTodoInput(input);
     const { data, error } = await db.todos.insert({
       userId:   userIdFromWire(args.userId),
       title:    args.title,
@@ -310,12 +300,8 @@ export const shareToWebhook = action(
 //   - A `transaction()` opened while one is already active for this app emits
 //     `SAVEPOINT zs_sp_<N>` on the SAME connection, so an inner failure rolls
 //     back only to that savepoint (cap: MAX_SAVEPOINT_DEPTH = 8).
-//   - `{ isolationLevel }` is honoured on the outermost BEGIN only. Postgres
-//     emits `BEGIN ISOLATION LEVEL ...`; SQLite validates the string and then
-//     runs a plain `BEGIN` (transaction/mod.rs:384-391). That divergence is
-//     documented in docs/reference/sqlite-divergences.md and had never been
-//     measured; `txIsolation` below is the probe that measures whether it is
-//     observable through this surface at all.
+//   - Isolation is selected on the outermost transaction. SQLite accepts the
+//     default or serializable; other levels are rejected before the callback.
 //
 // Every procedure returns counts read AFTER the transaction settles, through
 // the ordinary (non-tx) path, so the harness can tell "the callback said it
@@ -456,30 +442,7 @@ export const txIsolation = mutation(
           const r = await tx.todos.insert({ userId: uid, title });
           return { title: r.title };
         },
-        // The cast is NOT only there for `txIsoBad`. THREE spellings-of-record
-        // exist for this option and no two agree (measured 2026-08-10):
-        //
-        //   the TypeScript union   sdks/types/shared.d.ts:18-22 allows ONLY the
-        //                          SQL-spaced forms: "read uncommitted" |
-        //                          "read committed" | "repeatable read" |
-        //                          "serializable".
-        //   the reference doc      docs/reference/db.md:893-894 tells creators
-        //                          to write "readCommitted" (default),
-        //                          "repeatableRead" or "serializable".
-        //   the runtime            normalize_isolation_level
-        //                          (crates/zeroship-data-v8/src/v8_classes/db.rs:295)
-        //                          accepts camelCase, spaced and uppercase, all
-        //                          four levels -- and its rejection message
-        //                          recommends the camelCase spellings.
-        //
-        // So the two spellings the reference doc recommends do not compile.
-        // Verified with `tsc --noEmit` on this project: `{ isolationLevel:
-        // "repeatableRead" }` gives `TS2820: Type '"repeatableRead"' is not
-        // assignable to type 'ZeroshipIsolationLevel | undefined'. Did you mean
-        // '"repeatable read"'?`, and the same for "readCommitted", while
-        // "repeatable read" and "serializable" compile clean. They WORK at
-        // runtime: this probe sends "repeatableRead" and Postgres was observed
-        // emitting `BEGIN ISOLATION LEVEL REPEATABLE READ` for it.
+        // The probe also sends invalid input to exercise runtime rejection.
         level === null
           ? undefined
           : { isolationLevel: level as TransactionOptions["isolationLevel"] },
@@ -841,7 +804,8 @@ export const txRaceStep = mutation(
 );
 
 export const seedUser = mutation(
-  async ({ email, name, handle }: SeedUserInput) => {
+  async (input: SeedUserInput) => {
+    const { email, name, handle } = parseSeedUserInput(input);
     const { data, error } = await db.users.insert({ email, name, handle });
     if (error) throw error;
     return data;
