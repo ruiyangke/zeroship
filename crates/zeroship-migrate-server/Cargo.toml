@@ -80,8 +80,7 @@ zeroship-runtime = { workspace = true }
 v8 = { workspace = true }
 
 # Database verification is mandatory in ordinary cargo test runs.
-# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
-# migrated platform database required by these tests.
+# tests/run_billing_suite.sh provisions the migrated platform database.
 
 [[test]]
 name = "apply_api_test"

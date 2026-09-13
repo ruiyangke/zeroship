@@ -156,8 +156,7 @@ tempfile = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # Database verification is mandatory in ordinary cargo test runs.
-# tests/run_billing_suite.sh and tests/run_worker_suite.sh provision the
-# migrated platform database required by these tests.
+# tests/run_billing_suite.sh provisions the migrated platform database.
 
 # Integration modules share executables to avoid repeatedly linking the service.
 # Workflow targets own their migrated template and disposable databases.

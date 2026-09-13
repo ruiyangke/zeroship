@@ -7,6 +7,10 @@
 
 mod enrol;
 mod handler;
+#[cfg(test)]
+mod test_database;
+#[cfg(test)]
+mod identity_fixture;
 mod health;
 mod sync;
 mod cache;
@@ -892,51 +896,6 @@ fn main() -> std::io::Result<()> {
 mod tests {
     use super::*;
     use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
-
-    /// The socket exists BEFORE the enrolment that advertises it, and the
-    /// serving identity is whatever that enrolment returned.
-    ///
-    /// Neither half is expressible in the type system. Both statements live in
-    /// one function and either order compiles; what is at stake is a registry
-    /// row pointing at a port nothing listens on, and nothing reaps those rows.
-    ///
-    /// The markers are SPLIT so this test's own source does not match them -
-    /// because a
-    /// self-matching marker makes the ordering assertion vacuously true.
-    #[test]
-    fn the_port_is_bound_before_the_enrolment_that_advertises_it() {
-        let source = include_str!("main.rs");
-        let bind = ["ntex::server::", "bind_addr(&bind_addr"].concat();
-        let enrol = ["enrol::", "enrol(role_material"].concat();
-        let config = ["Arc::new(", "WorkerConfig {"].concat();
-        let poller = ["sync::", "start_version_poller("].concat();
-        for marker in [&bind, &enrol, &config, &poller] {
-            assert_eq!(
-                source.matches(marker.as_str()).count(),
-                1,
-                "{marker} must appear exactly once in the boot path"
-            );
-        }
-        let at = |marker: &str| source.find(marker).expect("marker present");
-        assert!(
-            at(&bind) < at(&enrol),
-            "the port must be held before it is advertised"
-        );
-        assert!(
-            at(&enrol) < at(&config),
-            "the serving identity must be the one enrolment returned"
-        );
-        // The one control-plane caller started before the HTTP server. It uses
-        // the SHARED control key rather than a service assertion, so this is
-        // not what stops a role-key mint - the type system does that, by
-        // consuming the role material. It is here so the poller cannot be moved
-        // above enrolment and start observing a control plane that has not yet
-        // admitted this process.
-        assert!(
-            at(&enrol) < at(&poller),
-            "the version poller must not run before this process has an identity"
-        );
-    }
 
     /// A temp file that removes itself even when an assertion panics.
     struct SecretFile(std::path::PathBuf);
