@@ -93,11 +93,8 @@ async fn resolve_floor(
     if let Some(hit) = crate::orm_context::current().floors(|f| f.get(&key).cloned()) {
         return Ok(hit);
     }
-    // Boxed: an inline `LiveSchema` future makes the whole write path's future
-    // ~16 KB, and it is constructed on EVERY write while the await it guards
-    // runs at most once per binding. The allocation is on the cold arm; the
-    // stack saving is on the hot one.
-    let live = Box::pin(route.backend().introspect_schema(binding.app_id())).await?;
+    // Keep catalog work out of the hot write future's stack allocation.
+    let live = Box::pin(crate::exec::read_catalog(route)).await?;
     let floor = Rc::new(floor_from_live(&live));
     crate::orm_context::current().floors_mut(|f| f.insert(key, Rc::clone(&floor)));
     Ok(floor)

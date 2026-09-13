@@ -9,14 +9,25 @@ impl crate::protection::Catalog for SqliteBackend {
     async fn introspect_schema(
         &self,
         app_id: &str,
+        _schema: &crate::sql::SchemaName,
+        transaction: Option<&crate::driver::Session>,
     ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
-        self.attach_app_file(app_id).await?;
+        let shared;
+        let session = if let Some(transaction) = transaction {
+            transaction
+                .get::<super::session::SqliteSessionHandle>()
+                .ok_or_else(|| DbError::internal("catalog received a non-SQLite session"))?
+        } else {
+            self.attach_app_file(app_id).await?;
+            shared = super::session::SqliteSessionHandle::new(self.session.clone());
+            &shared
+        };
         let mut out = crate::sql::catalog::LiveSchema::default();
 
         let q_app = crate::sql::mapping::quote_ident(app_id);
         let tables_sql =
             format!("SELECT name FROM {q_app}.sqlite_master WHERE type = 'table' ORDER BY name");
-        let table_rows = self.session.query(&tables_sql, &[]).await?;
+        let table_rows = session.query(&tables_sql, &[]).await?;
         let mut user_tables: Vec<String> = Vec::with_capacity(table_rows.len());
         for row in &table_rows {
             let name = row.first().and_then(|c| c.clone()).unwrap_or_default();
@@ -30,7 +41,7 @@ impl crate::protection::Catalog for SqliteBackend {
             let q_coll = crate::sql::mapping::quote_ident(collection);
 
             let table_info_sql = format!("PRAGMA {q_app}.table_info({q_coll})");
-            let col_rows = self.session.query(&table_info_sql, &[]).await?;
+            let col_rows = session.query(&table_info_sql, &[]).await?;
 
             // Read protection sentinels from stored CREATE TABLE text because
             // PRAGMA table_info does not retain column comments.
@@ -38,8 +49,7 @@ impl crate::protection::Catalog for SqliteBackend {
                 "SELECT sql FROM {q_app}.sqlite_master \
                  WHERE type = 'table' AND name = ?"
             );
-            let master_rows = self
-                .session
+            let master_rows = session
                 .query(&master_sql_query, &[collection.as_str()])
                 .await?;
             let create_table_text: String = master_rows
@@ -82,7 +92,7 @@ impl crate::protection::Catalog for SqliteBackend {
             }
 
             let index_list_sql = format!("PRAGMA {q_app}.index_list({q_coll})");
-            let idx_rows = self.session.query(&index_list_sql, &[]).await?;
+            let idx_rows = session.query(&index_list_sql, &[]).await?;
             let mut idx_map = std::collections::HashMap::new();
             for row in &idx_rows {
                 let idx_name = row.get(1).and_then(|c| c.clone()).unwrap_or_default();
@@ -98,7 +108,7 @@ impl crate::protection::Catalog for SqliteBackend {
 
                 let q_idx = crate::sql::mapping::quote_ident(&idx_name);
                 let index_info_sql = format!("PRAGMA {q_app}.index_info({q_idx})");
-                let info_rows = self.session.query(&index_info_sql, &[]).await?;
+                let info_rows = session.query(&index_info_sql, &[]).await?;
                 let mut columns = Vec::with_capacity(info_rows.len());
                 for info_row in &info_rows {
                     let col_name = info_row.get(2).and_then(|c| c.clone()).unwrap_or_default();
@@ -120,7 +130,7 @@ impl crate::protection::Catalog for SqliteBackend {
             }
 
             let fk_sql = format!("PRAGMA {q_app}.foreign_key_list({q_coll})");
-            let fk_rows = self.session.query(&fk_sql, &[]).await?;
+            let fk_rows = session.query(&fk_sql, &[]).await?;
             let mut fk_map = std::collections::HashMap::new();
             for row in &fk_rows {
                 let fk_id = row.first().and_then(|c| c.clone()).unwrap_or_default();

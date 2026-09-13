@@ -8,6 +8,7 @@ use test_schema::posts;
 mod bulk;
 mod conflicts;
 mod calendar_date;
+mod catalog_routing;
 mod dynamic_reads;
 mod encrypted_upsert;
 mod exact_decimal;
@@ -964,8 +965,10 @@ impl crate::protection::Catalog for RegisteredBackend {
     async fn introspect_schema(
         &self,
         app_id: &str,
+        schema: &crate::sql::SchemaName,
+        session: Option<&crate::driver::Session>,
     ) -> Result<crate::sql::catalog::LiveSchema, DbError> {
-        self.inner.introspect_schema(app_id).await
+        self.inner.introspect_schema(app_id, schema, session).await
     }
 }
 #[async_trait::async_trait(?Send)]

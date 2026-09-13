@@ -37,7 +37,11 @@ fn introspect_empty_schema_yields_empty_live_schema() {
                 .await
                 .expect("ensure_app_schema");
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect_schema on empty namespace");
             // No user tables → empty `tables` / `indexes` / `foreign_keys`.
@@ -98,7 +102,11 @@ fn introspect_after_create_table_round_trip() {
                 .expect("CREATE INDEX items_name_idx");
 
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect_schema after CREATE TABLE");
 
@@ -187,7 +195,11 @@ fn introspection_includes_prefixed_creator_schema_tables() {
                 .expect("create prefixed table");
 
             let live = backend
-                .introspect_schema("app_demo")
+                .introspect_schema(
+                    "app_demo",
+                    &crate::sql::SchemaName::new("app_demo").unwrap(),
+                    None,
+                )
                 .await
                 .expect("introspect prefixed table");
             let secret = live

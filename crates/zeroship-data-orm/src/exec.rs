@@ -55,6 +55,28 @@ pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientS
         .map_err(|_| tx_slot_unavailable(route.app_id()))
 }
 
+/// Read catalog evidence on the captured binding and transaction lease.
+pub(crate) async fn read_catalog(
+    route: &TxRoute,
+) -> Result<crate::sql::catalog::LiveSchema, DbError> {
+    if route.in_tx() {
+        route.check_scope()?;
+        return crate::transaction::driver::execute_operation(route.app_id(), async {
+            let lane = take_tx_lane(route)?;
+            route.backend().validate_session(lane.client())?;
+            route
+                .backend()
+                .introspect_schema(route.app_id(), route.schema(), Some(lane.client()))
+                .await
+        })
+        .await;
+    }
+    route
+        .backend()
+        .introspect_schema(route.app_id(), route.schema(), None)
+        .await
+}
+
 /// Execute SQL with text params — uses the app's TX connection when this
 /// dispatch was issued inside that transaction, otherwise the pool.
 pub async fn run_sql(route: &TxRoute, sql: &str, params: &[Value]) -> Result<Vec<Value>, DbError> {
