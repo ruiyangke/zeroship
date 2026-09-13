@@ -492,6 +492,7 @@ fn shape(predicate: &ResolvedPredicate) -> String {
 
 fn operand_shape(operand: &ResolvedOperand) -> String {
     match operand {
+        ResolvedOperand::RowPresence => "row_presence".into(),
         ResolvedOperand::Column(column) => column.name().as_str().to_owned(),
         ResolvedOperand::Comparison(comparison) => format!(
             "comparison({},{:?})",

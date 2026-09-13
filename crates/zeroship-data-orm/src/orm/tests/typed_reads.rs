@@ -45,6 +45,7 @@ async fn typed_reads_keep_execution_state_off_the_callers_stack() {
     let all = entity.query().all::<Reading>();
     let first = entity.query().first::<Reading>();
     let count = entity.count(Filter::all());
+    let exists = entity.exists(Filter::all());
     let projected = db
         .from(&alias)
         .select(alias.row::<Reading>())
@@ -63,6 +64,7 @@ async fn typed_reads_keep_execution_state_off_the_callers_stack() {
         ("query.all", std::mem::size_of_val(&all)),
         ("query.first", std::mem::size_of_val(&first)),
         ("count", std::mem::size_of_val(&count)),
+        ("exists", std::mem::size_of_val(&exists)),
         ("projection.all", std::mem::size_of_val(&projected)),
         ("caller", std::mem::size_of_val(&caller)),
     ];
@@ -74,6 +76,7 @@ async fn typed_reads_keep_execution_state_off_the_callers_stack() {
     assert_eq!(all.await.unwrap().len(), 1);
     assert_eq!(first.await.unwrap().unwrap().title, "measured");
     assert_eq!(count.await.unwrap(), 1);
+    assert!(exists.await.unwrap());
     assert_eq!(projected.await.unwrap().len(), 1);
     assert!(matches!(dynamic.await.unwrap(), Output::Rows {rows, ..} if rows.len() == 1));
     let (found, queried) = caller.await.unwrap();

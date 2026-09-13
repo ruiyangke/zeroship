@@ -20,7 +20,7 @@ impl NativeValue for ResultValue {
     }
 }
 
-pub(crate) fn resolve(value: Value, has_masked: bool) -> ResolveValue {
+pub fn resolve(value: Value, has_masked: bool) -> ResolveValue {
     ResolveValue::Native(Box::new(ResultValue { value, has_masked }))
 }
 fn allocation_error() -> OpError {
@@ -33,8 +33,8 @@ enum EncodeStep {
     Object(Vec<String>),
 }
 
-pub(crate) fn encode<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
+pub fn encode<'s>(
+    scope: &v8::PinScope<'s, '_>,
     value: Value,
 ) -> Result<v8::Local<'s, v8::Value>, OpError> {
     let mut pending = vec![EncodeStep::Value(value)];
@@ -75,7 +75,17 @@ pub(crate) fn encode<'s>(
                         v8::Number::new(scope, value.as_f64().ok_or_else(allocation_error)?).into()
                     }
                 }
-                Value::Timestamp(value) => v8::Number::new(scope, value as f64).into(),
+                Value::Timestamp(value) => {
+                    if !zeroship_data_orm::sql::temporal::is_timestamp_millis(value) {
+                        return Err(OpError::error("invalid timestamp value"));
+                    }
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "Portable timestamps fit JavaScript's exact integer range"
+                    )]
+                    let millis = value as f64;
+                    v8::Number::new(scope, millis).into()
+                }
                 Value::String(value) | Value::Decimal(value) => v8::String::new(scope, &value)
                     .ok_or_else(allocation_error)?
                     .into(),
@@ -114,6 +124,29 @@ pub(crate) fn encode<'s>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_results_preserve_the_portable_domain() {
+        use zeroship_data_orm::sql::temporal::{MAX_TIMESTAMP_MILLIS, MIN_TIMESTAMP_MILLIS};
+        zeroship_runtime::init_v8();
+        let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+        v8::scope!(let handles, &mut isolate);
+        let context = v8::Context::new(handles, Default::default());
+        let scope = &mut v8::ContextScope::new(handles, context);
+        for millis in [MIN_TIMESTAMP_MILLIS, -1, 0, MAX_TIMESTAMP_MILLIS] {
+            let result = encode(scope, Value::Timestamp(millis)).unwrap();
+            assert_eq!(result.to_rust_string_lossy(scope), millis.to_string());
+        }
+        for millis in [
+            i64::MIN,
+            MIN_TIMESTAMP_MILLIS - 1,
+            MAX_TIMESTAMP_MILLIS + 1,
+            i64::MAX,
+        ] {
+            let error = encode(scope, Value::Timestamp(millis)).unwrap_err();
+            assert_eq!(error.message, "invalid timestamp value");
+        }
+    }
 
     #[test]
     fn json_limit_leaves_room_for_database_result_envelopes() {

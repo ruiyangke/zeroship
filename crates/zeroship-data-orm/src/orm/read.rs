@@ -45,6 +45,10 @@ pub struct ReadJoin {
 
 #[derive(Debug, Clone)]
 pub enum ReadProjection {
+    /// Project whether a row matched without reading its fields.
+    Presence {
+        output: String,
+    },
     Row {
         output: String,
         source: String,
@@ -211,15 +215,24 @@ impl PreparedRead {
         let mut scalar_schema = FieldMap::new();
         for projection in &input.projection {
             let output = match projection {
-                ReadProjection::Row { output, .. } | ReadProjection::Scalar { output, .. } => {
-                    output
-                }
+                ReadProjection::Presence { output }
+                | ReadProjection::Row { output, .. }
+                | ReadProjection::Scalar { output, .. } => output,
             };
             ident(output, IdentRole::Alias)?;
             if !output_names.insert(output.clone()) {
                 return Err(invalid("duplicate output name"));
             }
             match projection {
+                ReadProjection::Presence { .. } => {
+                    if aggregating {
+                        return Err(invalid("row presence requires an ungrouped read"));
+                    }
+                    projected.push(SelectedExpression {
+                        expression: ResolvedOperand::RowPresence,
+                        alias: ident(output, IdentRole::Alias)?,
+                    });
+                }
                 ReadProjection::Row {
                     source,
                     fields,
@@ -425,6 +438,9 @@ impl PreparedRead {
             let mut output = Record::new();
             for projection in &self.projections {
                 match projection {
+                    ReadProjection::Presence { output: name } => {
+                        output.insert(name.clone(), Value::Bool(true));
+                    }
                     ReadProjection::Row {
                         output: name,
                         source,
@@ -697,7 +713,9 @@ fn encode_literal(
                     .map(|(field, _)| (field.as_str(), &source.schema))
             })
         }),
-        ResolvedOperand::Aggregate { column: None, .. } | ResolvedOperand::Comparison(_) => None,
+        ResolvedOperand::RowPresence
+        | ResolvedOperand::Aggregate { column: None, .. }
+        | ResolvedOperand::Comparison(_) => None,
     }
     .flatten();
     if let Some((field, schema)) = path {
@@ -972,6 +990,43 @@ mod tests {
     use super::*;
     use crate::sql::CompareOp;
     use crate::value;
+
+    #[test]
+    fn row_presence_selects_a_constant_without_loading_fields() {
+        use crate::schema::{CollectionSchema, Schema};
+        use crate::sql::registration::SqlRegistration;
+        let binding = DbBinding::cold_start(zeroship_core::app_id::AppId::mint().as_str());
+        crate::OrmContext::new().with(|| {
+            let schema = CollectionSchema::from_fields(&value!({
+                "id":{"type":"string", "primaryKey":true, "required":true, "readable":false},
+                "private":{"type":"bytes", "readable":false},
+            }))
+            .unwrap();
+            crate::descriptor::install_collections(
+                &binding,
+                Schema::new([("records".into(), schema)]),
+            )
+            .unwrap();
+            for registration in [SqlRegistration::postgres(), SqlRegistration::sqlite()] {
+                let mut query = ReadQuery::new(ReadSource::new("records", "r"));
+                query.projection.push(ReadProjection::Presence {
+                    output: "present".into(),
+                });
+                query.limit = RowLimit::new(1).unwrap();
+                let prepared = PreparedRead::new(&binding, &registration, query).unwrap();
+                assert!(prepared
+                    .query
+                    .sql()
+                    .starts_with("SELECT 1 AS \"present\" FROM "));
+                assert!(prepared.query.sql().contains(" LIMIT $1"));
+                assert_eq!(prepared.query.params()[0], value!(1));
+                assert!(prepared
+                    .sources
+                    .iter()
+                    .all(|source| source.fields.is_empty()));
+            }
+        });
+    }
 
     fn source(schema: FieldMap) -> SourceLayout {
         let schema = Arc::new(crate::schema::CollectionSchema::new(schema).into_fields());

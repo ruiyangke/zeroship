@@ -505,9 +505,9 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | WS subscription affinity routing | 🟡 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | Affinity runs; WS proxy returns 501 (use zeroship serve). |
 | Native OP client with circuit breaker | 🟢 | internal | `crates/zeroship-gateway/src/op_client.rs`, `oidc_rp.rs` | — | `crates/zeroship-gateway/tests/op_breaker_test.rs` | 4xx doesn't trip; only transport/timeouts. |
 | Per-app anchor store (reload-recovery) | 🟢 | internal | `crates/zeroship-gateway/src/anchors.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | 30-day; single-flight per anchor. |
-| Gateway sessions store (audit/revocation) | 🟢 | internal | `crates/zeroship-gateway/src/sessions.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/sessions_test.rs` | Not read on hot path (R1b). |
+| Gateway sessions store (audit/revocation) | 🟢 | internal | `crates/zeroship-gateway/src/sessions.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/src/sessions/tests.rs` | Audit rows; family markers enforce request revocation. |
 | Per-app identities store (pws_ + relay) | 🟢 | internal | `crates/zeroship-gateway/src/identities.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/identities_relay_test.rs` | Relay lookup fail → empty email. |
-| Row-level-security tenant isolation | 🟢 | internal | `crates/zeroship-gateway/src/rls.rs` | — | `crates/zeroship-gateway/tests/sessions_test.rs` | SET LOCAL GUC; unset fails closed. |
+| Row-level-security tenant isolation | 🟢 | internal | `crates/zeroship-gateway/src/rls.rs` | — | `crates/zeroship-gateway/src/sessions/tests.rs` | Migrated gateway role; unscoped reads and writes fail closed. |
 | Per-thread PostgreSQL pool | 🟢 | internal | `crates/zeroship-gateway/src/db.rs`, `lib.rs` | — | `crates/zeroship-gateway/src/db/tests.rs` | !Send; None in dev no-DB. |
 | Trust-proxy client IP derivation | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | — | — | Default false; behind trusted L7 only. |
 | DPoP jti replay cache (tiered) | ⚫ | none | — | — | — | REMOVED with the DPoP arm (P5e). The surviving replay cache is `LogoutJtiCache` (back-channel logout), in `crates/zeroship-core/src/logout_token.rs`. |
