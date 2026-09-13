@@ -123,6 +123,7 @@ impl RuntimeInner {
                         if !ready {
                             return Ok((EvaluationPhase::Adapters { entry, promises }, false));
                         }
+                        self.state.borrow_mut().startup_declarations_open = true;
                         let evaluation = evaluate_module(scope, &entry)?;
                         crate::core::init::perform_microtask_checkpoint(scope);
                         evaluation
@@ -151,6 +152,7 @@ impl RuntimeInner {
         match advanced {
             Err(error) => self.fail_startup(error),
             Ok((EvaluationPhase::Creator(evaluation), true)) => {
+                self.state.borrow_mut().startup_declarations_open = false;
                 let StartupState::Evaluating { descriptor, .. } =
                     std::mem::replace(&mut self.startup, StartupState::Finalizing)
                 else {
@@ -182,6 +184,7 @@ impl RuntimeInner {
     }
 
     pub(super) fn fail_startup(&mut self, error: String) {
+        self.state.borrow_mut().startup_declarations_open = false;
         self.startup = StartupState::Failed(error);
         self.fetch_handler_fn = None;
         self.fetch_fast_fn = None;
@@ -199,11 +202,6 @@ impl RuntimeInner {
         let scope = &mut v8::ContextScope::new(handle_scope, context);
         let (entries, rpc_registry) =
             with_context_preserving_ambient(scope, &InvocationContext::default(), |scope| {
-                for plugin in &self.plugins {
-                    let namespace =
-                        crate::plugin::runtime_plugin_namespace(scope, plugin.namespace())?;
-                    plugin.finalize_runtime(scope, namespace, descriptor)?;
-                }
                 v8::tc_scope!(let tc, scope);
                 let ns = v8::Local::new(tc, namespace)
                     .to_object(tc)
@@ -246,6 +244,11 @@ impl RuntimeInner {
                             .map_err(|error| error.describe(tc))?)
                     }
                 };
+                for plugin in &self.plugins {
+                    let namespace =
+                        crate::plugin::runtime_plugin_namespace(tc, plugin.namespace())?;
+                    plugin.finalize_runtime(tc, namespace, descriptor)?;
+                }
                 Ok::<_, String>((entries, rpc_registry))
             })?;
         let mut entries = entries.into_iter();

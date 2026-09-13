@@ -443,20 +443,19 @@ its compiled dist files and the Vite plugin imports it for dev. User code must n
 | installSchema / schema auto-discovery | &#x1F7E2; | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | &mdash; | `sdks/bootstrap/tests/install-schema.test.ts` | Plants typed Collection wrappers from the generated descriptor; native boot already bound Rust schema metadata. |
 | normalizeSchema + expandUnionToFlatColumns | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Keeps native method names; colliding collections use `collection(name)`. |
 | validateRefTargets | 🟢 | `@zeroship/bootstrap/install-schema` | `sdks/bootstrap/src/install-schema.ts` | — | `sdks/bootstrap/tests/install-schema.test.ts` | Every `t.ref` target must be a key of the same schema map, else `REF_TARGET_NOT_FOUND`. A qualified `other_app.users` fails that membership test, but as an undeclared name, not by a cross-app rule. |
-| __zsDispatch (embedded RPC dispatcher) | 🟢 | internal | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Idempotent IIFE; dev+prod identical JS. |
-| runtime-entry (prod TLA orchestrator) | 🟢 | internal (include_str!) | `sdks/bootstrap/src/runtime-entry.ts`, `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Runs after dispatcher; skips if env.db absent. |
-| dev-entry (dev coordinator) | 🟢 | internal (@zeroship/bootstrap dev) | `sdks/bootstrap/src/dev-entry.ts` | — | — | Not in barrel; lazy schema install. |
+| Remaining JS RPC dispatcher | 🟡 | internal | `sdks/bootstrap/src/dispatcher.ts` | `docs/reference/zeroship-standard.md` | — | Dev dispatch awaits the native dev loader cutover. Production procedures use native dispatch. |
+| Native startup lifecycle | 🟢 | internal | `crates/zeroship-runtime/src/core/runtime_startup.rs` | `docs/reference/plugin-system.md` | `crates/zeroship-runtime/tests/startup.rs` | Prepares adapters, evaluates the app, validates entries and finalizes declarations before dispatch. |
+| dev-entry (dev coordinator) | 🟡 | internal | `sdks/bootstrap/src/dev-entry.ts` | `sdks/bootstrap/README.md` | — | ModuleRunner dispatch glue pending native loader integration; no schema or policy installation. |
 | createFetchHandler (WinterCG wrapper) | 🟢 | internal | `sdks/bootstrap/src/fetch-handler.ts` | — | `sdks/bootstrap/tests/fetch-handler.test.ts` | 5xx sanitized in prod; SuperJSON optional. |
 | dev-tier auth provider | 🟢 | internal (@zeroship/bootstrap/dev-auth) | `sdks/bootstrap/src/dev-auth.ts` | `docs/reference/auth-dev-tier.md` | `sdks/bootstrap/tests/dev-auth.test.ts` | Absent from .zship; byte-compatible with Rust. |
 | WS subscription dispatch | 🟢 | `default.subscribe` (kernel-called) | `crates/zeroship-runtime/src/core/init.rs` | — | `examples/raw-streaming.js` | hello/data/ping/pong; close 4400/4408. |
 | fetchFast extension | 🟢 | internal (user namespace) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Signature undocumented; no example. |
 | zeroship facade module | 🟢 | `import { env } from 'zeroship'` | `crates/zeroship-runtime/src/core/init.rs` | — | `examples/http-handler.js` | env/waitUntil/getRequest/current*/runQuery. |
 | raw-JS deploy (no-tooling) | 🟢 | `zeroship serve <file>.js` | `crates/zeroship-runtime/src/core/init.rs` | `docs/reference/zeroship-standard.md` | `examples/raw-rpc.js` | Dict or function-shape rpc; fn.config drives frames. |
-| mask policy flush at boot | 🟢 | internal | `sdks/bootstrap/src/runtime-entry.ts`, `dev-entry.ts` | — | — | Single-shot at cold start. |
-| __zsDbPlatform resolver + capability boundary | 🟢 | internal (V8 Private symbol) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Resolver deleted after use (P9 §8). |
+| Native mask-policy finalization | 🟢 | internal | `crates/zeroship-data-v8/src/startup_policy.rs` | `docs/reference/db.md` | `crates/zeroship-data-v8/src/tests/startup_policy.rs` | Captures declarations during startup and seals the deployment policy without database I/O. |
 | legacy fallback fetch / user.index() | 🟡 | internal (fallbackFetch) | `crates/zeroship-runtime/src/core/init.rs` | — | — | Undocumented "legacy"; unary RPC fallthrough → 404. |
 | manifest.exports.schema (deprecated field) | ⚫ | internal (manifest wire) | `crates/zeroship-bundle/src/manifest.rs` | — | — | No longer read/written; kept for archive upgrade. |
-| bootstrap build ordering (pnpm before cargo) | 🟢 | internal (build toolchain) | `sdks/bootstrap/scripts/post-build.mjs` | `sdks/bootstrap/README.md` | — | post-build strips export marker for splice. |
+| DB adapter build ordering | 🟢 | internal | `crates/zeroship-data-v8/src/lib.rs` | `docs/reference/plugin-system.md` | — | The DB adapter embeds its compiled SDK module. |
 
 ---
 
@@ -1195,8 +1194,8 @@ the dev HMR registry, `defineRpcProcedures`, `newUuidV7`, the `@zeroship/rpc-rea
 
 **Deploy / bootstrap:** `fetchFast` signature/semantics, the `zeroship` module exports
 (`waitUntil`/`getRequest`/`current*`/`runQuery`), the dev-entry API, `createFetchHandler` wire
-protocol, the WS subscription frame protocol + close codes, mask-policy flush, the `__zsDbPlatform`
-capability boundary (P9 §8), the `user.index()` fallback, and the `@zeroship/bootstrap` package.
+protocol, the WS subscription frame protocol and close codes, the `user.index()` fallback,
+and the remaining `@zeroship/bootstrap` package.
 
 **Gateway:** back-channel logout endpoint, the auth.zeroship.ai reverse-proxy split, app-response
 header sanitization (SEC-9), trust-proxy IP derivation, the native OP circuit breaker, the per-thread

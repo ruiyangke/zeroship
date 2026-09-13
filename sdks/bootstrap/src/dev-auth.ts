@@ -47,13 +47,9 @@
  *
  * ## Dev-only by construction
  *
- * This module is imported ONLY by `dev-entry.ts` (`@zeroship/bootstrap/dev`),
- * which the Vite plugin's dev-bootstrap consumes. The production
- * `runtime-entry.ts` never imports it, and `vite build`'s `.zship` bundles the
- * user module + the prod runtime-entry — never `@zeroship/bootstrap/dev`. So
- * the dev-auth provider is structurally absent from any shipped worker module
- * (grep-provable). There is no runtime flag in shipped code; the dev tier lives
- * exclusively in the dev path.
+ * The Vite dev bootstrap consumes this provider through the dev entry.
+ * Production entries contain creator handlers and procedure metadata; the
+ * deployed runtime does not import this provider.
  */
 
 /** Public user projection (camelCase) — mirrors `@zeroship/auth` `User`. */

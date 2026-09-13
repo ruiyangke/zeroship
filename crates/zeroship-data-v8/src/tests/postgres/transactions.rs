@@ -277,43 +277,7 @@ fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
 /// Self-contained dispatcher shim: a function-shape `default.rpc` that
 /// looks up `_procedures[name]` and runs it. These tests open
 /// transactions explicitly via `env.db.transaction`.
-const SHIM: &str = r#"
-async function _shimRpc(name, input, ctx) {
-    const fn = _procedures[name];
-    if (typeof fn !== "function") {
-        throw Object.assign(new Error("Method not found: " + name), { status: 404 });
-    }
-    let out = fn(input, ctx);
-    if (out && typeof out.then === "function") out = await out;
-    return out;
-}
-async function _zsRpcAndRespond(name, input) {
-    try {
-        const result = await _shimRpc(name, input);
-        return new Response(JSON.stringify({ json: result === undefined ? null : result }),
-            { status: 200, headers: { "content-type": "application/json" } });
-    } catch (err) {
-        const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status < 600) ? err.status : 500;
-        const body = { message: err?.message ?? String(err), name: err?.name ?? "Error" };
-        if (err && typeof err.code === "string") body.code = err.code;
-        return new Response(JSON.stringify(body), {
-            status, headers: { "content-type": "application/json" },
-        });
-    }
-}
-async function _zsFetch(request) {
-    const url = new URL(request.url);
-    const id = decodeURIComponent(url.pathname.slice("/__zeroship/v1/".length));
-    const text = await request.text();
-    let input;
-    if (text) {
-        const env = JSON.parse(text);
-        input = env && typeof env === "object" && "json" in env ? env.json : env;
-    }
-    return await _zsRpcAndRespond(id, input);
-}
-export default { fetch: _zsFetch, rpc: _shimRpc };
-"#;
+const SHIM: &str = r#"export default { rpc: _procedures };"#;
 
 fn notes_runtime_descriptor() -> String {
     let mut descriptor = serde_json::json!({

@@ -1,66 +1,4 @@
-// Embedded RPC dispatcher (`__zsDispatch`).
-//
-// Compiled to `dist/dispatcher.js` and `include_str!`d by the runtime
-// crate's `crates/zeroship-runtime/src/core/init.rs`, spliced into the bootstrap
-// module so the IIFE evaluates BEFORE `runtime-entry.js`'s top-level
-// await and BEFORE the kernel resolves `default.fetch` / `default.rpc`
-// off the user namespace. Dispatcher install must survive a schema-load
-// failure so the worker can still surface the error via the RPC wire —
-// hence: dispatcher first, schema install second.
-//
-// The IIFE pattern ensures idempotent install: if the bootstrap script
-// is evaluated more than once (isolate refresh), the second pass keeps
-// the live `__zsDispatch` rather than overwriting it. The function-
-// shape `default.rpc` path documented in `docs/reference/zeroship-standard.md`
-// bypasses this dispatcher entirely; the bootstrap calls the function
-// directly.
-//
-// READ THIS BEFORE AUDITING THE RPC ERROR CONTRACT.
-//
-// This header used to say: "SOURCE OF TRUTH: this file is the canonical
-// dispatcher ... production splices it into the runtime's bootstrap
-// module via `include_str!`. Single implementation; no drift between dev
-// and prod." Both halves are wrong, checked 2026-08-11.
-//
-//  1. Nothing `include_str!`s `dist/dispatcher.js`. `grep -rn
-//     'include_str!' crates/runtime/src` embeds `runtime-entry.js` and
-//     `install-schema.js` from this package, and nothing else. This file
-//     reaches the runtime by being BUNDLED into the app's own server
-//     bundle: the Vite plugin's synthetic entry imports
-//     `@zeroship/bootstrap`, whose index imports this module for its
-//     install side effect.
-//
-//  2. The UNARY RPC path never reaches this function, on either tier.
-//     The synthetic entry exports `default.rpc` as a plain dict; the
-//     bootstrap wraps that dict in `USER_RPC`
-//     (crates/zeroship-runtime/src/core/init.rs, `dispatchRpc`), and the kernel's
-//     fast path calls it. `USER_RPC` delegates to `__zsDispatchRpc` -- a
-//     SECOND copy of the body below, written inline in init.rs. That
-//     copy is what answers `Method not found` and `Invalid input` for a
-//     normal query or mutation.
-//
-// The two copies HAVE already drifted in text: this one throws "No RPC
-// dispatch table installed" where init.rs throws "RPC registry is not an
-// object". That is not client-visible today only because the arm is
-// unreachable in a built app. Until the two are actually unified, a
-// change here needs the same change there in the same patch.
-//
-// What this copy DOES serve, on both tiers: stream and subscription
-// procedures, which the kernel deliberately routes through
-// `default.fetch` -> `createFetchHandler` -> here, so the SSE encoder can
-// wrap the iterator.
-//
-// Dev is not a different story: `pnpm dev` runs the same Rust runtime
-// binary, so the same split applies there. Measured rather than reasoned
-// -- `tests/e2e_dev_vs_deployed_errors.sh` sends an unparseable body and
-// dev answers with the RUST parser's text ("invalid JSON body", from
-// `crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_body`) and not the JS
-// one, which would have appended the underlying parse error.
-
-// Build emits this file with `export {};` to mark it as a module. The
-// post-build step in `scripts/post-build.mjs` strips that line (and
-// source-map comments) so the file content is pure top-level JS,
-// safe to splice into the runtime's bootstrap module.
+// Dev dispatch and workflow glue retained until their native callers cut over.
 export {};
 
 declare const globalThis: {
@@ -72,12 +10,6 @@ declare const globalThis: {
   __zsEnterKind?: (kind: string) => number;
   __zsExitKind?: (token: number) => void;
   __zsValidateOutput?: boolean;
-  // Schema-readiness promise set by `runtime-entry.ts` (production) for
-  // the asynchronous mask-policy flush. The dispatcher gates the first
-  // procedure on it here. Undefined for schema-less apps and the dev path
-  // (dev-entry awaits its own `schemaReady` before calling through).
-  __zsSchemaReady?: Promise<unknown>;
-  [key: string]: unknown;
 };
 
 type WorkflowDispatchContext = { mode: "body" | "step" };
@@ -148,16 +80,6 @@ const workflowDispatchAls = new AsyncLocalStorage<WorkflowDispatchContext>();
       | undefined;
     if (typeof fn !== "function") {
       throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
-    }
-
-    // The production `runtime-entry` installs Collection wrappers
-    // synchronously but defers the asynchronous mask-policy flush to
-    // `__zsSchemaReady`. Gate the first procedure on it so a rejected
-    // policy install surfaces through the RPC error envelope. No-op for
-    // schema-less apps (undefined) and on the warm path (settled promise).
-    const schemaReady = globalScope.__zsSchemaReady;
-    if (schemaReady && typeof (schemaReady as { then?: unknown }).then === "function") {
-      await schemaReady;
     }
 
     const cfg = (fn as { config?: { input?: unknown; output?: unknown; kind?: string } }).config;

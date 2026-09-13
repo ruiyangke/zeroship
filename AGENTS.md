@@ -63,7 +63,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
-| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/zeroship-runtime/src/core/init.rs` |
+| **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `crates/zeroship-runtime/src/core/runtime_startup.rs` · `crates/zeroship-runtime/src/rpc/dispatch.rs` |
 | **Framework-internal coordination** (`installSchema`, `__zsDispatch`, dev-entry) | `sdks/db/src/install-schema.ts` · `crates/zeroship-data-v8/src/lib.rs` · `sdks/bootstrap/README.md` |
 | **Billing / metering / Stripe Connect** | `docs/reference/billing-metering.md` · `crates/zeroship-control/src/metering/provider/` · `crates/zeroship-stream/` · `crates/zeroship-control/src/cron/{event_forwarder,spend_recompute,billing_reconcile}.rs` |
 | **WebSocket** (RFC 6455 implementation) | `docs/reference/websocket-design.md` · `crates/zeroship-runtime/src/` (search `WebSocket`) |
@@ -351,21 +351,19 @@ SDK packages call the `env.*` native primitives internally. Validation, query bu
 
 ### Framework-internal: `@zeroship/bootstrap`
 
-`@zeroship/bootstrap` is the coordination package the runtime crate and Vite plugin both consume. It owns:
+The remaining bootstrap package supplies Vite module normalization, dev dispatch,
+fetch routing and dev auth while the native dev loader cuts over. Workflow glue
+is retained for removal with the active workflow refactor. Creator code must
+not import this package; see `sdks/bootstrap/README.md`.
 
-- `__zsDispatch` — the embedded RPC dispatcher (input parse / capability / stream framing)
-- `normalizeUserModule` — namespace → `{ fetch, rpc, userDefault }` shape
-- `createFetchHandler` — WinterCG fetch wrapper routing `/__zeroship/v1/<id>` through the dispatcher
-- `runtime-entry.ts` — TLA orchestrator the runtime crate `include_str!`s
-- `dev-entry.ts` — dev-mode equivalent the Vite plugin's dev-bootstrap delegates to
-
-The DB SDK internal entry owns `installSchema` and its collection, transaction,
-relation and live-query helpers. `DbPlugin` supplies that compiled adapter as
-`zeroship:db/internal` through `NativePlugin::javascript_modules`. Runtime
-initialization supplies the native DB handle and generated descriptor; Vite
-emits no installer import or call.
-
-**User code MUST NOT import `@zeroship/bootstrap`.** It carries no back-compat guarantee; the runtime crate and Vite plugin are the only stable consumers. See `sdks/bootstrap/README.md`.
+The runtime owns startup readiness and native procedure invocation. The DB SDK
+internal entry owns `installSchema` and its collection, transaction, relation
+and live-query helpers. `DbPlugin` supplies that compiled adapter as
+`zeroship:db/internal` through `NativePlugin::javascript_modules`. Native
+preparation supplies the DB handle and validated descriptor before creator
+modules evaluate. The SDK's `defineMaskPolicy` records a declaration through
+`env.db.declareMaskPolicy`; the DB plugin installs and seals it during native
+finalization. Vite emits no installer import or call.
 
 ### When to add a native primitive vs. an npm package
 
@@ -454,11 +452,8 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 ## Development
 
 ```bash
-# Build (workspace) — build the SDKs FIRST. The runtime crate
-# includes `sdks/bootstrap/dist/runtime-entry.js` and `sdks/db/dist/internal.js`,
-# so `pnpm build` must run before `cargo build -p zeroship-runtime`.
-# Root `pnpm build` respects the dependency graph (bootstrap → db);
-# cargo then sees the freshly emitted dist files.
+# Build the SDKs before Cargo. The DB adapter embeds
+# `sdks/db/dist/internal.js`; root `pnpm build` supplies that compiled source.
 #
 # `sdks/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
 # `crates/zeroship-migrate-node` whose outputs are untracked and which `pnpm install`

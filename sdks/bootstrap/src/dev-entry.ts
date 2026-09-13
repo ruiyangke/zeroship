@@ -1,48 +1,8 @@
-/**
- * Dev-mode entry — consolidates the dispatch + schema-install
- * coordination the Vite plugin's `dev-bootstrap` used to inline.
- *
- * The caller supplies a `loadUserModule()` thunk that re-imports the
- * user module per request (HMR may have invalidated cached
- * evaluations) and the `envDb` getter (so the dev entry doesn't
- * hard-code the runtime's `__zs_env()` indirection). This module owns:
- *
- *   1. Lazy descriptor install via `installSchema(env.db, descriptor)` on first
- *      request when dev has injected `__zsRuntimeDescriptor`. Going
- *      top-level-await on the user import would block dev startup on
- *      potentially-failing user code; lazy is the right tradeoff for dev.
- *   2. Per-call normalization via `normalizeUserModule(mod, registry)`
- *      so HMR replacements land naturally — the registry captures the
- *      transform's `__register` side-effects and merges last
- *      (last-write-wins).
- *   3. Function-shape `default.rpc` for HMR. Dev's namespace may
- *      change per request; the dict-shape captured at module-init
- *      would go stale on every edit. The dispatcher (`__zsDispatch`)
- *      consumes the dict each call.
- *   4. WinterCG `default.fetch` via `createFetchHandler(...)` — routes
- *      `/__zeroship/v1/<id>` through the dispatcher; falls through to user's
- *      own `default.fetch` for non-RPC paths.
- *
- * The Vite plugin's `dev-bootstrap/index.ts` (post-Stage-7) is a thin
- * shell: it constructs the ModuleRunner + registry, calls `devEntry`,
- * and re-exports the result as `default`.
- *
- * NOTE: this module imports `./dispatcher.js` for its side effect so
- * the same `__zsDispatch` function the runtime splices in production
- * is installed on the dev isolate too. Single implementation; no
- * drift.
- */
-
+// Dev dispatch glue retained until the native dev entry loader cuts over.
 import "./dispatcher.js";
-import { installSchema as bundledInstallSchema } from "@zeroship/db/internal";
 import { createFetchHandler } from "./fetch-handler.js";
 import { createDevAuthProvider } from "./dev-auth.js";
 import { normalizeUserModule, type NormalizedUserModule } from "./normalize.js";
-
-type InstallSchema = typeof bundledInstallSchema;
-type DbInternalModule = {
-  _flushPendingMaskPolicy?: () => Record<string, readonly string[]> | null;
-};
 
 declare const globalThis: {
   __zsDispatch?: (
@@ -55,262 +15,24 @@ declare const globalThis: {
 };
 
 export interface DevEntryOptions {
-  /**
-   * Loader for the user module. Called per request in dev so HMR
-   * invalidations land naturally. Returns the module namespace
-   * (i.e. the result of `runner.import(ENTRY)`).
-   */
   loadUserModule: () => Promise<unknown>;
-  /**
-   * Resolve the live `env.db` handle. The dev-bootstrap previously
-   * reached into `globalThis.__zs_env()`; this is a parameter so the
-   * dev path doesn't hard-code a global. Returns `undefined` when the
-   * DbPlugin isn't registered (skip-schema-install path).
-   */
-  getEnvDb: () => unknown;
-  /**
-   * Optional registry that the transform populates via
-   * `globalThis.__register(wireId, fn)`. When provided, the
-   * normalizer merges its entries last (last-write-wins for HMR).
-   */
   registry?: Map<string, (input: unknown, ctx: unknown) => unknown>;
-  /**
-   * Optional `installSchema` loader. In dev mode the caller MUST
-   * provide this so the dev path loads `installSchema` through the
-   * same module-loader (e.g. Vite's ModuleRunner) that loads the
-   * user's `t.*` builders. Without this, the dev path uses the
-   * `@zeroship/bootstrap`-bundled `installSchema` which carries its
-   * OWN `TypeBuilder` class — `instanceof TypeBuilder` checks inside
-   * `validateRefTargets` / `normalizeSchema` then return `false`
-   * for builders the user code constructed, and the schema install
-   * silently produces empty Collection wrappers.
-   *
-   * Production callers (the runtime crate's bootstrap module) don't
-   * use this entry — they invoke `installSchema` from a dynamic
-   * import that goes through the bundle resolver, so identity is
-   * preserved automatically.
-   */
-  getInstallSchema?: () => Promise<InstallSchema>;
-  /**
-   * Optional loader for `@zeroship/db/internal`. In dev mode the caller
-   * should provide this through the same ModuleRunner that loaded the
-   * user module so `defineMaskPolicy()` and `_flushPendingMaskPolicy()`
-   * observe the same module instance.
-   */
-  getDbInternal?: () => Promise<DbInternalModule>;
-  /**
-   * Logger for dev-only diagnostics. Defaults to `console.log` /
-   * `console.error`. Pass a no-op pair to silence the dev path.
-   */
-  logger?: { log: (msg: string) => void; error: (msg: string) => void };
-  /**
-   * Reader for the dev-auth env vars (`ZEROSHIP_DEV_AUTH`,
-   * `ZEROSHIP_DEV_AUTH_SECRET`). Defaults to `process.env` lookups in the dev
-   * runtime. The dev-auth provider serves the same-origin `/__zeroship/auth/*`
-   * endpoints the `@zeroship/auth` client drives; when no secret is present it
-   * stays disabled and `/__zeroship/auth/*` falls through to the user module. Tests
-   * inject a fake reader. This is the SELF-CONTAINED dev tier of the auth
-   * contract — it is never present in a production `.zship` (this whole module
-   * is dev-only; `runtime-entry.ts` never imports it).
-   */
   getDevAuthEnv?: (name: string) => string | undefined;
 }
 
 export interface DevEntry {
   fetch: (request: Request, env: unknown, ctx: unknown) => Promise<Response>;
   rpc: (name: string, input: unknown, ctx: unknown) => unknown;
-  /**
-   * Resolve a durable workflow class by EXPORT name. The dispatcher calls this
-   * when the entry module exposes it (`default.loadWorkflow`), which is how
-   * the dev tier reaches workflow classes that live behind Vite's module
-   * runner rather than in the entry's own namespace.
-   */
   loadWorkflow: (name: string) => Promise<unknown>;
-  /**
-   * Test/runtime hook: reset the lazy schema-install latch. Called by
-   * the dev-bootstrap when Vite's dep optimizer regenerated pre-
-   * bundled files (schema must be re-installed against the fresh
-   * runner because the new runtime instance carries a separate
-   * `@zeroship/bootstrap` copy — see `instanceof` rationale below).
-   */
-  resetSchemaInstalled: () => void;
 }
 
-/**
- * Build the dev-mode `default` export. Returns the same `{ fetch, rpc }`
- * shape the runtime expects from a user module; the Vite plugin's
- * dev-bootstrap re-exports this verbatim.
- *
- * Per the ZS standard (`docs/reference/zeroship-standard.md`), `default.rpc`
- * is function-shape here — dev's namespace may change per request so
- * the dict is freshly resolved on every call. Production uses dict-
- * shape because the bundle is frozen.
- */
 export function devEntry(options: DevEntryOptions): DevEntry {
-  // The runtime wrapper evaluates before Vite loads the creator module.
-  // This entry owns schema installation after that lazy import, including
-  // sealing the app's policy before its first handler can run.
-  globalThis.__zsDeferSchemaInstall = true;
-  const log = options.logger?.log ?? ((m) => console.log(m));
-  const logError = options.logger?.error ?? ((m) => console.error(m));
-
-  // Capture and remove the resolver while the trusted dev bootstrap evaluates.
-  // Creator code loads later through the module runner and cannot retain it.
-  const platformResolver = (globalThis as unknown as {
-    __zsDbPlatform?: (db: unknown) => unknown;
-  }).__zsDbPlatform;
-  try {
-    delete (globalThis as unknown as { __zsDbPlatform?: unknown }).__zsDbPlatform;
-  } catch {
-    // The runtime installs this as a configurable property.
-  }
-
-  // Module-local handle on the most recent mask-policy flush.
-  // Stage 6 of the @zeroship/db refactor replaced the cross-module
-  // `globalThis.__zeroshipPlatformReady` with a per-isolate (per-
-  // module-load) variable. HMR re-runs of `maybeInstallSchema`
-  // overwrite the handle in place so the second request awaits the
-  // FRESH chain.
-  let schemaReady: Promise<unknown> | undefined;
-
-  // Set once per ModuleRunner lifetime. The caller resets it via
-  // `resetSchemaInstalled()` after a deps re-optimize (which forces
-  // the runner to rebuild and re-imports the SDK copy).
-  let schemaInstalled = false;
-  let schemaInstall: Promise<void> | undefined;
-
   async function loadNormalized(): Promise<NormalizedUserModule> {
-    const mod = await options.loadUserModule();
-    await maybeInstallSchema(mod);
-    return normalizeUserModule(mod, options.registry);
-  }
-
-  async function maybeInstallSchema(mod: unknown): Promise<void> {
-    if (schemaInstalled) return;
-    if (!schemaInstall) {
-      schemaInstall = installRuntimeSchema(mod);
-    }
-    await schemaInstall;
-  }
-
-  async function installRuntimeSchema(_mod: unknown): Promise<void> {
-    // **Migration-first cutover (P5 S4)** - dev installs from the generated
-    // RuntimeSchemaDescriptor that native runtime boot injects. An absent
-    // descriptor is a schema-less app.
-    const descriptorGlobal = globalThis as unknown as {
-      __zsRuntimeDescriptor?: unknown;
-    };
-    const hasDescriptor = Object.prototype.hasOwnProperty.call(
-      descriptorGlobal,
-      "__zsRuntimeDescriptor",
-    );
-    const descriptor = descriptorGlobal.__zsRuntimeDescriptor;
-    const runtimeDescriptorFields = (
-      value: unknown,
-    ): Record<string, unknown> => {
-      if (
-        value != null &&
-        typeof value === "object" &&
-        (value as { version?: unknown }).version === 2 &&
-        (value as { collections?: unknown }).collections != null &&
-        typeof (value as { collections?: unknown }).collections === "object" &&
-        !Array.isArray((value as { collections?: unknown }).collections)
-      ) {
-        const out = Object.create(null) as Record<string, unknown>;
-        for (const [name, collection] of Object.entries(
-          (value as { collections: Record<string, unknown> }).collections,
-        )) {
-          if (collection == null || typeof collection !== "object" || Array.isArray(collection)) {
-            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} must be an object`);
-          }
-          const c = collection as Record<string, unknown>;
-          if (c.fields == null || typeof c.fields !== "object" || Array.isArray(c.fields)) {
-            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} requires object field "fields"`);
-          }
-          if (c.options == null || typeof c.options !== "object" || Array.isArray(c.options)) {
-            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} requires object field "options"`);
-          }
-          const options = c.options as Record<string, unknown>;
-          if (typeof options.softDelete !== "boolean" || typeof options.versioning !== "boolean") {
-            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} options requires boolean "softDelete" and "versioning"`);
-          }
-          if (!Array.isArray(c.indexes)) {
-            throw new Error(`@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: collection ${JSON.stringify(name)} requires array field "indexes"`);
-          }
-          out[name] = c.fields;
-        }
-        return out;
-      }
-      throw new Error(
-        "@zeroship/bootstrap: invalid RuntimeSchemaDescriptor: expected v2 object with { version: 2, collections }",
-      );
-    };
-    const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
-
-    if (!schema) {
-      schemaInstalled = true;
-      return;
-    }
-
-    const envDb = options.getEnvDb();
-    if (!envDb) {
-      logError(
-        `[zeroship:dev] schema install skipped: env.db not available - ` +
-          `is the DbPlugin registered on this runtime?`,
-      );
-      schemaInstalled = true;
-      return;
-    }
-    // Use the caller-supplied loader when available so the install
-    // path runs through the SAME module-loader (Vite's ModuleRunner
-    // in dev) that loaded the user's `t.*` builders. Identity-
-    // matched TypeBuilder is required for `instanceof` checks in
-    // validateRefTargets / normalizeSchema to recognise user-side
-    // type builders. Falls back to the bundled `installSchema` when
-    // no loader is provided (e.g. unit tests).
-    const installSchema = options.getInstallSchema
-      ? await options.getInstallSchema()
-      : bundledInstallSchema;
-    // Resolve the handle through the module-local capability captured at boot.
-    const platform =
-      typeof platformResolver === "function" ? platformResolver(envDb) : undefined;
-    installSchema(
-      envDb as Parameters<typeof installSchema>[0],
-      descriptor as Parameters<typeof installSchema>[1],
-    );
-    schemaReady = (async () => {
-      const policyMod = options.getDbInternal
-        ? await options.getDbInternal()
-        : await import("@zeroship/db/internal") as DbInternalModule;
-      const pending = typeof policyMod._flushPendingMaskPolicy === "function"
-        ? policyMod._flushPendingMaskPolicy()
-        : null;
-      const setMaskPolicy = (platform as { setMaskPolicy?: unknown } | undefined)?.setMaskPolicy;
-      if (typeof setMaskPolicy === "function") {
-        await (setMaskPolicy as (
-          this: typeof platform,
-          p: Record<string, readonly string[]>,
-        ) => Promise<unknown>).call(platform, pending ?? {});
-      }
-    })();
-    log(`[zeroship:dev] installed schema from runtime descriptor`);
-    schemaInstalled = true;
+    return normalizeUserModule(await options.loadUserModule(), options.registry);
   }
 
   async function dispatchRpcAsync(name: string, input: unknown, ctx: unknown): Promise<unknown> {
-    // Re-import per call so HMR invalidations land naturally. On the
-    // FIRST call this also triggers schema install, so schemaReady
-    // gets populated here.
     const normalized = await loadNormalized();
-
-    // Await schema-readiness AFTER `loadNormalized` had a chance to
-    // populate `schemaReady`. Reading it BEFORE the import would
-    // observe `undefined` on the first call. Gate the first RPC on the
-    // mask-policy flush. No-op on the warm path.
-    if (schemaReady && typeof schemaReady.then === "function") {
-      try { await schemaReady; } catch { /* surfaces via the handler */ }
-    }
-
     const dispatch = globalThis.__zsDispatch;
     if (typeof dispatch !== "function") {
       // Should never happen — `import "./dispatcher.js"` above
@@ -360,17 +82,7 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     return dispatchRpcAsync(name, input, ctx);
   }
 
-  // Gate the dev fetch fall-through on schema readiness (C1). By the
-  // time `createFetchHandler` calls this, it has already awaited
-  // `loadNormalized()`, which runs `maybeInstallSchema` and populates
-  // the module-local `schemaReady`. So reading it here observes the
-  // freshly-installed chain (or `undefined` for schema-less apps). A
-  // rejected chain rejects here and the handler surfaces a 500.
-  const userFetchHandler = createFetchHandler(loadNormalized, () =>
-    (schemaReady && typeof schemaReady.then === "function")
-      ? (schemaReady as Promise<unknown>).then(() => undefined)
-      : undefined,
-  );
+  const userFetchHandler = createFetchHandler(loadNormalized);
 
   // Dev-tier auth provider — owns the same-origin `/__zeroship/auth/*` endpoints in
   // self-contained dev (no gateway or external auth service). Reads its config from the spawn env
@@ -411,11 +123,6 @@ export function devEntry(options: DevEntryOptions): DevEntry {
     loadWorkflow: async (name: string) => {
       const normalized = await loadNormalized();
       return normalized.workflows[name];
-    },
-    resetSchemaInstalled: () => {
-      schemaInstalled = false;
-      schemaReady = undefined;
-      schemaInstall = undefined;
     },
   };
 }

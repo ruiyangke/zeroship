@@ -208,91 +208,10 @@ pub struct HttpResult {
 /// the URL matches /__zeroship/v1/<id>; symmetric to `default.fetch`),
 /// `fetchFast` is the optional zeroship-extension HTTP fast path for
 /// non-RPC traffic, and `subscribe` is the WS-subscription dispatcher.
-/// Name of the process-lifetime `v8::Private` symbol under which the
-/// `DbPlatform` capability handle is stashed on the `env.db` object
-/// (P9 §8 — the `__platform` capability gate).
-///
-/// A `v8::Private` minted via [`v8::Private::for_api`] is interned by
-/// name across the isolate and never collected, so any site that needs
-/// the symbol — `plugin-db`'s `mint_db` (which calls `set_private`) and
-/// the [`zs_db_platform_callback`] resolver (which calls `get_private`)
-/// — derives the SAME symbol from this single name string. The name is
-/// the shared source of truth; there is no shared static handle to
-/// thread across crates.
-///
-/// `plugin-db` references this via
-/// `zeroship_runtime::core::init::ZS_PLATFORM_PRIVATE_NAME`
-/// (plugin-db depends on the runtime crate; not vice-versa). The
-/// qualified `#capability` suffix follows the V8 guidance to namespace
-/// `for_api` keys to avoid clashes in the global private name space.
-pub const ZS_PLATFORM_PRIVATE_NAME: &str = "zeroship::db::__platform#capability";
-
-/// Resolve the process-lifetime `ZS_PLATFORM` private symbol.
-///
-/// Both the `set_private` site (`plugin-db::v8_classes::db::mint_db`)
-/// and the `get_private` reader ([`zs_db_platform_callback`]) call this
-/// so they operate on byte-identical symbol identity. Cheap after the
-/// first call — `for_api` returns the interned symbol on repeat reads.
-pub fn zs_platform_private<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
-    let name = v8::String::new(scope, ZS_PLATFORM_PRIVATE_NAME).unwrap();
-    v8::Private::for_api(scope, Some(name))
-}
-
-/// `globalThis.__zsDbPlatform(db)` — the capability-handle resolver
-/// handed to `@zeroship/bootstrap`'s `runtime-entry` (P9 §8).
-///
-/// Reads the `DbPlatform` instance stashed on the passed `db` object
-/// under the `ZS_PLATFORM` private symbol and returns it. Returns
-/// `undefined` when the argument is not an object or carries no platform
-/// slot (e.g. a stub `env.db` in a dev run without `DATABASE_URL`).
-///
-/// ## Security (P9 §8)
-///
-/// The `DbPlatform` handle lives in a `v8::Private` slot and is unreadable from
-/// creator JavaScript. The internal bridge captures this resolver and deletes
-/// the global before the creator module evaluates. It exposes only the mask
-/// policy installation operation to the bootstrap module. Dev uses the same
-/// ordering before its module runner loads creator code.
-fn zs_db_platform_callback(
-    scope: &mut v8::PinScope,
-    args: v8::FunctionCallbackArguments,
-    mut rv: v8::ReturnValue,
-) {
-    let arg = args.get(0);
-    let Ok(db_obj) = v8::Local::<v8::Object>::try_from(arg) else {
-        rv.set(v8::undefined(scope).into());
-        return;
-    };
-    let priv_sym = zs_platform_private(scope);
-    match db_obj.get_private(scope, priv_sym) {
-        Some(handle) if !handle.is_undefined() => rv.set(handle),
-        _ => rv.set(v8::undefined(scope).into()),
-    }
-}
-
-/// Schema auto-discovery init script. Spliced into [`BOOTSTRAP_JS`]
-/// immediately after the `import * as user from "./__user__.js"` line so
-/// the top-level `await import("zeroship:db/internal")`
-/// runs inside the bootstrap module's evaluation — before the runtime
-/// resolves `default.fetch` / `default.rpc` off the namespace.
-///
-/// Source of truth: `sdks/bootstrap/src/runtime-entry.ts` — compiled by
-/// the bootstrap package's `pnpm build` (which strips the `export {};`
-/// module marker so the file is splice-safe). Stage 7 of the refactor
-/// moved this out of a runtime-owned JS file (since deleted) so dev and
-/// prod share a single implementation.
-///
-/// Build ordering: `pnpm -F @zeroship/bootstrap build` MUST run before
-/// `cargo build -p zeroship-runtime`. The workspace's root `pnpm build`
-/// runs the bootstrap package in topological order via the
-/// @zeroship/db → @zeroship/bootstrap dependency edge.
-pub(crate) const DB_INIT_JS: &str =
-    include_str!("../../../../sdks/bootstrap/dist/runtime-entry.js");
-
 /// Internal capability bridge module source.
 ///
 /// This module captures native capabilities before `./__user__.js` evaluates.
-/// Creator code receives neither the callbacks nor the `DbPlatform` handle.
+/// Creator code does not receive these captured callbacks.
 const KIND_BRIDGE_JS: &str = r##"
 import { AsyncLocalStorage } from "node:async_hooks";
 
@@ -304,28 +223,9 @@ const ZS_WORKFLOW_BODY_TIMER_ERROR =
 const enterKind = globalThis.__zsEnterKind;
 const exitKind = globalThis.__zsExitKind;
 const zsWorkflowRealFetch = globalThis.fetch;
-const zsDbPlatformResolver = globalThis.__zsDbPlatform;
-const zsEnvDb = typeof globalThis.__zs_env === "function"
-    ? globalThis.__zs_env()?.db
-    : undefined;
-const zsDbPlatform = typeof zsDbPlatformResolver === "function" && zsEnvDb != null
-    ? zsDbPlatformResolver(zsEnvDb)
-    : undefined;
-
 try { delete globalThis.__zsEnterKind; } catch (_e) {}
 try { delete globalThis.__zsExitKind; } catch (_e) {}
 try { delete globalThis.__zsClearKind; } catch (_e) {}
-if (__zsHideDbPlatform) {
-    try { delete globalThis.__zsDbPlatform; } catch (_e) {}
-}
-
-export async function __zsInstallDbMaskPolicy(policy) {
-    const setter = zsDbPlatform?.setMaskPolicy;
-    if (typeof setter === "function") {
-        await setter.call(zsDbPlatform, policy);
-    }
-}
-
 class ZsNondeterministicError extends Error {
     constructor(message = "workflow replay is nondeterministic") {
         super(message);
@@ -421,11 +321,6 @@ export async function __zsDispatchRpc(rpc, name, input, ctx) {
     const fn = rpc[name];
     if (typeof fn !== "function") {
         throw mkErr("Method not found: " + name, 404, "NOT_FOUND");
-    }
-
-    const schemaReady = globalThis.__zsSchemaReady;
-    if (schemaReady && typeof schemaReady.then === "function") {
-        await schemaReady;
     }
 
     const cfg = fn.config;
@@ -1501,28 +1396,11 @@ export async function __zsWorkflowDispatch(userNamespace, envelope, _ctx) {
 pub(crate) static BOOTSTRAP_KIND_BRIDGE_SPEC: LazyLock<String> =
     LazyLock::new(|| format!("__zs_kind_bridge_{}.js", uuid::Uuid::new_v4().simple()));
 
-/// Runtime-injected bootstrap module source. Built once at first use by
-/// splicing [`DB_INIT_JS`] into the otherwise-static bootstrap template.
-///
-/// The template is split into prefix (imports the internal kind bridge before
-/// `./__user__.js`) and main so the init script runs AFTER `user` is bound but
-/// BEFORE the `default.fetch` / `default.rpc` resolution. Order matters:
-///   1. The internal bridge evaluates before creator code, removes forgeable
-///      globals, and retains only the exact database policy operation.
-///   2. [`DB_INIT_JS`] runs next. Its top-level await imports the framework
-///      installer through V8's microtask checkpoint and plants typed Collection
-///      wrappers on `env.db`. Native plugins already received the validated
-///      descriptor before creator module evaluation.
-///
-/// By the time the kernel reads `default.fetch` / `default.rpc` off the user
-/// namespace, the dispatcher bridge is captured privately and the typed schema
-/// surface is live on `env.db`.
 pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
     let prefix = bootstrap_prefix_js();
     let mut s =
-        String::with_capacity(prefix.len() + DB_INIT_JS.len() + BOOTSTRAP_MAIN_JS.len() + 4);
+        String::with_capacity(prefix.len() + BOOTSTRAP_MAIN_JS.len());
     s.push_str(&prefix);
-    s.push_str(DB_INIT_JS);
     s.push_str(BOOTSTRAP_MAIN_JS);
     s
 });
@@ -1530,7 +1408,7 @@ pub(crate) static BOOTSTRAP_JS: LazyLock<String> = LazyLock::new(|| {
 fn bootstrap_prefix_js() -> String {
     format!(
         r#"
-import {{ __zsDispatchRpc, __zsInstallDbMaskPolicy, __zsWorkflowDispatch }} from "./{}";
+import {{ __zsDispatchRpc, __zsWorkflowDispatch }} from "./{}";
 import * as user from "./__user__.js";
 
 "#,
@@ -1886,44 +1764,10 @@ function _zsIsWsUpgrade(request) {
     return true;
 }
 
-// DB boot-policy readiness gate. `runtime-entry` stashes the asynchronous
-// mask-policy installation on `globalThis.__zsSchemaReady` but does NOT await
-// it (top-level await would leave module eval pending and
-// 404 every dispatch). The RPC dispatcher already awaits it before the
-// first procedure; the WinterCG fetch / fetchFast entries did NOT — so a
-// `default.fetch` handler could otherwise race that security setup.
-//
-// Gate fetch + fetchFast at REQUEST time (not module-eval time): await
-// the same promise the dispatcher awaits before invoking the user slot.
-// The await is near-free on the warm path once the promise is settled. A
-// rejected policy chain surfaces as a thrown error from the gate, so the fetch
-// fails loud rather than running without its declared policy.
-async function __zsAwaitSchemaReady() {
-    const ready = globalThis.__zsSchemaReady;
-    if (ready && typeof ready.then === "function") {
-        // A rejection here throws out of this await — the caller (the
-        // gated fetch/fetchFast shim) propagates it to the kernel, which
-        // maps it to an HTTP error envelope. Do NOT swallow it: a fetch
-        // after a failed schema-apply must surface a clear error.
-        await ready;
-    }
-}
-
-// Resolve the user's default.fetch once at module init. When present we
-// wrap it in a thin async shim that AWAITS `__zsSchemaReady` first, so
-// the user handler never runs before DB boot policy is ready.
-// The kernel already awaits a returned Promise and turns thrown
-// exceptions into `DispatchResult::ErrorValue` (honoring `err.status`),
-// so the shim adds one settled-promise await on the warm path and
-// correctly propagates a rejected schema chain on the cold path.
-const __USER_FETCH_RAW = (user && user.default && typeof user.default.fetch === "function")
-    ? user.default.fetch
-    : null;
-const USER_FETCH = __USER_FETCH_RAW
-    ? async function gatedFetch(request, env, ctx) {
-          await __zsAwaitSchemaReady();
-          return __USER_FETCH_RAW.call(user.default, request, env, ctx);
-      }
+// The host finalizes startup before dispatch. Preserve the creator fetch receiver.
+const __USER_FETCH_RAW = user?.default?.fetch;
+const USER_FETCH = typeof __USER_FETCH_RAW === "function"
+    ? Function.prototype.bind.call(__USER_FETCH_RAW, user.default)
     : null;
 
 // Optional zeroship extension: `user.default.fetchFast(method, url, bodyBytes, env)`.
@@ -1938,17 +1782,8 @@ const USER_FETCH = __USER_FETCH_RAW
 const __USER_FETCH_FAST_RAW = (user && user.default && typeof user.default.fetchFast === "function")
     ? user.default.fetchFast
     : null;
-// Same schema-readiness gate as `fetch` (C1). The shim is async, so it
-// returns a Promise; the kernel's fetchFast path already awaits a
-// promise return and re-classifies the resolved value (null → fall
-// through to the slow `default.fetch`, which is itself gated). A
-// rejected `__zsSchemaReady` throws out of the shim → kernel maps it to
-// an error envelope. Near-free on the warm path (settled promise).
 const USER_FETCH_FAST = __USER_FETCH_FAST_RAW
-    ? async function gatedFetchFast(method, url, bodyBytes, env) {
-          await __zsAwaitSchemaReady();
-          return __USER_FETCH_FAST_RAW(method, url, bodyBytes, env);
-      }
+    ? Function.prototype.bind.call(__USER_FETCH_FAST_RAW, user.default)
     : null;
 
 // Standalone RPC entry — the kernel calls this directly when the URL
@@ -1993,10 +1828,7 @@ async function fallbackFetch(request) {
     // GET / (or any path) → user.index() convention. The export
     // returns HTML (string or Response). Lets RPC-only apps still
     // render a UI without forcing creators to handle URL routing.
-    // Gate on schema readiness (C1) — `user.index()` may read `env.db`,
-    // so it must not run before the cold-boot migration resolves.
     if (request.method === "GET" && typeof user.index === "function") {
-        await __zsAwaitSchemaReady();
         try {
             const url = new URL(request.url);
             if (url.pathname === "/" || url.pathname === "") {
@@ -2215,10 +2047,6 @@ pub(crate) fn prepare_application(
     // class above is the sole provider; building with
     // `--no-default-features` (polyfill mode) is no longer supported.
 
-    // P5 S3: schema install is descriptor-only. Apps that ship migrations get
-    // `manifest.runtime_descriptor`; schema-less apps get no descriptor and the
-    // bootstrap installs no env.db collections.
-
     // Wrap the user's module graph in the bootstrap entry.
     //
     // The wrapper contains the bootstrap, its private capability bridge,
@@ -2269,26 +2097,17 @@ fn wrap_with_bootstrap(
     }
 
     let mut out: Vec<ModuleEntry> = Vec::with_capacity(modules.len() + 3);
-    let allow_deferred_schema_install = crate::transport::ssrf::dev_mode_enabled();
 
     // entry 0: bootstrap becomes the new entrypoint under "index.js".
     out.push(ModuleEntry {
         specifier: "index.js".into(),
-        // Keep this host decision in the bootstrap module's lexical scope;
-        // an app-controlled global must not suppress production policy sealing.
-        source: format!(
-            "const __zsAllowDeferredSchemaInstall = {};\n{}",
-            allow_deferred_schema_install, &*BOOTSTRAP_JS,
-        ),
+        source: BOOTSTRAP_JS.clone(),
     });
 
     // entry 1: capture native capabilities before creator code evaluates.
     out.push(ModuleEntry {
         specifier: BOOTSTRAP_KIND_BRIDGE_SPEC.clone(),
-        source: format!(
-            "const __zsHideDbPlatform = {};\n{}",
-            !allow_deferred_schema_install, KIND_BRIDGE_JS,
-        ),
+        source: KIND_BRIDGE_JS.into(),
     });
 
     // entry 2: user's original entry, renamed to "__user__.js". Its own
@@ -3197,25 +3016,6 @@ fn setup_globals_with_descriptor(
         }
     }
 
-    // __zsDbPlatform - the P9 section 8 capability-handle resolver. Reads the
-    // `DbPlatform` instance stashed on `env.db` under the `ZS_PLATFORM`
-    // private symbol and returns it. `@zeroship/bootstrap` resolves it once for
-    // the mask-policy flush, then deletes the global so no creator handler can
-    // reach it. See `zs_db_platform_callback`.
-    {
-        let f = v8::Function::new(scope, zs_db_platform_callback).unwrap();
-        let key = v8::String::new(scope, "__zsDbPlatform").unwrap();
-        global.set(scope, key.into(), f.into());
-    }
-
-    // __zsRuntimeDescriptor — the migration-first cutover (P5 S3). When the
-    // deployed `.zship` carries a `manifest.runtime_descriptor`, the worker
-    // resolves its blob and stamps the JSON onto `RuntimeState`. We parse it
-    // here and expose the resulting v2 `{ version, collections }` descriptor as
-    // a global so `@zeroship/bootstrap`'s entry sources the schema from the
-    // migration fold. Absent (`None`) means schema-less app. A present but
-    // corrupt/non-v2 descriptor is a hard boot error, never a schema-less
-    // fallback.
     let runtime_descriptor = {
         let descriptor_json = {
             let state: crate::state::SharedState = scope
@@ -3226,14 +3026,6 @@ fn setup_globals_with_descriptor(
         };
         if let Some(json) = descriptor_json {
             let descriptor = validate_runtime_descriptor_json(&json)?;
-            let parsed = v8::String::new(scope, &json)
-                .and_then(|s| v8::json::parse(scope, s))
-                .ok_or_else(|| {
-                    "runtime: failed to inject manifest.runtime_descriptor after JSON validation"
-                        .to_string()
-                })?;
-            let key = v8::String::new(scope, "__zsRuntimeDescriptor").unwrap();
-            global.set(scope, key.into(), parsed);
             Some(descriptor)
         } else {
             None

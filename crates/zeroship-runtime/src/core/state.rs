@@ -494,6 +494,9 @@ pub struct RuntimeState {
     pub forwarder_resumes: VecDeque<u32>,
     /// Host-controlled development output checking.
     pub(crate) validate_rpc_output: bool,
+    /// Native plugins may accept startup declarations only while the creator
+    /// entry is evaluating. Finalization and failure close this authority.
+    pub(crate) startup_declarations_open: bool,
 
     /// Futures for in-flight async ops (fetch, kv, ...).
     pub spawned_ops: Vec<Pin<Box<dyn Future<Output = OpResult>>>>,
@@ -777,6 +780,7 @@ impl RuntimeState {
             response_forwarders: HashMap::new(),
             forwarder_resumes: VecDeque::new(),
             validate_rpc_output: false,
+            startup_declarations_open: false,
 
             spawned_ops: Vec::new(),
             spawned_timers: Vec::new(),

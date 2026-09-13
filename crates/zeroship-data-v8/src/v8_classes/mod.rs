@@ -5,7 +5,7 @@
 //! under their captured transaction scope. Masked values and subscriptions own
 //! native handles whose lifecycle follows their wrappers.
 //!
-//! Internal policy installation uses the private `db_platform` capability.
+//! Native startup owns policy finalization.
 
 /// Exercises cold-open backend resolution and per-query unmask dispatch through
 /// the crate-private V8 entry points.
@@ -13,7 +13,6 @@
 mod cold_open;
 pub mod collection;
 pub mod db;
-pub mod db_platform;
 pub mod dispatch;
 pub mod masked_value;
 pub mod subscription;

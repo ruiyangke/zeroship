@@ -1438,9 +1438,6 @@ importers:
 
   sdks/bootstrap:
     dependencies:
-      '@zeroship/db':
-        specifier: workspace:*
-        version: link:../db
       '@zeroship/types':
         specifier: workspace:*
         version: link:../types

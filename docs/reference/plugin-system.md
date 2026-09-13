@@ -56,8 +56,11 @@ The worker awaits it before caching an isolate. Hosts that manage multiple
 isolates keep them exited between asynchronous turns; initialization enters
 and exits the isolate around its synchronous V8 work.
 
-DB facade preparation uses this lifecycle. The remaining bootstrap mask-policy
-handoff has not yet moved into native finalization.
+DB facade preparation uses this lifecycle. The SDK records mask-policy
+declarations through the native DB binding while creator startup evaluates.
+The DB plugin installs and seals the captured declaration during finalization.
+Unmasking refuses with `database_startup_pending` until finalization; ordinary
+descriptor-bound operations remain available during startup.
 
 ## Current plugin styles
 
