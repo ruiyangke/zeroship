@@ -251,7 +251,11 @@ pub async fn callback(
     let Some(native_return_to) = stash.return_to.as_deref() else {
         return render_error_clearing(PublicErrorMessage::InvalidRequest, &cfg);
     };
-    let resume = LinkResume::ReturnTo(native_return_to);
+    // Provider interaction is complete even when linking still needs a local
+    // confirmation. Store the remaining request in the signed continuation.
+    let native_return_to =
+        return_to_after_prompt_interaction(native_return_to, &["login", "select_account"]);
+    let resume = LinkResume::ReturnTo(&native_return_to);
     let outcome = match linker::resolve_or_link(
         db.as_ref(),
         &profile,
@@ -380,8 +384,6 @@ pub async fn callback(
     )
     .await;
 
-    let native_return_to =
-        return_to_after_prompt_interaction(native_return_to, &["login", "select_account"]);
     let mut resp = return_to::see_other(&native_return_to);
     resp.header(SET_COOKIE, session_cookie::set_cookie(&session.id));
     resp.header(SET_COOKIE, clear_stash_cookie(github_stash_cookie_name()));
