@@ -1,25 +1,13 @@
-//! `RpcCtx` — a per-request native holder exposing lazy accessors for
-//! `requestId`, `traceId`, `method`, `url`, `headers`, `signal`, `user`,
-//! `idempotencyKey`. See `docs/archive/perf/rpc-ctx-regression-2026-05-07.md` §4
-//! S10 for the design rationale (avoids ~4 µs/request of eager Headers /
-//! URL / AbortController construction on procedures that never read ctx).
-//!
-//! ## Identity invariants
-//!
-//! - `ctx.signal` returns the SAME JS object on every read within one
-//!   request — the AbortController is minted eagerly in `mint_rpc_ctx`
-//!   so `register_in_flight` can register it before user code runs;
-//!   the signal V8 wrapper is extracted from the controller on first
-//!   read and cached on the holder.
-//! - `ctx.headers` and `ctx.url` are also cached — multiple reads return
-//!   the same JS object (so `ctx.headers === ctx.headers` is `true`).
-//!   Per the 2026-05-07 amendment to `docs/proposals/rpc.md` §3 these
-//!   are NOT frozen — mutations succeed and are request-scoped.
+//! Native request context with lazy headers, URL and user accessors.
+//! The host owns its `AbortSignal`; reads preserve signal identity without
+//! consulting creator-writable constructors or controller methods.
 
 #![allow(unsafe_code)]
 
 use std::cell::RefCell;
 use std::sync::Arc;
+
+use super::abort::RequestSignal;
 
 use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
@@ -48,20 +36,14 @@ pub struct RpcCtx {
     pub headers: Arc<Vec<(String, String)>>,
     pub user_json: Option<String>,
     pub idempotency_key: Option<String>,
-    /// Eagerly-minted AbortController. Held as a `Global` so
-    /// `register_in_flight` can clone it for the abort registry before
-    /// user code runs — eviction must be able to fire abort even on
-    /// procedures that never read `ctx.signal`.
-    pub abort_controller: RefCell<Option<v8::Global<v8::Object>>>,
     /// Lazily-materialized `ctx.headers` wrapper. First read constructs
     /// a native Headers via `build_kernel_headers` and caches the Global.
     pub cached_headers: RefCell<Option<v8::Global<v8::Object>>>,
     /// Lazily-materialized `ctx.url` wrapper. First read invokes the
     /// global URL constructor and caches the result.
     pub cached_url: RefCell<Option<v8::Global<v8::Object>>>,
-    /// Lazily-materialized `ctx.signal` wrapper. First read extracts the
-    /// signal V8 object from `abort_controller`; cached for `[SameObject]`.
-    pub cached_signal: RefCell<Option<v8::Global<v8::Object>>>,
+    /// Native signal retained for the request and its asynchronous continuations.
+    pub cached_signal: RefCell<Option<RequestSignal>>,
     /// Lazily-materialized `ctx.user` wrapper. JSON.parse is deferred
     /// until first read. `null` is materialized once on first call.
     pub cached_user: RefCell<Option<v8::Global<v8::Value>>>,
@@ -87,7 +69,6 @@ impl RpcCtx {
             headers: Arc::new(Vec::new()),
             user_json: None,
             idempotency_key: None,
-            abort_controller: RefCell::new(None),
             cached_headers: RefCell::new(None),
             cached_url: RefCell::new(None),
             cached_signal: RefCell::new(None),
@@ -180,43 +161,11 @@ impl RpcCtx {
         obj.into()
     }
 
-    /// `ctx.signal` — extract the AbortSignal from the AbortController
-    /// (minting one lazily if the caller didn't request eager construction);
-    /// cache for `[SameObject]`.
+    /// Return the native signal owned by this request.
     #[v8_getter]
     #[v8_name = "signal"]
     fn signal_getter<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Value> {
-        if let Some(g) = self.cached_signal.borrow().as_ref() {
-            return v8::Local::new(scope, g.clone()).into();
-        }
-        let existing = self.abort_controller.borrow().clone();
-        let controller_g = match existing {
-            Some(g) => g,
-            None => {
-                let c = match build_abort_controller(scope) {
-                    Ok(c) => c,
-                    Err(_) => return v8::undefined(scope).into(),
-                };
-                let g = v8::Global::new(scope, c);
-                *self.abort_controller.borrow_mut() = Some(g.clone());
-                g
-            }
-        };
-        let controller = v8::Local::new(scope, controller_g);
-        let s_key = match v8::String::new(scope, "signal") {
-            Some(s) => s,
-            None => return v8::undefined(scope).into(),
-        };
-        let signal_v = match controller.get(scope, s_key.into()) {
-            Some(v) => v,
-            None => return v8::undefined(scope).into(),
-        };
-        let signal_obj = match v8::Local::<v8::Object>::try_from(signal_v) {
-            Ok(o) => o,
-            Err(_) => return v8::undefined(scope).into(),
-        };
-        *self.cached_signal.borrow_mut() = Some(v8::Global::new(scope, signal_obj));
-        signal_obj.into()
+        self.signal(scope).into()
     }
 }
 
@@ -279,16 +228,8 @@ fn get_or_init_template_slot<'s>(
     (inst_tmpl, proto_v)
 }
 
-/// Mint a fresh `RpcCtx` JS wrapper on `scope` from the supplied Rust
-/// state. Headers / URL / signal / user / abort-controller materialize
-/// on first accessor read. When `eager_abort_controller` is true, the
-/// AbortController is constructed up-front so the caller can hand the
-/// Local to `register_in_flight` (multi-tenant worker path).
-///
-/// Returns `(holder, Option<controller>)`; the second slot is `None`
-/// when `eager_abort_controller` is false.
-// 9 args, one per RpcCtx field this materializes - bundling them into a params
-// struct would only move the arity problem to every call site's construction.
+/// Create the native request holder. An eager signal can be registered for
+/// eviction before creator code runs; other callers materialize it on demand.
 #[allow(clippy::too_many_arguments)]
 pub fn mint_rpc_ctx<'s>(
     scope: &mut v8::PinScope<'s, '_>,
@@ -299,21 +240,15 @@ pub fn mint_rpc_ctx<'s>(
     headers: Arc<Vec<(String, String)>>,
     user_json: Option<String>,
     idempotency_key: Option<String>,
-    eager_abort_controller: bool,
-) -> Result<(v8::Local<'s, v8::Object>, Option<v8::Local<'s, v8::Object>>), OpError> {
+    eager_signal: bool,
+) -> Result<(v8::Local<'s, v8::Object>, Option<RequestSignal>), OpError> {
     let (inst_tmpl, proto_v) = get_or_init_template_slot(scope);
     let obj = inst_tmpl
         .new_instance(scope)
         .ok_or_else(|| OpError::type_error("RpcCtx instance allocation failed"))?;
     obj.set_prototype(scope, proto_v);
 
-    let (eager_controller, controller_global) = if eager_abort_controller {
-        let c = build_abort_controller(scope)?;
-        let g = v8::Global::new(scope, c);
-        (Some(c), Some(g))
-    } else {
-        (None, None)
-    };
+    let signal = eager_signal.then(|| RequestSignal::new(scope));
 
     let state = RpcCtx {
         request_id,
@@ -323,10 +258,9 @@ pub fn mint_rpc_ctx<'s>(
         headers,
         user_json,
         idempotency_key,
-        abort_controller: RefCell::new(controller_global),
         cached_headers: RefCell::new(None),
         cached_url: RefCell::new(None),
-        cached_signal: RefCell::new(None),
+        cached_signal: RefCell::new(signal.clone()),
         cached_user: RefCell::new(None),
     };
     let boxed: Box<RpcCtx> = Box::new(state);
@@ -344,7 +278,7 @@ pub fn mint_rpc_ctx<'s>(
     );
     std::mem::forget(weak);
 
-    Ok((obj, eager_controller))
+    Ok((obj, signal))
 }
 
 /// Construct a native `URL` JS object via `new URL(href)`.
@@ -367,17 +301,14 @@ fn build_native_url<'s>(
         .ok_or_else(|| OpError::type_error("URL construction failed"))
 }
 
-/// Mint a fresh `AbortController`.
-fn build_abort_controller<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-) -> Result<v8::Local<'s, v8::Object>, OpError> {
-    let global = scope.get_current_context().global(scope);
-    let key = v8::String::new(scope, "AbortController").unwrap();
-    let ctor_v = global
-        .get(scope, key.into())
-        .ok_or_else(|| OpError::type_error("globalThis.AbortController missing"))?;
-    let ctor = v8::Local::<v8::Function>::try_from(ctor_v)
-        .map_err(|_| OpError::type_error("globalThis.AbortController is not a function"))?;
-    ctor.new_instance(scope, &[])
-        .ok_or_else(|| OpError::type_error("AbortController construction failed"))
+impl RpcCtx {
+    fn signal<'s>(&self, scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Object> {
+        if let Some(signal) = self.cached_signal.borrow().as_ref() {
+            return signal.local(scope);
+        }
+        let signal = RequestSignal::new(scope);
+        let object = signal.local(scope);
+        *self.cached_signal.borrow_mut() = Some(signal);
+        object
+    }
 }
