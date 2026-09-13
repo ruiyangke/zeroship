@@ -287,12 +287,7 @@ impl SpendEngine {
         let mut warned_unweighted: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for row in &usage_rows {
-            let aid_raw: String = row.get("app_id");
-            let aid = AppId::parse(&aid_raw).map_err(|e| {
-                RegistryError::Database(format!(
-                    "usage_aggregates.app_id {aid_raw} is not a canonical app id: {e}"
-                ))
-            })?;
+            let aid = crate::app_id::from_row(row, "app_id", "spend usage aggregate")?;
             let metric: String = row.get("metric");
             if !weights.contains_key(&metric) && warned_unweighted.insert(metric.clone()) {
                 tracing::warn!(
@@ -310,12 +305,7 @@ impl SpendEngine {
         let mut transitions = Vec::new();
 
         for row in &app_rows {
-            let app_id_raw: String = row.get("id");
-            let app_id = AppId::parse(&app_id_raw).map_err(|e| {
-                RegistryError::Database(format!(
-                    "apps.id {app_id_raw} is not a canonical app id: {e}"
-                ))
-            })?;
+            let app_id = crate::app_id::from_row(row, "id", "spend app")?;
             let (plan_id, prev, override_limit, prev_eval_limit) =
                 Self::app_state_row(&conn, &app_id).await?;
 
