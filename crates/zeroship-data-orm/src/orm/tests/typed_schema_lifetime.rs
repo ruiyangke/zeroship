@@ -7,16 +7,10 @@ fn discard<T: 'static>(future: impl Future<Output = Result<T, DbError>> + 'stati
     Box::pin(async move { future.await.map(|_| ()) })
 }
 
-async fn exercise(db: &Database) {
+fn pending_operations(db: &Database) -> Vec<(&'static str, Pending)> {
     let entity = db.entity::<posts::Entity>().unwrap();
-    let _: Post = entity
-        .insert(NewPost {
-            title: "original".into(),
-        })
-        .await
-        .unwrap();
     let alias = entity.alias("p").unwrap();
-    let pending = vec![
+    vec![
         ("all", discard(entity.query().all::<Post>())),
         ("first", discard(entity.query().first::<Post>())),
         (
@@ -78,7 +72,22 @@ async fn exercise(db: &Database) {
                 ConflictTarget::new(posts::title),
             )),
         ),
-    ];
+    ]
+}
+
+#[expect(
+    clippy::future_not_send,
+    reason = "the fixture uses thread-local compio sessions"
+)]
+async fn exercise(db: &Database) {
+    let entity = db.entity::<posts::Entity>().unwrap();
+    let _: Post = entity
+        .insert(NewPost {
+            title: "original".into(),
+        })
+        .await
+        .unwrap();
+    let pending = pending_operations(db);
     let mut changed = posts::Entity::schema().fields().clone();
     changed["title"].max_length = Some(64);
     db.context

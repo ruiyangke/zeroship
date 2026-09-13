@@ -309,6 +309,10 @@ impl<E: Entity> EntityCollection<E> {
         read_builder::validate_bound_schema(&self.collection.database, E::COLLECTION, &self.schema)
     }
 
+    #[expect(
+        clippy::future_not_send,
+        reason = "ORM operations use thread-local compio sessions"
+    )]
     fn dispatch<F>(
         &self,
         prepared: Result<F, DbError>,
