@@ -80,8 +80,7 @@ cd "$ROOT"
 # Workflow acceptance owns its database and service fleet through Testcontainers.
 # It also has a dedicated runner: `cargo xtask test workflow`.
 
-# The server's coordinates come from the generated overlay, not from four
-# `${PG_x:-...}` lines here and four identical ones in run_auth_suite.sh. See
+# The server coordinates come from the generated overlay. See
 # tests/lib/test_config.sh; `tests/provision_test_backends.sh` writes the file,
 # and the PG_* names are its INPUTS, so setting one still points a run wherever
 # you like.
@@ -316,9 +315,7 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 
-# Exit codes alone cannot distinguish "every group passed" from "a group ran
-# nothing and said so politely". Require a MINIMUM, the same shape as
-# run_auth_suite.sh.
+# This runner retains a passed-test floor to detect missing test groups.
 passed="$(grep -oE '^test result: ok\. [0-9]+ passed' "$SUITE_LOG" \
   | grep -oE '[0-9]+' | awk '{s+=$1} END {print s+0}')"
 

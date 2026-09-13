@@ -3,23 +3,9 @@
 # test_config.sh - the shell half of the test overlay.
 #
 # THE LOGIC IS NOW IN RUST: tests/fixtures/platform_db/overlay.rs, reached
-# through `zs-testkit overlay`. This file is the shell BINDING - it keeps the
-# function names and the exported-variable contract that tests/run_auth_suite.sh
-# and tests/run_billing_suite.sh already source, so neither of them changed.
-# Read the Rust module for what the reader parses and why it is not the real
-# config parser.
-#
-# WHAT THIS REPLACES (unchanged, and still the reason the overlay exists).
-# Every suite carried its own copy of the test backends' coordinates:
-#
-#   tests/run_auth_suite.sh:65-68       PG_HOST/PG_PORT/PG_USER/PG_PASS
-#   tests/run_billing_suite.sh:124-127  the same four lines again
-#
-# and then exported the resulting DSN under whichever names the crates it ran
-# happened to read - AUTH_DB_URL, CONTROL_TEST_DB, MIGRATE_SERVER_TEST_DB,
-# GATEWAY_ANCHORS_DB_URL, GATEWAY_POOL_SMOKE_URL. Two copies of the address
-# drift; five names for one value means a crate whose name nobody exported runs
-# against nothing and reports passes.
+# through `zs-testkit overlay`. This file provides the function names and
+# exported variables used by the remaining worker and billing shell runners.
+# Auth package tests own their services and do not use this overlay.
 #
 # `tests/provision_test_backends.sh` writes `deploy/ops/zeroship.test.toml` in
 # the platform's own config schema, and this reads it. Rust SERVICE code reads
