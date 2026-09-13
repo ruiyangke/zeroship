@@ -2842,11 +2842,10 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
   `crates/zeroship-gateway/src/lib.rs:192-215`). A scoped search for `.signing_key` and
   `.prev_signing_key` under `crates/zeroship-gateway/src` found no `GateState` reads; the
   old private key therefore remains resident unnecessarily.
-- Workflow replay remains duplicated in the runtime's inline
-  `__zsWorkflowDispatch` (`crates/zeroship-runtime/src/core/init.rs`), the bootstrap
-  dispatcher (`sdks/bootstrap/src/dispatcher.ts`), and the SDK's internal
-  journal module (`sdks/workflows/src/journal.ts`). Their output readers now
-  use a host-bound callback, and the control credential stays in Rust.
+- Workflow replay still has the runtime's inline `__zsWorkflowDispatch`
+  (`crates/zeroship-runtime/src/core/init.rs`) beside the SDK's internal journal
+  module (`sdks/workflows/src/journal.ts`). Their output readers use a host-bound
+  callback, and the control credential stays in Rust.
 - Auth implements a non-brokered stored `client_secret_post` branch, but
   Control's registration API accepts only Basic or public `none` and both
   automatic client writers hardcode Basic
