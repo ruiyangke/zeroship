@@ -550,21 +550,15 @@ fn zs_env_returns_snapshot() {
 }
 
 #[test]
-fn zs_bind_and_get_request_ctx() {
+fn fetch_context_is_direct_and_legacy_context_globals_are_absent() {
     let modules = m(r#"
         export default {
             fetch(request, env, ctx) {
-                // Simulate what the bootstrap (PR 2) will do:
-                // bind ctx on entry.
-                __zs_bind_request_ctx(ctx);
-
-                // Nested lookup — must return the SAME object reference.
-                const nested = __zs_get_request_ctx();
-
                 return Response.json({
-                    sameRef: nested === ctx,
-                    hasWaitUntil: typeof nested?.waitUntil === "function",
-                    hasPassThrough: typeof nested?.passThroughOnException === "function"
+                    bindGlobal: typeof globalThis.__zs_bind_request_ctx,
+                    getGlobal: typeof globalThis.__zs_get_request_ctx,
+                    hasWaitUntil: typeof ctx.waitUntil === "function",
+                    hasPassThrough: typeof ctx.passThroughOnException === "function"
                 });
             }
         };
@@ -575,7 +569,8 @@ fn zs_bind_and_get_request_ctx() {
     };
     let body = body_to_string(&body);
     assert_eq!(status, 200, "body: {}", body);
-    assert!(body.contains(r#""sameRef":true"#), "body: {}", body);
+    assert!(body.contains(r#""bindGlobal":"undefined""#), "body: {}", body);
+    assert!(body.contains(r#""getGlobal":"undefined""#), "body: {}", body);
     assert!(body.contains(r#""hasWaitUntil":true"#), "body: {}", body);
     assert!(body.contains(r#""hasPassThrough":true"#), "body: {}", body);
 }

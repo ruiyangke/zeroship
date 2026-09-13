@@ -72,7 +72,6 @@ impl RequestLifetime {
     pub(crate) fn release(self, state: &SharedState) {
         let mut state = state.borrow_mut();
         state.per_request_user.remove(&self.request_id);
-        state.request_ctx_by_id.remove(&self.request_id);
         state.request_by_id.remove(&self.request_id);
         state.per_request_logs.remove(&self.request_id);
     }
