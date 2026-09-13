@@ -89,29 +89,20 @@ impl Recovery {
         deployment: &DeploymentId,
         activation_revision: Revision,
     ) -> Result<(), Error> {
-        self.queue.transact(|tx| async move {
-            queue::register_scope_in(&tx, app).await?;
-            queue::lock_scope(&tx, app).await?;
-            let scopes = tx.collection(recovery_scopes::Entity::COLLECTION)?;
-            if let Some(stored) = load(&tx, app).await? {
-                let revision = Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)?;
-                if activation_revision < revision
-                    || (activation_revision == revision && stored.deployment_id != deployment.as_str()) {
-                    return Err(Error::Conflict);
-                }
-                if activation_revision > revision {
-                    scopes.update(value!({"id":app.as_str()}), value!({
-                        "deployment_id":deployment.as_str(), "activation_revision":activation_revision.get(),
-                    })).await?;
-                }
-            } else {
-                scopes.insert(value!({
-                    "id":app.as_str(), "deployment_id":deployment.as_str(),
-                    "activation_revision":activation_revision.get(), "next_due_at":self.queue.clock.now().await?,
-                })).await?;
-            }
-            Ok(())
-        }).await
+        self.queue
+            .transact(|tx| async move {
+                queue::register_scope_in(&tx, app).await?;
+                queue::lock_scope(&tx, app).await?;
+                ensure_in(
+                    &tx,
+                    app,
+                    deployment,
+                    activation_revision,
+                    self.queue.clock.now().await?,
+                )
+                .await
+            })
+            .await
     }
 
     /// Page due obligations by app identity, including apps with healthy owners.
@@ -183,6 +174,43 @@ impl Recovery {
             Ok(Some(spec))
         }).await
     }
+}
+
+/// The caller holds the queue's app lock in the activation transaction.
+pub(crate) async fn ensure_in(
+    tx: &Database,
+    app: &AppId,
+    deployment: &DeploymentId,
+    activation_revision: Revision,
+    now: i64,
+) -> Result<(), Error> {
+    let scopes = tx.collection(recovery_scopes::Entity::COLLECTION)?;
+    if let Some(stored) = load(tx, app).await? {
+        let revision =
+            Revision::try_from(stored.activation_revision).map_err(|_| Error::Storage)?;
+        if activation_revision < revision
+            || (activation_revision == revision && stored.deployment_id != deployment.as_str())
+        {
+            return Err(Error::Conflict);
+        }
+        if activation_revision > revision {
+            let changed = scopes.execute(Operation::Update {
+                filter:value!({"id":app.as_str(), "activation_revision":revision.get()}),
+                patch:value!({"deployment_id":deployment.as_str(), "activation_revision":activation_revision.get()}), many:true,
+            }).await?;
+            if !matches!(changed, Output::Count(1)) {
+                return Err(Error::Storage);
+            }
+        }
+    } else {
+        scopes
+            .insert(value!({
+                "id":app.as_str(), "deployment_id":deployment.as_str(),
+                "activation_revision":activation_revision.get(), "next_due_at":now,
+            }))
+            .await?;
+    }
+    Ok(())
 }
 
 async fn load(tx: &Database, app: &AppId) -> Result<Option<Stored>, Error> {

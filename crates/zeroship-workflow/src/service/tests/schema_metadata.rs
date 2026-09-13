@@ -145,7 +145,7 @@ async fn assert_metadata(store: &OrmStore) {
         .namespace(store.binding.app_id(), store.binding.schema());
     let family = store.backend.sql_registration().family();
     let sql = match family {
-        POSTGRES_FAMILY => r#"
+        POSTGRES_FAMILY => r"
             SELECT c.relname AS table_name, a.attname AS column_name,
                    format_type(a.atttypid, a.atttypmod) AS storage_type,
                    a.attnotnull AS required,
@@ -155,7 +155,7 @@ async fn assert_metadata(store: &OrmStore) {
             JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum > 0 AND NOT a.attisdropped
             LEFT JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
             WHERE n.nspname = $1 AND c.relkind = 'r'
-        "#
+        "
         .to_owned(),
         SQLITE_FAMILY => format!(
             r#"
@@ -245,7 +245,7 @@ async fn assert_unique_metadata(store: &OrmStore, descriptor: &Value) {
         .backend
         .namespace(store.binding.app_id(), store.binding.schema());
     let sql = match store.backend.sql_registration().family() {
-        POSTGRES_FAMILY => r#"
+        POSTGRES_FAMILY => r"
             SELECT t.relname AS table_name, i.relname AS index_name, a.attname AS column_name
             FROM pg_index x
             JOIN pg_class t ON t.oid=x.indrelid
@@ -255,7 +255,7 @@ async fn assert_unique_metadata(store: &OrmStore, descriptor: &Value) {
             JOIN pg_attribute a ON a.attrelid=t.oid AND a.attnum=k.attnum
             WHERE n.nspname=$1 AND x.indisunique AND NOT x.indisprimary
             ORDER BY t.relname,i.relname,k.position
-        "#
+        "
         .to_owned(),
         SQLITE_FAMILY => format!(
             r#"

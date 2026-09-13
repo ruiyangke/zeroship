@@ -54,6 +54,7 @@ async fn platform_role_can_coordinate_without_customer_or_journal_privileges() {
     }
     manager_queue_authority(&fixture, &runtime).await;
     manager_recovery_authority(&fixture).await;
+    manager_scheduling_authority(&fixture).await;
     let schema = fixture
         .admin
         .query(
@@ -143,6 +144,89 @@ async fn manager_recovery_authority(fixture: &platform::Platform) {
 }
 
 #[expect(
+    clippy::future_not_send,
+    reason = "native scheduling uses the platform role through compio ORM"
+)]
+async fn manager_scheduling_authority(fixture: &platform::Platform) {
+    use zeroship_core::{
+        app_id::AppId,
+        schema_name::SchemaName,
+        workflow_jobs::{DeploymentId, JobOperation},
+        workflow_schedules::{
+            ActivateSchedules, RegisterSchedules, ScheduleCatchUp, ScheduleDescriptor,
+            ScheduleOverlap, ScheduleTiming,
+        },
+    };
+    use zeroship_data_orm::binding::DbBinding;
+    use zeroship_workflow_manager::{
+        scheduling::{Options as SchedulingOptions, Scheduler},
+        Options as QueueOptions, Queue,
+    };
+
+    let queue = Queue::connect(
+        DbBinding::new(
+            "workflow_manager",
+            "platform-schema",
+            SchemaName::new("workflow_manager").unwrap(),
+        ),
+        &fixture.runtime_url,
+        QueueOptions::default(),
+    )
+    .await
+    .unwrap();
+    let scheduler = Scheduler::new(queue, SchedulingOptions::default()).unwrap();
+    let app = AppId::mint();
+    let deployment = DeploymentId::mint();
+    scheduler
+        .prepare(&RegisterSchedules {
+            app_id: app.clone(),
+            deployment_id: deployment.clone(),
+            schedules: vec![ScheduleDescriptor {
+                name: "daily".into(),
+                workflow_name: "report".into(),
+                schedule: ScheduleTiming::Cron {
+                    cron_expr: "@daily".into(),
+                    tz: "UTC".into(),
+                },
+                overlap: ScheduleOverlap::default(),
+                catch_up: ScheduleCatchUp::default(),
+            }],
+        })
+        .await
+        .unwrap();
+    let activation = scheduler
+        .activate(&ActivateSchedules {
+            app_id: app.clone(),
+            deployment_id: deployment.clone(),
+            revision: 1.try_into().unwrap(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        activation.operation,
+        JobOperation::Activate { .. }
+    ));
+    // Seed a historical frontier without waiting for the wall clock to reach it.
+    fixture
+        .admin
+        .execute(
+            "UPDATE workflow_manager.schedules SET next_at=0 WHERE app_id=$1",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap();
+    let due = scheduler.due(None).await.unwrap();
+    assert_eq!(due.len(), 1);
+    assert_eq!(due[0].app_id, app);
+    let page = scheduler.dispatch(&app, &due[0].schedule_id).await.unwrap();
+    assert_eq!(page.jobs.len(), 1);
+    assert_eq!(page.jobs[0].deployment_id, deployment);
+    assert!(matches!(page.jobs[0].operation, JobOperation::Cron { .. }));
+    assert!(!page.more);
+    assert!(scheduler.due(None).await.unwrap().is_empty());
+}
+
+#[expect(
     clippy::too_many_lines,
     reason = "the provisioned role's grants and refusals are checked against the same queue state"
 )]
@@ -176,6 +260,11 @@ async fn manager_queue_authority(fixture: &platform::Platform, runtime: &compio_
             "placement_receipts",
             "queue_scopes",
             "recovery_scopes",
+            "schedule_activations",
+            "schedule_deployments",
+            "schedule_occurrences",
+            "schedule_scopes",
+            "schedules",
             "schema_version",
             "workers"
         ]
