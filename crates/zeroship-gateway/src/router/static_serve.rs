@@ -1087,7 +1087,7 @@ mod tests {
         disk: crate::blob_cache::DiskBlobCache,
     ) -> GateState {
         GateState {
-            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
+            service_auth: std::sync::Arc::new(crate::tests::gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),

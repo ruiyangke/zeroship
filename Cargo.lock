@@ -8193,7 +8193,6 @@ dependencies = [
  "zeroship-authz",
  "zeroship-bundle",
  "zeroship-core",
- "zeroship-mailer",
  "zeroship-metering",
 ]
 
