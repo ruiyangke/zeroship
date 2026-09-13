@@ -1,43 +1,11 @@
 //! `zeroship.users` CRUD.
 
-use std::cell::Cell;
-
 use compio_postgres::{Client, GenericClient};
 use zeroship_core::UserId;
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::error::{AuthError, Result};
 use crate::oidc::refresh::revoke_person_sessions_in_transaction;
-
-thread_local! {
-    /// Test-observable count of failed-login round-trips issued on THIS thread
-    /// (real or dummy).
-    ///
-    /// Bumped once per serialized PG round-trip performed by
-    /// [`record_login_failure`] and [`record_login_failure_dummy`]. It exists so a
-    /// regression test can assert — without flaky wall-clock timing — that the
-    /// real-password failure arm and the absent/OAuth-only failure arm perform an
-    /// EQUIVALENT number of latency-visible DB round-trips (finding F7: post-verify
-    /// DB-work asymmetry is an email-enumeration timing oracle).
-    ///
-    /// Thread-local (not a process global) so concurrent tests in the same
-    /// binary can't corrupt one another's delta — `verify_password_credentials`
-    /// runs its DB round-trips on the calling task's thread (only the Argon2
-    /// verify hops to `spawn_blocking`). Production code never reads it.
-    static LOGIN_FAILURE_ROUNDTRIPS: Cell<u64> = const { Cell::new(0) };
-}
-
-/// Current value of this thread's failed-login round-trip counter (test
-/// instrumentation).
-#[must_use]
-pub fn login_failure_roundtrips() -> u64 {
-    LOGIN_FAILURE_ROUNDTRIPS.with(Cell::get)
-}
-
-#[inline]
-fn bump_login_failure_roundtrips() {
-    LOGIN_FAILURE_ROUNDTRIPS.with(|c| c.set(c.get() + 1));
-}
 
 #[derive(Debug, Clone)]
 pub struct UserRow {
@@ -209,7 +177,6 @@ pub mod lockout {
 pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
     // Increment atomically and read back the new count so the lock decision is
     // made against the row's authoritative value (no read-modify-write race).
-    bump_login_failure_roundtrips();
     let rows = conn
         .query(
             "UPDATE zeroship.users \
@@ -242,19 +209,11 @@ pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
     Ok(count)
 }
 
-/// Enumeration-defense companion to [`record_login_failure`]: issue ONE
-/// throwaway `UPDATE zeroship.users … WHERE id = $1` against a freshly minted,
-/// guaranteed-absent user id so the absent / OAuth-only / no-credential failure
-/// arm performs the SAME serialized PG round-trip the real-password arm does
-/// (finding F7).
-///
-/// Without this, the real-password wrong-password arm runs
-/// `record_login_failure` (a `users` UPDATE) before its audit row while the
-/// absent arm runs only the audit INSERT — a measurable post-Argon2 latency
-/// delta that leaks whether an email belongs to a real, password-bearing
-/// account. This is the DB-round-trip analog of the dummy-hash that already
-/// equalizes the Argon2 wall time. The UPDATE matches zero rows (an id minted
-/// here and never stored), so it never mutates any account.
+/// Enumeration-defense companion to [`record_login_failure`]: send a failed-login
+/// UPDATE using an unpersisted user id before auditing the refusal. This preserves
+/// database work on the absent, passwordless and ineligible credential paths.
+/// It does not establish equal latency: a matching row can incur contention and
+/// crossing the lockout threshold requires an additional UPDATE.
 ///
 /// Best-effort by contract: like the real arm, a fault here must NOT change the
 /// credential decision. The caller logs and proceeds.
@@ -263,10 +222,8 @@ pub async fn record_login_failure(conn: &Client, id: &UserId) -> Result<i32> {
 ///
 /// Returns `AuthError::Db` on PG failure.
 pub async fn record_login_failure_dummy(conn: &Client) -> Result<()> {
-    bump_login_failure_roundtrips();
-    // A fresh user id is not persisted, so the UPDATE matches no row. We mirror the real
-    // statement's shape (same table, same SET targets, RETURNING) so PG plans
-    // and executes equivalent work.
+    // The fresh id is not persisted. The statement follows the real failure
+    // update's shape without changing an existing account.
     let absent = UserId::mint();
     conn.query(
         "UPDATE zeroship.users \

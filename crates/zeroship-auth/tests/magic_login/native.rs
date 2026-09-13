@@ -3,14 +3,19 @@
 use super::fixtures::*;
 use crate::common::{self, CapturingMailer, auth_server::AuthServer, database::Database};
 use std::sync::Arc;
+use zeroship_auth::store::users;
 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
-async fn same_device_login_requires_csrf_and_consumes_the_emailed_link() {
+async fn same_device_login_requires_csrf_and_recovers_a_soft_locked_account() {
     Database::run(async |database| {
         let mailer = Arc::new(CapturingMailer::default());
         let server = AuthServer::with_mailer(database, mailer.clone()).await;
         let email = "same-device@example.test";
+        let user = users::create(&server.pg, email, "Magic recovery", None)
+            .await
+            .unwrap();
+        soft_lock(&server, &user.id).await;
         let login = RequestedLogin::start(&server, &mailer, email).await;
         let cookie = format!("__Host-zsidp_magic_csrf={}", login.nonce);
 
@@ -42,6 +47,7 @@ async fn same_device_login_requires_csrf_and_consumes_the_emailed_link() {
 
         let response = login.redeem(&server, &login.nonce, Some(&cookie)).await;
         assert_login_session(&server, &response, email, &login.return_to).await;
+        assert_lock_cleared(&server, &user.id).await;
         assert_eq!(
             common::read_set_cookie(&response, "__Host-zsidp_magic_csrf").as_deref(),
             Some("")
@@ -94,6 +100,9 @@ async fn cross_device_login_binds_the_completion_to_its_target_and_consumes_it()
         assert_completion_state(&server, &login.nonce, false, 0).await;
         assert_eq!(session_count(&server).await, 0, "the redeeming browser is not signed in");
 
+        let user = users::find_by_email(&server.pg, email).await.unwrap().unwrap();
+        soft_lock(&server, &user.id).await;
+
         let other_target = common::native_authorize_return_to(
             "another-client", "http://127.0.0.1:9999/another-cb",
         );
@@ -103,6 +112,7 @@ async fn cross_device_login_binds_the_completion_to_its_target_and_consumes_it()
 
         let response = login.complete(&server, &code, &login.return_to).await;
         assert_login_session(&server, &response, email, &login.return_to).await;
+        assert_lock_cleared(&server, &user.id).await;
         assert_completion_state(&server, &login.nonce, true, 2).await;
         assert_login_rejected(login.complete(&server, &code, &login.return_to).await).await;
         assert_completion_state(&server, &login.nonce, true, 2).await;
