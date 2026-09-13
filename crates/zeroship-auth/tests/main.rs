@@ -6,9 +6,8 @@
 //! Cargo auto-discovery is disabled for this crate. Register new modules here
 //! or beneath an existing module so ordinary cargo test includes their cases.
 //! Store tests live under `store`; HTTP and protocol modules exercise the
-//! production routes. Owned database cases manage their servers and connection
-//! tasks through `common::database`. Older cases still require the configured
-//! platform database while their fixtures are being converted.
+//! production routes. Database cases manage their own servers and connection
+//! tasks through `common::database`.
 //!
 //! Select a group with `cargo test -p zeroship-auth --test main -- store::`.
 //! Each case must own mutable resources even though the executable is shared.
@@ -37,9 +36,8 @@ mod oidc_token_client_auth_test;
 mod oidc_userinfo_test;
 mod password_login;
 mod password_reset;
-mod postmark_webhook_test;
-mod relay_auto_revoke_test;
-mod relay_dedup_test;
+mod postmark;
+mod relay;
 mod security_headers_test;
 mod second_factor;
 mod signing_key_retention_test;
