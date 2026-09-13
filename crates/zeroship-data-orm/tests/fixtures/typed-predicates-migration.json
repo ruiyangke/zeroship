@@ -1,0 +1,48 @@
+{
+  "ir_version": 1,
+  "name": "typed_predicates",
+  "ops": [
+    {
+      "op": "createTable",
+      "name": "predicate_rows",
+      "columns": [
+        {
+          "name": "label",
+          "type": "text",
+          "nullable": false
+        },
+        {
+          "name": "rank",
+          "type": "bigInt",
+          "nullable": false
+        },
+        {
+          "name": "optional",
+          "type": "text"
+        },
+        {
+          "name": "payload",
+          "type": "bytes"
+        },
+        {
+          "name": "document",
+          "type": "json",
+          "nullable": false
+        },
+        {
+          "name": "moment",
+          "type": "timestamp",
+          "nullable": false
+        },
+        {
+          "name": "secret",
+          "type": {
+            "encrypted": {
+              "of": "text"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

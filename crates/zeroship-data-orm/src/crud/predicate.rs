@@ -103,61 +103,118 @@ pub(crate) fn resolve_model(
     table: &ResolvedTable,
     registration: &SqlRegistration,
 ) -> Result<ResolvedPredicate, QueryError> {
+    validate_model_budget(&predicate)?;
+    resolve_model_inner(predicate, schema, table, registration)
+}
+
+fn validate_model_budget(predicate: &crate::orm::ModelPredicate) -> Result<(), QueryError> {
+    use crate::orm::ModelPredicate;
+    let mut stack = vec![(predicate, 1)];
+    let mut nodes = 0;
+    while let Some((predicate, depth)) = stack.pop() {
+        nodes += 1;
+        if depth > crate::sql::MAX_PREDICATE_DEPTH
+            || nodes > crate::sql::joins::MAX_READ_PREDICATE_NODES
+        {
+            return Err(invalid("filter exceeds its predicate budget"));
+        }
+        match predicate {
+            ModelPredicate::And(children) | ModelPredicate::Or(children) => {
+                if children.len() > crate::sql::joins::MAX_READ_PREDICATE_NODES {
+                    return Err(invalid("filter exceeds its predicate budget"));
+                }
+                stack.extend(children.iter().map(|child| (child, depth + 1)));
+            }
+            ModelPredicate::Not(child) => stack.push((child, depth + 1)),
+            ModelPredicate::Membership { values, .. }
+                if values.len() > crate::sql::MAX_MEMBERSHIP_LIST_LEN =>
+            {
+                return Err(invalid("membership exceeds its value budget"));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn resolve_model_inner(
+    predicate: crate::orm::ModelPredicate,
+    schema: &Value,
+    table: &ResolvedTable,
+    registration: &SqlRegistration,
+) -> Result<ResolvedPredicate, QueryError> {
     use crate::orm::ModelPredicate;
     Ok(match predicate {
         ModelPredicate::And(children) => ResolvedPredicate::and(
             children
                 .into_iter()
-                .map(|child| resolve_model(child, schema, table, registration))
+                .map(|child| resolve_model_inner(child, schema, table, registration))
                 .collect::<Result<_, _>>()?,
         ),
         ModelPredicate::Or(children) => ResolvedPredicate::or(
             children
                 .into_iter()
-                .map(|child| resolve_model(child, schema, table, registration))
+                .map(|child| resolve_model_inner(child, schema, table, registration))
                 .collect::<Result<_, _>>()?,
         ),
+        ModelPredicate::Not(child) => ResolvedPredicate::Not(Box::new(resolve_model_inner(
+            *child,
+            schema,
+            table,
+            registration,
+        )?)),
         ModelPredicate::Const(value) => ResolvedPredicate::Const(value),
-        ModelPredicate::Compare {
-            field,
-            op,
-            mut value,
-        } => {
-            mapping::validate_field_name(field)?;
-            mapping::validate_value_operation(field, schema)?;
-            let definition = schema
-                .get(field)
-                .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
-            if definition["filterable"].as_bool() == Some(false) {
-                return Err(invalid(format!("field '{field}' is not filterable")));
-            }
-            let input = table
-                .inputs
-                .get(field)
-                .ok_or_else(|| invalid(format!("filter field has no physical column: {field}")))?;
-            let column = table.table.column(&input.column)?;
-            if value.is_null() {
-                if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
-                    return Err(invalid("null supports only equality comparisons"));
-                }
-                ResolvedPredicate::IsNull {
-                    operand: ResolvedOperand::Column(column),
-                    negated: op == CompareOp::Ne,
-                }
-            } else {
-                validate_comparison(definition, op)?;
-                crate::sql::codecs::prepare_value(field, definition, &mut value)
-                    .map_err(|error| invalid(error.to_string()))?;
-                let storage = column.storage();
-                let value = registration.encode(storage, value)?;
-                ResolvedPredicate::Compare {
-                    lhs: ResolvedOperand::Column(column),
-                    op,
-                    rhs: ResolvedPredicateValue::Bind { storage, value },
-                }
-            }
+        ModelPredicate::Compare { field, op, value } => {
+            let (column, definition) = resolve_column(field, schema, table)?;
+            comparison(column, field, definition, op, value, registration)?
+        }
+        ModelPredicate::Membership { field, op, values } => {
+            let (column, definition) = resolve_column(field, schema, table)?;
+            condition(
+                column,
+                field,
+                definition,
+                if op == MembershipOp::In {
+                    "$in"
+                } else {
+                    "$nin"
+                },
+                Value::Array(values),
+                registration,
+            )?
+        }
+        ModelPredicate::IsNull { field, negated } => {
+            let (column, definition) = resolve_column(field, schema, table)?;
+            condition(
+                column,
+                field,
+                definition,
+                "$exists",
+                Value::Bool(negated),
+                registration,
+            )?
         }
     })
+}
+
+fn resolve_column<'a>(
+    field: &str,
+    schema: &'a Value,
+    table: &ResolvedTable,
+) -> Result<(Column, &'a Value), QueryError> {
+    mapping::validate_field_name(field)?;
+    mapping::validate_value_operation(field, schema)?;
+    let definition = schema
+        .get(field)
+        .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
+    if definition["filterable"].as_bool() == Some(false) {
+        return Err(invalid(format!("field '{field}' is not filterable")));
+    }
+    let input = table
+        .inputs
+        .get(field)
+        .ok_or_else(|| invalid(format!("filter field has no physical column: {field}")))?;
+    Ok((table.table.column(&input.column)?, definition))
 }
 
 fn resolve_inner(
@@ -200,19 +257,7 @@ fn resolve_inner(
             });
             continue;
         }
-        mapping::validate_field_name(&field)?;
-        mapping::validate_value_operation(&field, schema)?;
-        let definition = schema
-            .get(&field)
-            .ok_or_else(|| invalid(format!("unknown filter field: {field}")))?;
-        if definition["filterable"].as_bool() == Some(false) {
-            return Err(invalid(format!("field '{field}' is not filterable")));
-        }
-        let input = table
-            .inputs
-            .get(&field)
-            .ok_or_else(|| invalid(format!("filter field has no physical column: {field}")))?;
-        let column = table.table.column(&input.column)?;
+        let (column, definition) = resolve_column(&field, schema, table)?;
         match value {
             Value::Object(operators) if operators.keys().any(|key| key.starts_with('$')) => {
                 for (operator, operand) in operators {
@@ -258,26 +303,7 @@ fn condition(
         _ => None,
     };
     if let Some(op) = comparison {
-        if value.is_null() {
-            if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
-                return Err(invalid(
-                    "null supports only equality and inequality comparisons",
-                ));
-            }
-            return Ok(ResolvedPredicate::IsNull {
-                operand: ResolvedOperand::Column(column),
-                negated: op == CompareOp::Ne,
-            });
-        }
-        validate_comparison(definition, op)?;
-        return Ok(ResolvedPredicate::Compare {
-            rhs: ResolvedPredicateValue::Bind {
-                storage: column.storage(),
-                value: encode(field, definition, column.storage(), value, registration)?,
-            },
-            lhs: ResolvedOperand::Column(column),
-            op,
-        });
+        return self::comparison(column, field, definition, op, value, registration);
     }
     match operator {
         "$in" | "$nin" => {
@@ -360,8 +386,38 @@ fn condition(
     }
 }
 
+fn comparison(
+    column: Column,
+    field: &str,
+    definition: &Value,
+    op: CompareOp,
+    value: Value,
+    registration: &SqlRegistration,
+) -> Result<ResolvedPredicate, QueryError> {
+    if value.is_null() {
+        if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
+            return Err(invalid(
+                "null supports only equality and inequality comparisons",
+            ));
+        }
+        return Ok(ResolvedPredicate::IsNull {
+            operand: ResolvedOperand::Column(column),
+            negated: op == CompareOp::Ne,
+        });
+    }
+    validate_comparison(definition, op)?;
+    Ok(ResolvedPredicate::Compare {
+        rhs: ResolvedPredicateValue::Bind {
+            storage: column.storage(),
+            value: encode(field, definition, column.storage(), value, registration)?,
+        },
+        lhs: ResolvedOperand::Column(column),
+        op,
+    })
+}
+
 fn validate_comparison(definition: &Value, op: CompareOp) -> Result<(), QueryError> {
-    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
+    use crate::sql::descriptors::{PredicateOperator, supports_predicate_operator};
     let operator = if matches!(op, CompareOp::Eq | CompareOp::Ne) {
         PredicateOperator::Equality
     } else {
@@ -377,14 +433,14 @@ fn validate_comparison(definition: &Value, op: CompareOp) -> Result<(), QueryErr
 }
 
 fn validate_equality(definition: &Value) -> Result<(), QueryError> {
-    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
+    use crate::sql::descriptors::{PredicateOperator, supports_predicate_operator};
     supports_predicate_operator(definition, PredicateOperator::Equality)
         .then_some(())
         .ok_or_else(|| invalid("ordinary equality is not supported for this field type"))
 }
 
 fn validate_pattern(definition: &Value) -> Result<(), QueryError> {
-    use crate::sql::descriptors::{supports_predicate_operator, PredicateOperator};
+    use crate::sql::descriptors::{PredicateOperator, supports_predicate_operator};
     supports_predicate_operator(definition, PredicateOperator::Pattern)
         .then_some(())
         .ok_or_else(|| invalid("pattern operator requires a text field"))
@@ -506,20 +562,104 @@ mod tests {
             assert!(resolves(definition, filter).is_err());
         }
 
-        assert!(resolves(
-            crate::value!({"type":"json"}),
-            crate::value!({"field":{"$eq":{"key":true}}}),
-        )
-        .is_ok());
-        assert!(resolves(
-            crate::value!({"type":"calendarDate"}),
-            crate::value!({"field":{"$gte":"2026-01-01"}}),
-        )
-        .is_ok());
-        assert!(resolves(
-            crate::value!({"type":"string"}),
-            crate::value!({"field":{"$like":"prefix%"}}),
-        )
-        .is_ok());
+        assert!(
+            resolves(
+                crate::value!({"type":"json"}),
+                crate::value!({"field":{"$eq":{"key":true}}}),
+            )
+            .is_ok()
+        );
+        assert!(
+            resolves(
+                crate::value!({"type":"calendarDate"}),
+                crate::value!({"field":{"$gte":"2026-01-01"}}),
+            )
+            .is_ok()
+        );
+        assert!(
+            resolves(
+                crate::value!({"type":"string"}),
+                crate::value!({"field":{"$like":"prefix%"}}),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn model_predicates_keep_capability_and_input_budgets() {
+        use crate::orm::ModelPredicate;
+        let registration = SqlRegistration::sqlite();
+        let run = |definition, predicate| {
+            let schema = crate::value!({
+                "id": {"type":"string", "required":true, "primaryKey":true},
+                "field": definition,
+            });
+            let table = ResolvedTable::new(
+                &SchemaName::new("main").unwrap(),
+                "records",
+                &schema,
+                &registration,
+            )
+            .unwrap();
+            resolve_model(predicate, &schema, &table, &registration)
+        };
+        let plain = crate::value!({"type":"string"});
+        let equality = || ModelPredicate::Compare {
+            field: "field",
+            op: CompareOp::Eq,
+            value: "value".into(),
+        };
+        assert!(run(plain.clone(), equality()).is_ok());
+        for definition in [
+            crate::value!({"type":"string", "filterable":false}),
+            crate::value!({"type":"string", "encrypted":true}),
+        ] {
+            for predicate in [
+                equality(),
+                ModelPredicate::Membership {
+                    field: "field",
+                    op: MembershipOp::In,
+                    values: vec![],
+                },
+                ModelPredicate::Membership {
+                    field: "field",
+                    op: MembershipOp::NotIn,
+                    values: vec![Value::Null],
+                },
+                ModelPredicate::IsNull {
+                    field: "field",
+                    negated: false,
+                },
+            ] {
+                assert!(run(definition.clone(), predicate).is_err());
+            }
+        }
+        let mut deep = equality();
+        for _ in 0..crate::sql::MAX_PREDICATE_DEPTH {
+            deep = ModelPredicate::And(vec![deep]);
+        }
+        assert!(run(plain.clone(), deep).is_err());
+        assert!(
+            run(
+                plain.clone(),
+                ModelPredicate::Or(
+                    (0..crate::sql::joins::MAX_READ_PREDICATE_NODES)
+                        .map(|_| equality())
+                        .collect(),
+                )
+            )
+            .is_err()
+        );
+        assert!(
+            run(
+                plain,
+                ModelPredicate::Membership {
+                    field: "field",
+                    op: MembershipOp::In,
+                    values: vec![Value::Null; crate::sql::MAX_MEMBERSHIP_LIST_LEN + 1],
+                }
+            )
+            .is_err()
+        );
     }
 }

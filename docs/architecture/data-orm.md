@@ -191,12 +191,80 @@ SQLite opens or creates a filesystem database, for example
 options are rejected. Tests provide explicit temporary files; the ORM owns no
 temporary directory and never removes database files when a backend closes.
 
+## Typed Rust queries
+
+Generated fields build predicates and ordering keys without JSON encoding.
+`eq`, `ne`, ordered comparisons, `in_values`, `not_in_values`, `is_null` and
+`is_not_null` compose with `and`, `or` and negation. Ordered comparisons require
+a comparable logical type; descriptor checks still enforce field capabilities
+and protection rules.
+
+```rust,ignore
+let posts = db.entity::<schema::posts::Entity>()?;
+let rows: Vec<PostSummary> = posts.query()
+    .filter(schema::posts::score.gte(Some(minimum_score))?
+        .and(schema::posts::title.in_values(allowed_titles)?))
+    .order_by(schema::posts::score.desc().nulls_last())
+    .order_by(schema::posts::id.asc())
+    .limit(page_size)?
+    .all().await?;
+```
+
+`first` returns an optional model. `count` counts matching visible rows without
+applying ordering or page bounds. `include_deleted` opts into rows hidden by the
+declared deletion lifecycle. The existing `find(filter, options)` method uses
+the same typed query path.
+
+Aliased columns support scalar `select`, optional joined scalars through
+`select_optional`, and `count`, `count_distinct`, `sum`, `avg`, `min` and `max`.
+`count_rows()` represents `COUNT(*)`; grouping and `having` use the shared
+relational compiler.
+
+```rust,ignore
+use zeroship_data_orm::orm::count_rows;
+
+let p = posts.alias("p")?;
+let totals: Vec<(Option<String>, i64, Option<f64>)> = db.from(&p)
+    .group_by(p.column(schema::posts::nickname))
+    .having(count_rows().gte(minimum_group_size)?)
+    .select((
+        p.column(schema::posts::nickname).select(),
+        count_rows(),
+        p.column(schema::posts::score).avg(),
+    ))?
+    .all().await?;
+```
+
+Counts decode as `i64`. Integer sums decode as `Option<i64>` and numeric sums
+and averages as `Option<f64>`. Minima and maxima preserve the column's logical
+type. Aggregates other than counts are optional because an empty input yields
+SQL null. Aggregate results use native codecs and may omit entity identity.
+
 ## Bulk mutations
 
 `updateMany`, `deleteMany`, `restoreMany`, and `purgeMany` return affected-row
 counts. Their SQL omits `RETURNING`; `ScopedExecutor::exec` and
 `DriverSession::exec` expose the database count without decoding records.
 Single-row writes and inserts retain their record-returning paths.
+
+Rust exposes these as `update_many`, `delete_many`, `restore_many` and
+`purge_many`. `insert_many` accepts typed insert models and returns decoded
+models atomically. Single-row `restore` and `purge` return an optional model.
+Typed upsert names its conflict columns explicitly:
+
+```rust,ignore
+use zeroship_data_orm::orm::ConflictTarget;
+
+let saved: Post = posts.upsert(
+    input,
+    ConflictTarget::new(schema::posts::slug),
+).await?;
+```
+
+The conflict target must belong to the entity and match database uniqueness.
+Composite unique targets use `ConflictTarget::new(field).and(other_field)`.
+These methods share the normal generators, protection passes and transaction
+route; they do not expose driver or SQL details to application code.
 
 Ordinary bulk operations affect every matching row. The read-query limit does
 not truncate writes, and an operation does not split itself into independently
@@ -376,6 +444,22 @@ requires no new backend enum variant in those paths.
 
 ## Session ownership and transactions
 
+Rust callers select isolation through typed transaction options:
+
+```rust,ignore
+use zeroship_data_orm::orm::{IsolationLevel, TransactionOptions};
+
+db.transaction_with_options(
+    TransactionOptions::default().isolation_level(IsolationLevel::Serializable),
+    |tx| async move { save_changes(&tx).await },
+).await?;
+```
+
+Omitted isolation uses the backend default. SQLite accepts explicit serializable
+isolation and rejects the other levels. Nested callbacks inherit their parent's
+isolation; passing an explicit level to a savepoint is refused. The callback is
+not invoked when its options are refused, and the parent remains usable.
+
 ```text
 ordinary operation                 explicit transaction
        |                                   |
@@ -410,6 +494,13 @@ The session reports actual settlement as committed, rolled back, or
 indeterminate. The transaction reducer decides the response and whether to
 publish queued effects. An uncertain result never proves commit. Nested
 callbacks use savepoints, and escaped callback handles expire.
+
+Dropping a native callback starts supervised cancellation and retains admission
+until cleanup settles or withdraws the session. Abandoning a nested callback
+cancels its enclosing transaction; returning an error rolls back its savepoint.
+An accepted commit remains owned by settlement even if its caller disappears.
+During session startup, cancellation may be indeterminate because the backend
+has not yet exposed an interrupt handle.
 
 Cancellation authority is captured while the session is available and remains
 bound to that lease. An acknowledgement either confirms delivery of an interrupt

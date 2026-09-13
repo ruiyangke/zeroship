@@ -120,32 +120,6 @@ impl Database {
         })
     }
 
-    /// Commit a successful callback or roll back its error. Nested calls use
-    /// the transaction protocol's savepoint frames. Escaped handles expire
-    /// when their callback finishes, including when its future is cancelled.
-    pub async fn transaction<T, F, Fut>(&self, body: F) -> Result<T, DbError>
-    where
-        F: FnOnce(Database) -> Fut,
-        Fut: Future<Output = Result<T, DbError>>,
-    {
-        self.context
-            .scope(async {
-                self.check_scope()?;
-                let route = self.capture_route().bind(self.backend.clone())?;
-                let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;
-                let active = Rc::new(Cell::new(true));
-                let _guard = ScopeGuard(active.clone());
-                let mut transaction = self.clone();
-                transaction.scope = Some(active.clone());
-                transaction.transaction_scope = Some(
-                    crate::transaction::scope::TransactionScope::current(self.binding.app_id())?,
-                );
-                let result = body(transaction).await;
-                active.set(false);
-                frame.finish(result).await
-            })
-            .await
-    }
 
     fn check_scope(&self) -> Result<(), DbError> {
         check_scope(self.scope.as_ref())
@@ -223,6 +197,7 @@ impl Collection {
         &self,
         filter: model::ModelPredicate,
         patch: Value,
+        many: bool,
     ) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let db = &self.database;
         db.context.with(|| {
@@ -234,25 +209,30 @@ impl Collection {
                     db.actor_id.clone(),
                     filter,
                     patch,
+                    many,
                 )
             });
             self.dispatch(prepared)
         })
     }
 
-    fn delete_model(
+    fn mutate_model(
         &self,
         filter: model::ModelPredicate,
+        mutation: mutations::Mutation,
+        many: bool,
     ) -> impl Future<Output = Result<Output, DbError>> + use<> {
         let db = &self.database;
         db.context.with(|| {
             let prepared = db.check_scope().and_then(|()| {
-                PreparedOperation::new_model_delete(
+                PreparedOperation::new_model_mutation(
                     db.binding.clone(),
                     &self.name,
                     db.capture_route(),
                     db.actor_id.clone(),
                     filter,
+                    mutation,
+                    many,
                 )
             });
             self.dispatch(prepared)
@@ -307,79 +287,28 @@ pub struct EntityCollection<E: Entity> {
     entity: PhantomData<E>,
 }
 fn schema_mismatch<E: Entity>() -> DbError {
+    schema_mismatch_for(E::COLLECTION)
+}
+
+fn schema_mismatch_for(collection: &str) -> DbError {
     DbError::config(
         "orm_schema_mismatch",
         format!(
             "collection '{}': Rust metadata differs from the installed runtime descriptor; regenerate from the deployment's schema.runtime.json",
-            E::COLLECTION,
+            collection,
         ),
     )
 }
 impl<E: Entity> EntityCollection<E> {
     fn validate(&self) -> Result<(), DbError> {
-        self.collection.database.context.with(|| {
-            let current = crate::descriptor::collection_schema(
-                &self.collection.database.binding,
-                E::COLLECTION,
-            )?;
-            if std::sync::Arc::ptr_eq(&current, &self.schema)
-                || current.as_ref() == self.schema.as_ref()
-            {
-                Ok(())
-            } else {
-                Err(schema_mismatch::<E>())
-            }
-        })
+        read_builder::validate_bound_schema(&self.collection.database, E::COLLECTION, &self.schema)
     }
     pub fn find<R: FromRow<E>>(
         &self,
         filter: Filter<E>,
         options: FindOptions,
     ) -> impl Future<Output = Result<Vec<R>, DbError>> + use<E, R> {
-        let future = self.validate().and_then(|()| {
-            let mut source = ReadSource::new(E::COLLECTION, "source");
-            source.include_deleted = options.include_deleted;
-            let mut query = ReadQuery::new(source);
-            query.model_filter = Some(filter.into_predicate());
-            query.limit = options
-                .limit
-                .map(crate::sql::RowLimit::new)
-                .transpose()
-                .map_err(|error| DbError::validation("invalid_read", error.to_string()))?
-                .unwrap_or_default();
-            query.offset = options
-                .offset
-                .map(crate::sql::RowOffset::new)
-                .transpose()
-                .map_err(|error| DbError::validation("invalid_read", error.to_string()))?
-                .unwrap_or_default();
-            query.projection.push(ReadProjection::Row {
-                output: "model".into(),
-                source: "source".into(),
-                fields: Some(R::COLUMNS.iter().map(|field| (*field).into()).collect()),
-                optional: false,
-            });
-            Ok(self.collection.database.read(query))
-        });
-        async move {
-            let Output::Rows { rows, .. } = future?.await? else {
-                return Err(DbError::internal("model read returned a count"));
-            };
-            rows.into_iter()
-                .map(|row| {
-                    let Value::Object(mut fields) = row else {
-                        return Err(DbError::internal("model read returned a non-record"));
-                    };
-                    let Value::Object(model) = fields
-                        .swap_remove("model")
-                        .ok_or_else(|| DbError::internal("model read omitted its projection"))?
-                    else {
-                        return Err(DbError::internal("model projection was not a record"));
-                    };
-                    R::from_row(Row::new(model))
-                })
-                .collect()
-        }
+        self.query().filter(filter).with_options(options).all()
     }
     pub fn insert<I: Insertable<E>, R: FromRow<E>>(
         &self,
@@ -407,6 +336,7 @@ impl<E: Entity> EntityCollection<E> {
                 self.collection.update_model(
                     filter.into_predicate(),
                     Value::Object([("$set".into(), Value::Object(fields))].into()),
+                    false,
                 )
             });
         async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
@@ -416,7 +346,11 @@ impl<E: Entity> EntityCollection<E> {
         filter: Filter<E>,
     ) -> impl Future<Output = Result<Option<R>, DbError>> + use<E, R> {
         let future = self.validate().map(|()| {
-            self.collection.delete_model(filter.into_predicate())
+            self.collection.mutate_model(
+                filter.into_predicate(),
+                mutations::Mutation::Delete,
+                false,
+            )
         });
         async move { Ok(decode_rows::<E, R>(future?.await?)?.pop()) }
     }
@@ -435,6 +369,11 @@ fn decode_rows<E: Entity, R: FromRow<E>>(output: Output) -> Result<Vec<R>, DbErr
 }
 mod codecs;
 mod model;
+mod mutations;
+pub use mutations::ConflictTarget;
+mod transactions;
+pub use crate::error::IsolationLevel;
+pub use transactions::TransactionOptions;
 pub use codecs::{sql_types, Decimal, Point, Protected};
 pub use model::*;
 pub mod read;
@@ -631,7 +570,7 @@ impl PreparedOperation {
                 } else {
                     crud::plan_delete_one
                 }(&binding, &route, collection, filter, actor_id.as_deref())?,
-                operation: ChangeOp::Update,
+                operation: mutations::Mutation::Delete.change_op(&binding, collection)?,
                 many,
             },
             Operation::Purge { filter, many } => Plan::Mutation {
@@ -710,6 +649,7 @@ impl PreparedOperation {
         actor_id: Option<String>,
         filter: model::ModelPredicate,
         patch: Value,
+        many: bool,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;
         Ok(Self {
@@ -721,26 +661,30 @@ impl PreparedOperation {
             plan: Plan::Update {
                 filter: filter.into(),
                 patch,
-                many: false,
+                many,
             },
         })
     }
 
-    fn new_model_delete(
+    fn new_model_mutation(
         binding: DbBinding,
         collection: &str,
         route: CapturedRoute,
         actor_id: Option<String>,
         filter: model::ModelPredicate,
+        mutation: mutations::Mutation,
+        many: bool,
     ) -> Result<Self, DbError> {
         validate_target(&binding, collection, &route)?;
-        let query = crud::plan_delete_one_input(
+        let query = mutation.plan(
             &binding,
             &route,
             collection,
-            filter.into(),
+            filter,
             actor_id.as_deref(),
+            many,
         )?;
+        let operation = mutation.change_op(&binding, collection)?;
         Ok(Self {
             context: crate::orm_context::current(),
             binding,
@@ -749,8 +693,8 @@ impl PreparedOperation {
             actor_id,
             plan: Plan::Mutation {
                 query,
-                operation: ChangeOp::Update,
-                many: false,
+                operation,
+                many,
             },
         })
     }

@@ -34,6 +34,8 @@ mod completion;
 pub(crate) use completion::Completion;
 #[cfg(test)]
 mod settlement_tests;
+#[cfg(test)]
+mod native_cancellation_tests;
 
 thread_local! {
     /// Monotonic session generation for this thread. Never reset it: generations must
@@ -425,12 +427,7 @@ pub async fn deadline_fired(
 /// order step 1 has something to compare: a cancel naming a different identity
 /// must not touch this entry's session, actor, timer or admission - not even to
 /// cancel it.
-#[allow(
-    dead_code,
-    reason = "no production cancel publisher yet - the creator API has no tx.cancel(), \
-              and the deadline path reaches Cancelling through `deadline_fired`. \
-              Exercised by `transaction::probe::cancel`."
-)]
+#[cfg(test)]
 pub async fn cancel(app_id: &str) -> Driven {
     let Some(authority) = authority_of(app_id) else {
         return Driven::default();
@@ -441,6 +438,25 @@ pub async fn cancel(app_id: &str) -> Driven {
         &StepConfig::default(),
     )
     .await
+}
+
+/// Claim cleanup before returning from Drop; keep its I/O owned by the admission.
+pub(super) fn cancel_admission(app_id: &str, completion: Completion) -> bool {
+    let Some(authority) = authority_of(app_id) else {
+        return false;
+    };
+    let Some(actions) = apply(app_id, TxEvent::Cancel { authority }) else {
+        return false;
+    };
+    // An earlier cancellation or accepted terminal command remains the owner.
+    if !actions.is_empty() {
+        let app_id = app_id.to_owned();
+        crate::orm_context::spawn(async move {
+            run_attempt(&app_id, actions, &StepConfig::default(), completion).await;
+        })
+        .detach();
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +823,14 @@ async fn open_session(
     completion: &Completion,
 ) -> Result<(), OpenSessionError> {
     let client = backend.open_tx_session(app_id, schema, begin).await?;
+    install_opened_session(app_id, completion, client)
+}
+
+fn install_opened_session(
+    app_id: &str,
+    completion: &Completion,
+    client: Session,
+) -> Result<(), OpenSessionError> {
     if !completion.is_current(app_id) {
         client.discard();
         return Err(OpenSessionError::Failed(DbError::internal(
@@ -982,48 +1006,25 @@ impl std::future::Future for SessionReturned<'_> {
     }
 }
 
-/// Perform forced cleanup and report what the health oracle said **afterwards**.
-///
-/// This function is the one SC-1 constrains by name. Read the module docs before
-/// touching the order of the two steps inside [`cleanup_postgres`].
+/// Interrupt outstanding work, then establish the session's cleanup outcome.
 async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> CleanupAck {
+    // Dropping a query future returns its handle before PostgreSQL has stopped
+    // executing it. Confirm cancellation before queuing ROLLBACK on that handle.
+    if crate::tx_lanes::with(|l| l.tx_canceller_for(app_id).is_some()) {
+        return cancel_and_reclaim(app_id, token).await;
+    }
     if let Some(ack) = rollback_session_in_slot(app_id).await {
         return ack;
     }
 
-    // An empty slot has three causes and they are NOT the same, so the answer is
-    // taken from the PROTOCOL's view of session ownership rather than from the
-    // slot being empty. Reading emptiness as proof of anything is the DBR-03
-    // shape.
     let session = crate::tx_lanes::with(|l| l.transaction_reducer(app_id).map(TxReducer::session));
     match session {
-        // No session was ever acquired. From `Preparing` - goal `NoTransaction` -
-        // that is proved by construction with no I/O: the reducer mints the
-        // `IssueBegin` token on the transition OUT of `Preparing`, so a force
-        // that found `Preparing` interrupted a transaction whose `BEGIN` was
-        // never issued.
-        //
-        // `Starting` may still be awaiting BEGIN or session setup on the
-        // server. There is no installed canceller yet. The opening interpreter
-        // checks its admission before installation and discards any session
-        // returned after retirement; it cannot install into a replacement.
-        Some(super::reducer::SessionOwnership::None) => {
-            let _ = goal;
+        Some(super::reducer::SessionOwnership::None) if goal == CleanupGoal::NoTransaction => {
             CleanupAck::NoOpenTransaction
         }
-        // A session exists and some other future holds it out of the slot. This
-        // is the COMMON case, not an edge: the execution deadline fires because
-        // a statement is slow, and a slow statement is one whose future is
-        // holding the session. Cancel it rather than concluding that health is
-        // unknown - the previous answer here destroyed the connection every
-        // time the mechanism that exists to bound a slow statement fired.
-        //
-        // `Registry` and `Command` are both real here, and the difference is not
-        // one this function may act on. `Command` is a statement the reducer
-        // knows about; `Registry` is the ambient CRUD path, which takes the
-        // session with a bare `TxClientSlotGuard` and reports nothing to the
-        // state machine (see the module header's "known gap"). Today's
-        // production creator statements are the second kind.
+        // During startup the backend still owns BEGIN/setup and has not exposed
+        // a canceller. Retirement fences late installation, but proves no rollback.
+        Some(super::reducer::SessionOwnership::None) => CleanupAck::Indeterminate,
         Some(
             super::reducer::SessionOwnership::Registry
             | super::reducer::SessionOwnership::Command(_),
@@ -1045,48 +1046,14 @@ async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
 
 /// Cancel the statement holding the session, reclaim it, and roll it back.
 ///
-/// The three steps are in this order for a reason that is not stylistic:
-///
-/// 1. **Deliver the cancellation and wait for the server to confirm it.**
-///    `Pool::cancel_query` returns only after the postmaster closed the
-///    dedicated cancellation connection, which is the cross-connection ordering
-///    barrier. Until that returns, a `CancelRequest` is still in flight and
-///    could land on any statement this backend runs next - including the
-///    `ROLLBACK` below, or a later borrower's query.
-/// 2. **Wait for the holder to give the session back.** The cancelled statement
-///    fails with `57014`, its `await` returns, and its
-///    [`crate::tx_lanes::TxClientSlotGuard`] parks the session. That put is what
-///    wakes this wait.
-/// 3. **Roll back and sample the oracle**, in that order, exactly as
-///    [`cleanup_postgres`] does for a session that was in the slot all along.
-///
-/// ## What happens when the cancel and the return race
-///
-/// The canceller and the holder run concurrently, so all three orderings must be
-/// safe, and they are - two of them by construction and one by falling back:
-///
-/// * The cancel lands while the statement runs. The intended case: `57014`, the
-///   guard returns the session, the `ROLLBACK` proves the goal, the connection
-///   is kept.
-/// * The statement finishes on its own first. Step 1 has not returned yet, so
-///   nothing here touches the session while the packet is unconfirmed. The
-///   server discards a cancel that arrives while a backend is idle waiting for a
-///   command, so the `ROLLBACK` runs normally.
-/// * The cancel is dispatched in the narrow window after the statement finished
-///   but before the backend is back at command-read. The pending cancel is
-///   consumed by the next interrupt check, which is our own `ROLLBACK`: it fails
-///   with `57014`, the oracle does not read `Idle`, the ack is `Indeterminate`
-///   and the session is withdrawn. A false withdrawal - the safe answer - and
-///   never a cancel that outlives this cleanup, because step 1's EOF proves the
-///   packet was consumed before the `ROLLBACK` was even sent.
+/// Confirm CancelRequest delivery before sending ROLLBACK or returning the lease:
+/// an unconfirmed request could interrupt cleanup or a later borrower's query.
+/// After the handle returns, rollback must establish backend health before reuse.
 async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
     let Some(identity) = CleanupIdentity::capture(app_id, token) else {
         return CleanupAck::Indeterminate;
     };
     let Some(canceller) = crate::tx_lanes::with(|l| l.tx_canceller_for(app_id)) else {
-        // No canceller was captured for this session. A SQLite handle with no
-        // transaction reservation is the only way to get here, and there is
-        // nothing stable to interrupt.
         return CleanupAck::Indeterminate;
     };
 

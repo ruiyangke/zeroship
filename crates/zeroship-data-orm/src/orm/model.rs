@@ -155,18 +155,115 @@ impl<C: Column> Field<C> {
 }
 impl<C: FilterableColumn> Field<C> {
     pub fn eq<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+        self.compare(crate::sql::CompareOp::Eq, value)
+    }
+    pub fn ne<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+        self.compare(crate::sql::CompareOp::Ne, value)
+    }
+    fn compare<T: EncodeValue<C::SqlType>>(
+        self,
+        op: crate::sql::CompareOp,
+        value: T,
+    ) -> Result<Filter<C::Entity>, DbError> {
         let value = value
             .encode_value()
             .map_err(|error| field_error::<C>("filter", error))?;
         Ok(Filter {
             predicate: ModelPredicate::Compare {
                 field: C::NAME,
-                op: crate::sql::CompareOp::Eq,
+                op,
                 value,
             },
             entity: PhantomData,
         })
     }
+    pub fn in_values<T: EncodeValue<C::SqlType>>(
+        self,
+        values: impl IntoIterator<Item = T>,
+    ) -> Result<Filter<C::Entity>, DbError> {
+        self.membership(crate::sql::MembershipOp::In, values)
+    }
+    pub fn not_in_values<T: EncodeValue<C::SqlType>>(
+        self,
+        values: impl IntoIterator<Item = T>,
+    ) -> Result<Filter<C::Entity>, DbError> {
+        self.membership(crate::sql::MembershipOp::NotIn, values)
+    }
+    fn membership<T: EncodeValue<C::SqlType>>(
+        self,
+        op: crate::sql::MembershipOp,
+        values: impl IntoIterator<Item = T>,
+    ) -> Result<Filter<C::Entity>, DbError> {
+        Ok(Filter {
+            predicate: ModelPredicate::Membership {
+                field: C::NAME,
+                op,
+                values: encode_members::<C, T>(values)?,
+            },
+            entity: PhantomData,
+        })
+    }
+    pub fn is_null(self) -> Filter<C::Entity> {
+        self.null_check(false)
+    }
+    pub fn is_not_null(self) -> Filter<C::Entity> {
+        self.null_check(true)
+    }
+    fn null_check(self, negated: bool) -> Filter<C::Entity> {
+        Filter {
+            predicate: ModelPredicate::IsNull {
+                field: C::NAME,
+                negated,
+            },
+            entity: PhantomData,
+        }
+    }
+}
+
+/// Logical types supporting portable ordered comparisons.
+pub trait OrderedSqlType {}
+macro_rules! ordered_types {
+    ($($sql:ident),* $(,)?) => { $(impl OrderedSqlType for super::sql_types::$sql {})* };
+}
+ordered_types!(Text, Integer, BigInt, Number, Timestamp, CalendarDate, Time);
+impl<T: OrderedSqlType> OrderedSqlType for super::sql_types::Nullable<T> {}
+
+impl<C: FilterableColumn> Field<C>
+where
+    C::SqlType: OrderedSqlType,
+{
+    pub fn lt<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+        self.compare(crate::sql::CompareOp::Lt, value)
+    }
+    pub fn lte<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+        self.compare(crate::sql::CompareOp::Lte, value)
+    }
+    pub fn gt<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+        self.compare(crate::sql::CompareOp::Gt, value)
+    }
+    pub fn gte<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Filter<C::Entity>, DbError> {
+        self.compare(crate::sql::CompareOp::Gte, value)
+    }
+}
+
+pub(crate) fn encode_members<C: Column, T: EncodeValue<C::SqlType>>(
+    values: impl IntoIterator<Item = T>,
+) -> Result<Vec<Value>, DbError> {
+    let mut encoded = Vec::new();
+    for value in values {
+        if encoded.len() == crate::sql::MAX_MEMBERSHIP_LIST_LEN {
+            return Err(DbError::validation(
+                "invalid_filter",
+                "membership exceeds its value budget",
+            ));
+        }
+        encoded.push(
+            value
+                .encode_value()
+                .map_err(|error| field_error::<C>("filter", error))?,
+        );
+    }
+    Ok(encoded)
 }
 impl<C: UpdatableColumn> Field<C> {
     pub fn set<T: EncodeValue<C::SqlType>>(self, value: T) -> Result<Patch<C::Entity>, DbError> {
@@ -189,10 +286,20 @@ pub struct Filter<E> {
 pub(crate) enum ModelPredicate {
     And(Vec<Self>),
     Or(Vec<Self>),
+    Not(Box<Self>),
     Compare {
         field: &'static str,
         op: crate::sql::CompareOp,
         value: Value,
+    },
+    Membership {
+        field: &'static str,
+        op: crate::sql::MembershipOp,
+        values: Vec<Value>,
+    },
+    IsNull {
+        field: &'static str,
+        negated: bool,
     },
     Const(bool),
 }
@@ -214,18 +321,40 @@ impl<E> Filter<E> {
     pub fn or(self, other: Self) -> Self {
         self.combine(false, other)
     }
+    pub fn negate(self) -> Self {
+        Self {
+            predicate: ModelPredicate::Not(Box::new(self.predicate)),
+            entity: PhantomData,
+        }
+    }
     fn combine(self, conjunction: bool, other: Self) -> Self {
+        let mut children = match self.predicate {
+            ModelPredicate::And(children) if conjunction => children,
+            ModelPredicate::Or(children) if !conjunction => children,
+            child => vec![child],
+        };
+        match other.predicate {
+            ModelPredicate::And(nested) if conjunction => children.extend(nested),
+            ModelPredicate::Or(nested) if !conjunction => children.extend(nested),
+            child => children.push(child),
+        }
         Self {
             predicate: if conjunction {
-                ModelPredicate::And(vec![self.predicate, other.predicate])
+                ModelPredicate::And(children)
             } else {
-                ModelPredicate::Or(vec![self.predicate, other.predicate])
+                ModelPredicate::Or(children)
             },
             entity: PhantomData,
         }
     }
     pub(crate) fn into_predicate(self) -> ModelPredicate {
         self.predicate
+    }
+}
+impl<E> std::ops::Not for Filter<E> {
+    type Output = Self;
+    fn not(self) -> Self {
+        self.negate()
     }
 }
 #[derive(Debug)]
