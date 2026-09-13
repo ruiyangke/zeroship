@@ -43,11 +43,21 @@ pub(super) fn collection(name: &str, schema: &CollectionSchema) -> Result<(), Db
     }
     identity(name, schema)?;
     let mut relation_names = HashSet::new();
+    let mut physical_columns = HashSet::new();
     let mut soft_delete = false;
     let mut concurrency = false;
     for (field, column) in schema.fields() {
         crate::sql::mapping::validate_field_name(field)?;
         validate_column(field, column, 0)?;
+        let value_column = column.storage.value_column.as_deref().unwrap_or(field);
+        let raw_column = crate::sql::mapping::declared_raw_column(field, column)?;
+        for physical in std::iter::once(value_column).chain(raw_column.as_deref()) {
+            if !physical_columns.insert(physical.to_owned()) {
+                return Err(invalid(format!(
+                    "collection '{name}' has conflicting physical column mappings"
+                )));
+            }
+        }
         if column.soft_delete && std::mem::replace(&mut soft_delete, true)
             || column.concurrency && std::mem::replace(&mut concurrency, true)
         {
