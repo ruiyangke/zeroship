@@ -5,8 +5,8 @@
     reason = "fixtures stay on their compio runtime"
 )]
 
-use crate::common::{CapturingMailer, auth_server::AuthServer, database::Database};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
+use crate::common::{auth_server::AuthServer, database::Database, CapturingMailer};
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde_json::json;
 use std::{io::Write as _, sync::Arc};
 use zeroship_mailer::suppressions;
@@ -134,11 +134,9 @@ async fn signature_refusals_cannot_send_mail_and_the_authentic_request_succeeds(
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].to.email, "recipient@example.test");
         assert!(sent[0].text.contains("verification-token-hash"));
-        assert!(
-            sent[0]
-                .text
-                .contains("https://provider.example.test/auth/v1/verify")
-        );
+        assert!(sent[0]
+            .text
+            .contains("https://provider.example.test/auth/v1/verify"));
     })
     .await;
 }
