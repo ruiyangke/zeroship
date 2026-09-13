@@ -74,7 +74,7 @@ pub struct DeliveryOptions {
 }
 
 impl DeliveryOptions {
-    fn validate(self) -> Result<(), WorkflowServiceError> {
+    pub(super) fn validate(self) -> Result<(), WorkflowServiceError> {
         if self.execution_timeout.is_zero()
             || self.operation_timeout.is_zero()
             || self.retry_delay.is_zero()
@@ -496,7 +496,7 @@ async fn release<L: JobLease>(
     let _ = bounded(timeout, app.release_job(task, lease)).await;
 }
 
-async fn bounded<T>(
+pub(super) async fn bounded<T>(
     timeout: Duration,
     future: impl Future<Output = Result<T, WorkflowServiceError>>,
 ) -> Result<T, WorkflowServiceError> {
