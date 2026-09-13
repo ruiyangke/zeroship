@@ -57,8 +57,6 @@ skew breaks browser launch.
 
 `ci.yml` does not run this, exactly as it does not run `tests/e2e_browser/`:
 both need a nix env, real browsers and a live multi-process stack. Run it by
-hand when touching auth UI. The cheap always-on companions that DO run in the
-normal Rust suite are `crates/auth/tests/template_csp_test.rs` (no inline
-`style=` in any template) and `crates/auth/tests/template_a11y_test.rs` (every
-error banner is an addressable alert) - they guard the source shape, while this
-tier is what proves the browser agrees.
+hand when touching auth UI. The normal Rust suite exercises rendered login
+markup and response headers. Template source scans are retired; browser checks
+cover computed styles, interaction and accessibility-tree behavior.
