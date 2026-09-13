@@ -151,15 +151,12 @@ fn validate_column(name: &str, column: &ColumnSchema, depth: usize) -> Result<()
             ));
         }
     }
-    if column.precision.is_some() {
+    if let Some(precision) = column.precision {
         if column.logical_type != LogicalType::Number {
             return Err(invalid("fixed precision requires a numeric column"));
         }
-        crate::sql::statement::DecimalStorage::new(
-            column.precision.unwrap(),
-            column.scale.unwrap_or(0),
-        )
-        .map_err(|error| DbError::validation("invalid_numeric_metadata", error.to_string()))?;
+        crate::sql::statement::DecimalStorage::new(precision, column.scale.unwrap_or(0))
+            .map_err(|error| DbError::validation("invalid_numeric_metadata", error.to_string()))?;
     } else if column.scale.is_some() {
         return Err(invalid("numeric scale requires fixed precision"));
     }
