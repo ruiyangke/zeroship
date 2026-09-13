@@ -6,9 +6,8 @@
  *   export default defineConfig({ plugins: [react(), zeroship()] })
  *
  * How it works:
- *   1. transform: discovers `"use server"` modules, rewrites RPC exports
- *      into client stubs, and appends the dev registry hooks the runtime
- *      bootstrap consumes
+ *   1. transform: discovers `"use server"` modules and rewrites RPC exports
+ *      into client stubs while retaining server binding metadata
  *   2. environment: registers zeroship DevEnvironment with Vite
  *   3. dev-server: spawns the dev runtime, exposes HTTP module fetch +
  *      HMR poll endpoints, and proxies runtime-bound requests
@@ -34,12 +33,8 @@ import { zeroshipFrameworkResolverPlugin, zeroshipModulePlugin } from "./zeroshi
  * One configured dev-auth user (all fields optional; sensible defaults).
  *
  * There is no `password` field. The dev login form prefills + validates a
- * password DERIVED from `id` (`devPasswordFor` in
- * `sdks/bootstrap/src/dev-auth.ts`): `"dev-"` + the first 8 characters of the
- * id after `pws_`, e.g. `pws_alice000000000000000` -> `dev-alice000`. It is
- * not a secret; it only makes the dev credential check (and its failure path)
- * real, and it is deliberately short enough that the deployed platform's
- * signup policy refuses it.
+ * password derived from `id` by the Vite dev-auth provider. It is visible in
+ * the form and only exists to exercise the credential failure path locally.
  */
 export interface DevAuthUser {
   /** Opaque per-app pairwise subject. Defaults to a stable `pws_dev…`. */
@@ -113,9 +108,9 @@ export interface ZeroshipOptions {
    * - `false` — disable; `/__zeroship/auth/*` falls through to the user module and
    *   `env.auth.getUser()` returns `null` (anonymous).
    *
-   * Dev-only by construction: this provider lives in the dev runtime
-   * (`@zeroship/bootstrap/dev`) and is structurally absent from any production
-   * `.zship` build.
+   * Dev-only by construction: Vite serves these routes as middleware and only
+   * shares the cookie secret with the local runtime verifier. Production
+   * `.zship` builds do not contain the provider.
    */
   devAuth?: boolean | DevAuthUser | { user: DevAuthUser } | { users: DevAuthUser[]; defaultUserId?: string };
 }

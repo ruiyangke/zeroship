@@ -291,6 +291,65 @@ describe("devServerPlugin", () => {
     }
   });
 
+  test("serves the dev-auth flow while creator runtime startup is broken", async () => {
+    const harness = await startHarness({
+      devServerPort: 3909,
+      serveRuntime: true,
+      freshRuntimeRequired: true,
+    });
+    try {
+      const runtimeFailure = await fetch(`${harness.origin}/api/probe`);
+      assert.equal(runtimeFailure.status, 500);
+
+      const callback = `${harness.origin}/__zeroship/auth/popup-callback`;
+      const authorize = await fetch(
+        `${harness.origin}/__zeroship/auth/authorize?state=dev-state&redirect_uri=${encodeURIComponent(callback)}`,
+      );
+      assert.equal(authorize.status, 200);
+      const csrfCookie = authorize.headers.get("set-cookie") ?? "";
+      const csrf = /__zeroship_dev_csrf=([^;]+)/.exec(csrfCookie)?.[1];
+      assert.ok(csrf, "authorize must set the dev CSRF cookie");
+
+      const login = await fetch(`${harness.origin}/__zeroship/auth/authorize`, {
+        method: "POST",
+        redirect: "manual",
+        headers: {
+          "content-type": "application/x-www-form-urlencoded",
+          cookie: `__zeroship_dev_csrf=${csrf}`,
+        },
+        body: new URLSearchParams({
+          csrf,
+          state: "dev-state",
+          redirect_uri: callback,
+          email: "dev@localhost",
+          password: "dev-dev00000",
+        }),
+      });
+      assert.equal(login.status, 302);
+      const location = new URL(login.headers.get("location") ?? "", harness.origin);
+      const code = location.searchParams.get("code");
+      assert.ok(code, "login must mint an authorization code");
+
+      const exchange = await fetch(`${harness.origin}/__zeroship/auth/session`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code }),
+      });
+      assert.equal(exchange.status, 200);
+      const sessionCookie = exchange.headers.get("set-cookie") ?? "";
+      const session = /__zeroship_dev_session=([^;]+)/.exec(sessionCookie)?.[1];
+      assert.ok(session, "exchange must set the dev session cookie");
+
+      const probe = await fetch(`${harness.origin}/__zeroship/auth/session`, {
+        headers: { cookie: `__zeroship_dev_session=${session}` },
+      });
+      assert.equal(probe.status, 200);
+      assert.equal((await probe.json() as { user?: { email?: string } }).user?.email, "dev@localhost");
+    } finally {
+      await harness.close();
+    }
+  });
+
   test("spawns the runtime with the default sqlite dev database and tears it down on close", async () => {
     const beforeExitListeners = process.listenerCount("exit");
     const beforeSigintListeners = process.listenerCount("SIGINT");

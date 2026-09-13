@@ -976,8 +976,8 @@ async fn handle_request(
     let ctx = RequestCtx::new(cancel.clone());
 
     // Dev-tier auth: in self-contained dev there is no gateway to HMAC-sign a
-    // `ZeroShip-User` header, so the JS dev-auth provider
-    // (`@zeroship/bootstrap/dev`) mints a local `__zeroship_dev_session`
+    // `ZeroShip-User` header, so Vite dev-auth middleware mints a local
+    // `__zeroship_dev_session`
     // cookie instead. Resolve the dev identity from that cookie and thread it
     // through the SAME `call_fetch_handler_with_user` path the worker uses for
     // the gateway header — identical `user_json` shape, identical native

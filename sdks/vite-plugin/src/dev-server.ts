@@ -23,7 +23,6 @@ import {
   ENV_VITE_ORIGIN,
   ENV_ENTRY,
   ENV_RUNTIME_DESCRIPTOR,
-  ENV_DEV_AUTH,
   ENV_DEV_AUTH_SECRET,
   ENV_DIE_WITH_PARENT,
   DEFAULT_DEV_PORT,
@@ -34,7 +33,8 @@ import {
   RUNTIME_RESTART_MAX_MS,
   RUNTIME_LOG_TAIL_LINES,
 } from "./constants.js";
-import { resolveDevAuthEnv, type DevAuthOption } from "./dev-auth-config.js";
+import { resolveDevAuth, type DevAuthOption } from "./dev-auth-config.js";
+import { createDevAuthProvider, serveDevAuthHttp } from "./dev-auth.js";
 import {
   ZeroshipDevEnvironment,
   createZeroshipEnvironmentOptions,
@@ -556,9 +556,13 @@ export function devServerPlugin(
   // Resolve the dev-tier auth env pair ONCE per dev-server lifetime. The secret
   // is stable across child restarts (the crash-restart handler re-spawns the
   // runtime) so cookies minted before a restart still verify afterward.
-  const devAuthEnv = resolveDevAuthEnv(options.devAuth, () =>
+  const devAuth = resolveDevAuth(options.devAuth, () =>
     randomBytes(32).toString("hex"),
   );
+  const devAuthProvider = createDevAuthProvider({
+    config: devAuth.config ?? undefined,
+    secret: devAuth.secret ?? undefined,
+  });
 
   let root = "";
   let isDev = false;
@@ -631,6 +635,18 @@ export function devServerPlugin(
         logTail: [],
         port: devPort,
       };
+
+      server.middlewares.use(
+        async (
+          req: http.IncomingMessage,
+          res: http.ServerResponse,
+          next: () => void,
+        ) => {
+          const pathname = requestPath(req);
+          if (!devAuthProvider?.handles(pathname)) return next();
+          await serveDevAuthHttp(devAuthProvider, req, res);
+        },
+      );
 
       // 0. Migration-first gen-types — ensure the migrations dir is WATCHED so a
       //    change there fires `hotUpdate` (Vite only watches the module graph +
@@ -1019,15 +1035,12 @@ export function devServerPlugin(
             [ENV_DIE_WITH_PARENT]: String(process.pid),
             [ENV_VITE_ORIGIN]: `http://localhost:${vitePort}`,
             ...(serverEntry ? { [ENV_ENTRY]: serverEntry } : {}),
-            // Dev-tier auth: when enabled, hand the child the dev-user config +
-            // the cookie HMAC secret. The runtime's `dev_auth.rs` reads the
-            // secret to verify the `__zeroship_dev_session` cookie → server-side
-            // identity; the bootstrap dev-auth provider reads both to serve
-            // `/__zeroship/auth/*` + sign the cookie. Omitted entirely when disabled.
-            ...(devAuthEnv.config !== null && devAuthEnv.secret !== null
+            // The Vite middleware owns the dev login surface. The child only
+            // receives its cookie HMAC secret so Rust can recover the request
+            // identity before creator dispatch.
+            ...(devAuthProvider !== null && devAuth.secret !== null
               ? {
-                  [ENV_DEV_AUTH]: devAuthEnv.config,
-                  [ENV_DEV_AUTH_SECRET]: devAuthEnv.secret,
+                  [ENV_DEV_AUTH_SECRET]: devAuth.secret,
                 }
               : {}),
           };
@@ -1199,13 +1212,8 @@ export function devServerPlugin(
       // than being caught by Vite's index.html fallback. Forwarded path
       // prefixes:
       //   - /__zeroship/v1/<id>   ← spec wire (production + dev parity)
-      //   - /__zeroship/auth/*    ← platform BFF login (authorize,
-      //                     popup-callback, session[?mint=1], signout),
-      //                     answered by the child runtime's dev-auth
-      //                     provider (sdks/bootstrap/src/dev-auth.ts) — the
-      //                     same same-origin contract the gateway owns in
-      //                     prod. Without this the SDK's session mint hits
-      //                     Vite's SPA fallback and fails.
+      //   - /__zeroship/auth/*    ← forwarded only when dev auth is disabled,
+      //                     preserving creator ownership of those paths
       //   - /api/*         ← raw HTTP routes the user app exposes
       //   - /rpc, /_rpc    ← legacy wires kept for in-flight migrations
       server.middlewares.use(
