@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock};
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
 use zeroship_core::app_id::AppId;
 
-use super::super::tests::init_runtime;
 use super::journal::Journal;
 use crate::identity_fixture::service_auth;
 use crate::sync::SharedEnvs;
@@ -25,7 +24,7 @@ pub(super) struct Fixture<'db> {
 impl Fixture<'_> {
     pub async fn run(max_pinned: usize, test: impl AsyncFnOnce(&Fixture<'_>)) {
         Database::migrated(async |database| {
-            init_runtime();
+            zeroship_runtime::init::init_v8();
             let app_id = AppId::mint();
             let meter = Arc::new(zeroship_metering::Meter::new());
             let worker_url = database.url_as("zeroship_worker");
@@ -137,41 +136,22 @@ fn workflow_zship(source: &[u8]) -> Vec<u8> {
 
 #[test]
 fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
-    use super::super::{load_pinned_workflow_on_demand, tests::test_worker_config};
+    use super::super::{load_pinned_workflow_on_demand, tests::fixture::Worker};
 
     std::thread::spawn(|| {
         compio::runtime::Runtime::new().unwrap().block_on(async {
-            init_runtime();
-            let root = tempfile::tempdir().unwrap();
-            let config = test_worker_config(root.path());
-            let app_id = AppId::mint();
-            crate::cache::init_cache(
-                4,
-                4,
-                crate::cache::KernelConfig {
-                    control_url: config.control_url.clone(),
-                    control_key: String::new(),
-                    db_service: None,
-                    kv_store: None,
-                    storage_backend: None,
-                    meter: Arc::new(zeroship_metering::Meter::new()),
-                },
-            );
-            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
-            crate::sync::put_env_from_json(
-                &envs,
-                app_id.clone(),
-                r#"{"vars":{},"secrets":{},"expose":[]}"#,
-                0,
-            )
-            .unwrap();
+            let worker = Worker::new();
+            let root = &worker.storage;
+            let config = &worker.config;
+            let app_id = worker.app_id.clone();
+            let envs = &worker.envs;
             let original = deploy_workflow_fixture(&config.blob_store, &app_id, "original").await;
             let replacement =
                 deploy_workflow_fixture(&config.blob_store, &app_id, "replacement").await;
             load_pinned_workflow_on_demand(&config, &envs, &app_id, &original)
                 .await
                 .unwrap();
-            assert!(crate::cache::has_pinned_workflow_app(&app_id, &original));
+            assert!(crate::cache::get_workflow_runtime(&app_id, &original).is_some());
 
             let bytes = config
                 .blob_store
@@ -190,7 +170,7 @@ fn pinned_loader_verifies_stored_manifest_content_and_app_scope() {
                 .await
                 .unwrap_err();
             assert!(error.contains("manifest validation failed"));
-            assert!(crate::cache::has_pinned_workflow_app(&app_id, &original));
+            assert!(crate::cache::get_workflow_runtime(&app_id, &original).is_some());
 
             std::fs::remove_file(path).unwrap();
             assert!(
