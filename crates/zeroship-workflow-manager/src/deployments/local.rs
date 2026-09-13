@@ -1,7 +1,7 @@
 //! Local host provisioning of the normal app deployment catalog.
 
+use super::Error;
 use super::{collections, DeploymentHolds, SQLITE_SCHEMA};
-use crate::WorkflowServiceError;
 use std::{
     path::Path,
     time::{Duration, Instant},
@@ -17,7 +17,7 @@ impl DeploymentHolds {
     ///
     /// # Errors
     /// Refuses incompatible catalogs without altering existing data.
-    pub async fn open_local(path: &Path) -> Result<Self, WorkflowServiceError> {
+    pub async fn open_local(path: &Path) -> Result<Self, Error> {
         initialize(path)?;
         let deadline = Instant::now() + Duration::from_secs(5);
         let database = loop {
@@ -25,7 +25,7 @@ impl DeploymentHolds {
                 DbBinding::new(
                     "platform",
                     "app-deployments",
-                    SchemaName::new("main").expect("local catalog namespace"),
+                    SchemaName::new("main").map_err(|_| super::invalid_storage())?,
                 ),
                 ConnectOptions::new(
                     format!("sqlite:{}", path.display()),
@@ -49,7 +49,7 @@ impl DeploymentHolds {
     }
 }
 
-fn initialize(path: &Path) -> Result<(), WorkflowServiceError> {
+fn initialize(path: &Path) -> Result<(), Error> {
     if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         std::fs::create_dir_all(parent).map_err(|_| unavailable())?;
     }
@@ -71,7 +71,7 @@ fn initialize(path: &Path) -> Result<(), WorkflowServiceError> {
             .execute_batch(SQLITE_SCHEMA)
             .map_err(|_| unavailable())?;
         if actual != objects(&expected)? {
-            return Err(WorkflowServiceError::Unavailable(
+            return Err(Error::Unavailable(
                 "local app deployment catalog schema is incompatible".into(),
             ));
         }
@@ -79,9 +79,7 @@ fn initialize(path: &Path) -> Result<(), WorkflowServiceError> {
     tx.commit().map_err(|_| unavailable())
 }
 
-fn objects(
-    connection: &rusqlite::Connection,
-) -> Result<Vec<(String, String)>, WorkflowServiceError> {
+fn objects(connection: &rusqlite::Connection) -> Result<Vec<(String, String)>, Error> {
     let mut query = connection
         .prepare(
             "SELECT name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' ORDER BY name",
@@ -95,6 +93,6 @@ fn objects(
     result
 }
 
-fn unavailable() -> WorkflowServiceError {
-    WorkflowServiceError::Unavailable("local app deployment catalog is unavailable".into())
+fn unavailable() -> Error {
+    Error::Unavailable("local app deployment catalog is unavailable".into())
 }

@@ -21,26 +21,25 @@ fn concurrent_local_registration() {
     let app = AppId::mint();
     let (hash, encoded) = manifest();
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
-    let peers: Vec<_> = (0..4)
-        .map(|_| {
-            let path = path.clone();
-            let app = app.clone();
-            let hash = hash.clone();
-            let encoded = encoded.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                compio::runtime::Runtime::new().unwrap().block_on(async {
-                    DeploymentHolds::open_local(&path)
-                        .await
-                        .unwrap()
-                        .record_deployment(&app, &hash, &encoded)
-                        .await
-                        .unwrap()
-                })
+    // Spawn every participant before joining any thread waiting at the barrier.
+    let peers: [_; 4] = std::array::from_fn(|_| {
+        let path = path.clone();
+        let app = app.clone();
+        let hash = hash.clone();
+        let encoded = encoded.clone();
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            compio::runtime::Runtime::new().unwrap().block_on(async {
+                DeploymentHolds::open_local(&path)
+                    .await
+                    .unwrap()
+                    .record_deployment(&app, &hash, &encoded)
+                    .await
+                    .unwrap()
             })
         })
-        .collect();
+    });
     let ids: Vec<_> = peers.into_iter().map(|peer| peer.join().unwrap()).collect();
     for id in &ids[1..] {
         assert_eq!(id, &ids[0]);
@@ -93,7 +92,7 @@ async fn local_catalog_preserves_identity_holds_and_reclamation_after_reopen() {
         catalog
             .acquire(&scope(&foreign), &deployment, generation(1))
             .await,
-        Err(WorkflowServiceError::PermissionDenied)
+        Err(Error::PermissionDenied)
     ));
 
     assert_conflict(fence_reclamation(&catalog.database, &app, &deployment).await);
@@ -225,7 +224,7 @@ async fn registration_rejects_invalid_manifests_and_corrupt_existing_metadata() 
             catalog
                 .record_deployment(&app, invalid_hash, invalid_manifest)
                 .await,
-            Err(WorkflowServiceError::InvalidRequest(_))
+            Err(Error::InvalidRequest(_))
         ));
     }
     let deployment = catalog
@@ -241,8 +240,41 @@ async fn registration_rejects_invalid_manifests_and_corrupt_existing_metadata() 
         .unwrap();
     assert!(matches!(
         catalog.record_deployment(&app, &hash, &encoded).await,
-        Err(WorkflowServiceError::Internal(_))
+        Err(Error::Internal(_))
     ));
+}
+
+#[compio::test]
+async fn local_catalog_uses_the_exact_host_selected_file() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("normal-app-deployments.sqlite");
+    let ledger = DeploymentHolds::open_local(&path).await.unwrap();
+    let app = AppId::mint();
+    let (hash, encoded) = manifest();
+    let deployment = ledger
+        .record_deployment(&app, &hash, &encoded)
+        .await
+        .unwrap();
+    let holder = scope(&app);
+    ledger
+        .acquire(&holder, &deployment, generation(1))
+        .await
+        .unwrap();
+    let stored = rusqlite::Connection::open(&path).unwrap();
+    let identity: String = stored
+        .query_row(
+            "SELECT id FROM app_deploys WHERE app_id = ?1 AND deploy_hash = ?2",
+            rusqlite::params![app.uuid().to_string(), hash],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(identity, deployment);
+    let state: String = stored.query_row(
+        "SELECT state FROM app_deploy_holds WHERE app_id = ?1 AND deploy_id = ?2 AND holder_id = ?3",
+        rusqlite::params![app.uuid().to_string(), deployment, holder.holder()],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(state, "held");
 }
 
 #[compio::test]
@@ -253,7 +285,7 @@ async fn local_catalog_rejects_incompatible_schema_without_rewriting_it() {
     connection.execute_batch("CREATE TABLE app_deploys (id TEXT PRIMARY KEY); INSERT INTO app_deploys VALUES ('keep')").unwrap();
     assert!(matches!(
         DeploymentHolds::open_local(&path).await,
-        Err(WorkflowServiceError::Unavailable(_))
+        Err(Error::Unavailable(_))
     ));
     assert_eq!(
         connection

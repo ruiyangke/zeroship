@@ -526,12 +526,12 @@ contract as its producers and consumers change; it is not retained as an alias.
 
 ### Deployment retention placement
 
-The current `zeroship-workflow::deployment_holds` mixes platform ORM persistence
-with the worker's remote client. Split these responsibilities with the crate
-change. Ledger/catalog models and mutations move to the manager library's
-`deployments` module. Closed hold messages and the native capability contract
-move to core; HTTP calls move to the service client. Customer journal dependency
-checks and publication intents stay in `zeroship-workflow`.
+Ledger/catalog models and mutations live in the manager library's `deployments`
+module. Closed hold messages live in core. The customer engine retains the
+scoped client trait and its remote adapter, using the service client's shared
+authenticated transport. Customer journal dependency checks and publication
+intents stay in `zeroship-workflow`. CLI composition supplies a native adapter;
+the engine has no shipped dependency on the manager ledger.
 
 Control remains the production owner of its hold and reclamation APIs. It uses
 the native platform ledger library with its authorized binding. The manager's
@@ -626,6 +626,24 @@ compilation and transaction settlement. Prefer model and collection operations;
 keep raw SQL only for concrete public-API gaps such as database clock access.
 Do not restore separate workflow PostgreSQL and SQLite journal backends.
 
+Placement, management and queue metadata share the manager's physical namespace
+and native `Database` handle. Their internal operations accept the transaction
+handle supplied by the manager store. Assignment verification and job transitions
+must commit in that transaction; opening another coordinator transaction from a
+queue authorization callback would lose atomicity and could contend with its own
+app lock. Keep app-lock-before-worker-lock ordering for placement and capacity.
+The current separate coordination namespace is removed during this cutover.
+
+The caller's transaction deadline covers lock acquisition, authority
+revalidation and waiting for commit. Converting a database expiry to a monotonic
+deadline accounts for time spent reading the clock; later revalidation can
+shorten the budget but cannot restore elapsed time. Cancellation before terminal
+dispatch rolls back. Once commit has been dispatched, timeout means an uncertain
+outcome: the ORM owns settlement, and retries read the durable receipt. Never
+treat a timed-out wait as proof that no mutation committed. PostgreSQL role/grant
+inspection remains host startup validation, separate from ordinary ORM metadata
+operations.
+
 The canonical migration DSL generates schemas and ORM descriptors. Rust model
 mapping uses the shared `schema!`, `FromRow`, `Insertable` and `Changeset`
 contracts. Every table has `id` as its sole primary key. Composite domain
@@ -676,6 +694,12 @@ operations, payload handling, a bounded runner, a V8 adapter, normal bundle
 loading, deployment holds and a registry/placement/management server. The CLI
 composes the journal and runner. These are reusable foundations, not evidence
 that the manager-owned job architecture is complete.
+
+The native crate split now includes an authenticated metadata client, closed job
+and delivery contracts, an ORM metadata queue and the platform deployment ledger.
+Queue settlement records receipts and successor jobs atomically. Production
+queue endpoints, manager-owned scheduling and recovery, and delivered-job
+acceptance by the customer engine still require the cutover below.
 
 The existing replacement worker discovers due work and runs maintenance itself.
 The coordinator stores wake hints rather than owning durable job delivery. Those

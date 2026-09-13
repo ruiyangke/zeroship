@@ -7,11 +7,16 @@ use zeroship_core::{
     service_assertion::ServiceIssuer,
     service_identity::ServiceEndpoint,
     service_peers::ServiceAuth,
-    workflow_coordination::{Failure, FailureCode, AUDIENCE},
+    workflow_coordination::{Failure, FailureCode},
 };
 
+/// Bounded authenticated exchanges shared by native metadata client adapters.
+///
+/// Public while deployment retention adapters live outside this crate. Callers
+/// must validate each receipt against their request; coordinator operations use
+/// the typed [`crate::WorkerCoordinator`] and [`crate::ControlCoordinator`] clients.
 #[derive(Clone, Debug)]
-pub(super) struct Transport {
+pub struct Transport {
     base: Url,
     auth: Arc<ServiceAuth>,
     audience: ServiceIssuer,
@@ -20,7 +25,16 @@ pub(super) struct Transport {
 }
 
 impl Transport {
-    pub(super) fn new(raw: &str, auth: Arc<ServiceAuth>, options: Options) -> Result<Self, Error> {
+    /// Bind a metadata peer origin, service signer, audience and exchange limits.
+    ///
+    /// # Errors
+    /// Rejects ambiguous origins, plaintext remote peers and empty limits.
+    pub fn new(
+        raw: &str,
+        auth: Arc<ServiceAuth>,
+        audience: ServiceIssuer,
+        options: Options,
+    ) -> Result<Self, Error> {
         let base = Url::parse(raw).map_err(|_| Error::InvalidConfig)?;
         let loopback = match base.host() {
             Some(Host::Ipv4(ip)) => ip.is_loopback(),
@@ -44,12 +58,18 @@ impl Transport {
             base,
             auth,
             options,
-            audience: ServiceIssuer::parse(AUDIENCE).map_err(|_| Error::InvalidConfig)?,
+            audience,
             client: cyper::Client::new(),
         })
     }
 
-    pub(super) async fn post<T: Serialize, R: DeserializeOwned>(
+    /// Send metadata with a fresh assertion and deserialize a bounded receipt.
+    /// The caller binds the receipt to the operation's scope and identity.
+    ///
+    /// # Errors
+    /// Rejects missing credentials, oversized metadata, failed exchanges,
+    /// redirects and responses outside the closed service error contract.
+    pub async fn post<T: Serialize, R: DeserializeOwned>(
         &self,
         endpoint: ServiceEndpoint,
         request: &T,

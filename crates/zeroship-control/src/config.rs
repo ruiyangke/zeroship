@@ -81,6 +81,10 @@ pub struct ControlSettings {
     #[config(name = "control.gateway_url", default = "http://localhost".to_owned())]
     pub gateway_url: Operational<String>,
 
+    /// Workflow coordinator used to verify app placement and queue management.
+    #[config(name = "control.workflow_coordinator_url", default = "http://127.0.0.1:9093".to_owned())]
+    pub workflow_coordinator_url: Operational<String>,
+
     /// Provider used as the usage meter.
     #[config(name = "control.meter_provider", default = "lite".to_owned())]
     pub meter_provider: Operational<String>,

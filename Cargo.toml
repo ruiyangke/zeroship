@@ -239,6 +239,8 @@ zeroship-storage-v8 = { path = "crates/zeroship-storage-v8" }
 zeroship-kv = { path = "crates/zeroship-kv", default-features = false }
 zeroship-kv-v8 = { path = "crates/zeroship-kv-v8" }
 zeroship-workflow = { path = "crates/zeroship-workflow" }
+zeroship-workflow-client = { path = "crates/zeroship-workflow-client" }
+zeroship-workflow-manager = { path = "crates/zeroship-workflow-manager" }
 zeroship-workflow-v8 = { path = "crates/zeroship-workflow-v8" }
 zeroship-metering = { path = "crates/zeroship-metering" }
 zeroship-stream = { path = "crates/zeroship-stream" }

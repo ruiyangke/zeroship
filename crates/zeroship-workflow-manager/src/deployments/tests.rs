@@ -51,11 +51,9 @@ fn scope(app: &AppId) -> HoldScope {
 fn generation(value: i64) -> HoldGeneration {
     value.try_into().unwrap()
 }
-fn assert_conflict<T: std::fmt::Debug>(result: Result<T, WorkflowServiceError>) {
-    assert!(
-        matches!(result, Err(WorkflowServiceError::Conflict(_))),
-        "{result:?}"
-    );
+fn assert_conflict<T: std::fmt::Debug>(result: Result<T, Error>) {
+    let error = result.expect_err("expected a deployment retention conflict");
+    assert!(matches!(error, Error::Conflict(_)), "{error:?}");
 }
 
 #[derive(FromRow)]
@@ -70,10 +68,10 @@ async fn stored_hold_identity(database: &Database, holder: &HoldScope, deploymen
         .unwrap()
         .find::<StoredHoldIdentity>(
             holds::app_id
-                .eq(holder.app.uuid().to_string())
+                .eq(holder.app().uuid().to_string())
                 .unwrap()
                 .and(holds::deploy_id.eq(deployment).unwrap())
-                .and(holds::holder_id.eq(holder.holder.clone()).unwrap()),
+                .and(holds::holder_id.eq(holder.holder().to_owned()).unwrap()),
             FindOptions::default(),
         )
         .await
@@ -108,6 +106,10 @@ async fn postgres_holds_survive_reconnection_and_fence_reclamation() {
     assert_eq!(error.as_db_error().unwrap().code().code(), "42501");
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "follow durable hold generations and collector fences across reconnects"
+)]
 async fn contract(url: &str) {
     let db = database(url).await;
     let app = AppId::mint();
@@ -125,7 +127,7 @@ async fn contract(url: &str) {
         .unwrap();
     assert_eq!(receipt.deploy_hash, hash);
     assert_eq!(receipt.app_id, app);
-    assert_eq!(receipt.holder_id, holder.holder);
+    assert_eq!(receipt.holder_id, holder.holder());
     assert_eq!(receipt.state, HoldState::Held);
     let stored_id = stored_hold_identity(&db, &holder, &deployment).await;
     assert_eq!(
@@ -154,13 +156,13 @@ async fn contract(url: &str) {
             holds
                 .acquire(&wrong_scope, wrong_deployment, generation(1))
                 .await,
-            Err(WorkflowServiceError::PermissionDenied)
+            Err(Error::PermissionDenied)
         ));
         assert!(matches!(
             holds
                 .release(&wrong_scope, wrong_deployment, generation(1))
                 .await,
-            Err(WorkflowServiceError::PermissionDenied)
+            Err(Error::PermissionDenied)
         ));
     }
     assert_conflict(holds.release(&peer, &deployment, generation(1)).await);
@@ -286,18 +288,76 @@ async fn contract(url: &str) {
         value!({"state":"released", "generation":0}),
     ] {
         db.collection(models::app_deploy_holds::Entity::COLLECTION).unwrap()
-            .update(value!({"app_id":app.uuid().to_string(), "deploy_id":suspect, "holder_id":holder.holder}), patch)
+            .update(value!({"app_id":app.uuid().to_string(), "deploy_id":suspect, "holder_id":holder.holder()}), patch)
             .await.unwrap();
         assert_conflict(
             transact(&db, async |tx| fence_reclamation(&tx, &app, &suspect).await).await,
         );
         assert!(matches!(
             holds.acquire(&holder, &suspect, generation(1)).await,
-            Err(WorkflowServiceError::Internal(_))
+            Err(Error::Internal(_))
         ));
     }
 
+    authority_is_rechecked_before_committing(&db, &holds, &app).await;
     callback_errors_and_cancellation_roll_back(&db, &holds, &app).await;
+}
+
+async fn authority_is_rechecked_before_committing(
+    database: &Database,
+    ledger: &DeploymentHolds,
+    app: &AppId,
+) {
+    let deployment = seed(database, app, &"e".repeat(64)).await;
+    let holder = scope(app);
+    for reject_at in [1, 2] {
+        for failure in [Error::PermissionDenied, Error::Timeout] {
+            let checks = std::cell::Cell::new(0);
+            let result = ledger
+                .acquire_authorized(&holder, &deployment, generation(1), || {
+                    checks.set(checks.get() + 1);
+                    std::future::ready(if checks.get() == reject_at {
+                        Err(failure.clone())
+                    } else {
+                        Ok(())
+                    })
+                })
+                .await;
+            assert_eq!(result, Err(failure));
+            assert_eq!(checks.get(), reject_at);
+            let stored = database.collection(holds::Entity::COLLECTION).unwrap()
+                .count(value!({"app_id":app.uuid().to_string(), "deploy_id":deployment, "holder_id":holder.holder()}), value!({}))
+                .await.unwrap();
+            assert!(matches!(stored, Output::Count(0)));
+        }
+    }
+    let acquired = ledger
+        .acquire(&holder, &deployment, generation(1))
+        .await
+        .unwrap();
+    let checks = std::cell::Cell::new(0);
+    let release = ledger
+        .release_authorized(&holder, &deployment, generation(1), || {
+            checks.set(checks.get() + 1);
+            std::future::ready(if checks.get() == 2 {
+                Err(Error::PermissionDenied)
+            } else {
+                Ok(())
+            })
+        })
+        .await;
+    assert_eq!(release, Err(Error::PermissionDenied));
+    assert_eq!(
+        ledger
+            .acquire(&holder, &deployment, generation(1))
+            .await
+            .unwrap(),
+        acquired
+    );
+    ledger
+        .release(&holder, &deployment, generation(1))
+        .await
+        .unwrap();
 }
 
 async fn callback_errors_and_cancellation_roll_back(
@@ -307,16 +367,14 @@ async fn callback_errors_and_cancellation_roll_back(
 ) {
     let deployment = seed(database, app, &"d".repeat(64)).await;
     for error in [
-        WorkflowServiceError::InvalidRequest("invalid command".into()),
-        WorkflowServiceError::Unauthenticated,
-        WorkflowServiceError::PermissionDenied,
-        WorkflowServiceError::NotFound("missing record".into()),
-        WorkflowServiceError::Conflict("changed record".into()),
-        WorkflowServiceError::ResourceExhausted("capacity".into()),
-        WorkflowServiceError::PayloadTooLarge,
-        WorkflowServiceError::Unavailable("peer unavailable".into()),
-        WorkflowServiceError::Timeout,
-        WorkflowServiceError::Internal("host failure".into()),
+        Error::InvalidRequest("invalid command".into()),
+        Error::Unauthenticated,
+        Error::PermissionDenied,
+        Error::Conflict("changed record".into()),
+        Error::ResourceExhausted("capacity".into()),
+        Error::Unavailable("peer unavailable".into()),
+        Error::Timeout,
+        Error::Internal("host failure".into()),
     ] {
         let result = transact(database, async |tx| {
             fence_reclamation(&tx, app, &deployment).await?;
@@ -331,7 +389,7 @@ async fn callback_errors_and_cancellation_roll_back(
         let mut pending = Box::pin(transact(database, async |tx| {
             fence_reclamation(&tx, app, &deployment).await?;
             fenced.send(()).unwrap();
-            std::future::pending::<Result<(), WorkflowServiceError>>().await
+            std::future::pending::<Result<(), Error>>().await
         }));
         match futures::future::select(&mut pending, ready).await {
             futures::future::Either::Left(_) => panic!("collector completed before cancellation"),
@@ -386,21 +444,10 @@ async fn postgres_reclamation_serializes_with_concurrent_hold_acquisition() {
 }
 
 #[test]
-fn hold_identity_and_generation_are_validated() {
-    assert!(HoldScope::new(AppId::mint(), typed_id::generate("wrk")).is_err());
-    for invalid in [0, -1, i64::MIN] {
-        assert!(HoldGeneration::try_from(invalid).is_err());
-        assert!(serde_json::from_value::<HoldGeneration>(serde_json::json!(invalid)).is_err());
-    }
-    assert!(generation(i64::MAX).next().is_err());
-    assert_eq!(generation(1).next().unwrap(), generation(2));
-}
-
-#[test]
 fn deployment_models_match_the_migration_compiler() {
     let output = Command::new("node")
         .args([
-            "crates/zeroship-workflow/schema/deployments/generate.mjs",
+            "crates/zeroship-workflow-manager/schema/deployments/generate.mjs",
             "--check",
         ])
         .current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))

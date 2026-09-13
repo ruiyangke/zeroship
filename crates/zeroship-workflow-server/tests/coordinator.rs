@@ -656,3 +656,147 @@ async fn metadata_schema_has_no_customer_authority_and_ids_are_bytewise() {
         Err(Error::Unavailable)
     ));
 }
+
+#[compio::test]
+async fn assignment_verification_preserves_leases_and_fences_app_authority() {
+    let fixture = Fixture::new().await;
+    let service = fixture.service().await;
+    let worker = register_worker(&service, 2).await;
+    let app = AppId::mint();
+    let assignment = service
+        .assign(&assignment_request(&app, &worker))
+        .await
+        .unwrap();
+    let request = VerifyAssignment {
+        app_id: app.clone(),
+        worker_id: worker.clone(),
+        assignment_revision: assignment.revision,
+    };
+    for worker_is_shorter in [false, true] {
+        let (assignment_ttl, worker_ttl) = if worker_is_shorter {
+            (60_000_i64, 30_000_i64)
+        } else {
+            (30_000, 60_000)
+        };
+        fixture.admin.execute(
+            "UPDATE workflow_coordination.assignments SET expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+$2 WHERE app_id=$1",
+            &[&app.as_str(), &assignment_ttl],
+        ).await.unwrap();
+        fixture.admin.execute(
+            "UPDATE workflow_coordination.workers SET state='draining',expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+$2 WHERE worker_id=$1",
+            &[&worker.as_str(), &worker_ttl],
+        ).await.unwrap();
+        let snapshot = || async {
+            fixture.admin.query_one(
+                "SELECT to_jsonb(a)::text AS assignment,to_jsonb(w)::text AS worker,
+                 LEAST(a.expires_at,w.expires_at) AS deadline
+                 FROM workflow_coordination.assignments a JOIN workflow_coordination.workers w USING(worker_id)
+                 WHERE a.app_id=$1 AND a.worker_id=$2", &[&app.as_str(), &worker.as_str()],
+            ).await.unwrap()
+        };
+        let before = snapshot().await;
+        let result = service.verify_assignment(&request).await.unwrap();
+        assert_eq!(result.app_id, app);
+        assert_eq!(result.worker_id, worker);
+        assert_eq!(result.revision, assignment.revision);
+        assert_eq!(result.expires_at.get(), before.get::<_, i64>("deadline"));
+        assert_eq!(service.verify_assignment(&request).await.unwrap(), result);
+        let after = snapshot().await;
+        for column in ["assignment", "worker"] {
+            assert_eq!(
+                before.get::<_, String>(column),
+                after.get::<_, String>(column)
+            );
+        }
+    }
+    for foreign in [
+        VerifyAssignment {
+            app_id: AppId::mint(),
+            ..request.clone()
+        },
+        VerifyAssignment {
+            worker_id: WorkerId::mint(),
+            ..request.clone()
+        },
+        VerifyAssignment {
+            assignment_revision: (assignment.revision.get() + 1).try_into().unwrap(),
+            ..request.clone()
+        },
+    ] {
+        assert_eq!(
+            service.verify_assignment(&foreign).await,
+            Err(Error::Denied)
+        );
+    }
+    fixture
+        .admin
+        .execute(
+            "UPDATE workflow_coordination.assignments SET released=true WHERE app_id=$1",
+            &[&app.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service.verify_assignment(&request).await,
+        Err(Error::Denied)
+    );
+    fixture.admin.execute("UPDATE workflow_coordination.assignments SET released=false,expires_at=0 WHERE app_id=$1", &[&app.as_str()]).await.unwrap();
+    assert_eq!(
+        service.verify_assignment(&request).await,
+        Err(Error::Denied)
+    );
+    fixture
+        .admin
+        .execute(
+            "UPDATE workflow_coordination.assignments SET expires_at=$2 WHERE app_id=$1",
+            &[&app.as_str(), &i64::MAX],
+        )
+        .await
+        .unwrap();
+    fixture
+        .admin
+        .execute(
+            "UPDATE workflow_coordination.workers SET expires_at=0 WHERE worker_id=$1",
+            &[&worker.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        service.verify_assignment(&request).await,
+        Err(Error::Denied)
+    );
+}
+
+#[compio::test]
+async fn assignment_verification_checks_expiry_after_waiting_for_scope_lock() {
+    let mut fixture = Fixture::new().await;
+    let service = fixture.service().await;
+    let worker = register_worker(&service, 1).await;
+    let app = AppId::mint();
+    let assignment = service
+        .assign(&assignment_request(&app, &worker))
+        .await
+        .unwrap();
+    let request = VerifyAssignment {
+        app_id: app.clone(),
+        worker_id: worker.clone(),
+        assignment_revision: assignment.revision,
+    };
+    fixture.admin.execute(
+        "UPDATE workflow_coordination.assignments SET expires_at=floor(extract(epoch FROM clock_timestamp())*1000)::bigint+200 WHERE app_id=$1",
+        &[&app.as_str()],
+    ).await.unwrap();
+    let lock = fixture.admin.transaction().await.unwrap();
+    lock.query(
+        "SELECT app_id FROM workflow_coordination.scopes WHERE app_id=$1 FOR UPDATE",
+        &[&app.as_str()],
+    )
+    .await
+    .unwrap();
+    let (result, ()) = futures::join!(service.verify_assignment(&request), async {
+        compio::time::sleep(Duration::from_millis(300)).await;
+        lock.commit().await.unwrap();
+    });
+    assert_eq!(result, Err(Error::Denied));
+    service.verify().await.unwrap();
+}

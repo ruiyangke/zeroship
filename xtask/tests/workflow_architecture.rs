@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
-fn rust_workflow_crates_do_not_depend_on_the_v8_runtime() {
+fn workflow_process_dependencies_follow_crate_ownership() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let output = Command::new(env!("CARGO"))
         .args(["metadata", "--format-version=1", "--all-features"])
@@ -35,8 +35,11 @@ fn rust_workflow_crates_do_not_depend_on_the_v8_runtime() {
         .collect();
     for name in [
         "zeroship-workflow",
+        "zeroship-workflow-client",
+        "zeroship-workflow-manager",
         "zeroship-workflow-scheduler",
         "zeroship-workflow-server",
+        "zeroship-worker",
     ] {
         let id = *packages
             .iter()
@@ -50,23 +53,41 @@ fn rust_workflow_crates_do_not_depend_on_the_v8_runtime() {
                 continue;
             }
             let dependency = packages[id];
-            if name == "zeroship-workflow-server" {
+            if matches!(name, "zeroship-workflow" | "zeroship-worker") {
                 assert!(
-                    !["zeroship-workflow", "zeroship-storage", "zeroship-data-orm"]
+                    !["zeroship-workflow-manager", "zeroship-workflow-server"]
                         .contains(&dependency),
-                    "coordinator reaches customer engine or storage through {dependency}"
+                    "{name} reaches a platform workflow implementation through {dependency}"
                 );
             }
-            assert!(
-                ![
-                    "v8",
-                    "zeroship-runtime",
-                    "zeroship-runtime-macros",
-                    "zeroship-workflow-v8"
-                ]
-                .contains(&dependency),
-                "{name} reaches {dependency} through a shipped dependency"
-            );
+            if matches!(
+                name,
+                "zeroship-workflow-manager" | "zeroship-workflow-server"
+            ) {
+                assert!(
+                    !["zeroship-workflow", "zeroship-storage"].contains(&dependency),
+                    "{name} reaches customer engine or payload storage through {dependency}"
+                );
+            }
+            if name == "zeroship-workflow-client" {
+                assert!(
+                    !["zeroship-workflow", "zeroship-workflow-manager", "zeroship-data-orm", "zeroship-storage"]
+                        .contains(&dependency),
+                    "metadata client reaches engine or database implementation through {dependency}"
+                );
+            }
+            if name != "zeroship-worker" {
+                assert!(
+                    ![
+                        "v8",
+                        "zeroship-runtime",
+                        "zeroship-runtime-macros",
+                        "zeroship-workflow-v8"
+                    ]
+                    .contains(&dependency),
+                    "{name} reaches {dependency} through a shipped dependency"
+                );
+            }
             for edge in nodes[id]["deps"].as_array().unwrap() {
                 if edge["dep_kinds"]
                     .as_array()

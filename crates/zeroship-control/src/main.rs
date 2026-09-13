@@ -457,6 +457,7 @@ fn main() -> std::io::Result<()> {
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
+    let workflow_coordinator_url = settings.workflow_coordinator_url.get().to_owned();
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
     let stripe_base_url = settings.stripe_base_url.get().clone();
@@ -661,6 +662,7 @@ fn main() -> std::io::Result<()> {
         );
         report.field("workers_count", CheckValue::Count(workers_count));
         report.field("gateway_url", CheckValue::Plain(gateway_url.clone()));
+        report.field("workflow_coordinator_url", CheckValue::Plain(workflow_coordinator_url.clone()));
         report.field(
             "service_credentials",
             CheckValue::Plain(credentials.summary().to_string()),
@@ -1177,9 +1179,17 @@ fn main() -> std::io::Result<()> {
     let readiness = Arc::new(zeroship_core::readiness::ReadinessGate::with_defaults());
 
     web::server(async move || {
+        let hold_state = state.clone();
+        let coordinator_url = workflow_coordinator_url.clone();
         web::App::new()
             .state(state.clone())
             .state(readiness.clone())
+            .state_factory(async move || {
+                zeroship_control::deployment_hold_api::DeploymentHoldApi::connect(
+                    &hold_state,
+                    &coordinator_url,
+                ).await.map(std::rc::Rc::new)
+            })
             // --- Admin API ---
             .service(
                 web::resource("/api/apps")
@@ -1363,6 +1373,7 @@ fn main() -> std::io::Result<()> {
             // human is the last owner of anything.
             .configure(erasure::configure)
             .configure(workflow_instance_api::configure)
+            .configure(zeroship_control::deployment_hold_api::configure)
             .service(
                 web::resource("/internal/billing/reconcile")
                     .route(web::post().to(internal::force_reconcile)),

@@ -55,6 +55,19 @@ impl std::fmt::Display for WorkflowServiceError {
 
 impl std::error::Error for WorkflowServiceError {}
 
+impl From<zeroship_core::workflow_deployments::Error> for WorkflowServiceError {
+    fn from(error: zeroship_core::workflow_deployments::Error) -> Self {
+        match error {
+            zeroship_core::workflow_deployments::Error::InvalidHolder => {
+                Self::InvalidRequest("invalid deployment holder".into())
+            }
+            zeroship_core::workflow_deployments::Error::GenerationExhausted => {
+                Self::ResourceExhausted("deployment hold generation exhausted".into())
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum WorkflowError {
     Invalid(String),

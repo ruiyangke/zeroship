@@ -11,6 +11,7 @@ ed25519-dalek = { workspace = true }
 futures = { workspace = true }
 flume = { workspace = true }
 zeroship-core = { workspace = true }
+zeroship-workflow-client = { workspace = true }
 zeroship-bundle = { workspace = true }
 zeroship-data-orm = { workspace = true }
 zeroship-storage = { workspace = true }
@@ -28,13 +29,10 @@ thiserror = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
-url = { workspace = true }
 tempfile = { workspace = true }
 
 [dev-dependencies]
-compio-tls = { workspace = true }
-rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
-rcgen = "0.14"
+zeroship-workflow-manager = { workspace = true }
 zeroship-storage = { workspace = true, features = ["s3"] }
 compio-s3 = { workspace = true }
 testcontainers = { version = "0.28", features = ["blocking"] }

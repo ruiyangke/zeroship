@@ -1,0 +1,685 @@
+#![expect(
+    clippy::future_not_send,
+    reason = "native ORM transactions stay on their owning compio thread"
+)]
+
+use crate::{
+    clock::{Clock, Sample},
+    error::Error,
+    models::{self, Job, jobs, queue_scopes},
+};
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    future::{Future, poll_fn, ready},
+    io::Write,
+    rc::Rc,
+    task::Poll,
+    time::{Duration, Instant},
+};
+use zeroship_core::{
+    app_id::AppId,
+    typed_id,
+    workflow_coordination::{Assignment, WorkerId},
+    workflow_jobs::{Delivery, JobSpec, Settlement, SettlementReceipt},
+};
+use zeroship_data_orm::{
+    ConnectOptions, Value,
+    binding::DbBinding,
+    encryption::ProjectKeySource,
+    error::DbError,
+    orm::{Database, Entity, FindOptions, Operation, Output},
+    value,
+};
+
+/// Bounds leases, transaction waits and successor metadata.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    pub lease: Duration,
+    pub transaction_timeout: Duration,
+    pub max_successors: usize,
+    pub max_metadata_bytes: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            lease: Duration::from_secs(30),
+            transaction_timeout: Duration::from_secs(5),
+            max_successors: 256,
+            max_metadata_bytes: 256 * 1024,
+        }
+    }
+}
+
+/// Durable platform metadata with app-scoped delivery fences.
+///
+/// Hosts authenticate workers and obtain their current coordinator assignment
+/// before calling delivery operations. The authorized variants recheck placement
+/// after locks and before commit. Journal authority remains in the creator zone.
+/// A timeout does not retract a dispatched commit; retry the same settlement to
+/// recover its durable receipt.
+#[derive(Clone, Debug)]
+pub struct Queue {
+    database: Database,
+    clock: Clock,
+    options: Options,
+}
+
+impl Queue {
+    /// Bind provisioned platform storage without creating schemas or roles.
+    ///
+    /// # Errors
+    /// Refuses invalid bounds and unavailable or incompatible storage.
+    pub async fn connect(binding: DbBinding, url: &str, options: Options) -> Result<Self, Error> {
+        if options.transaction_timeout.is_zero()
+            || Instant::now()
+                .checked_add(options.transaction_timeout)
+                .is_none()
+            || options.max_successors == 0
+            || options.max_metadata_bytes == 0
+            || options.lease.as_millis() == 0
+            || i64::try_from(options.lease.as_millis()).is_err()
+        {
+            return Err(Error::Invalid);
+        }
+        let database = Database::connect(
+            binding.clone(),
+            ConnectOptions::new(url, ProjectKeySource::unavailable()).connection_authority(),
+            models::collections()?,
+        )
+        .await?;
+        for collection in [jobs::Entity::COLLECTION, queue_scopes::Entity::COLLECTION] {
+            database
+                .collection(collection)?
+                .find(value!({}), value!({"limit":1}))
+                .await?;
+        }
+        let clock = Clock::connect(binding, url, options.transaction_timeout).await?;
+        Ok(Self {
+            database,
+            clock,
+            options,
+        })
+    }
+
+    /// Register an app selected by trusted platform configuration.
+    ///
+    /// # Errors
+    /// Refuses failed transactions; repeated registration preserves queue state.
+    pub async fn register_scope(&self, app: &AppId) -> Result<(), Error> {
+        self.transact(|tx| async move {
+            tx.collection(queue_scopes::Entity::COLLECTION)?
+                .execute(Operation::Upsert {
+                    document: value!({
+                        "id":format!("wqs_{}", typed_id::uuid_to_base62(&app.uuid())),
+                        "app_id":app.as_str()
+                    }),
+                    conflict_fields: value!(["app_id"]),
+                })
+                .await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Submit immutable metadata; an outbox retry uses the same job identity.
+    ///
+    /// # Errors
+    /// Refuses unknown apps, reused identities with different content and storage failures.
+    pub async fn submit(&self, job: &JobSpec) -> Result<JobSpec, Error> {
+        self.encode(job)?;
+        self.transact(|tx| async move {
+            lock_scope(&tx, &job.app_id).await?;
+            self.insert(&tx, job, self.clock.now().await?).await?;
+            Ok(job.clone())
+        })
+        .await
+    }
+
+    /// Claim under a current assignment authenticated by the native host.
+    ///
+    /// # Errors
+    /// Refuses expired authority and failed transactions.
+    pub async fn claim(&self, assignment: &Assignment) -> Result<Option<Delivery>, Error> {
+        self.claim_authorized(assignment, || ready(Ok(assignment.clone())))
+            .await
+    }
+
+    /// Revalidate placement after acquiring the app lock and before commit.
+    ///
+    /// # Errors
+    /// Refuses revoked assignments, exhausted attempts and failed transactions.
+    pub async fn claim_authorized<F, Fut>(
+        &self,
+        assignment: &Assignment,
+        mut authorize: F,
+    ) -> Result<Option<Delivery>, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Assignment, Error>>,
+    {
+        let budget = Budget::new(self.options.transaction_timeout);
+        self.transact_for(budget.clone(), |tx| async move {
+            lock_scope(&tx, &assignment.app_id).await?;
+            let observed = authorize().await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            budget.cap(sample, authority.expires_at.get())?;
+            let now = sample.millis;
+            let due = value!({"app_id":assignment.app_id.as_str(), "$or":[
+                {"state":"ready", "available_at":{"$lte":now}},
+                {"state":"leased", "lease_deadline":{"$lte":now}}
+            ]});
+            let Output::Rows { rows, .. } = tx.collection(jobs::Entity::COLLECTION)?.find(
+                due, value!({"limit":1,"select":["id"],"orderBy":{"available_at":1,"id":1}})
+            ).await? else { return Err(Error::Storage); };
+            let Some(row) = rows.first() else {
+                let observed = authorize().await?;
+                let sample = self.clock.sample().await?;
+                let authority = current(assignment, observed, sample.millis)?;
+                budget.cap(sample, authority.expires_at.get())?;
+                return Ok(None);
+            };
+            let id = row["id"].as_str().ok_or(Error::Storage)?;
+            let job = load(&tx, &assignment.app_id, id).await?.ok_or(Error::Storage)?;
+            let attempt = job.attempt.checked_add(1).filter(|value| *value > 0)
+                .ok_or(Error::Capacity)?;
+            let sample = self.clock.sample().await?;
+            let deadline = self.deadline(&authority, sample.millis)?;
+            budget.cap(sample, deadline)?;
+            let delivery = Delivery {
+                job: job.spec()?, worker_id: assignment.worker_id.clone(),
+                assignment_revision: assignment.revision,
+                attempt: attempt.try_into().map_err(|_| Error::Storage)?,
+                deadline: deadline.try_into().map_err(|_| Error::Storage)?,
+            };
+            update(&tx,
+                value!({"id":id,"app_id":assignment.app_id.as_str(),"state":job.state,"attempt":job.attempt}),
+                value!({"state":"leased","attempt":attempt,"worker_id":assignment.worker_id.as_str(),
+                    "assignment_revision":assignment.revision.get(),"lease_deadline":deadline})
+            ).await?;
+            let observed = authorize().await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            if deadline > authority.expires_at.get() || sample.millis >= deadline {
+                return Err(Error::Denied);
+            }
+            budget.cap(sample, deadline.min(authority.expires_at.get()))?;
+            Ok(Some(delivery))
+        }).await
+    }
+
+    /// Extend the current delivery under host-authenticated placement.
+    ///
+    /// # Errors
+    /// Refuses expired deliveries and any changed worker, app, revision or attempt.
+    pub async fn heartbeat(
+        &self,
+        assignment: &Assignment,
+        delivery: &Delivery,
+    ) -> Result<Delivery, Error> {
+        self.heartbeat_authorized(assignment, delivery, || ready(Ok(assignment.clone())))
+            .await
+    }
+
+    /// Revalidate placement while extending the stored delivery lease.
+    ///
+    /// # Errors
+    /// Refuses stale delivery identity, revoked placement and failed transactions.
+    pub async fn heartbeat_authorized<F, Fut>(
+        &self,
+        assignment: &Assignment,
+        delivery: &Delivery,
+        mut authorize: F,
+    ) -> Result<Delivery, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Assignment, Error>>,
+    {
+        bound(assignment, delivery)?;
+        let budget = Budget::new(self.options.transaction_timeout);
+        self.transact_for(budget.clone(), |tx| async move {
+            lock_scope(&tx, &assignment.app_id).await?;
+            let observed = authorize().await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            budget.cap(sample, authority.expires_at.get())?;
+            let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
+                .await?
+                .ok_or(Error::Conflict)?;
+            matches_delivery(&job, delivery)?;
+            let sample = self.clock.sample().await?;
+            live(&job, sample.millis)?;
+            budget.cap(
+                sample,
+                authority
+                    .expires_at
+                    .get()
+                    .min(job.lease_deadline.ok_or(Error::Storage)?),
+            )?;
+            let deadline = self.deadline(&authority, sample.millis)?;
+            update(&tx, fence(delivery), value!({"lease_deadline":deadline})).await?;
+            let observed = authorize().await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            if deadline > authority.expires_at.get() || sample.millis >= deadline {
+                return Err(Error::Denied);
+            }
+            live(&job, sample.millis)?;
+            budget.cap(
+                sample,
+                authority
+                    .expires_at
+                    .get()
+                    .min(job.lease_deadline.ok_or(Error::Storage)?),
+            )?;
+            Ok(Delivery {
+                deadline: deadline.try_into().map_err(|_| Error::Storage)?,
+                ..delivery.clone()
+            })
+        })
+        .await
+    }
+
+    /// Atomically persist an outcome and its immutable successor jobs.
+    /// Retried settled deliveries return the stored receipt after lease expiry;
+    /// the host must still authenticate the original worker identity.
+    ///
+    /// # Errors
+    /// Refuses changed settlements, foreign successors and stale delivery fences.
+    pub async fn settle(
+        &self,
+        assignment: &Assignment,
+        settlement: &Settlement,
+    ) -> Result<SettlementReceipt, Error> {
+        self.settle_authorized(
+            assignment,
+            settlement,
+            || ready(Ok(assignment.clone())),
+            || ready(Ok(settlement.delivery.worker_id.clone())),
+        )
+        .await
+    }
+
+    /// Revalidate active placement around an atomic settlement. Receipt replay
+    /// checks current enrollment of the original worker through `authorize_replay`;
+    /// expired or replaced placement does not erase its immutable receipt.
+    /// Replay neither renews placement nor admits successor writes.
+    ///
+    /// # Errors
+    /// Refuses revoked active delivery, conflicting successors and failed transactions.
+    pub async fn settle_authorized<F, Fut, R, Replay>(
+        &self,
+        assignment: &Assignment,
+        settlement: &Settlement,
+        mut authorize: F,
+        mut authorize_replay: R,
+    ) -> Result<SettlementReceipt, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<Assignment, Error>>,
+        R: FnMut() -> Replay,
+        Replay: Future<Output = Result<WorkerId, Error>>,
+    {
+        let delivery = &settlement.delivery;
+        bound(assignment, delivery)?;
+        if settlement.successors.len() > self.options.max_successors {
+            return Err(Error::Capacity);
+        }
+        self.encode(settlement)?;
+        let mut successors = BTreeMap::new();
+        for successor in &settlement.successors {
+            if successor.app_id != assignment.app_id {
+                return Err(Error::Denied);
+            }
+            if successor.id == delivery.job.id {
+                return Err(Error::Conflict);
+            }
+            if successors
+                .insert(successor.id.as_str(), successor)
+                .is_some_and(|previous| previous != successor)
+            {
+                return Err(Error::Conflict);
+            }
+        }
+        let digest = digest(&self.encode(&(
+            &delivery.job,
+            &delivery.worker_id,
+            delivery.assignment_revision,
+            delivery.attempt,
+            settlement.outcome,
+            successors.values().collect::<Vec<_>>(),
+        ))?);
+        let budget = Budget::new(self.options.transaction_timeout);
+        self.transact_for(budget.clone(), |tx| async move {
+            lock_scope(&tx, &assignment.app_id).await?;
+            let job = load(&tx, &assignment.app_id, delivery.job.id.as_str())
+                .await?
+                .ok_or(Error::Conflict)?;
+            matches_delivery(&job, delivery)?;
+            let outcome = serde_json::to_string(&settlement.outcome).map_err(|_| Error::Invalid)?;
+            let receipt = SettlementReceipt {
+                job_id: delivery.job.id.clone(),
+                app_id: assignment.app_id.clone(),
+                attempt: delivery.attempt,
+                outcome: settlement.outcome,
+            };
+            if job.state == "settled" {
+                if job.settlement_digest.as_deref() != Some(&digest)
+                    || job.outcome.as_deref() != Some(&outcome)
+                {
+                    return Err(Error::Conflict);
+                }
+                if authorize_replay().await? != delivery.worker_id {
+                    return Err(Error::Denied);
+                }
+                return Ok(receipt);
+            }
+            let observed = authorize().await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            live(&job, sample.millis)?;
+            budget.cap(
+                sample,
+                authority
+                    .expires_at
+                    .get()
+                    .min(job.lease_deadline.ok_or(Error::Storage)?),
+            )?;
+            for successor in successors.values() {
+                self.insert(&tx, successor, sample.millis).await?;
+            }
+            update(
+                &tx,
+                fence(delivery),
+                value!({
+                    "state":"settled","outcome":outcome,"settlement_digest":digest
+                }),
+            )
+            .await?;
+            let observed = authorize().await?;
+            let sample = self.clock.sample().await?;
+            let authority = current(assignment, observed, sample.millis)?;
+            live(&job, sample.millis)?;
+            budget.cap(
+                sample,
+                authority
+                    .expires_at
+                    .get()
+                    .min(job.lease_deadline.ok_or(Error::Storage)?),
+            )?;
+            Ok(receipt)
+        })
+        .await
+    }
+
+    fn deadline(&self, assignment: &Assignment, now: i64) -> Result<i64, Error> {
+        let lease = i64::try_from(self.options.lease.as_millis()).map_err(|_| Error::Invalid)?;
+        let deadline = now
+            .checked_add(lease)
+            .ok_or(Error::Capacity)?
+            .min(assignment.expires_at.get());
+        if deadline <= now {
+            return Err(Error::Denied);
+        }
+        Ok(deadline)
+    }
+
+    fn encode(&self, value: &impl Serialize) -> Result<Vec<u8>, Error> {
+        let mut output = Metadata {
+            bytes: Vec::new(),
+            bound: self.options.max_metadata_bytes,
+        };
+        serde_json::to_writer(&mut output, value).map_err(|_| Error::Capacity)?;
+        Ok(output.bytes)
+    }
+
+    async fn insert(&self, tx: &Database, spec: &JobSpec, now: i64) -> Result<(), Error> {
+        let digest = digest(&self.encode(spec)?);
+        if let Some(job) = load(tx, &spec.app_id, spec.id.as_str()).await? {
+            return if job.spec_digest == digest && job.spec()? == *spec {
+                Ok(())
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        tx.collection(jobs::Entity::COLLECTION)?.insert(value!({
+            "id":spec.id.as_str(),"app_id":spec.app_id.as_str(),"deployment_id":spec.deployment_id.as_str(),
+            "operation":serde_json::to_string(&spec.operation).map_err(|_| Error::Invalid)?,
+            "spec_digest":digest,"available_at":spec.available_at.get(),"state":"ready", "attempt":0,
+            "created_at":now
+        })).await?;
+        Ok(())
+    }
+
+    async fn transact<T, F, Fut>(&self, body: F) -> Result<T, Error>
+    where
+        F: FnOnce(Database) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        self.transact_for(Budget::new(self.options.transaction_timeout), body)
+            .await
+    }
+
+    async fn transact_for<T, F, Fut>(&self, budget: Budget, body: F) -> Result<T, Error>
+    where
+        F: FnOnce(Database) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        const CALLBACK_FAILED: &str = "workflow_manager_callback_failed";
+        let mut failure = None;
+        let saved = &mut failure;
+        let result = bounded(
+            budget,
+            self.database.transaction(|tx| async move {
+                match body(tx).await {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        *saved = Some(error);
+                        Err(DbError::validation(
+                            CALLBACK_FAILED,
+                            "queue transaction refused",
+                        ))
+                    }
+                }
+            }),
+        )
+        .await?;
+        match result {
+            Err(DbError::ValidationFailed {
+                code: CALLBACK_FAILED,
+                ..
+            }) => Err(failure.unwrap_or(Error::Storage)),
+            Err(error) => Err(error.into()),
+            Ok(value) => Ok(value),
+        }
+    }
+}
+
+async fn lock_scope(tx: &Database, app: &AppId) -> Result<(), Error> {
+    let result = tx
+        .collection(queue_scopes::Entity::COLLECTION)?
+        .execute(Operation::Update {
+            filter: value!({"app_id":app.as_str()}),
+            patch: value!({"$inc":{"lock_version":0}}),
+            many: true,
+        })
+        .await?;
+    match result {
+        Output::Count(1) => Ok(()),
+        Output::Count(0) => Err(Error::Denied),
+        _ => Err(Error::Storage),
+    }
+}
+
+async fn load(tx: &Database, app: &AppId, id: &str) -> Result<Option<Job>, Error> {
+    Ok(tx
+        .entity::<jobs::Entity>()?
+        .find::<Job>(
+            jobs::id
+                .eq(id.to_owned())?
+                .and(jobs::app_id.eq(app.as_str().to_owned())?),
+            FindOptions {
+                limit: Some(1),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_iter()
+        .next())
+}
+
+async fn update(tx: &Database, filter: Value, patch: Value) -> Result<(), Error> {
+    match tx
+        .collection(jobs::Entity::COLLECTION)?
+        .execute(Operation::Update {
+            filter,
+            patch,
+            many: true,
+        })
+        .await?
+    {
+        Output::Count(1) => Ok(()),
+        Output::Count(0) => Err(Error::Conflict),
+        _ => Err(Error::Storage),
+    }
+}
+
+fn current(original: &Assignment, mut observed: Assignment, now: i64) -> Result<Assignment, Error> {
+    if original.app_id != observed.app_id
+        || original.worker_id != observed.worker_id
+        || original.revision != observed.revision
+        || original.expires_at.get() <= now
+        || observed.expires_at.get() <= now
+    {
+        return Err(Error::Denied);
+    }
+    observed.expires_at = original.expires_at.min(observed.expires_at);
+    Ok(observed)
+}
+
+fn bound(assignment: &Assignment, delivery: &Delivery) -> Result<(), Error> {
+    if assignment.app_id != delivery.job.app_id
+        || assignment.worker_id != delivery.worker_id
+        || assignment.revision != delivery.assignment_revision
+    {
+        return Err(Error::Denied);
+    }
+    Ok(())
+}
+
+fn matches_delivery(job: &Job, delivery: &Delivery) -> Result<(), Error> {
+    if job.spec()? != delivery.job
+        || job.worker_id.as_deref() != Some(delivery.worker_id.as_str())
+        || job.assignment_revision != Some(delivery.assignment_revision.get())
+        || job.attempt != delivery.attempt.get()
+    {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+
+fn live(job: &Job, now: i64) -> Result<(), Error> {
+    if job.state != "leased" || job.lease_deadline.is_none_or(|deadline| deadline <= now) {
+        return Err(Error::Conflict);
+    }
+    Ok(())
+}
+
+fn fence(delivery: &Delivery) -> Value {
+    value!({"id":delivery.job.id.as_str(),"app_id":delivery.job.app_id.as_str(),"state":"leased",
+        "worker_id":delivery.worker_id.as_str(),"assignment_revision":delivery.assignment_revision.get(),
+        "attempt":delivery.attempt.get()})
+}
+
+fn digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The stored lease can shorten the caller's wait after its app lock is acquired.
+/// A dispatched commit may finish after this wait; its receipt resolves retries.
+#[derive(Clone)]
+struct Budget(Rc<Cell<Instant>>);
+
+impl Budget {
+    fn new(timeout: Duration) -> Self {
+        Self(Rc::new(Cell::new(Instant::now() + timeout)))
+    }
+
+    fn cap(&self, sample: Sample, deadline: i64) -> Result<(), Error> {
+        let remaining = deadline
+            .checked_sub(sample.millis)
+            .filter(|remaining| *remaining > 0)
+            .ok_or(Error::Denied)?;
+        let deadline = sample
+            .started
+            .checked_add(Duration::from_millis(
+                u64::try_from(remaining).map_err(|_| Error::Invalid)?,
+            ))
+            .ok_or(Error::Invalid)?;
+        self.0.set(self.0.get().min(deadline));
+        if self.0.get() <= Instant::now() {
+            return Err(Error::Timeout);
+        }
+        Ok(())
+    }
+}
+
+async fn bounded<T>(budget: Budget, future: impl Future<Output = T>) -> Result<T, Error> {
+    let mut future = Box::pin(future);
+    let mut deadline = budget.0.get();
+    let mut timer = Box::pin(compio::time::sleep(
+        deadline.saturating_duration_since(Instant::now()),
+    ));
+    poll_fn(move |context| {
+        if Instant::now() >= budget.0.get() {
+            return Poll::Ready(Err(Error::Timeout));
+        }
+        if deadline != budget.0.get() {
+            deadline = budget.0.get();
+            timer = Box::pin(compio::time::sleep(
+                deadline.saturating_duration_since(Instant::now()),
+            ));
+        }
+        if timer.as_mut().poll(context).is_ready() {
+            return Poll::Ready(Err(Error::Timeout));
+        }
+        let result = future.as_mut().poll(context);
+        if Instant::now() >= budget.0.get() {
+            return Poll::Ready(Err(Error::Timeout));
+        }
+        if deadline != budget.0.get() {
+            deadline = budget.0.get();
+            timer = Box::pin(compio::time::sleep(
+                deadline.saturating_duration_since(Instant::now()),
+            ));
+            if timer.as_mut().poll(context).is_ready() {
+                return Poll::Ready(Err(Error::Timeout));
+            }
+        }
+        result.map(Ok)
+    })
+    .await
+}
+
+struct Metadata {
+    bytes: Vec<u8>,
+    bound: usize,
+}
+impl Write for Metadata {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > self.bound.saturating_sub(self.bytes.len()) {
+            return Err(std::io::Error::other(
+                "workflow queue metadata exceeds its bound",
+            ));
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}

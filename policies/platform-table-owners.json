@@ -132,5 +132,7 @@
   "payloads": "zeroship_platform",
   "payload_refs": "zeroship_platform",
   "outbox": "zeroship_platform",
-  "app_state": "zeroship_platform"
+  "app_state": "zeroship_platform",
+  "queue_scopes": "zeroship_platform",
+  "jobs": "zeroship_platform"
 }

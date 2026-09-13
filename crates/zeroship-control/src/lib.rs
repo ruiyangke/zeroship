@@ -60,6 +60,7 @@ pub mod void_reissue;
 pub mod worker_enrolment;
 pub mod worker_health;
 pub mod workflow_instance_api;
+pub mod deployment_hold_api;
 pub(crate) mod workflow_limits;
 pub(crate) mod workflow_rollout;
 

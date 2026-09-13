@@ -12,7 +12,6 @@ pub mod backend;
 pub mod calendar;
 pub mod claim;
 pub mod client;
-pub mod coordination;
 pub mod deployment_holds;
 pub mod engine;
 pub mod errors;

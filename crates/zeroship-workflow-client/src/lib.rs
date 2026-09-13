@@ -1,20 +1,24 @@
-//! Worker-initiated coordination over the service API. No database capability
+//! Native coordination over the service API. No database capability
 //! crosses this interface; assignment metadata does not authorize journal I/O.
 #![allow(
     clippy::future_not_send,
     reason = "HTTP connections stay on their compio runtime"
 )]
 
+mod control;
 mod transport;
 
+pub use control::ControlCoordinator;
+pub use transport::Transport;
+
 use std::{collections::HashSet, sync::Arc, time::Duration};
-use transport::Transport;
 use zeroship_core::workflow_coordination::{
     AcknowledgeManagement, AssignedScope, Assignment, FailureCode, ManageRun, ManagementReceipt,
     PublishWakeHint, RegisterWorker, RegisteredWorker, ReleaseScope, ScopePage, WakeHintReceipt,
-    WorkerId,
+    WorkerId, AUDIENCE,
 };
 use zeroship_core::{
+    service_assertion::ServiceIssuer,
     service_identity::endpoints,
     service_peers::{service_issuer, ServiceAuth, WORKER_SERVICE_NAME},
 };
@@ -42,7 +46,7 @@ impl Default for Options {
 pub enum Error {
     #[error("invalid workflow coordinator client configuration")]
     InvalidConfig,
-    #[error("workflow coordinator requires an enrolled worker identity")]
+    #[error("workflow coordinator requires an authorized service identity")]
     Unauthenticated,
     #[error("workflow coordinator request exceeds its bound")]
     RequestTooLarge,
@@ -85,7 +89,12 @@ impl WorkerCoordinator {
             .map_err(|_| Error::Unauthenticated)?;
         Ok(Self {
             worker_id,
-            transport: Transport::new(url, auth, options)?,
+            transport: Transport::new(
+                url,
+                auth,
+                ServiceIssuer::parse(AUDIENCE).map_err(|_| Error::InvalidConfig)?,
+                options,
+            )?,
         })
     }
 

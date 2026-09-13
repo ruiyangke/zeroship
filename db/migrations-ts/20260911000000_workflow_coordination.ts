@@ -1,12 +1,13 @@
 import { grant, raw, revoke, role, schema } from "@zeroship/migrate";
 import { workflowCoordinatorSchema } from "../../crates/zeroship-workflow-server/schema/schema.ts";
+import { workflowManagerSchema } from "../../crates/zeroship-workflow-manager/schema/schema.ts";
 import { readFileSync } from "node:fs";
 
 export default {
   name: "workflow_coordination",
   schema() {
     role("zeroship_workflow_migrator").create({ login: false });
-    role("zeroship_workflow").create({ login: true, setSearchPath: ["workflow_coordination", "pg_catalog"] });
+    role("zeroship_workflow").create({ login: true, setSearchPath: ["workflow_coordination", "workflow_manager", "pg_catalog"] });
     schema("workflow_coordination").create({ authorization: "zeroship_workflow_migrator" });
     const tables = workflowCoordinatorSchema();
     for (const name of tables) {
@@ -23,6 +24,29 @@ export default {
       to: ["zeroship_workflow"],
     });
     revoke({ privileges: ["all"], on: { kind: "schema", names: ["workflow_coordination"] }, from: ["PUBLIC", "zeroship_control", "zeroship_worker", "zeroship_gateway", "zeroship_app"] });
+    schema("workflow_manager").create({ authorization: "zeroship_workflow_migrator" });
+    workflowManagerSchema("workflow_manager");
+    const managerDescriptor = JSON.parse(readFileSync(new URL("../../crates/zeroship-workflow-manager/schema/schema.runtime.json", import.meta.url), "utf8"));
+    const managerTables = Object.keys(managerDescriptor.collections ?? {});
+    if (!managerTables.length) throw new Error("workflow manager descriptor is empty");
+    for (const name of managerTables) {
+      raw({
+        sql: `ALTER TABLE workflow_manager."${name.replaceAll('"', '""')}" OWNER TO zeroship_workflow_migrator`,
+        reason: "workflow queue metadata ownership belongs to the migration role",
+      });
+    }
+    grant({ privileges: ["usage"], on: { kind: "schema", names: ["workflow_manager"] }, to: ["zeroship_workflow"] });
+    grant({
+      privileges: ["select", "insert", "update", "delete"],
+      on: { kind: "table", schema: "workflow_manager", names: managerTables },
+      to: ["zeroship_workflow"],
+    });
+    revoke({ privileges: ["all"], on: { kind: "schema", names: ["workflow_manager"] }, from: ["PUBLIC", "zeroship_control", "zeroship_worker", "zeroship_gateway", "zeroship_app"] });
+    revoke({
+      privileges: ["all"],
+      on: { kind: "table", schema: "workflow_manager", names: managerTables },
+      from: ["PUBLIC", "zeroship_control", "zeroship_worker", "zeroship_gateway", "zeroship_app"],
+    });
     grant({ privileges: ["usage"], on: { kind: "schema", names: ["zeroship", "service_authn"] }, to: ["zeroship_workflow"] });
     raw({
       sql: "GRANT SELECT (id,status,public_key) ON zeroship.worker_instances TO zeroship_workflow",

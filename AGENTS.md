@@ -60,7 +60,7 @@ None of this is licence to measure less - measure more, and put the result in a 
 | **Object storage and SDK** (`@zeroship/storage`) | `docs/reference/storage.md` · `crates/zeroship-storage/` (Rust operations) · `crates/zeroship-storage-v8/` (V8 binding) · `sdks/storage/` |
 | **KV storage and SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `crates/zeroship-kv/` (storage) · `crates/zeroship-kv-v8/` (V8 binding) · `sdks/kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
-| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (Rust engine/client) · `crates/zeroship-workflow-v8/` (binding/executor) · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
+| **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-workflow/` (customer engine) · `crates/zeroship-workflow-client/` (authenticated metadata transport) · `crates/zeroship-workflow-manager/` (platform queue) · `crates/zeroship-workflow-v8/` (binding/executor) · `docs/proposals/2026-09-11-workflow-worker.md` (manager cutover) |
 | **Build a creator app + deploy** (the primary creator flow) | `docs/build-and-deploy-golden-path.md` · `examples/starter/` (scaffold + `CLAUDE.md`) · `tests/golden_path.sh` · `crates/zeroship-cli/` (`zeroship deploy`) |
 | **Creator project config** (`zeroship.jsonc`: app, control, build shape, migration paths, environments) | `docs/reference/project-config.md`, `schema/project-v1.json`, `crates/zeroship-cli/src/project_config/`, `sdks/vite-plugin/src/project-config/` |
 | **zeroship deploy contract** (`default = { fetch?, rpc? }`, dispatcher, raw-JS deploys) | `docs/reference/zeroship-standard.md` · `sdks/bootstrap/src/{dispatcher,runtime-entry}.ts` · `crates/zeroship-runtime/src/core/init.rs` |
@@ -166,11 +166,16 @@ crates/
 ├── zeroship-kv-v8/      env.kv binding: V8 conversion, isolate state, dispatch, metering
 ├── zeroship-storage/    Scoped Rust object storage, LocalFs and S3 backends; no V8
 ├── zeroship-storage-v8/ env.storage binding, isolate-owned streams and metering
+├── zeroship-workflow/   Customer ORM journal, replay, scoped Rust operations and bounded execution
+├── zeroship-workflow-client/ Authenticated workflow metadata transport; no ORM or V8
+├── zeroship-workflow-manager/ Platform ORM queue and deployment retention ledger; no customer journal or V8
+├── zeroship-workflow-v8/ env.workflows binding and exclusive workflow execution
 ├── zeroship-metering/ Meter (atomic per-(app,metric) counters) + compio usage-event outbox task; NO V8. The data plugins emit usage metrics into it; there is no env.meter.
 ├── zeroship-stream/  Kafka-family durable event stream (StreamTransport trait + registry + Redpanda adapter)
 │
 │ System 1 — Creator Platform
 ├── zeroship-control/ Control plane (app CRUD, deploy, billing, env, route registry)
+├── zeroship-workflow-server/ Authenticated workflow registry and placement host; manager queue cutover is tracked in the workflow proposal
 │
 │ System 2 — App Runtime
 ├── zeroship-gateway/ Manifest dispatch, JWT, rate-limit, CHWBL routing, asset proxy
@@ -255,8 +260,10 @@ These don't change. If you're about to violate one, stop and ask.
   Update the sets and this invariant together when that accepted boundary
   changes, including when Tokio is removed. Rejection tests cover dependency
   aliases, target-specific kinds, TOML spellings, missing input, and optional
-  feature activation. The workflow HTTP client belongs to `zeroship-workflow`;
-  its accepted cyper dependency follows the Rust client.
+  feature activation. Authenticated workflow metadata transport belongs to
+  `zeroship-workflow-client`; its accepted cyper dependency follows that client.
+  `zeroship-workflow` also retains a cyper dependency for its existing app API
+  client until the manager cutover removes that transport.
 
 - **V8 per thread, one isolate per (app, live deploy) plus a bounded budget of pinned workflow isolates per app (`max_pinned_isolates_per_app`) for deploy-pinned workflow replay.** Worker uses LRU eviction; isolates `enter`/`exit` to allow many apps per thread (`crates/zeroship-worker/src/cache.rs`).
 - **typed_id everywhere.** UUIDv7 + base62 + entity prefix (`usr_…`, `app_…`, `ses_…`). Defined in `crates/zeroship-core/src/typed_id.rs`.

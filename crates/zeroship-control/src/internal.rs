@@ -132,7 +132,7 @@ pub(crate) async fn check_service_auth(
 /// database-shaped trait for that, and it would buy nothing, because the role
 /// and the instance are separable at parse time and "is a lookup even needed"
 /// is therefore answerable before the first check runs.
-async fn verify_service_caller(
+pub(crate) async fn verify_service_caller(
     state: &AppState,
     authorization: Option<&str>,
     endpoint: ServiceEndpoint,

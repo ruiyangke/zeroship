@@ -451,6 +451,10 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/env");
     pub const CONTROL_APP_DATA_KEY: ServiceEndpoint =
         ServiceEndpoint::new("control", "GET", "/internal/apps/{app_id}/data-key");
+    pub const CONTROL_DEPLOYMENT_HOLD_ACQUIRE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/acquire");
+    pub const CONTROL_DEPLOYMENT_HOLD_RELEASE: ServiceEndpoint =
+        ServiceEndpoint::new("control", "POST", "/v1/deployment-holds/release");
     pub const CONTROL_BILLING_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
@@ -472,6 +476,8 @@ pub mod endpoints {
         "POST",
         "/v1/assignments/assign",
     );
+    pub const WORKFLOW_VERIFY_ASSIGNMENT: ServiceEndpoint =
+        ServiceEndpoint::new("workflow", "POST", "/v1/assignments/verify");
     pub const WORKFLOW_RECOVERY: ServiceEndpoint = ServiceEndpoint::new(
         "workflow",
         "POST",
@@ -581,6 +587,7 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                     endpoints::GATEWAY_WORKFLOW_ADVANCE,
                     endpoints::WORKFLOW_WORKERS,
                     endpoints::WORKFLOW_ASSIGN,
+                    endpoints::WORKFLOW_VERIFY_ASSIGNMENT,
                     endpoints::WORKFLOW_RECOVERY,
                     endpoints::WORKFLOW_MANAGE,
                     endpoints::WORKFLOW_MANAGEMENT_STATUS,
@@ -617,6 +624,8 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
                 principal("svc/worker"),
                 &[
                     endpoints::CONTROL_VERSIONS,
+                    endpoints::CONTROL_DEPLOYMENT_HOLD_ACQUIRE,
+                    endpoints::CONTROL_DEPLOYMENT_HOLD_RELEASE,
                     endpoints::WORKFLOW_REGISTER,
                     endpoints::WORKFLOW_ASSIGNMENTS,
                     endpoints::WORKFLOW_RENEW,

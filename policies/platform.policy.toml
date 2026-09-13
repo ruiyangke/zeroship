@@ -22,7 +22,8 @@
 # The cross-schema peers have distinct authorities. `public` holds extensions.
 # `service_authn` holds assertion replay state shared by verifying services.
 # `workflow_coordination` holds registry, placement and management metadata under
-# a migration owner. `zeroship` holds platform records; the coordinator reads
+# a migration owner. `workflow_manager` holds the durable job queue under the
+# same migration owner. `zeroship` holds platform records; the coordinator reads
 # only enrolled worker identity columns. Customer journals are worker-owned.
 #
 # Widening this list widens what a platform migration may create. THE COUNTERWEIGHT
@@ -104,17 +105,17 @@ scope = "all"
 [[grant]]
 key = "schema.cross_schema"
 value = true
-scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination", "workflow_manager"] }
 
 [[grant]]
 key = "schema.create_table"
 value = true
-scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination", "workflow_manager"] }
 
 [[grant]]
 key = "schema.rename"
 value = true
-scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination"] }
+scope = { include = ["zeroship", "public", "service_authn", "workflow_coordination", "workflow_manager"] }
 
 [[grant]]
 key = "safety.destructive_ops"
