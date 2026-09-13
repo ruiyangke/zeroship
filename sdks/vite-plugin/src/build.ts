@@ -502,9 +502,9 @@ export function buildPlugin(
         // etc. as bare specifiers.
         nodeCompatPlugin(),
         // Intercept the bare `zeroship` specifier so user code's
-        // `import { env } from "zeroship"` resolves to the runtime
-        // virtual module (`Object.freeze(__zs_env())`) instead of the
-        // file-linked `zeroship-stub` package (`export const env = {}`).
+        // `import { env } from "zeroship"` resolves to the runtime-owned
+        // virtual module instead of the file-linked `zeroship-stub` package
+        // (`export const env = {}`).
         // Without this, `noExternal: true` inlines the stub and
         // `env.db` is `undefined` at runtime — every env.db (and
         // env.auth/kv/storage) RPC procedure throws `Cannot read
