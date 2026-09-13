@@ -1,9 +1,7 @@
 //! Login CSRF, framing, rate limits and session rotation through the auth server.
 
 use crate::common;
-use common::{
-    auth_server::AuthServer, database::Database, read_set_cookie, CookieJar, TEST_CONSOLE_ORIGIN,
-};
+use common::{auth_server::AuthServer, database::Database, read_set_cookie, CookieJar};
 
 const CLIENT_IP: &str = "192.0.2.10";
 
@@ -135,6 +133,9 @@ async fn login_csrf_mismatched_token_rejected() {
 async fn login_clickjacking_headers_present() {
     Database::run(async |database| {
         let fx = AuthServer::start(database).await;
+        let [console_origin] = fx.config.frame_ancestor_origins() else {
+            panic!("the framing fixture must admit its configured console origin");
+        };
 
         // (a) The FRAMED route `/login` GET: relaxed frame-ancestors, NO XFO.
         let return_to = AuthServer::fresh_challenge();
@@ -160,7 +161,7 @@ async fn login_clickjacking_headers_present() {
             .to_string();
         // Read the admitted origin from CONFIG, not a literal in this assertion.
         assert!(
-            csp.contains(&format!("frame-ancestors 'self' {TEST_CONSOLE_ORIGIN}")),
+            csp.contains(&format!("frame-ancestors 'self' {console_origin}")),
             "framed /login CSP must allow 'self' + the configured console origin; got {csp:?}"
         );
         assert!(

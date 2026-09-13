@@ -5,7 +5,7 @@
     reason = "auth fixtures belong to their compio runtime"
 )]
 
-use super::{database::Database, native_authorize_return_to, test_auth_config_with};
+use super::{database::Database, native_authorize_return_to, test_auth_config_at};
 use compio_postgres::Client;
 use ntex::web;
 use std::net::TcpListener;
@@ -70,7 +70,9 @@ impl AuthServer {
                 .await
                 .expect("publish fixture signing key");
         }
-        let config = Arc::new(test_auth_config_with(&database_url, extra));
+        let listener = listener.unwrap_or_else(|| TcpListener::bind("127.0.0.1:0").unwrap());
+        let auth_base = format!("http://{}", listener.local_addr().unwrap());
+        let config = Arc::new(test_auth_config_at(&database_url, &auth_base, extra));
         let cfg = config.clone();
         let google_enabled = cfg.google_client_id().is_some();
         let google_jwks =
@@ -80,9 +82,7 @@ impl AuthServer {
         let refresh_pool = RefreshSessionPool::new(database_url, 4);
         let pool_state = refresh_pool.clone();
         let frame_ancestor_origins = cfg.frame_ancestor_origins().to_vec();
-        let test_config = listener.map_or_else(web::test::config, |listener| {
-            web::test::config().listener(listener)
-        });
+        let test_config = web::test::config().listener(listener);
         let server = web::test::server_with(test_config, move || {
             let cfg = cfg.clone();
             let db_state = db_state.clone();
@@ -116,7 +116,7 @@ impl AuthServer {
             }
         })
         .await;
-        let auth_base = format!("http://{}", server.addr());
+        assert_eq!(auth_base, format!("http://{}", server.addr()));
         Self {
             _server: server,
             auth_base,
